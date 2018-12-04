@@ -42,15 +42,12 @@ class SubmissionDispatcher:
         self.process_submission(submission)
 
     def process_submission(self, submission):
-        # Open up the file/service table for this submission
-        process_table = DispatchHash(submission.sid)
-        if process_table.finished():
-            return self.finalize_submission(submission, process_table)
-
         # Try to find all files, and extracted files
         unchecked_files = list(submission.files)
         pending_files = []
 
+        # For each file, we will look through all its results, any exctracted files
+        # found 
         while unchecked_files:
             sha = unchecked_files.pop()
             file_type = self.files.get(sha).type
