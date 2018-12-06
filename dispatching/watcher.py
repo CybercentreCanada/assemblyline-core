@@ -1,7 +1,7 @@
-from assemblyline.remote.datatypes.queues.priority import UnstablePriorityQueue, PriorityQueue
+from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 from assemblyline.remote.datatypes import get_client, retry_call
 from assemblyline.remote.datatypes.hash import ExpiringHash
-from assemblyline.common.signals import set_handler
+
 
 import time
 import logging
@@ -45,7 +45,7 @@ def touch(redis_connection, timeout, key, queue, message):
     hash = ExpiringHash(WATCHER_HASH, *redis_connection)
     hash.add(key, json.dumps({'queue': queue, 'message': message}))
 
-    queue = UnstablePriorityQueue(WATCHER_QUEUE, *redis_connection)
+    queue = PriorityQueue(WATCHER_QUEUE, *redis_connection)
     queue.push(time.time() + timeout, key)
 
 
@@ -55,7 +55,6 @@ class WatcherServer:
         self.hash = ExpiringHash(WATCHER_HASH, *redis_connection)
         self.queue = WatchQueue(WATCHER_QUEUE, *redis_connection)
         self.running = True
-        set_handler(self.stop)
 
     def stop(self):
         self.running = False

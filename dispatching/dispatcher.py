@@ -38,7 +38,7 @@ class SubmissionDispatcher:
             self.submissions.save(sid, submission)
 
         # Refresh the watch
-        watcher.touch(self.redis, timeout=self.timeout_seconds, queue=SUBMISSION_QUEUE, message={'sid': sid})
+        watcher.touch(self.redis, key=sid, timeout=self.timeout_seconds, queue=SUBMISSION_QUEUE, message={'sid': sid})
         self.process_submission(submission)
 
     def process_submission(self, submission):
@@ -47,7 +47,7 @@ class SubmissionDispatcher:
         pending_files = []
 
         # For each file, we will look through all its results, any exctracted files
-        # found 
+        # found
         while unchecked_files:
             sha = unchecked_files.pop()
             file_type = self.files.get(sha).type

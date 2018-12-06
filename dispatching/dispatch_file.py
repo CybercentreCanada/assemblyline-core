@@ -7,9 +7,12 @@ from configuration import ConfigManager
 import watcher
 
 
-# @odm.model()
-# class Task(odm.Model):
-#
+@odm.model()
+class Task(odm.Model):
+    sid = odm.Keyword()
+    file_hash = odm.Keyword()
+    file_type = odm.Keyword()
+    depth = odm.Integer()
 
 
 DISPATCH_QUEUE = 'dispatch-file'
@@ -46,19 +49,18 @@ class FileDispatcher:
         queue. If it isn't proceed normally. If it is, check that the service is still online.
         """
         # Read the message content
-        message = json.loads(message)
-        file_hash = message['file_hash']
-        sid = message['sid']
-        submission = self.submissions.get(sid)
+        task = Task(json.loads(message))
+        file_hash = task.file_hash
+        submission = self.submissions.get(task.sid)
 
         # Refresh the watch on the submission, we are still working on it
-        watcher.touch(self.redis, timeout=self.timeout_seconds, queue=SUBMISSION_QUEUE, message={'sid': sid})
+        watcher.touch(self.redis, key=task.sid, timeout=self.timeout_seconds, queue=SUBMISSION_QUEUE, message={'sid': task.sid})
 
         # Open up the file/service table for this submission
-        process_table = DispatchHash(submission.sid)
+        process_table = DispatchHash(self.redis, submission.id)
 
         # Calculate the schedule for the file
-        schedule = self.config.build_schedule(submission, file_type)
+        schedule = self.config.build_schedule(submission, task.file_type)
 
         # Go through each round of the schedule removing complete/failed services
         # Break when we find a stage that still needs processing
@@ -71,7 +73,7 @@ class FileDispatcher:
                 if process_table.finished(service):
                     continue
 
-                # Check if there is a result/non-recoverable error
+                # Check if something, an error/a result already exists, to resolve this service
                 access_key = self.process_key(submission, file_hash, service)
                 if access_key:
                     process_table.finish(service, file_hash, access_key)
@@ -79,14 +81,10 @@ class FileDispatcher:
 
                 outstanding.append(service)
 
-            raise NotImplementedError()
-
         # Try to retry/dispatch any outstanding services
         if outstanding:
-            raise NotImplementedError()
+            self.dispatch(submission, file_hash, service)
 
-
-            return
-
-        # There are no outstanding services, this file is done
-        self.finish_file(submission, file_hash)
+        else:
+            # There are no outstanding services, this file is done
+            self.finish_file(submission, file_hash)
