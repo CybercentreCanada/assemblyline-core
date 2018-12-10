@@ -25,3 +25,8 @@ class Submission(odm.Model):
     metadata = odm.Mapping(odm.Text(), default={})
 
     selected_services = odm.List(odm.Keyword(), default=[])
+
+
+@odm.model(index=True, store=True)
+class Result(odm.Model):
+    pass

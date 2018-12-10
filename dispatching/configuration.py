@@ -110,6 +110,9 @@ class ConfigManager:
     def stages(self):
         return self.seed['services']['stages']
 
+    def service_failure_limit(self, service):
+        return self.seed['services']['master_list'][service].get('failure_limit', 5)
+
     @property
     def seed(self):
         if time.time() - self._update_time > self.REFRESH_SECONDS:

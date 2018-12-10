@@ -41,6 +41,7 @@ class FileDispatcher:
         self.ds = datastore
         self.submissions = datastore.submissions
         self.results = datastore.results
+        self.errors = datastore.errors
         self.config = ConfigManager(datastore)
         self.redis = redis
         self.running = True
@@ -82,24 +83,22 @@ class FileDispatcher:
         # Go through each round of the schedule removing complete/failed services
         # Break when we find a stage that still needs processing
         outstanding = {}
+        tasks_remaining = 0
         while schedule and not outstanding:
             stage = schedule.pop(0)
 
             for service in stage:
-                print(service)
                 # If the result is in the process table we are fine
                 if process_table.finished(file_hash, service):
-                    print('process finished?')
                     continue
 
                 # Check if something, an error/a result already exists, to resolve this service
                 config = self.config.build_service_config(service, submission)
                 access_key = self.find_results(submission, file_hash, service, config)
                 if access_key:
-                    process_table.finish(service, file_hash, access_key)
+                    tasks_remaining = process_table.finish(file_hash, service, access_key)
                     continue
 
-                print(service, stage, outstanding, bool(outstanding))
                 outstanding[service] = config
 
         # Try to retry/dispatch any outstanding services
@@ -107,7 +106,6 @@ class FileDispatcher:
             for service, config in outstanding.items():
                 # Check if this submission has already dispatched this service, and hasn't timed out yet
                 if time.time() - process_table.dispatch_time(file_hash, service) < self.config.service_timeout(service):
-                    print('dispatched without timeout')
                     continue
 
                 # Build the actual service dispatch message
@@ -123,7 +121,11 @@ class FileDispatcher:
 
         else:
             # There are no outstanding services, this file is done
-            self.finish_file(submission, file_hash)
+
+            # If there are no outstanding ANYTHING for this submission,
+            # send a message to the submission dispatcher to finalize
+            if process_table.all_finished() and tasks_remaining == 0:
+                self.submission_queue.push({'sid': submission.id})
 
     def find_results(self, sid, file_hash, service, config):
         """
@@ -135,16 +137,20 @@ class FileDispatcher:
         if self.results.exists(key):
             return key
 
-        # NOTE these searchs can be parallel
-        # TODO Search the errors for one matching this submission/hash/service
+        # NOTE these searches can be parallel
+        # NOTE these searches need to be changed to match whatever the error log is set to
+        # Search the errors for one matching this submission/hash/service
         # that also has a terminal flag
-        # ...
+        results = self.errors.search(f"sid:{sid} AND file_hash:{file_hash} AND service:{service} "
+                                     "AND catagory:'terminal'", rows=1, fl=[self.ds.ID])
+        for result in results['items']:
+            return result.id
 
-        # TODO Count the crash errors for submission/hash/service
-        # ...
-
-        # TODO Count the timeout errors for submission/hash/service
-        # ...
+        # Count the crash or timeout errors for submission/hash/service
+        results = self.errors.search(f"sid:{sid} AND file_hash:{file_hash} AND service:{service} "
+                                     "AND (catagory:'timeout' OR catagory:'crash')", rows=0)
+        if results['total'] > self.config.service_failure_limit(service):
+            return 'errors'
 
         # No reasons not to continue processing this file
         return False
