@@ -1,7 +1,21 @@
 import re
 import logging
 import time
-from assemblyline.datastore import odm
+from assemblyline import odm
+from assemblyline.odm.models.result import Result
+
+
+def normalize_data(data):
+    if isinstance(data, dict):
+        return tuple((k, normalize_data(data[k])) for k in sorted(data.keys()))
+    elif isinstance(data, (list, tuple)):
+        return tuple(normalize_data(v) for v in data)
+    else:
+        return data
+
+
+def config_hash(config):
+    return str(hash(normalize_data(config)))
 
 
 @odm.model()
@@ -94,6 +108,15 @@ class ConfigManager:
 
         # Use set to remove duplicates, set is more efficent in batches
         return list(set(found_services))
+
+    def build_result_key(self, file_hash, service_name, config_hash):
+        # TODO get service version from config
+        return Result.build_key(
+            service_name=service_name,
+            version='0',
+            file_hash=file_hash,
+            conf_key=config_hash,
+        )
 
     def categories(self):
         all_categories = {}

@@ -26,7 +26,13 @@ class DispatchHash:
         raise NotImplementedError()
         # retry_call(self.client.delete, self.name)
 
-    def finish(self, service_name, file_hash):
+    def finish(self, service_name, file_hash, result_key):
+        """
+        As a single transaction:
+         - Remove the service from the dispatched list
+         - Add the file to the finished list, with the given result key
+         - return the number of items in the dispatched list
+        """
         raise NotImplementedError()
         # retry_call(self.client.delete, self.name)
 

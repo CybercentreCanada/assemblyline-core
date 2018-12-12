@@ -2,9 +2,11 @@ import time
 import mock
 import json
 
-from models import Submission, Result, build_result_key
-import dispatch_file
-from dispatch_file import service_queue_name
+from configuration import config_hash, ConfigManager
+from assemblyline.odm.models import random_model_obj
+from assemblyline.odm.models.submission import Submission
+import dispatcher
+from dispatcher import service_queue_name, FileTask, ServiceTask
 
 
 class Error:
@@ -112,7 +114,7 @@ class MockQueue:
         return len(self.queue)
 
 
-class ConfigShim:
+class ConfigShim(ConfigManager):
     def __init__(self, *args, **kwargs):
         pass
 
@@ -134,18 +136,18 @@ class ConfigShim:
 
 
 def test_dispatcher():
-    with mock.patch('dispatch_file.NamedQueue', MockFactory(MockQueue)) as mq:
-        with mock.patch('dispatch_file.DispatchHash', MockFactory(MockDispatchHash)) as dh:
-            with mock.patch('dispatch_file.ConfigManager', ConfigShim):
+    with mock.patch('dispatcher.NamedQueue', MockFactory(MockQueue)) as mq:
+        with mock.patch('dispatcher.DispatchHash', MockFactory(MockDispatchHash)) as dh:
+            with mock.patch('dispatcher.ConfigManager', ConfigShim):
                 ds = MockDatastore()
                 file_hash = 'totally-a-legit-hash'
-                ds.submissions.save('first-submission', Submission({'files': []}))
+                ds.submissions.save('first-submission', random_model_obj(Submission))
 
-                dispatcher = dispatch_file.FileDispatcher(ds, tuple())
+                disp = dispatcher.Dispatcher(ds, tuple())
                 print('==== first dispatch')
                 # Submit a problem, and check that it gets added to the dispatch hash
                 # and the right service queues
-                dispatcher.handle(json.dumps({
+                disp.dispatch_file(FileTask({
                     'sid': 'first-submission',
                     'file_hash': file_hash,
                     'file_type': 'unknown',
@@ -160,7 +162,7 @@ def test_dispatcher():
 
                 # Making the same call again should have no effect
                 print('==== second dispatch')
-                dispatcher.handle(json.dumps({
+                disp.dispatch_file(FileTask({
                     'sid': 'first-submission',
                     'file_hash': file_hash,
                     'file_type': 'unknown',
@@ -180,7 +182,7 @@ def test_dispatcher():
                 mq.flush()
                 dh['first-submission'].fail_dispatch(file_hash, 'extract')
 
-                dispatcher.handle(json.dumps({
+                disp.dispatch_file(FileTask({
                     'sid': 'first-submission',
                     'file_hash': file_hash,
                     'file_type': 'unknown',
@@ -197,11 +199,11 @@ def test_dispatcher():
                 print('==== fourth dispatch')
                 mq.flush()
                 dh['first-submission'].finish(file_hash, 'extract', 'result-key')
-                wrench_result_key = build_result_key(file_hash, 'wrench', {})
+                wrench_result_key = disp.config.build_result_key(file_hash=file_hash, service_name='wrench', config_hash=config_hash({}))
                 print('wrench result key', wrench_result_key)
                 ds.results.save(wrench_result_key, {})
 
-                dispatcher.handle(json.dumps({
+                disp.dispatch_file(FileTask({
                     'sid': 'first-submission',
                     'file_hash': file_hash,
                     'file_type': 'unknown',
@@ -224,7 +226,7 @@ def test_dispatcher():
                 ds.errors.next_searches.append({'total': 5})
                 dh['first-submission'].finish(file_hash, 'frankenstrings', 'result-key')
 
-                dispatcher.handle(json.dumps({
+                disp.dispatch_file(FileTask({
                     'sid': 'first-submission',
                     'file_hash': file_hash,
                     'file_type': 'unknown',
@@ -242,7 +244,7 @@ def test_dispatcher():
                 mq.flush()
                 dh['first-submission'].finish(file_hash, 'xerox', 'result-key')
 
-                dispatcher.handle(json.dumps({
+                disp.dispatch_file(FileTask({
                     'sid': 'first-submission',
                     'file_hash': file_hash,
                     'file_type': 'unknown',
@@ -250,4 +252,4 @@ def test_dispatcher():
                 }))
 
                 assert dh['first-submission'].finished(file_hash, 'xerox')
-                assert len(dispatcher.submission_queue) == 1
+                assert len(disp.submission_queue) == 1
