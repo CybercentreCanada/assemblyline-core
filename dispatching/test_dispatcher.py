@@ -3,8 +3,9 @@ import mock
 import json
 
 from configuration import config_hash, ConfigManager
-from assemblyline.odm.models import random_model_obj
-from assemblyline.odm.models.submission import Submission
+from assemblyline.odm.randomizer import random_model_obj
+from assemblyline.odm import models
+import assemblyline.odm.models.file
 import dispatcher
 from dispatcher import service_queue_name, FileTask, ServiceTask
 
@@ -116,7 +117,8 @@ class MockQueue:
 
 class ConfigShim(ConfigManager):
     def __init__(self, *args, **kwargs):
-        pass
+        self.extraction_depth_limit = 10
+        self.dispatch_timeout = 30 * 60
 
     def build_schedule(self, *args):
         return [
@@ -135,13 +137,13 @@ class ConfigShim(ConfigManager):
         return 4
 
 
-def test_dispatcher():
+def test_dispatch_file():
     with mock.patch('dispatcher.NamedQueue', MockFactory(MockQueue)) as mq:
         with mock.patch('dispatcher.DispatchHash', MockFactory(MockDispatchHash)) as dh:
             with mock.patch('dispatcher.ConfigManager', ConfigShim):
                 ds = MockDatastore()
                 file_hash = 'totally-a-legit-hash'
-                ds.submissions.save('first-submission', random_model_obj(Submission))
+                ds.submissions.save('first-submission', random_model_obj(models.submission.Submission))
 
                 disp = dispatcher.Dispatcher(ds, tuple())
                 print('==== first dispatch')
@@ -199,7 +201,8 @@ def test_dispatcher():
                 print('==== fourth dispatch')
                 mq.flush()
                 dh['first-submission'].finish(file_hash, 'extract', 'result-key')
-                wrench_result_key = disp.config.build_result_key(file_hash=file_hash, service_name='wrench', config_hash=config_hash({}))
+                wrench_result_key = disp.config.build_result_key(file_hash=file_hash, service_name='wrench',
+                                                                 config_hash=config_hash({}))
                 print('wrench result key', wrench_result_key)
                 ds.results.save(wrench_result_key, {})
 
@@ -253,3 +256,32 @@ def test_dispatcher():
 
                 assert dh['first-submission'].finished(file_hash, 'xerox')
                 assert len(disp.submission_queue) == 1
+
+
+def test_dispatch_submission():
+    with mock.patch('dispatcher.watcher.touch', mock.MagicMock()):
+        with mock.patch('dispatcher.NamedQueue', MockFactory(MockQueue)) as mq:
+            with mock.patch('dispatcher.DispatchHash', MockFactory(MockDispatchHash)) as dh:
+                with mock.patch('dispatcher.ConfigManager', ConfigShim):
+                    ds = MockDatastore()
+                    file_hash = 'totally-a-legit-hash'
+
+                    ds.files.save(file_hash, random_model_obj(models.file.File))
+                    ds.files.get(file_hash).sha256 = file_hash
+                    # ds.file.get(file_hash).sha256 = ''
+
+                    submission = random_model_obj(models.submission.Submission)
+                    submission.files.clear()
+                    submission.files.append(models.submission.File(dict(
+                        name='./file',
+                        sha256=file_hash
+                    )))
+
+                    submission.sid = 'first-submission'
+                    ds.submissions.save(submission.sid, submission)
+
+                    disp = dispatcher.Dispatcher(ds, tuple())
+                    print('==== first dispatch')
+                    # Submit a problem, and check that it gets added to the dispatch hash
+                    # and the right service queues
+                    disp.dispatch_submission(submission)

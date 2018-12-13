@@ -40,43 +40,55 @@ SUBMISSION_QUEUE = 'submission'
 class Dispatcher:
 
     def __init__(self, datastore, redis):
+        # Load the datastore collections that we are going to be using
         self.ds = datastore
         self.submissions = datastore.submissions
         self.results = datastore.results
         self.errors = datastore.errors
+        self.files = datastore.files
+
+        # Create a config cache that will refresh config values periodically
         self.config = ConfigManager(datastore)
+
+        # Connect to all of our persistant redis structures
         self.redis = redis
-        self.running = True
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, *redis)
-        self.file_dispatch = NamedQueue(SUBMISSION_QUEUE, *redis)
-        self.timeout_seconds = 30 * 60
+        self.file_queue = NamedQueue(SUBMISSION_QUEUE, *redis)
 
     def dispatch_submission(self, submission: Submission):
         """
         Find any files associated with a submission and dispatch them if they are
         not marked as in progress. If all files are finished, finalize the submission.
 
-
+        Preconditions:
+            - File exists in the filestore and file collection in the datastore
+            - Submission is stored in the datastore
         """
         # Refresh the watch
-        watcher.touch(self.redis, key=submission.id, timeout=self.timeout_seconds,
-                      queue=SUBMISSION_QUEUE, message={'sid': submission.id})
+        watcher.touch(self.redis, key=submission.sid, timeout=self.config.dispatch_timeout,
+                      queue=SUBMISSION_QUEUE, message={'sid': submission.sid})
 
         # Open up the file/service table for this submission
-        process_table = DispatchHash(submission.id, *self.redis)
+        process_table = DispatchHash(submission.sid, *self.redis)
         depth_limit = self.config.extraction_depth_limit
 
         # Try to find all files, and extracted files
         unchecked_files = []
         for file_hash in submission.files:
-            file_type = self.files.get(file_hash).type
+            file_type = self.files.get(file_hash.sha256).type
+            print(dict(
+                sid=submission.sid,
+                file_hash=file_hash,
+                file_type=file_type,
+                depth=0
+            ))
             unchecked_files.append(FileTask(dict(
-                sid=submission.id,
+                sid=submission.sid,
                 file_hash=file_hash,
                 file_type=file_type,
                 depth=0
             )))
-        encountered_files = set(submission.files)
+        encountered_files = {file.sha256 for file in submission.files}
         pending_files = {}
 
         # For each file, we will look through all its results, any exctracted files
@@ -117,7 +129,7 @@ class Dispatcher:
 
                         file_type = self.files.get(file_hash).type
                         unchecked_files.append(FileTask(dict(
-                            sid=submission.id,
+                            sid=submission.sid,
                             file_hash=sub_file,
                             file_type=file_type,
                             depth=task.depth + 1
@@ -127,7 +139,7 @@ class Dispatcher:
         # file isn't done yet, poke those files
         if pending_files:
             for task in pending_files.values():
-                self.file_dispatch.push(task)
+                self.file_queue.push(task)
         else:
             finalize_submission()
 
@@ -153,7 +165,7 @@ class Dispatcher:
         submission = self.submissions.get(task.sid)
 
         # Refresh the watch on the submission, we are still working on it
-        watcher.touch(self.redis, key=task.sid, timeout=self.timeout_seconds,
+        watcher.touch(self.redis, key=task.sid, timeout=self.config.dispatch_timeout,
                       queue=SUBMISSION_QUEUE, message={'sid': task.sid})
 
         # Open up the file/service table for this submission
@@ -207,7 +219,7 @@ class Dispatcher:
             # If there are no outstanding ANYTHING for this submission,
             # send a message to the submission dispatcher to finalize
             if process_table.all_finished() and tasks_remaining == 0:
-                self.submission_queue.push({'sid': submission.id})
+                self.submission_queue.push({'sid': submission.sid})
 
     def _find_results(self, sid, file_hash, service, config):
         """
@@ -250,7 +262,7 @@ class Dispatcher:
         process_table.fail_dispatch(task.file_hash, task.service_name)
 
         # Send a message to prompt the re-issue of the task if needed
-        self.file_dispatch.push(FileTask(dict(
+        self.file_queue.push(FileTask(dict(
             sid=task.sid,
             file_hash=task.file_hash,
             file_type=task.file_type,
