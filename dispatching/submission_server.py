@@ -4,9 +4,9 @@ from dispatcher import Dispatcher
 
 
 class SubmissionDispatchServer(threading.Thread):
-    def __init__(self, logger):
+    def __init__(self, logger, redis, datastore):
         self.running = False
-        self.dispatcher = Dispatcher()
+        self.dispatcher = Dispatcher(logger=logger, redis=redis, datastore=datastore)
         self.logger = logger
 
     def start(self):

@@ -39,9 +39,10 @@ SUBMISSION_QUEUE = 'submission'
 
 class Dispatcher:
 
-    def __init__(self, datastore, redis):
+    def __init__(self, datastore, redis, logger):
         # Load the datastore collections that we are going to be using
         self.ds = datastore
+        self.log = logger
         self.submissions = datastore.submissions
         self.results = datastore.results
         self.errors = datastore.errors
