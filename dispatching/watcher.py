@@ -1,8 +1,8 @@
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue
-from assemblyline.remote.datatypes import get_client, retry_call
+from assemblyline.remote.datatypes import retry_call
 from assemblyline.remote.datatypes.hash import ExpiringHash
 
-
+import redis
 import time
 import logging
 import json
@@ -12,8 +12,8 @@ WATCHER_HASH = 'global-watcher-hash'
 
 
 class WatchQueue(object):
-    def __init__(self, name, host=None, port=None, db=None, private=False):
-        self.client = get_client(host, port, db, private)
+    def __init__(self, name, client):
+        self.client = client
         self.name = name
 
     def __enter__(self):
@@ -41,11 +41,17 @@ class WatchQueue(object):
         return bool(retry_call(self.client.zadd, priority, key))
 
 
-def touch(redis_connection, timeout, key, queue, message):
-    hash = ExpiringHash(WATCHER_HASH, *redis_connection)
+MAX_TIMEOUT = 60*60*48
+
+
+def touch(redis_connection: redis.Redis, timeout: int, key: str, queue: str, message: str):
+    if timeout >= MAX_TIMEOUT:
+        raise ValueError(f"Can't set watcher timeouts over {MAX_TIMEOUT}")
+
+    hash = ExpiringHash(WATCHER_HASH, MAX_TIMEOUT, redis_connection)
     hash.add(key, json.dumps({'queue': queue, 'message': message}))
 
-    queue = PriorityQueue(WATCHER_QUEUE, *redis_connection)
+    queue = PriorityQueue(WATCHER_QUEUE, redis_connection)
     queue.push(time.time() + timeout, key)
 
 

@@ -18,23 +18,48 @@ def config_hash(config):
     return str(hash(normalize_data(config)))
 
 
-@odm.model()
+@odm.model(index=True)
+class DispatchConfig(odm.Model):
+    stages = odm.List(odm.Keyword())
+
+
+@odm.model(index=True, store=True)
 class Service(odm.Model):
     name = odm.Keyword()
     category = odm.Keyword()
     stage = odm.Keyword()
-    accepts = odm.Keyword(index=False, default_set=True)
-    rejects = odm.Keyword(index=False, default_set=True)
+    accepts = odm.Keyword(default='')
+    rejects = odm.Keyword(default='')
+    failure_limit = odm.Integer(default=5)
 
 
-class ConfigManager:
+class CachedDocument:
+    REFRESH_SECONDS = 5
+
+    def __init__(self, collection, key):
+        self._collection = collection
+        self._key = key
+        self._cached = None
+        self._update_time = 0
+
+    def __getattr__(self, key):
+        if time.time() - self._update_time > self.REFRESH_SECONDS:
+            self._cached = self._collection.get(self._key)
+            self._update_time = time.time()
+        return getattr(self._cached, key)
+
+
+class Scheduler:
     REFRESH_SECONDS = 5
     system_category = 'system'
 
-    def __init__(self, datastore):
+    def __init__(self, datastore, config):
         self.datastore = datastore
-        self._seed = None
+        datastore.register('services', Service)
+        self._services = datastore.services
+        self._cached = []
         self._update_time = 0
+        self.config = config
 
     def build_schedule(self, submission, file_type: str):
         all_services = self.services()
@@ -130,18 +155,12 @@ class ConfigManager:
     def stage_index(self, stage):
         return self.stages().index(stage)
 
-    def stages(self):
-        return self.seed['services']['stages']
-
-    def service_failure_limit(self, service):
-        return self.seed['services']['master_list'][service].get('failure_limit', 5)
-
-    @property
-    def seed(self):
-        if time.time() - self._update_time > self.REFRESH_SECONDS:
-            self._seed = self.datastore.blobs.get('seed')
-            self._update_time = time.time()
-        return self._seed
+    # @property
+    # def seed(self):
+    #     if time.time() - self._update_time > self.REFRESH_SECONDS:
+    #         self._seed = self.datastore.blobs.get('seed')
+    #         self._update_time = time.time()
+    #     return self._seed
 
     def services(self):
-        return {name: Service(dict(name=name, **data)) for name, data in self.seed['services']['master_list'].items()}
+        return {ser.name: ser for ser in self._services.search('*:*', fl='*', rows=1000)['items']}

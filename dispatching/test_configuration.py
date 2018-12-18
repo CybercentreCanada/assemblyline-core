@@ -1,44 +1,62 @@
-from configuration import ConfigManager
+from configuration import Scheduler, Service
+
+#
+# class FakeServiceDatastore:
+#     def __init__(self):
+#         self.blobs = self
+#
+#     def get(self, key):
+#         assert key == 'seed'
+#         return {
+#             'services': {
+#                 'categories': ['dynamic', 'static', 'av'],
+#                 'stages':
+#                 'master_list': {
+
+#                 }
+#             }
+#         }
 
 
-class FakeServiceDatastore:
+class FakeDatastore:
     def __init__(self):
-        self.blobs = self
+        self.services = self
 
-    def get(self, key):
-        assert key == 'seed'
-        return {
-            'services': {
-                'categories': ['dynamic', 'static', 'av'],
-                'stages': ['pre', 'core', 'post'],
-                'master_list': {
-                    'extract': {
-                        'stage': 'pre',
-                        'category': 'static',
-                        'accepts': 'archive/.*',
-                        'rejects': None,
-                    },
-                    'AnAV': {
-                        'stage': 'core',
-                        'category': 'av',
-                        'accepts': '.*',
-                        'rejects': '',
-                    },
-                    'cuckoo': {
-                        'stage': 'core',
-                        'category': 'dynamic',
-                        'accepts': 'document/.*|executable/.*',
-                        'rejects': None,
-                    },
-                    'polish': {
-                        'stage': 'post',
-                        'category': 'static',
-                        'accepts': '.*',
-                        'rejects': None
-                    }
-                }
-            }
-        }
+    def register(*args):
+        pass
+
+    def search(self, *args, **kwargs):
+        return {'items': [Service({
+            'name': 'extract',
+            'stage': 'pre',
+            'category': 'static',
+            'accepts': 'archive/.*',
+            'rejects': None,
+        }),
+        # ,
+        # 'AnAV': {
+        #     'stage': 'core',
+        #     'category': 'av',
+        #     'accepts': '.*',
+        #     'rejects': '',
+        # },
+        # 'cuckoo': {
+        #     'stage': 'core',
+        #     'category': 'dynamic',
+        #     'accepts': 'document/.*|executable/.*',
+        #     'rejects': None,
+        # },
+        # 'polish': {
+        #     'stage': 'post',
+        #     'category': 'static',
+        #     'accepts': '.*',
+        #     'rejects': None
+        # }]}
+
+
+class FakeConfig:
+    def __init__(self):
+        self.core = ['pre', 'core', 'post'],
 
 
 class FakeSubmission:
@@ -48,7 +66,7 @@ class FakeSubmission:
 
 
 def test_schedule():
-    manager = ConfigManager(FakeServiceDatastore())
+    manager = Scheduler(FakeDatastore(), FakeConfig())
     schedule = manager.build_schedule(FakeSubmission(['static', 'av'], ['dynamic']), 'document/word')
     assert all(set(a) == set(b) for a, b in zip(schedule, [[], ['AnAV'], ['polish']]))
     schedule = manager.build_schedule(FakeSubmission(['static', 'av', 'dynamic'], []), 'document/word')

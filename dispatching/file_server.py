@@ -1,13 +1,15 @@
 import threading
+import logging
 import json
 from dispatcher import Dispatcher, FileTask
 
 
 class FileDispatchServer(threading.Thread):
-    def __init__(self, logger, redis, datastore):
+    def __init__(self, redis, datastore, logger=None):
+        super().__init__()
         self.running = False
-        self.dispatcher = Dispatcher(logger=logger, redis=redis, datastore=datastore)
-        self.logger = logger
+        self.logger = logger if logger else logging.getLogger('assemblyline.dispatcher.file')
+        self.dispatcher = Dispatcher(redis=redis, datastore=datastore, logger=self.logger)
 
     def start(self):
         self.running = True
@@ -19,10 +21,19 @@ class FileDispatchServer(threading.Thread):
 
         while self.running:
             try:
-                message = FileTask(json.loads(queue.pop()))
+                message = queue.pop(timeout=1)
+                if not message:
+                    continue
+
+                message = FileTask(json.loads(message))
                 self.dispatcher.dispatch_file(message)
             except Exception as error:
-                self.logger.error(error)
+                self.logger.exception(error)
+                break
+
+    def stop(self):
+        self.running = False
+        self.dispatcher.file_queue.push(None)
 
     def serve_forever(self):
         self.start()
@@ -33,7 +44,6 @@ if __name__ == '__main__':
 
     from assemlyline.common import log
     log.init_logging()
-    logger = log.logging.getLogger('assemblyline.dispatcher.file')
 
-    server = FileDispatchServer(logger)
+    server = FileDispatchServer()
     server.serve_forever()

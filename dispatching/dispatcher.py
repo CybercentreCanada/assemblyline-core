@@ -3,6 +3,7 @@ import json
 import uuid
 from functools import reduce
 
+# TODO replace with unique queue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from dispatch_hash import DispatchHash
 from configuration import ConfigManager, config_hash
@@ -33,7 +34,7 @@ class ServiceTask(odm.Model):
     service_config = odm.Keyword()
 
 
-DISPATCH_QUEUE = 'dispatch-file'
+FILE_QUEUE = 'dispatch-file'
 SUBMISSION_QUEUE = 'submission'
 
 
@@ -53,8 +54,8 @@ class Dispatcher:
 
         # Connect to all of our persistant redis structures
         self.redis = redis
-        self.submission_queue = NamedQueue(SUBMISSION_QUEUE, *redis)
-        self.file_queue = NamedQueue(SUBMISSION_QUEUE, *redis)
+        self.submission_queue = NamedQueue(SUBMISSION_QUEUE, redis)
+        self.file_queue = NamedQueue(FILE_QUEUE, redis)
 
     def dispatch_submission(self, submission: Submission):
         """
@@ -70,19 +71,13 @@ class Dispatcher:
                       queue=SUBMISSION_QUEUE, message={'sid': submission.sid})
 
         # Open up the file/service table for this submission
-        process_table = DispatchHash(submission.sid, *self.redis)
+        process_table = DispatchHash(submission.sid, self.redis)
         depth_limit = self.config.extraction_depth_limit
 
         # Try to find all files, and extracted files
         unchecked_files = []
         for file_hash in submission.files:
             file_type = self.files.get(file_hash.sha256).type
-            print(dict(
-                sid=submission.sid,
-                file_hash=file_hash,
-                file_type=file_type,
-                depth=0
-            ))
             unchecked_files.append(FileTask(dict(
                 sid=submission.sid,
                 file_hash=file_hash,

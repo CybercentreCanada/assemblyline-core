@@ -1,13 +1,15 @@
 import threading
 import json
+import logging
 from dispatcher import Dispatcher
 
 
 class SubmissionDispatchServer(threading.Thread):
-    def __init__(self, logger, redis, datastore):
+    def __init__(self, redis, datastore, logger=None):
+        super().__init__()
         self.running = False
-        self.dispatcher = Dispatcher(logger=logger, redis=redis, datastore=datastore)
-        self.logger = logger
+        self.logger = logger if logger else logging.getLogger('assemblyline.dispatcher.submissions')
+        self.dispatcher = Dispatcher(logger=self.logger, redis=redis, datastore=datastore)
 
     def start(self):
         self.running = True
@@ -20,11 +22,24 @@ class SubmissionDispatchServer(threading.Thread):
 
         while self.running:
             try:
-                message = json.loads(queue.pop())
+                message = queue.pop(timeout=1)
+                if not message:
+                    continue
+
+                message = json.loads(message)
                 sub = submissions.get(message['sid'])
+                if not sub:
+                    self.logger.error(f"Tried to dispatch submission missing from datastore: {message['sid']}")
+                    continue
+
                 self.dispatcher.dispatch_submission(sub)
             except Exception as error:
-                self.logger.error(error)
+                self.logger.exception(error)
+                break
+
+    def stop(self):
+        self.running = False
+        self.dispatcher.submission_queue.push(None)
 
     def serve_forever(self):
         self.start()
@@ -35,7 +50,6 @@ if __name__ == '__main__':
 
     from assemlyline.common import log
     log.init_logging()
-    logger = log.logging.getLogger('assemblyline.dispatcher.submissions')
 
-    server = SubmissionDispatchServer(logger)
+    server = SubmissionDispatchServer()
     server.serve_forever()

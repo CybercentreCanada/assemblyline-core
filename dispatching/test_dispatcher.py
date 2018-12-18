@@ -1,6 +1,7 @@
 import time
 import mock
 import json
+import logging
 
 from configuration import config_hash, ConfigManager
 from assemblyline.odm.randomizer import random_model_obj
@@ -145,7 +146,7 @@ def test_dispatch_file():
                 file_hash = 'totally-a-legit-hash'
                 ds.submissions.save('first-submission', random_model_obj(models.submission.Submission))
 
-                disp = dispatcher.Dispatcher(ds, tuple())
+                disp = dispatcher.Dispatcher(ds, tuple(), logging)
                 print('==== first dispatch')
                 # Submit a problem, and check that it gets added to the dispatch hash
                 # and the right service queues
@@ -280,7 +281,7 @@ def test_dispatch_submission():
                     submission.sid = 'first-submission'
                     ds.submissions.save(submission.sid, submission)
 
-                    disp = dispatcher.Dispatcher(ds, tuple())
+                    disp = dispatcher.Dispatcher(ds, tuple(), logging)
                     print('==== first dispatch')
                     # Submit a problem, and check that it gets added to the dispatch hash
                     # and the right service queues
