@@ -57,7 +57,7 @@ class Scheduler:
         self.datastore = datastore
         datastore.register('services', Service)
         self._services = datastore.services
-        self._cached = []
+        self._cached = None
         self._update_time = 0
         self.config = config
 
@@ -155,12 +155,11 @@ class Scheduler:
     def stage_index(self, stage):
         return self.stages().index(stage)
 
-    # @property
-    # def seed(self):
-    #     if time.time() - self._update_time > self.REFRESH_SECONDS:
-    #         self._seed = self.datastore.blobs.get('seed')
-    #         self._update_time = time.time()
-    #     return self._seed
+    def stages(self):
+        return self.config.core.dispatcher.stages
 
     def services(self):
-        return {ser.name: ser for ser in self._services.search('*:*', fl='*', rows=1000)['items']}
+        if time.time() - self._update_time > self.REFRESH_SECONDS:
+            self._cached = {ser.name: ser for ser in self._services.search('*:*', fl='*', rows=1000)['items']}
+            self._update_time = time.time()
+        return self._cached

@@ -1,4 +1,5 @@
 from configuration import Scheduler, Service
+from easydict import EasyDict
 
 #
 # class FakeServiceDatastore:
@@ -27,36 +28,38 @@ class FakeDatastore:
 
     def search(self, *args, **kwargs):
         return {'items': [Service({
-            'name': 'extract',
-            'stage': 'pre',
-            'category': 'static',
-            'accepts': 'archive/.*',
-            'rejects': None,
-        }),
-        # ,
-        # 'AnAV': {
-        #     'stage': 'core',
-        #     'category': 'av',
-        #     'accepts': '.*',
-        #     'rejects': '',
-        # },
-        # 'cuckoo': {
-        #     'stage': 'core',
-        #     'category': 'dynamic',
-        #     'accepts': 'document/.*|executable/.*',
-        #     'rejects': None,
-        # },
-        # 'polish': {
-        #     'stage': 'post',
-        #     'category': 'static',
-        #     'accepts': '.*',
-        #     'rejects': None
-        # }]}
+                    'name': 'extract',
+                    'stage': 'pre',
+                    'category': 'static',
+                    'accepts': 'archive/.*',
+                    'rejects': None,
+                }),
+                Service({
+                    'name': 'AnAV',
+                    'stage': 'core',
+                    'category': 'av',
+                    'accepts': '.*',
+                    'rejects': '',
+                }),
+                Service({
+                    'name': 'cuckoo',
+                    'stage': 'core',
+                    'category': 'dynamic',
+                    'accepts': 'document/.*|executable/.*',
+                    'rejects': None,
+                }),
+                Service({
+                    'name': 'polish',
+                    'stage': 'post',
+                    'category': 'static',
+                    'accepts': '.*',
+                    'rejects': None
+                })]}
 
 
 class FakeConfig:
     def __init__(self):
-        self.core = ['pre', 'core', 'post'],
+        self.core = EasyDict({'dispatcher': {'stages': ['pre', 'core', 'post']}})
 
 
 class FakeSubmission:

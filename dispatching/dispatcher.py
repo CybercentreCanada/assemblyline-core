@@ -6,7 +6,7 @@ from functools import reduce
 # TODO replace with unique queue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from dispatch_hash import DispatchHash
-from configuration import ConfigManager, config_hash
+from configuration import Scheduler, CachedDocument, config_hash
 from assemblyline import odm
 from assemblyline.odm.models.submission import Submission
 import watcher
@@ -50,7 +50,8 @@ class Dispatcher:
         self.files = datastore.files
 
         # Create a config cache that will refresh config values periodically
-        self.config = ConfigManager(datastore)
+        self.config = CachedDocument(datastore.configuration, 'current')
+        self.scheduler = Scheduler(datastore, self.config)
 
         # Connect to all of our persistant redis structures
         self.redis = redis
@@ -67,7 +68,7 @@ class Dispatcher:
             - Submission is stored in the datastore
         """
         # Refresh the watch
-        watcher.touch(self.redis, key=submission.sid, timeout=self.config.dispatch_timeout,
+        watcher.touch(self.redis, key=submission.sid, timeout=self.config.core.dispatcher.timeout,
                       queue=SUBMISSION_QUEUE, message={'sid': submission.sid})
 
         # Open up the file/service table for this submission
@@ -92,12 +93,12 @@ class Dispatcher:
         while unchecked_files:
             task = unchecked_files.pop()
             sha = task.file_hash
-            schedule = self.config.build_schedule(submission, file_type)
+            schedule = self.scheduler.build_schedule(submission, file_type)
 
             for service_name in reduce(lambda a, b: a + b, schedule):
                 # If the service is still marked as 'in progress'
                 runtime = time.time() - process_table.dispatch_time(sha, service_name)
-                if runtime < self.config.service_timeout(service_name):
+                if runtime < self.scheduler.service_timeout(service_name):
                     pending_files[sha] = task
                     continue
 
@@ -161,14 +162,14 @@ class Dispatcher:
         submission = self.submissions.get(task.sid)
 
         # Refresh the watch on the submission, we are still working on it
-        watcher.touch(self.redis, key=task.sid, timeout=self.config.dispatch_timeout,
+        watcher.touch(self.redis, key=task.sid, timeout=self.config.core.dispatcher.timeout,
                       queue=SUBMISSION_QUEUE, message={'sid': task.sid})
 
         # Open up the file/service table for this submission
         process_table = DispatchHash(task.sid, *self.redis)
 
         # Calculate the schedule for the file
-        schedule = self.config.build_schedule(submission, task.file_type)
+        schedule = self.scheduler.build_schedule(submission, task.file_type)
 
         # Go through each round of the schedule removing complete/failed services
         # Break when we find a stage that still needs processing
@@ -183,7 +184,7 @@ class Dispatcher:
                     continue
 
                 # Check if something, an error/a result already exists, to resolve this service
-                config = self.config.build_service_config(service, submission)
+                config = self.scheduler.build_service_config(service, submission)
                 access_key = self._find_results(submission, file_hash, service, config)
                 if access_key:
                     tasks_remaining = process_table.finish(file_hash, service, access_key)
@@ -195,7 +196,7 @@ class Dispatcher:
         if outstanding:
             for service, config in outstanding.items():
                 # Check if this submission has already dispatched this service, and hasn't timed out yet
-                if time.time() - process_table.dispatch_time(file_hash, service) < self.config.service_timeout(service):
+                if time.time() - process_table.dispatch_time(file_hash, service) < self.scheduler.service_timeout(service):
                     continue
 
                 # Build the actual service dispatch message
@@ -223,7 +224,7 @@ class Dispatcher:
         request to run `service` on `file_hash` for the configuration in `submission`
         """
         # Look for results that match this submission/hash/service config
-        key = self.config.build_result_key(file_hash, service, config_hash(config))
+        key = self.scheduler.build_result_key(file_hash, service, config_hash(config))
         if self.results.exists(key):
             # TODO Touch result expiry
             return key
@@ -240,7 +241,7 @@ class Dispatcher:
         # Count the crash or timeout errors for submission/hash/service
         results = self.errors.search(f"sid:{sid} AND file_hash:{file_hash} AND service:{service} "
                                      "AND (catagory:'timeout' OR catagory:'crash')", rows=0)
-        if results['total'] > self.config.service_failure_limit(service):
+        if results['total'] > self.scheduler.service_failure_limit(service):
             return 'errors'
 
         # No reasons not to continue processing this file
