@@ -31,20 +31,19 @@ class Service(odm.Model):
     accepts = odm.Keyword(default='')
     rejects = odm.Keyword(default='')
     failure_limit = odm.Integer(default=5)
+    params = odm.Mapping(odm.Keyword(), default={})
 
 
-class CachedDocument:
-    REFRESH_SECONDS = 5
-
-    def __init__(self, collection, key):
-        self._collection = collection
-        self._key = key
+class CachedObject:
+    def __init__(self, factory, refresh=5):
+        self._factory = factory
+        self._refresh = refresh
         self._cached = None
         self._update_time = 0
 
     def __getattr__(self, key):
-        if time.time() - self._update_time > self.REFRESH_SECONDS:
-            self._cached = self._collection.get(self._key)
+        if time.time() - self._update_time > self._refresh:
+            self._cached = self._factory()
             self._update_time = time.time()
         return getattr(self._cached, key)
 
@@ -65,11 +64,11 @@ class Scheduler:
         all_services = self.services()
 
         # Load the selected and excluded services by catagory
-        excluded = self.expand_categories(submission.excluded_categories)
-        if not submission.selected_categories:
+        excluded = self.expand_categories(submission.params.services.excluded)
+        if not submission.params.services.selected:
             selected = [s for s in all_services.keys()]
         else:
-            selected = self.expand_categories(submission.selected_categories)
+            selected = self.expand_categories(submission.params.services.selected)
 
         # Add in all system services, they are always needed, and can't be excluded
         for k, v in all_services.items():
@@ -163,3 +162,24 @@ class Scheduler:
             self._cached = {ser.name: ser for ser in self._services.search('*:*', fl='*', rows=1000)['items']}
             self._update_time = time.time()
         return self._cached
+
+    def service(self, service_name):
+        cached_services = self.services()
+        return cached_services[service_name]
+
+    def service_timeout(self, service_name):
+        return 60*60
+
+    def service_failure_limit(self, service_name):
+        return self.service(service_name).failure_limit
+
+    def build_service_config(self, service_name, submission):
+        """
+        Determine the parameter mapping for a service.
+
+        Combine the default and submission specific service parameters to
+        produce the final configuration for this submission.
+        """
+        params = dict(self.service(service_name).params)
+        params.update(submission.params.service_spec.get(service_name, {}))
+        return params

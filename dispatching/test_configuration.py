@@ -1,22 +1,7 @@
 from configuration import Scheduler, Service
 from easydict import EasyDict
-
-#
-# class FakeServiceDatastore:
-#     def __init__(self):
-#         self.blobs = self
-#
-#     def get(self, key):
-#         assert key == 'seed'
-#         return {
-#             'services': {
-#                 'categories': ['dynamic', 'static', 'av'],
-#                 'stages':
-#                 'master_list': {
-
-#                 }
-#             }
-#         }
+from assemblyline.odm.models.submission import Submission
+from assemblyline.odm.randomizer import random_model_obj
 
 
 class FakeDatastore:
@@ -62,19 +47,20 @@ class FakeConfig:
         self.core = EasyDict({'dispatcher': {'stages': ['pre', 'core', 'post']}})
 
 
-class FakeSubmission:
-    def __init__(self, selected, excluded):
-        self.selected_categories = selected
-        self.excluded_categories = excluded
+def submission(selected, excluded):
+    sub = random_model_obj(Submission)
+    sub.params.services.selected = selected
+    sub.params.services.excluded = excluded
+    return sub
 
 
 def test_schedule():
     manager = Scheduler(FakeDatastore(), FakeConfig())
-    schedule = manager.build_schedule(FakeSubmission(['static', 'av'], ['dynamic']), 'document/word')
+    schedule = manager.build_schedule(submission(['static', 'av'], ['dynamic']), 'document/word')
     assert all(set(a) == set(b) for a, b in zip(schedule, [[], ['AnAV'], ['polish']]))
-    schedule = manager.build_schedule(FakeSubmission(['static', 'av', 'dynamic'], []), 'document/word')
+    schedule = manager.build_schedule(submission(['static', 'av', 'dynamic'], []), 'document/word')
     assert all(set(a) == set(b) for a, b in zip(schedule, [[], ['AnAV', 'cuckoo'], ['polish']]))
-    schedule = manager.build_schedule(FakeSubmission([], []), 'document/word')
+    schedule = manager.build_schedule(submission([], []), 'document/word')
     assert all(set(a) == set(b) for a, b in zip(schedule, [[], ['AnAV', 'cuckoo'], ['polish']]))
-    schedule = manager.build_schedule(FakeSubmission([], []), 'archive/zip')
+    schedule = manager.build_schedule(submission([], []), 'archive/zip')
     assert all(set(a) == set(b) for a, b in zip(schedule, [['extract'], ['AnAV'], ['polish']]))

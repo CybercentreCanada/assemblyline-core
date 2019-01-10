@@ -1,12 +1,18 @@
 import time
+import datetime
 import json
 import uuid
+import traceback
 from functools import reduce
 
 # TODO replace with unique queue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
+from assemblyline.remote.datatypes.hash import Hash, ExpiringHash, ExpiringSet
+from assemblyline.remote.datatypes import counter
+from assemblyline.common import isotime, net, forge
+
 from dispatch_hash import DispatchHash
-from configuration import Scheduler, CachedDocument, config_hash
+from configuration import Scheduler, CachedObject, config_hash
 from assemblyline import odm
 from assemblyline.odm.models.submission import Submission
 import watcher
@@ -16,9 +22,24 @@ def service_queue_name(service):
     return 'service-queue-'+service
 
 
+def create_missing_file_error(submission, sha):
+    odm.models.error.Error({
+        'created': datetime.datetime.utcnow(),
+        'response': {
+            'message': f'Submission {submission.sid} tried to process missing file.',
+            'service_debug_info': traceback.format_stack(),
+            'service_name': 'dispatcher',
+            'service_version': '4',
+            'status': 'FAIL_NONRECOVERABLE',
+        },
+        'sha256': sha
+    })
+
+
 @odm.model()
 class FileTask(odm.Model):
     sid = odm.Keyword()
+    parent_hash = odm.KeyWord()
     file_hash = odm.Keyword()
     file_type = odm.Keyword()
     depth = odm.Integer()
@@ -40,7 +61,7 @@ SUBMISSION_QUEUE = 'submission'
 
 class Dispatcher:
 
-    def __init__(self, datastore, redis, logger):
+    def __init__(self, datastore, redis, redis_persist, logger):
         # Load the datastore collections that we are going to be using
         self.ds = datastore
         self.log = logger
@@ -50,13 +71,27 @@ class Dispatcher:
         self.files = datastore.files
 
         # Create a config cache that will refresh config values periodically
-        self.config = CachedDocument(datastore.configuration, 'current')
+        self.config = CachedObject(forge.get_config)
         self.scheduler = Scheduler(datastore, self.config)
 
         # Connect to all of our persistant redis structures
         self.redis = redis
+        self.redis_persist = redis_persist
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, redis)
         self.file_queue = NamedQueue(FILE_QUEUE, redis)
+
+        # Publish counters to the metrics sink.
+        self.counts = counter.AutoExportingCounters(
+            name='dispatcher-%s' % self.shard,
+            host=net.get_hostname(),
+            auto_flush=True,
+            auto_log=False,
+            export_interval_secs=self.config.system.update_interval,
+            channel=forge.get_metrics_sink(),
+            counter_type='dispatcher')
+
+    def start(self):
+        self.counts.start()
 
     def dispatch_submission(self, submission: Submission):
         """
@@ -67,33 +102,49 @@ class Dispatcher:
             - File exists in the filestore and file collection in the datastore
             - Submission is stored in the datastore
         """
-        # Refresh the watch
-        watcher.touch(self.redis, key=submission.sid, timeout=self.config.core.dispatcher.timeout,
-                      queue=SUBMISSION_QUEUE, message={'sid': submission.sid})
+        sid = submission.sid
+
+        # Refresh the watch, this ensures that this function will be called again
+        # if something goes wrong with one of the files, and it never finishes.
+        watcher.touch(self.redis, key=sid, timeout=self.config.core.dispatcher.timeout,
+                      queue=SUBMISSION_QUEUE, message={'sid': sid})
+
+        # Refresh the quota hold
+        if submission.params.quota_item and submission.params.submitter:
+            self.log.info(f"Submission {sid} counts toward quota for {submission.params.submitter}")
+            Hash('submissions-' + submission.params.submitter, self.redis_persist).add(sid, isotime.now_as_iso())
 
         # Open up the file/service table for this submission
         process_table = DispatchHash(submission.sid, self.redis)
-        depth_limit = self.config.extraction_depth_limit
+        depth_limit = self.config.core.dispatcher.extraction_depth_limit
 
         # Try to find all files, and extracted files
         unchecked_files = []
         for file_hash in submission.files:
-            file_type = self.files.get(file_hash.sha256).type
+            file_data = self.files.get(file_hash.sha256)
+            if not file_data:
+                self.errors.save(uuid.uuid4().hex, create_missing_file_error(submission, file_hash.sha256))
+                continue
+
             unchecked_files.append(FileTask(dict(
-                sid=submission.sid,
+                sid=sid,
                 file_hash=file_hash,
-                file_type=file_type,
+                file_type=file_data.type,
                 depth=0
             )))
         encountered_files = {file.sha256 for file in submission.files}
         pending_files = {}
+
+        # Track information about the results as we hit them
+        max_score = None
+        result_classifications = []
 
         # For each file, we will look through all its results, any exctracted files
         # found
         while unchecked_files:
             task = unchecked_files.pop()
             sha = task.file_hash
-            schedule = self.scheduler.build_schedule(submission, file_type)
+            schedule = self.scheduler.build_schedule(submission, task.file_type)
 
             for service_name in reduce(lambda a, b: a + b, schedule):
                 # If the service is still marked as 'in progress'
@@ -126,11 +177,18 @@ class Dispatcher:
 
                         file_type = self.files.get(file_hash).type
                         unchecked_files.append(FileTask(dict(
-                            sid=submission.sid,
+                            sid=sid,
                             file_hash=sub_file,
                             file_type=file_type,
                             depth=task.depth + 1
                         )))
+
+                # Collect information about the result
+                if max_score is None:
+                    max_score = result.score
+                else:
+                    max_score = max(max_score, result.score)
+                result_classifications.append(result.classification)
 
         # If there are pending files, then at least one service, on at least one
         # file isn't done yet, poke those files
@@ -138,7 +196,62 @@ class Dispatcher:
             for task in pending_files.values():
                 self.file_queue.push(task)
         else:
-            finalize_submission()
+            self.finalize_submission(submission, result_classifications, max_score)
+
+    def finalize_submission(self, submission: Submission, result_classifications, max_score):
+        sid = submission.sid
+
+        ExpiringSet(task.get_tag_set_name()).delete()
+        ExpiringHash(task.get_submission_tags_name()).delete()
+
+        if submission.params.quota_item and submission.params.submitter:
+            self.log.info(f"Submission {sid} no longer counts toward quota for {submission.params.submitter}")
+            Hash('submissions-' + submission.params.submitter, self.redis_persist).pop(sid)
+
+        # All the  remove this sid as well.
+        # entries.pop(sid)
+        process_table = DispatchHash(submission.sid, self.redis)
+        results = process_table.all_results()
+        process_table.delete()
+
+        # Pull in the classifications of ???
+        c12ns = dispatcher.completed.pop(sid).values() # TODO where are these classifications coming from
+        classification = Classification.UNRESTRICTED
+        for c12n in c12ns:
+            classification = Classification.max_classification(
+                classification, c12n
+            )
+
+        # TODO should we reverse the pointer here and start adding
+        # a SID to the error object?
+        errors = []  # dispatcher.errors.pop(sid, [])
+
+        # submission['original_classification'] = submission['classification']
+        submission.classification = classification
+        submission.error_count = len(errors)
+        submission.errors = errors
+        submission.file_count = len(set([x[:64] for x in errors + results]))
+        submission['results'] = results
+        submission.max_score = max_score
+        submission.state = 'completed'
+        submission.times.completed = isotime.now_as_iso()
+        self.submissions.sive(sid, submission)
+
+        completed_queue = submission.params.completed_queue
+        if completed_queue:
+            raw = submission.json()
+            raw.update({
+                'errors': errors,
+                'results': results,
+                'error_count': len(set([x[:64] for x in errors])),
+                'file_count': len(set([x[:64] for x in errors + results])),
+            })
+
+            self.open_queue(completed_queue).push(raw)
+
+        # Send complete message to any watchers.
+        for w in dispatcher.watchers.pop(sid, {}).itervalues():
+            w.push({'status': 'STOP'})
 
     def dispatch_file(self, task: FileTask):
         """ Handle a message describing a file to be processed.
@@ -181,13 +294,20 @@ class Dispatcher:
             for service in stage:
                 # If the result is in the process table we are fine
                 if process_table.finished(file_hash, service):
+                    if not submission.params.ignore_filtering and process_table.dropped(file_hash, service):
+                        schedule.clear()
                     continue
 
                 # Check if something, an error/a result already exists, to resolve this service
                 config = self.scheduler.build_service_config(service, submission)
                 access_key = self._find_results(submission, file_hash, service, config)
                 if access_key:
-                    tasks_remaining = process_table.finish(file_hash, service, access_key)
+                    result = self.results.get(access_key)
+                    if result:
+                        drop = result.drop_file
+                        tasks_remaining = process_table.finish(file_hash, service, access_key, drop=drop)
+                        if not submission.params.ignore_filtering and drop:
+                            schedule.clear()
                     continue
 
                 outstanding[service] = config
@@ -196,7 +316,8 @@ class Dispatcher:
         if outstanding:
             for service, config in outstanding.items():
                 # Check if this submission has already dispatched this service, and hasn't timed out yet
-                if time.time() - process_table.dispatch_time(file_hash, service) < self.scheduler.service_timeout(service):
+                queued_time = time.time() - process_table.dispatch_time(file_hash, service)
+                if queued_time < self.scheduler.service_timeout(service):
                     continue
 
                 # Build the actual service dispatch message
@@ -215,6 +336,7 @@ class Dispatcher:
 
             # If there are no outstanding ANYTHING for this submission,
             # send a message to the submission dispatcher to finalize
+            self.counts.increment('dispatch.files_completed')
             if process_table.all_finished() and tasks_remaining == 0:
                 self.submission_queue.push({'sid': submission.sid})
 
@@ -246,22 +368,3 @@ class Dispatcher:
 
         # No reasons not to continue processing this file
         return False
-
-    def service_failed(self, task: ServiceTask, error=None):
-        # Add an error to the datastore
-        if error:
-            self.errors.save(uuid.guid4().hex, error)
-        else:
-            self.errors.save(uuid.guid4().hex, create_generic_error(task))
-
-        # Mark the attempt to process the file over in the dispatch table
-        process_table = DispatchHash(task.sid, *self.redis)
-        process_table.fail_dispatch(task.file_hash, task.service_name)
-
-        # Send a message to prompt the re-issue of the task if needed
-        self.file_queue.push(FileTask(dict(
-            sid=task.sid,
-            file_hash=task.file_hash,
-            file_type=task.file_type,
-            depth=task.depth,
-        )))

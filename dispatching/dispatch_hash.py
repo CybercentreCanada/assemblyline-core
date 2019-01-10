@@ -4,6 +4,7 @@ and those that are already finished.
 """
 import time
 from assemblyline.remote.datatypes import retry_call
+from assemblyline.remote.datatypes import hash
 
 dispatch_tail = '-dispatch'
 finished_tail = '-finished'
@@ -23,6 +24,7 @@ class DispatchHash:
     def __init__(self, sid, client):
         self.client = client
         self.sid = sid
+        self.dropped_files = hash.ExpiringSet(sid, host=self.client)
         self._dispatch_key = f'{sid}{dispatch_tail}'
         self._finish_key = f'{sid}{finished_tail}'
         self._finish = self.client.register_script(finish_script)
@@ -49,13 +51,15 @@ class DispatchHash:
         """Remove a dispatched task, without marking it as finished."""
         retry_call(self.client.hdel, self._dispatch_key, f"{file_hash}-{service}")
 
-    def finish(self, file_hash, service, result_key):
+    def finish(self, file_hash, service, result_key, drop=False):
         """
         As a single transaction:
          - Remove the service from the dispatched list
          - Add the file to the finished list, with the given result key
          - return the number of items in the dispatched list
         """
+        if drop:
+            self.dropped_files.add(file_hash + service, True)
         return retry_call(self._finish, args=[self.sid, f"{file_hash}-{service}", result_key])
 
     def finished_count(self):
@@ -69,6 +73,9 @@ class DispatchHash:
             return result.decode()
         return False
 
+    def dropped(self, file_hash, service):
+        return self.dropped_files.has(file_hash + service)
+
     def all_finished(self):
         """Are there no outstanding tasks, and at least one finished task."""
         if retry_call(self.client.hlen, self._finish_key) == 0:
@@ -79,3 +86,4 @@ class DispatchHash:
         """Clear the tables from the redis server."""
         retry_call(self.client.delete, self._dispatch_key)
         retry_call(self.client.delete, self._finish_key)
+        self.dropped_files.delete()
