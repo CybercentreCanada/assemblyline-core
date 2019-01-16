@@ -55,6 +55,7 @@ class ServiceTask(odm.Model):
     service_config = odm.Keyword()
 
 
+
 FILE_QUEUE = 'dispatch-file'
 SUBMISSION_QUEUE = 'submission'
 
@@ -92,6 +93,35 @@ class Dispatcher:
 
     def start(self):
         self.counts.start()
+
+        # self.service_manager.start()
+
+        # This starts a thread that polls for messages with an exponential
+        # backoff, if no messages are found, to a maximum of one second.
+        # minimum = -6
+        # maximum = 0
+        # self.running = True
+        #
+        # threading.Thread(target=self.heartbeat).start()
+        # for _ in range(8):
+        #     threading.Thread(target=self.writer).start()
+        #
+        # signal.signal(signal.SIGINT, self.interrupt)
+        #
+        # time.sleep(2 * int(config.system.update_interval))
+
+        # exp = minimum
+        # while self.running:
+        #     if self.poll(len(self.entries)):
+        #         exp = minimum
+        #         continue
+        #     if self.drain and not self.entries:
+        #         break
+        #     time.sleep(2**exp)
+        #     exp = exp + 1 if exp < maximum else exp
+        #     self.check_timeouts()
+        #
+        # counts.stop()
 
     def dispatch_submission(self, submission: Submission):
         """
@@ -199,8 +229,13 @@ class Dispatcher:
             self.finalize_submission(submission, result_classifications, max_score)
 
     def finalize_submission(self, submission: Submission, result_classifications, max_score):
+        """All of the services for all of the files in this submission have finished or failed.
+
+        Update the records in the datastore, and flush the working data from redis.
+        """
         sid = submission.sid
 
+        # Erase tags
         ExpiringSet(task.get_tag_set_name()).delete()
         ExpiringHash(task.get_submission_tags_name()).delete()
 
@@ -273,6 +308,7 @@ class Dispatcher:
         # Read the message content
         file_hash = task.file_hash
         submission = self.submissions.get(task.sid)
+        now = time.time()
 
         # Refresh the watch on the submission, we are still working on it
         watcher.touch(self.redis, key=task.sid, timeout=self.config.core.dispatcher.timeout,
@@ -297,6 +333,45 @@ class Dispatcher:
                     if not submission.params.ignore_filtering and process_table.dropped(file_hash, service):
                         schedule.clear()
                     continue
+
+                # queue_size = self.queue_size[name] = self.queue_size.get(name, 0) + 1
+                # entry.retries[name] = entry.retries.get(name, -1) + 1
+
+                # if task.profile:
+                #     if entry.retries[name]:
+                #         log.info('%s Graph: "%s" -> "%s/%s" [label=%d];',
+                #         sid, srl, srl, name, entry.retries[name])
+                #     else:
+                #         log.info('%s Graph: "%s" -> "%s/%s";',
+                #         sid, srl, srl, name)
+                #         log.info('%s Graph: "%s/%s" [label=%s];',
+                #         sid, srl, name, name)
+
+                file_count = len(self.entries[sid]) + len(self.completed[sid])
+
+                # Warning: Please do not change the text of the error messages below.
+                msg = None
+                if self._service_is_down(service, now):
+                    log.debug(' '.join((msg, "Not sending %s/%s to %s." % (sid, srl, name))))
+                    response = Task(deepcopy(task.raw))
+                    response.watermark(name, '')
+                    response.nonrecoverable_failure(msg)
+                    self.storage_queue.push({
+                    'type': 'error',
+                    'name': name,
+                    'response': response,
+                    })
+                    return False
+
+                if service.skip(task):
+                    response = Task(deepcopy(task.raw))
+                    response.watermark(name, '')
+                    response.success()
+                    q.send_raw(response.as_dispatcher_response())
+                    return False
+
+                    task.sent = now
+                    service.proxy.execute(task.priority, task.as_service_request(name))
 
                 # Check if something, an error/a result already exists, to resolve this service
                 config = self.scheduler.build_service_config(service, submission)
@@ -332,6 +407,27 @@ class Dispatcher:
                 process_table.dispatch(file_hash, service)
 
         else:
+            # dispatcher.storage_queue.push({
+            #     'type': 'complete',
+            #     'expiry': task.__expiry_ts__,
+            #     'filescore_key': task.scan_key,
+            #     'now': now,
+            #     'psid': task.psid,
+            #     'score': int(dispatcher.score.get(sid, None) or 0),
+            #     'sid': sid,
+            # })
+            #
+            #             key = msg['filescore_key']
+            #             if key:
+            #                 store.save_filescore(
+            #                     key, msg['expiry'], {
+            #                         'psid': msg['psid'],
+            #                         'sid': msg['sid'],
+            #                         'score': msg['score'],
+            #                         'time': msg['now'],
+            #                     }
+            #                 )
+
             # There are no outstanding services, this file is done
 
             # If there are no outstanding ANYTHING for this submission,
@@ -368,3 +464,44 @@ class Dispatcher:
 
         # No reasons not to continue processing this file
         return False
+
+    # def heartbeat(self):
+    #     while not self.drain:
+    #         with self.lock:
+    #             heartbeat = {
+    #                 'shard': self.shard,
+    #                 'entries': len(self.entries),
+    #                 'errors': len(self.errors),
+    #                 'results': len(self.results),
+    #                 'resources': {
+    #                     "cpu_usage.percent": psutil.cpu_percent(),
+    #                     "mem_usage.percent": psutil.virtual_memory().percent,
+    #                     "disk_usage.percent": psutil.disk_usage('/').percent,
+    #                     "disk_usage.free": psutil.disk_usage('/').free,
+    #                 },
+    #                 'services': self._service_info(), 'queues': {
+    #                     'max_inflight': self.high,
+    #                     'control': self.control_queue.length(),
+    #                     'ingest': q.length(self.ingest_queue),
+    #                     'response': q.length(self.response_queue),
+    #                 },
+    #                 'hostinfo': self.hostinfo
+    #             }
+    #
+    #             msg = message.Message(to="*", sender='dispatcher', mtype=message.MT_DISPHEARTBEAT, body=heartbeat)
+    #             CommsQueue('status').publish(msg.as_dict())
+    #
+    #         time.sleep(1)
+    #
+    # # noinspection PyUnusedLocal
+    # def interrupt(self, unused1, unused2):  # pylint: disable=W0613
+    #     if self.drain:
+    #         log.info('Forced shutdown.')
+    #         self.running = False
+    #         return
+    #
+    #     log.info('Shutting down gracefully...')
+    #     # Rename control queue to 'control-<hostname>-<pid>-<seconds>-<shard>'.
+    #     self.control_queue = \
+    #         forge.get_control_queue('control-' + self.response_queue)
+    #     self.drain = True

@@ -9,66 +9,45 @@ score received, possibly sending a message to indicate that an alert should
 be created.
 """
 
-import logging
+import threading
 import redis
 import signal
-import sys
 import time
-import argparse
-import riak
 
-from collections import namedtuple
+# from collections import namedtuple
 from math import tanh
 from random import random
-from threading import RLock, Thread
 
-from assemblyline.common.charset import dotdump, safe_str
+from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
 from assemblyline.common.isotime import iso_to_epoch, now, now_as_iso
-from assemblyline.common.net import get_hostip, get_hostname, get_mac_for_ip
+# from assemblyline.common.net import get_hostip, get_hostname, get_mac_for_ip
 from assemblyline.common import net
 from assemblyline.common import forge
-from assemblyline.common import log
+from .document_keys import create_filescore_key
 
 from assemblyline import odm
 
-# from assemblyline.al.common import counter
-# from assemblyline.al.common import message
-# from assemblyline.al.common import queue
-# from assemblyline.al.common.notice import Notice, overrides
-# from assemblyline.al.common.remote_datatypes import Hash
-# from assemblyline.al.common.task import Task, get_submission_overrides
-# from assemblyline.al.core.datastore import create_filescore_key
-# from assemblyline.al.core.filestore import FileStoreException, CorruptedFileStoreException
+from assemblyline.remote.datatypes.exporting_counter import AutoExportingCounters
+from assemblyline.remote.datatypes.queues.named import NamedQueue
+from assemblyline.remote.datatypes.queues.priority import PriorityQueue
+from assemblyline.remote.datatypes.queues.comms import CommsQueue
+from assemblyline.remote.datatypes import get_client
 
 
-# class ScanLock(object):
-#     SCAN_LOCK_LOCK = RLock()
-#     SCAN_LOCK = {}
-#
-#     def __init__(self, scan_key):
-#         self.scan_key = scan_key
-#
-#     def __enter__(self):
-#         with self.SCAN_LOCK_LOCK:
-#             l = self.SCAN_LOCK.get(self.scan_key, None)
-#             if not l:
-#                 self.SCAN_LOCK[self.scan_key] = l = [0, RLock()]
-#             l[0] += 1
-#         l[1].acquire()
-#
-#     def __exit__(self, unused1, unused2, unused3):
-#         with self.SCAN_LOCK_LOCK:
-#             l = self.SCAN_LOCK[self.scan_key]
-#             l[0] -= 1
-#             if l[0] == 0:
-#                 del self.SCAN_LOCK[self.scan_key]
-#         l[1].release()
-
+def install_interrupt_handler(handler):
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
 
 # Timeout = namedtuple('Timeout', ['time', 'scan_key'])
 
+
 constants = forge.get_constants()
+priority_value = constants.PRIORITIES
+threshold_value = constants.PRIORITY_THRESHOLDS
+
+_completeq_name = 'm-complete'
+_ingestq_name = 'm-ingest'
 
 
 # TODO move to config file
@@ -81,17 +60,34 @@ class Ingest(odm.Model):
                                                         'Networking', 'Static Analysis'])
     default_resubmit_services = odm.List(odm.Keyword(), default=['Dynamic Analysis'])
 
+    # Maximum permitted length of metadata values
+    max_value_size = odm.Integer()
+
+    # Maximum file size for ingestion
+    max_size = odm.Integer()
+
 
 @odm.model()
 class IngestTask(odm.Model):
     # parameters that control middleman's handling of the task
     ignore_size = odm.Boolean(default=False)
     never_drop = odm.Boolean(default=False)
+    ignore_cache = odm.Boolean(default=False)
+    deep_scan = odm.Boolean(default=False)
+    ignore_dynamic_recursion_prevention = odm.Boolean(default=False)
+    ignore_cache = odm.Boolean(default=False)
+    ignore_filtering = odm.Boolean(default=False)
+    max_extracted = odm.Integer()
+    max_supplementary = odm.Integer()
+    completed_queue = odm.Keyword()
+    scan_key = odm.Keyword(default_set=True)  # overide the filescore key
 
     # describe the file being ingested
     sha256 = odm.Keyword()
     file_size = odm.Integer()
     classification = odm.Keyword()
+    metadata = odm.Mapping(odm.Keyword())
+    description = odm.Keyword()
 
     # Information about who wants this file ingested
     submitter = odm.Keyword()
@@ -100,27 +96,94 @@ class IngestTask(odm.Model):
     # What services should this be submitted to
     selected_services = odm.List(odm.Keyword())
     resubmit_services = odm.List(odm.Keyword())
+    params = odm.Mapping(odm.Keyword(), default={})
 
 
 class Middleman:
-    """Interface to the ingestion queues."""
+    """Internal interface to the ingestion queues."""
 
-    def __init__(self, datastore, logger):
+    def __init__(self, datastore, logger, classification=None):
         self.datastore = datastore
         self.log = logger
 
         # Cache the user groups
         self._user_groups = {}
+        self.cache = {}
+        self.cache_lock = threading.RLock()  # TODO are middle man instances single threaded now?
+        self.running = True
 
         # Create a config cache that will refresh config values periodically
-        self.config = CachedObject(forge.get_config)
+        self.config = forge.CachedObject(forge.get_config)
+
+        # Connect to the redis servers
+        self.redis = get_client(
+            db=self.config.core.redis.nonpersistent.db,
+            host=self.config.core.redis.nonpersistent.host,
+            port=self.config.core.redis.nonpersistent.port,
+            private=False,
+        )
+        self.persistent_redis = get_client(
+            db=self.config.core.redis.persistent.db,
+            host=self.config.core.redis.persistent.host,
+            port=self.config.core.redis.persistent.port,
+            private=False,
+        )
+
+        # Classification engine
+        self.ce = classification or forge.get_classification()
+
+        self.ingester_counts = AutoExportingCounters(
+            name='ingester',
+            host=net.get_hostip(),
+            auto_flush=True,
+            auto_log=False,
+            export_interval_secs=self.config.logging.export_interval,
+            channel=forge.get_metrics_sink())
+
+        self.whitelister_counts = AutoExportingCounters(
+            name='whitelister',
+            host=net.get_hostip(),
+            auto_flush=True,
+            auto_log=False,
+            export_interval_secs=self.config.logging.export_interval,
+            channel=forge.get_metrics_sink())
+
+        # Input. An external process creates a record when any submission completes.
+        self.complete_queue = NamedQueue(_completeq_name, self.redis)
+
+        # Output. Dropped entries are placed on this queue.
+        # dropq = queue.NamedQueue('m-drop-' + shard, **persistent)
+
+        # Input. An external process places submission requests on this queue.
+        self.ingest_queue = NamedQueue(_ingestq_name, self.persistent_redis)
+
+        # Traffic (TODO: What traffic?)
+        self.traffic_queue = CommsQueue('traffic', self.redis)
+
+        # Input/Output. Unique requests are placed in and processed from this queue.
+        self.unique_queue = PriorityQueue('m-unique', self.persistent_redis)
+
+    def start(self):
+        """Start shared middleman auxillary components."""
+        self.ingester_counts.start()
+        self.whitelister_counts.start()
+        install_interrupt_handler(self.interrupt_handler)
+
+    def interrupt_handler(self, *_):
+        self.log.info("Caught signal. Coming down...")
+        self.running = False
+
+    def stop(self):
+        """Stop shared middleman auxillary components."""
+        self.ingester_counts.stop()
+        self.whitelister_counts.stop()
 
     def get_user_groups(self, user):
         groups = self._user_groups.get(user, None)
         if groups is None:
             ruser = self.datastore.users.get(user)
             if not ruser:
-                raise ValueError(f"User not found [{user}] ingest failed")
+                return None
             groups = ruser.get('groups', [])
             self._user_groups[user] = groups
         return groups
@@ -128,7 +191,8 @@ class Middleman:
     def ingest(self, task: IngestTask):
         # Load a snapshot of ingest parameters as of right now.
         # self.config is a timed cache
-        conf = self.config.core.ingest
+        conf = self.config.core.ingestion
+        max_file_size = self.config.core.submission.max_file_size
 
         # Make sure we have a submitter ...
         if not task.submitter:
@@ -137,6 +201,10 @@ class Middleman:
         # ... and groups.
         if not task.groups:
             task.groups = self.get_user_groups(task.submitter)
+            if task.groups is None:
+                error_message = f"User not found [{task.submitter}] ingest failed"
+                send_notification(task, failure=error_message, logfunc=self.log.warning)
+                return
 
         #
         if not task.selected_services:
@@ -146,57 +214,47 @@ class Middleman:
         if not task.resubmit_services:
             task.resubmit_services = conf.default_resubmit_services
 
-        ingester_counts.increment('ingest.bytes_ingested', task.file_size)
-        ingester_counts.increment('ingest.submissions_ingested')
+        self.ingester_counts.increment('ingest.bytes_ingested', task.file_size)
+        self.ingester_counts.increment('ingest.submissions_ingested')
 
         if not task.sha256:
             send_notification(task, failure="Invalid sha256", logfunc=self.log.warning)
             return
 
         c12n = task.classification
-        if not Classification.is_valid(c12n):
+        if not self.ce.is_valid(c12n):
             send_notification(task, failure=f"Invalid classification {c12n}", logfunc=self.log.warning)
             return
 
-        metadata = notice.get('metadata', {})
-        if isinstance(metadata, dict):
-            to_delete = []
-            for k, v in metadata.iteritems():
-                meta_size = sys.getsizeof(v, -1)
-                if isinstance(v, basestring):
-                    meta_size = len(v)
-                if meta_size > config.core.middleman.max_value_size:
-                    to_delete.append(k)
-                elif meta_size < 0:
-                    to_delete.append(k)
-            if to_delete:
-                logger.info('Removing %s from %s', to_delete, notice.raw)
-                for k in to_delete:
-                    metadata.pop(k, None)
+        # Clean up metadata strings, since we may delete some, iterate on a copy of the keys
+        for key in list(task.metadata.keys()):
+            value = task.metadata[key]
+            meta_size = len(value)
+            if meta_size > conf.max_value_size:
+                self.log.info(f'Removing {key} from {task.sha256} from {task.submitter}')
+                task.metadata.pop(key)
 
-        if f_size > config.submissions.max.size and not ignore_size and not never_drop:
-            notice.set(
-                'failure', "File too large (%d > %d)" % (f_size, config.submissions.max.size)
-            )
+        if task.file_size > max_file_size and not task.ignore_size and not task.never_drop:
+            task.failure = f"File too large ({task.file_size} > {conf.max_size})"
             dropq.push(notice.raw)  # df push push
-            ingester_counts.increment('ingest.skipped')
+            self.ingester_counts.increment('ingest.skipped')
             return
 
         pprevious, previous, score = None, False, None
-        if not notice.get('ignore_cache', False):
-            pprevious, previous, score, _ = check(datastore, notice)
+        if not task.ignore_cache:
+            pprevious, previous, score, _ = self.check(task)
 
         # Assign priority.
-        low_priority = is_low_priority(notice)
+        low_priority = self.is_low_priority(task)
 
-        priority = notice.get('priority')
+        priority = task.priority
         if priority is None:
             priority = priority_value['medium']
 
             if score is not None:
                 priority = priority_value['low']
-                for level in ('critical', 'high'):
-                    if score >= threshold_value[level]:
+                for level, threshold in threshold_value.items():
+                    if score >= threshold:
                         priority = priority_value[level]
                         break
             elif low_priority:
@@ -204,37 +262,179 @@ class Middleman:
 
         # Reduce the priority by an order of magnitude for very old files.
         current_time = now()
-        if priority and \
-                expired(current_time - seconds(notice.get('ts', current_time)), 0):
+        if priority and expired(current_time - seconds(notice.get('ts', current_time)), 0):
             priority = (priority / 10) or 1
 
-        notice.set('priority', priority)
+        task.priority = priority
 
         # Do this after priority has been assigned.
         # (So we don't end up dropping the resubmission).
         if previous:
-            ingester_counts.increment('ingest.duplicates')
-            finalize(pprevious, previous, score, notice)  # df push calls
+            self.ingester_counts.increment('ingest.duplicates')
+            finalize(pprevious, previous, score, task)
             return
 
-        if drop(notice):  # df push calls
+        if drop(task):
             return
 
-        if is_whitelisted(notice):  # df push calls
+        if is_whitelisted(task):
             return
 
-        uniqueq.push(priority, notice.raw)  # df push push
+        self.unique_queue.push(priority, notice.raw)
 
+    def check(self, task: IngestTask):
+        key = self.stamp_filescore_key(task)
 
+        with self.cache_lock:
+            result = self.cache.get(key, None)
 
+        counter_name = 'ingest.cache_hit_local'
+        if result:
+            self.log.info('Local cache hit')
+        else:
+            counter_name = 'ingest.cache_hit'
 
-#
-#
-#
-#
-#
-# Classification = forge.get_classification()
-#
+            result = self.get_filescore(key)
+            if result:
+                self.log.info('Remote cache hit')
+            else:
+                self.ingester_counts.increment('ingest.cache_miss')
+                return None, False, None, key
+
+            add(key, result.get('psid', None), result['sid'], result['score'],
+                result.get('errors', 0), result['time'])
+
+        current_time = now()
+        delta = current_time - result.get('time', current_time)
+        errors = result.get('errors', 0)
+
+        if expired(delta, errors):
+            self.ingester_counts.increment('ingest.cache_expired')
+            with self.cache_lock:
+                self.cache.pop(key, None)
+                self.delete_filescore(key)
+            return None, False, None, key
+        elif stale(delta, errors):
+            self.ingester_counts.increment('ingest.cache_stale')
+            return None, False, result['score'], key
+
+        self.ingester_counts.increment(counter_name)
+
+        return result.get('psid', None), result['sid'], result['score'], key
+
+    def stamp_filescore_key(self, task: IngestTask, sha256=None):
+        if not sha256:
+            sha256 = task.sha256
+
+        raw_task = task.as_primitives()
+        selected = task.selected_services
+        key = task.scan_key
+
+        if not key:
+            key = create_filescore_key(sha256, raw_task, selected)
+            task.set('scan_key', key)
+
+        return key
+
+    def completed(self, task):
+        """Invoked when notified that a submission has completed."""
+        sha256 = task.root_sha256
+
+        psid = task.psid
+        score = task.score
+        sid = task.sid
+
+        scan_key = task.scan_key
+
+        with ScanLock(scan_key):
+            # Remove the entry from the hash of submissions in progress.
+            raw = scanning.pop(scan_key)  # df pull pop
+            if not raw:
+                logger.warning("Untracked submission (score=%d) for: %s %s",
+                               int(score), sha256, str(task.metadata))
+
+                # Not a result we care about. We are notified for every
+                # submission that completes. Some submissions will not be ours.
+                if task.metadata:
+                    stype = None
+                    try:
+                        stype = task.metadata.get('type', None)
+                    except:  # pylint: disable=W0702
+                        logger.exception("Malformed metadata: %s:", sid)
+
+                    if not stype:
+                        return scan_key
+
+                    if (task.description or '').startswith(default_prefix):
+                        raw = {
+                            'metadata': task.metadata,
+                            'overrides': get_submission_overrides(task, overrides),
+                            'sha256': sha256,
+                            'type': stype,
+                        }
+
+                        finalize(psid, sid, score, Notice(raw))
+                return scan_key
+
+            errors = task.raw.get('error_count', 0)
+            file_count = task.raw.get('file_count', 0)
+            ingester_counts.increment('ingest.submissions_completed')
+            ingester_counts.increment('ingest.files_completed', file_count)
+            ingester_counts.increment('ingest.bytes_completed', int(task.size or 0))
+
+            notice = Notice(raw)
+
+            with cache_lock:
+                _add(scan_key, psid, sid, score, errors, now())
+
+            finalize(psid, sid, score, notice)  # df push calls
+
+            def exhaust():
+                while True:
+                    res = dupq.pop(  # df pull pop
+                        dup_prefix + scan_key, blocking=False
+                    )
+                    if res is None:
+                        break
+                    yield res
+
+            # You may be tempted to remove the assignment to dups and use the
+            # value directly in the for loop below. That would be a mistake.
+            # The function finalize may push on the duplicate queue which we
+            # are pulling off and so condensing those two lines creates a
+            # potential infinite loop.
+            dups = [dup for dup in exhaust()]
+            for dup in dups:
+                finalize(psid, sid, score, Notice(dup))
+
+        return scan_key
+
+    def send_notification(self, notice, failure=None, logfunc=None):
+        if logfunc is None:
+            logfunc = self.log.info
+
+        if failure:
+            notice.set('failure', failure)
+
+        failure = notice.get('failure', None)
+        if failure:
+            logfunc("%s: %s", failure, str(notice.raw))
+
+        queue_name = notice.get('notification_queue', False)
+        if not queue_name:
+            return
+
+        score = notice.get('al_score', 0)
+        threshold = notice.get('notification_threshold', None)
+        if threshold and score < int(threshold):
+            return
+
+        q = notificationq.get(queue_name, None)
+        if not q:
+            notificationq[queue_name] = q = \
+                queue.NamedQueue(queue_name, **persistent)
+        q.push(notice.raw)
+
 # log.init_logging("middleman")
 # logger = logging.getLogger('assemblyline.middleman')
 #
@@ -257,12 +457,8 @@ class Middleman:
 #
 # # Globals
 # alertq = queue.NamedQueue('m-alert', **persistent)  # df line queue
-# cache = {}
-# cache_lock = RLock()
 # chunk_size = 1000
-# completeq_name = 'm-complete-' + shard
 # date_fmt = '%Y-%m-%dT%H:%M:%SZ'
-# default_prefix = config.core.middleman.default_prefix
 # dup_prefix = 'w-' + shard + '-'
 # dupq = queue.MultiQueue(**persistent)  # df line queue
 # expire_after_seconds = config.core.middleman.expire_after
@@ -273,14 +469,12 @@ class Middleman:
 #     'mac_address': get_mac_for_ip(ip),
 #     'host': get_hostname(),
 # }
-# ingestq_name = 'm-ingest-' + shard
 # is_low_priority = forge.get_is_low_priority()
 # max_priority = config.submissions.max.priority
 # max_retries = 10
 # max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
 # max_waiting = int(config.core.dispatcher.max.inflight) / (2 * shards)
 # min_priority = 1
-# priority_value = constants.PRIORITIES
 # retry_delay = 180
 # retryq = queue.NamedQueue('m-retry-' + shard, **persistent)  # df line queue
 # running = True
@@ -342,17 +536,6 @@ class Middleman:
 #         submitter_threads
 #     )
 #
-# defaults = {
-#     'classification': config.core.middleman.classification,
-#     'completed_queue': completeq_name,
-#     'deep_scan': False,
-#     'ignore_dynamic_recursion_prevention': False,
-#     'ignore_cache': False,
-#     'ignore_filtering': False,
-#     'max_extracted': config.core.middleman.max_extracted,
-#     'max_supplementary': config.core.middleman.max_supplementary,
-#     'params': {},
-# }
 #
 # # When a unique queue for a priority group has passed a threshold value, we
 # # start sampling, gradually increasing the probability that a newly ingested
@@ -374,25 +557,10 @@ class Middleman:
 #     prev = lvl
 #     start = end
 #
-# threshold_value = {
-#     'critical': 500,
-#     'high': 100,
-# }
-#
-# # Input. An external process creates a record when any submission completes.
-# completeq = queue.NamedQueue(completeq_name)  # df line queue
-#
-# # Output. Dropped entries are placed on this queue.
-# dropq = queue.NamedQueue('m-drop-' + shard, **persistent)  # df line queue
-#
-# # Input. An external process places submission requests on this queue.
-# ingestq = queue.NamedQueue(ingestq_name, **persistent)  # df line queue
 #
 # # Output. Notifications are placed on a notification queue.
 # notificationq = {}
 #
-# # Input/Output. Unique requests are placed in and processed from this queue.
-# uniqueq = queue.PriorityQueue('m-unique-' + shard, **persistent)  # df line queue
 #
 # # State. The submissions in progress are stored in Redis in order to
 # # persist this state and recover in case we crash.
@@ -401,9 +569,6 @@ class Middleman:
 # # Status.
 # statusq = queue.CommsQueue('status')
 #
-# # Traffic.
-# # df text trafficq [label=trafficq,shape=plaintext]
-# trafficq = queue.LocalQueue()
 
 
 def exit_and_log(original):
@@ -436,138 +601,6 @@ def _add(key, psid, sid, score, errors, t):
 def add(key, psid, sid, score, errors, t):
     with cache_lock:
         _add(key, psid, sid, score, errors, t)
-
-
-def check(datastore, notice):
-    key = stamp_filescore_key(notice)
-
-    with cache_lock:
-        result = cache.get(key, None)
-
-    counter_name = 'ingest.cache_hit_local'
-    if result:
-        logger.info('Local cache hit')
-    else:
-        counter_name = 'ingest.cache_hit'
-
-        result = datastore.get_filescore(key)
-        if result:
-            logger.info('Remote cache hit')
-        else:
-            ingester_counts.increment('ingest.cache_miss')
-            return None, False, None, key
-
-        add(key, result.get('psid', None), result['sid'], result['score'],
-            result.get('errors', 0), result['time'])
-
-    current_time = now()
-    delta = current_time - result.get('time', current_time)
-    errors = result.get('errors', 0)
-
-    if expired(delta, errors):
-        ingester_counts.increment('ingest.cache_expired')
-        with cache_lock:
-            cache.pop(key, None)
-            datastore.delete_filescore(key)
-        return None, False, None, key
-    elif stale(delta, errors):
-        ingester_counts.increment('ingest.cache_stale')
-        return None, False, result['score'], key
-
-    ingester_counts.increment(counter_name)
-
-    return result.get('psid', None), result['sid'], result['score'], key
-
-
-# Invoked when notified that a submission has completed.
-# noinspection PyBroadException
-def completed(task):  # df node def
-    sha256 = task.root_sha256
-
-    psid = task.psid
-    score = task.score
-    sid = task.sid
-
-    scan_key = task.scan_key
-
-    with ScanLock(scan_key):
-        # Remove the entry from the hash of submissions in progress.
-        raw = scanning.pop(scan_key)  # df pull pop
-        if not raw:
-            logger.warning("Untracked submission (score=%d) for: %s %s",
-                           int(score), sha256, str(task.metadata))
-
-            # Not a result we care about. We are notified for every
-            # submission that completes. Some submissions will not be ours.
-            if task.metadata:
-                stype = None
-                try:
-                    stype = task.metadata.get('type', None)
-                except:  # pylint: disable=W0702
-                    logger.exception("Malformed metadata: %s:", sid)
-
-                if not stype:
-                    return scan_key
-
-                if (task.description or '').startswith(default_prefix):
-                    raw = {
-                        'metadata': task.metadata,
-                        'overrides': get_submission_overrides(task, overrides),
-                        'sha256': sha256,
-                        'type': stype,
-                    }
-
-                    finalize(psid, sid, score, Notice(raw))
-            return scan_key
-
-        errors = task.raw.get('error_count', 0)
-        file_count = task.raw.get('file_count', 0)
-        ingester_counts.increment('ingest.submissions_completed')
-        ingester_counts.increment('ingest.files_completed', file_count)
-        ingester_counts.increment('ingest.bytes_completed', int(task.size or 0))
-
-        notice = Notice(raw)
-
-        with cache_lock:
-            _add(scan_key, psid, sid, score, errors, now())
-
-        finalize(psid, sid, score, notice)  # df push calls
-
-        def exhaust():
-            while True:
-                res = dupq.pop(  # df pull pop
-                    dup_prefix + scan_key, blocking=False
-                )
-                if res is None:
-                    break
-                yield res
-
-        # You may be tempted to remove the assignment to dups and use the
-        # value directly in the for loop below. That would be a mistake.
-        # The function finalize may push on the duplicate queue which we
-        # are pulling off and so condensing those two lines creates a
-        # potential infinite loop.
-        dups = [dup for dup in exhaust()]
-        for dup in dups:
-            finalize(psid, sid, score, Notice(dup))
-
-    return scan_key
-
-
-def stamp_filescore_key(notice, sha256=None):
-    if not sha256:
-        sha256 = notice.get('sha256')
-    key_data = notice.parse(
-        description=': '.join((default_prefix, sha256 or '')), **defaults
-    )
-    selected = notice.get('selected')
-
-    key = notice.get('scan_key', None)
-    if not key:
-        key = create_filescore_key(sha256, key_data, selected)
-        notice.set('scan_key', key)
-
-    return key
 
 
 def determine_resubmit_selected(selected, resubmit_to):
@@ -674,43 +707,6 @@ def finalize(psid, sid, score, notice):  # df node def
         priority = notice.get('priority', 0)
 
         uniqueq.push(priority, notice.raw)  # df push push
-
-
-@exit_and_log
-def ingester():  # df node def # pylint:disable=R0912
-    datastore = forge.get_datastore()
-    user_groups = {}
-
-    # Move from ingest to unique and waiting queues.
-    # While there are entries in the ingest queue we consume chunk_size
-    # entries at a time and move unique entries to uniqueq / queued and
-    # duplicates to their own queues / waiting.
-    while running:
-        while True:
-            result = completeq.pop(blocking=False)  # df pull pop
-            if not result:
-                break
-
-            completed(Task(result))  # df push calls
-
-        entry = ingestq.pop(timeout=1)  # df pull pop
-        if not entry:
-            continue
-
-        trafficq.push(entry)  # df push push
-
-        sha256 = entry.get('sha256', '')
-        if not sha256 or len(sha256) != 64:
-            logger.error("Invalid sha256: %s", entry)
-            continue
-
-        entry['md5'] = entry.get('md5', '').lower()
-        entry['sha1'] = entry.get('sha1', '').lower()
-        entry['sha256'] = sha256.lower()
-
-        ingest(datastore, user_groups, entry)  # df push calls
-
-    datastore.close()
 
 
 # noinspection PyBroadException
@@ -840,17 +836,8 @@ def init():
         # No need to lock. We're the only thing running at this point.
         timeouts.append(Timeout(scan_key, expiry_time))
 
-    signal.signal(signal.SIGINT, interrupt)
-    signal.signal(signal.SIGTERM, interrupt)
 
     datastore.close()
-
-
-# noinspection PyUnusedLocal
-def interrupt(unused1, unused2):  # pylint:disable=W0613
-    global running  # pylint:disable=W0603
-    logger.info("Caught signal. Coming down...")
-    running = False
 
 
 def is_alert(notice, score):
@@ -1107,42 +1094,6 @@ def send_heartbeats():
         time.sleep(1)
 
 
-def send_notification(notice, failure=None, logfunc=logger.info):
-    if failure:
-        notice.set('failure', failure)
-
-    failure = notice.get('failure', None)
-    if failure:
-        logfunc("%s: %s", failure, str(notice.raw))
-
-    queue_name = notice.get('notification_queue', False)
-    if not queue_name:
-        return
-
-    score = notice.get('al_score', 0)
-    threshold = notice.get('notification_threshold', None)
-    if threshold and score < int(threshold):
-        return
-
-    q = notificationq.get(queue_name, None)
-    if not q:
-        notificationq[queue_name] = q = \
-            queue.NamedQueue(queue_name, **persistent)
-    q.push(notice.raw)
-
-
-@exit_and_log
-def send_traffic():
-    real_trafficq = queue.CommsQueue('traffic')
-
-    while running:
-        msg = trafficq.pop(timeout=1)
-        if not msg:
-            continue
-
-        real_trafficq.publish(msg)
-
-
 def should_resubmit(score):
 
     # Resubmit:
@@ -1190,87 +1141,6 @@ def submit(client, notice):
         timeouts.append(Timeout(now(max_time), notice.get('scan_key')))
 
 
-# noinspection PyBroadException
-@exit_and_log
-def submitter():  # df node def
-    client = forge.get_submission_service()
-    datastore = forge.get_datastore()
-
-    while running:
-        try:
-            raw = submissionq.pop(timeout=1)  # df pull pop
-            if not raw:
-                continue
-
-            # noinspection PyBroadException
-            try:
-                sha256 = raw['sha256']
-            except Exception:  # pylint: disable=W0703
-                logger.exception("Malformed entry on submission queue:")
-                continue
-
-            if not sha256:
-                logger.error("Malformed entry on submission queue: %s", raw)
-                continue
-
-            notice = Notice(raw)
-            if drop(notice):  # df push calls
-                continue
-
-            if is_whitelisted(notice):  # df push calls
-                continue
-
-            pprevious, previous, score, scan_key = None, False, None, None
-            if not notice.get('ignore_cache', False):
-                pprevious, previous, score, scan_key = check(datastore, notice)
-            else:
-                scan_key = stamp_filescore_key(notice)
-
-            if previous:
-                if not notice.get('resubmit_to', []) and not pprevious:
-                    logger.warning("No psid for what looks like a resubmission of %s: %s", sha256, scan_key)
-                finalize(pprevious, previous, score, notice)  # df push calls
-                continue
-
-            with ScanLock(scan_key):
-                if scanning.exists(scan_key):
-                    logger.debug('Duplicate %s', sha256)
-                    ingester_counts.increment('ingest.duplicates')
-                    dupq.push(dup_prefix + scan_key, notice.raw)  # df push push
-                    continue
-
-                scanning.add(scan_key, notice.raw)  # df push add
-
-            ex = return_exception(submit, client, notice)
-            if not ex:
-                continue
-
-            ingester_counts.increment('ingest.error')
-
-            should_retry = True
-            if isinstance(ex, CorruptedFileStoreException):
-                logger.error("Submission for file '%s' failed due to corrupted filestore: %s" % (sha256, ex.message))
-                should_retry = False
-            elif isinstance(ex, riak.RiakError):
-                if 'too_large' in ex.message:
-                    should_retry = False
-                trace = get_stacktrace_info(ex)
-                logger.error("Submission for file '%s' failed due to Riak error:\n%s" % (sha256, trace))
-            elif not isinstance(ex, FileStoreException):
-                trace = get_stacktrace_info(ex)
-                logger.error("Submission for file '%s' failed: %s" % (sha256, trace))
-
-            raw = scanning.pop(scan_key)
-            if not raw:
-                logger.error('No scanning entry for for %s', sha256)
-                continue
-
-            if not should_retry:
-                continue
-
-            retry(raw, scan_key, sha256, ex)
-        except Exception:  # pylint:disable=W0703
-            logger.exception("Unexpected error")
 
 
 # Invoked when a timeout fires. (Timeouts always fire).
@@ -1294,43 +1164,3 @@ def timed_out(scan_key):  # df node def
 
     if actual_timeout:
         ingester_counts.increment('ingest.timed_out')
-
-
-ingester_counts = counter.AutoExportingCounters(
-    name='ingester',
-    host=net.get_hostip(),
-    auto_flush=True,
-    auto_log=False,
-    export_interval_secs=config.system.update_interval,
-    channel=forge.get_metrics_sink())
-
-whitelister_counts = counter.AutoExportingCounters(
-    name='whitelister',
-    host=net.get_hostip(),
-    auto_flush=True,
-    auto_log=False,
-    export_interval_secs=config.system.update_interval,
-    channel=forge.get_metrics_sink())
-
-init()
-
-Thread(target=maintain_inflight, name="maintain_inflight").start()
-Thread(target=process_retries, name="process_retries").start()
-Thread(target=send_heartbeats, name="send_heartbeats").start()
-Thread(target=send_traffic, name="send_traffic").start()
-
-# pylint: disable=C0321
-for i in range(dropper_threads):
-    Thread(target=dropper, name="dropper_%s" % i).start()  # df line thread
-# noinspection PyRedeclaration
-for i in range(ingester_threads):
-    Thread(target=ingester, name="ingester_%s" % i).start()  # df line thread
-# noinspection PyRedeclaration
-for i in range(submitter_threads):
-    Thread(target=submitter, name="submitter_%s" % i).start()  # df line thread
-
-while running:
-    process_timeouts()
-    time.sleep(60)
-
-# df text }

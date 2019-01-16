@@ -34,20 +34,6 @@ class Service(odm.Model):
     params = odm.Mapping(odm.Keyword(), default={})
 
 
-class CachedObject:
-    def __init__(self, factory, refresh=5):
-        self._factory = factory
-        self._refresh = refresh
-        self._cached = None
-        self._update_time = 0
-
-    def __getattr__(self, key):
-        if time.time() - self._update_time > self._refresh:
-            self._cached = self._factory()
-            self._update_time = time.time()
-        return getattr(self._cached, key)
-
-
 class Scheduler:
     REFRESH_SECONDS = 5
     system_category = 'system'
