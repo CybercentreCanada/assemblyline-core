@@ -15,12 +15,13 @@ import signal
 import time
 
 # from collections import namedtuple
-from math import tanh
+from math import tanh, isnan
 from random import random
 
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
 from assemblyline.common.isotime import iso_to_epoch, now, now_as_iso
+from assemblyline.common.importing import load_module_by_path
 # from assemblyline.common.net import get_hostip, get_hostname, get_mac_for_ip
 from assemblyline.common import net
 from assemblyline.common import forge
@@ -42,12 +43,9 @@ def install_interrupt_handler(handler):
 # Timeout = namedtuple('Timeout', ['time', 'scan_key'])
 
 
-constants = forge.get_constants()
-priority_value = constants.PRIORITIES
-threshold_value = constants.PRIORITY_THRESHOLDS
-
 _completeq_name = 'm-complete'
 _ingestq_name = 'm-ingest'
+_min_priority = 1
 
 
 # TODO move to config file
@@ -80,7 +78,11 @@ class IngestTask(odm.Model):
     max_extracted = odm.Integer()
     max_supplementary = odm.Integer()
     completed_queue = odm.Keyword()
+
+    # Information about the ingestion itself
+    ingest_time = odm.Date()
     scan_key = odm.Keyword(default_set=True)  # overide the filescore key
+    priority = odm.Float(default=float('nan'))
 
     # describe the file being ingested
     sha256 = odm.Keyword()
@@ -110,10 +112,23 @@ class Middleman:
         self._user_groups = {}
         self.cache = {}
         self.cache_lock = threading.RLock()  # TODO are middle man instances single threaded now?
+        self.whitelisted = {}
+        self.whitelisted_lock = threading.RLock()
         self.running = True
 
         # Create a config cache that will refresh config values periodically
         self.config = forge.CachedObject(forge.get_config)
+
+        # TODO Should any of these values be read dynamically
+        self.is_low_priority = load_module_by_path(self.config.core.middleman.is_low_priority)
+        self.get_whitelist_verdict = load_module_by_path(self.config.core.middleman.get_whitelist_verdict)
+        self.whitelist = load_module_by_path(self.config.core.middleman.whitelist)
+
+        # Constants are loaded based on a non-constant path, so has to be done at init rather than load
+        constants = forge.get_constants(self.config)
+        self.priority_value = constants.PRIORITIES
+        self.priority_range = constants.PRIORITY_RANGES
+        self.threshold_value = constants.PRIORITY_THRESHOLDS
 
         # Connect to the redis servers
         self.redis = get_client(
@@ -191,8 +206,8 @@ class Middleman:
     def ingest(self, task: IngestTask):
         # Load a snapshot of ingest parameters as of right now.
         # self.config is a timed cache
-        conf = self.config.core.ingestion
-        max_file_size = self.config.core.submission.max_file_size
+        conf = self.config.core.middleman
+        max_file_size = self.config.submission.max_file_size
 
         # Make sure we have a submitter ...
         if not task.submitter:
@@ -248,21 +263,21 @@ class Middleman:
         low_priority = self.is_low_priority(task)
 
         priority = task.priority
-        if priority is None:
-            priority = priority_value['medium']
+        if isnan(priority):
+            priority = self.priority_value['medium']
 
             if score is not None:
-                priority = priority_value['low']
-                for level, threshold in threshold_value.items():
+                priority = self.priority_value['low']
+                for level, threshold in self.threshold_value.items():
                     if score >= threshold:
-                        priority = priority_value[level]
+                        priority = self.priority_value[level]
                         break
             elif low_priority:
-                priority = priority_value['low']
+                priority = self.priority_value['low']
 
         # Reduce the priority by an order of magnitude for very old files.
         current_time = now()
-        if priority and expired(current_time - seconds(notice.get('ts', current_time)), 0):
+        if priority and self.expired(current_time - seconds(task.ingest_time), 0):
             priority = (priority / 10) or 1
 
         task.priority = priority
@@ -274,13 +289,13 @@ class Middleman:
             finalize(pprevious, previous, score, task)
             return
 
-        if drop(task):
+        if self.drop(task):
             return
 
-        if is_whitelisted(task):
+        if self.is_whitelisted(task):
             return
 
-        self.unique_queue.push(priority, notice.raw)
+        self.unique_queue.push(priority, task.json())
 
     def check(self, task: IngestTask):
         key = self.stamp_filescore_key(task)
@@ -294,15 +309,21 @@ class Middleman:
         else:
             counter_name = 'ingest.cache_hit'
 
-            result = self.get_filescore(key)
+            result = self.datastore.filescore.get(key)
             if result:
                 self.log.info('Remote cache hit')
             else:
                 self.ingester_counts.increment('ingest.cache_miss')
                 return None, False, None, key
 
-            add(key, result.get('psid', None), result['sid'], result['score'],
-                result.get('errors', 0), result['time'])
+            with self.cache_lock:
+                self.cache[key] = {
+                    'errors': result.get('errors', 0),
+                    'psid': result.get('psid', None),
+                    'score': result['score'],
+                    'sid': result['sid'],
+                    'time': result['time'],
+                }
 
         current_time = now()
         delta = current_time - result.get('time', current_time)
@@ -332,7 +353,7 @@ class Middleman:
 
         if not key:
             key = create_filescore_key(sha256, raw_task, selected)
-            task.set('scan_key', key)
+            task.scan_key = key
 
         return key
 
@@ -384,8 +405,14 @@ class Middleman:
 
             notice = Notice(raw)
 
-            with cache_lock:
-                _add(scan_key, psid, sid, score, errors, now())
+            with self.cache_lock:
+                cache[key] = {
+                    'errors': errors,
+                    'psid': psid,
+                    'score': score,
+                    'sid': sid,
+                    'time': now(),
+                }
 
             finalize(psid, sid, score, notice)  # df push calls
 
@@ -435,15 +462,66 @@ class Middleman:
                 queue.NamedQueue(queue_name, **persistent)
         q.push(notice.raw)
 
-# log.init_logging("middleman")
-# logger = logging.getLogger('assemblyline.middleman')
-#
-# persistent = {
-#     'db': config.core.redis.persistent.db,
-#     'host': config.core.redis.persistent.host,
-#     'port': config.core.redis.persistent.port,
-# }
-#
+
+    def expired(self, delta, errors):
+        # incomplete_expire_after_seconds = 3600
+        # incomplete_stale_after_seconds = 1800
+
+        if errors:
+            return delta >= self.config.core.middleman.incomplete_expire_after_seconds
+        else:
+            return delta >= self.config.core.middleman.expire_after
+
+    def drop(self, task: IngestTask) -> bool:
+        priority = task.priority
+        sample_threshold = self.config.core.middleman.sampling_at
+
+        dropped = False
+        if priority <= _min_priority:
+            dropped = True
+        else:
+            for level, rng in self.priority_range.items():
+                if rng[0] <= priority <= rng[1] and level in sample_threshold:
+                    dropped = must_drop(self.unique_queue.count(*rng), sample_threshold[level])
+                    break
+
+            if not dropped:
+                if task.file_size > self.config.submission.max_file_size or task.file_size == 0:
+                    dropped = True
+
+        if task.never_drop or not dropped:
+            return False
+
+        task.failure = 'Skipped'
+        dropq.push(notice.raw)  # df push push
+
+        self.ingester_counts.increment('ingest.skipped')
+
+        return True
+
+    def is_whitelisted(self, task: IngestTask):
+        reason, hit = self.get_whitelist_verdict(self.whitelist, task)
+        hit = {x: dotdump(safe_str(y)) for x, y in hit.items()}
+
+        if not reason:
+            with self.whitelisted_lock:
+                reason = self.whitelisted.get(task.sha256, None)
+                if reason:
+                    hit = 'cached'
+
+        if reason:
+            if hit != 'cached':
+                with self.whitelisted_lock:
+                    self.whitelisted[task.sha256] = reason
+
+            task.failure = "Whitelisting due to reason %s (%s)" % (dotdump(safe_str(reason)), hit)
+            dropq.push(notice.raw)  # df push push
+
+            self.ingester_counts.increment('ingest.whitelisted')
+            self.whitelister_counts.increment('whitelist.' + reason)
+
+        return reason
+
 # shards = 1
 # try:
 #     shards = int(config.core.middleman.shards)
@@ -461,20 +539,15 @@ class Middleman:
 # date_fmt = '%Y-%m-%dT%H:%M:%SZ'
 # dup_prefix = 'w-' + shard + '-'
 # dupq = queue.MultiQueue(**persistent)  # df line queue
-# expire_after_seconds = config.core.middleman.expire_after
-# get_whitelist_verdict = forge.get_get_whitelist_verdict()
 # ip = get_hostip()
 # hostinfo = {
 #     'ip:': ip,
 #     'mac_address': get_mac_for_ip(ip),
 #     'host': get_hostname(),
 # }
-# is_low_priority = forge.get_is_low_priority()
-# max_priority = config.submissions.max.priority
 # max_retries = 10
 # max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
 # max_waiting = int(config.core.dispatcher.max.inflight) / (2 * shards)
-# min_priority = 1
 # retry_delay = 180
 # retryq = queue.NamedQueue('m-retry-' + shard, **persistent)  # df line queue
 # running = True
@@ -485,9 +558,6 @@ class Middleman:
 # submissionq = queue.NamedQueue('m-submission-' + shard, **persistent)  # df line queue
 # timeouts = []
 # timeouts_lock = RLock()
-# whitelist = forge.get_whitelist()
-# whitelisted = {}
-# whitelisted_lock = RLock()
 #
 # dropper_threads = 1
 # try:
@@ -498,25 +568,6 @@ class Middleman:
 #         dropper_threads
 #     )
 #
-# incomplete_expire_after_seconds = 3600
-# try:
-#     incomplete_expire_after_seconds = \
-#         config.core.middleman.incomplete_expire_after
-# except AttributeError:
-#     logger.warning(
-#         "No incomplete_stale_after setting. Defaulting to %d.",
-#         incomplete_expire_after_seconds
-#     )
-#
-# incomplete_stale_after_seconds = 1800
-# try:
-#     incomplete_stale_after_seconds = \
-#         config.core.middleman.incomplete_stale_after
-# except AttributeError:
-#     logger.warning(
-#         "No incomplete_stale_after setting. Defaulting to %d.",
-#         incomplete_stale_after_seconds
-#     )
 #
 # ingester_threads = 1
 # try:
@@ -537,26 +588,7 @@ class Middleman:
 #     )
 #
 #
-# # When a unique queue for a priority group has passed a threshold value, we
-# # start sampling, gradually increasing the probability that a newly ingested
-# # entry will be dropped.
-# sample_threshold = {
-#     'low': config.core.middleman.get('sampling_at', {}).get('low', 10000000),
-#     'medium': config.core.middleman.get('sampling_at', {}).get('medium', 2000000),
-#     'high': config.core.middleman.get('sampling_at', {}).get('high', 1000000),
-#     'critical': config.core.middleman.get('sampling_at', {}).get('critical', 500000),
-# }
-#
-# priority_range = {}
-#
-# prev = 'low'
-# start = 0
-# for lvl in ('medium', 'high', 'critical', 'user'):
-#     end = priority_value.get(lvl, max_priority + 1)
-#     priority_range[prev] = (start, end - 1)
-#     prev = lvl
-#     start = end
-#
+
 #
 # # Output. Notifications are placed on a notification queue.
 # notificationq = {}
@@ -571,38 +603,6 @@ class Middleman:
 #
 
 
-def exit_and_log(original):
-    # noinspection PyBroadException
-    def wrapper(*args, **kwargs):
-        global running  # pylint: disable=W0603
-        try:
-            return original(*args, **kwargs)
-        except:  # pylint: disable=W0702
-            logger.exception("Exiting:")
-            running = False
-
-    wrapper.__name__ = original.__name__
-    wrapper.__doc__ = original.__doc__
-    wrapper.__dict__.update(original.__dict__)
-
-    return wrapper
-
-
-def _add(key, psid, sid, score, errors, t):
-    cache[key] = {
-        'errors': errors,
-        'psid': psid,
-        'score': score,
-        'sid': sid,
-        'time': t,
-    }
-
-
-def add(key, psid, sid, score, errors, t):
-    with cache_lock:
-        _add(key, psid, sid, score, errors, t)
-
-
 def determine_resubmit_selected(selected, resubmit_to):
     resubmit_selected = None
 
@@ -615,41 +615,11 @@ def determine_resubmit_selected(selected, resubmit_to):
     return resubmit_selected
 
 
-def drop(notice):  # df node def
-    priority = notice.get('priority')
-
-    dropped = False
-    if priority <= min_priority:
-        dropped = True
-    else:
-        for level in ('low', 'medium', 'critical', 'high'):
-            rng = priority_range[level]
-            if rng[0] <= priority <= rng[1]:
-                dropped = must_drop(uniqueq.count(*rng),
-                                    sample_threshold[level])
-                break
-
-        if not dropped:
-            size = notice.get('size') or notice.raw.get('size', 0)
-            if size > config.submissions.max.size or size == 0:
-                dropped = True
-
-    if notice.get('never_drop', False) or not dropped:
-        return False
-
-    notice.set('failure', 'Skipped')
-    dropq.push(notice.raw)  # df push push
-
-    ingester_counts.increment('ingest.skipped')
-
-    return True
-
 
 def drop_chance(length, maximum):
     return tanh(float(length - maximum) / maximum * 2.0)
 
 
-@exit_and_log
 def dropper():  # df node def
     datastore = forge.get_datastore()
 
@@ -669,13 +639,6 @@ def dropper():  # df node def
         datastore.save_or_freshen_file(sha256, {'sha256': sha256}, expiry, c12n)
 
     datastore.close()
-
-
-def expired(delta, errors):
-    if errors:
-        return delta >= incomplete_expire_after_seconds
-    else:
-        return delta >= expire_after_seconds
 
 
 def finalize(psid, sid, score, notice):  # df node def
@@ -851,36 +814,6 @@ def is_alert(notice, score):
     return True
 
 
-def is_whitelisted(notice):  # df node def
-    reason, hit = get_whitelist_verdict(whitelist, notice)
-    hit = {x: dotdump(safe_str(y)) for x, y in hit.iteritems()}
-
-    sha256 = notice.get('sha256')
-
-    if not reason:
-        with whitelisted_lock:
-            reason = whitelisted.get(sha256, None)
-            if reason:
-                hit = 'cached'
-
-    if reason:
-        if hit != 'cached':
-            with whitelisted_lock:
-                whitelisted[sha256] = reason
-
-        notice.set(
-            'failure',
-            "Whitelisting due to reason %s (%s)" % (dotdump(safe_str(reason)), hit)
-        )
-        dropq.push(notice.raw)  # df push push
-
-        ingester_counts.increment('ingest.whitelisted')
-        whitelister_counts.increment('whitelist.' + reason)
-
-    return reason
-
-
-@exit_and_log
 def maintain_inflight():  # df node def
     while running:
         # If we are scanning less than the max_waiting, submit more.
@@ -931,7 +864,6 @@ def must_drop(length, maximum):
     return random() < drop_chance(length, maximum)
 
 
-@exit_and_log
 def process_retries():  # df node def
     while running:
         raw = retryq.pop(timeout=1)  # df pull pop
@@ -950,7 +882,6 @@ def process_retries():  # df node def
 
 
 # noinspection PyBroadException
-@exit_and_log
 def process_timeouts():  # df node def
     global timeouts  # pylint:disable=W0603
 
@@ -1087,7 +1018,6 @@ def send_heartbeat():
     whitelister_counts.export()
 
 
-@exit_and_log
 def send_heartbeats():
     while running:
         send_heartbeat()

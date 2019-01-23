@@ -285,7 +285,7 @@ class Dispatcher:
             self.open_queue(completed_queue).push(raw)
 
         # Send complete message to any watchers.
-        for w in dispatcher.watchers.pop(sid, {}).itervalues():
+        for w in dispatcher.watchers.pop(sid, {}).values():
             w.push({'status': 'STOP'})
 
     def dispatch_file(self, task: FileTask):

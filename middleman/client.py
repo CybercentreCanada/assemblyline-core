@@ -1,5 +1,6 @@
-from .middleman import forge, get_client, NamedQueue, IngestTask
+from .middleman import forge, NamedQueue, IngestTask
 from .middleman import _completeq_name, _ingestq_name
+from .middleman import get_client, now
 
 
 class MiddlemanClient:
@@ -30,8 +31,7 @@ class MiddlemanClient:
         self.ingest_queue = NamedQueue(_ingestq_name, self.persistent_redis)
 
     def ingest(self, **kwargs):
-        sub_conf = self.config.core.submission
-        ing_conf = self.config.core.ingestion
+        ing_conf = self.config.core.middleman
 
         # Fill in fields that have a hard coded default
         kwargs['deep_scan'] = kwargs.get('deep_scan', False)
@@ -41,12 +41,14 @@ class MiddlemanClient:
         kwargs['completed_queue'] = _completeq_name
 
         # Fill in fields that have a default set in the configuration
-        kwargs['classification'] = kwargs.get('classification', sub_conf.default_classification)
-        kwargs['max_extracted'] = kwargs.get('max_extracted', sub_conf.default_max_extracted)
-        kwargs['max_supplementary'] = kwargs.get('max_supplementary', sub_conf.default_max_supplementary)
+        kwargs['max_extracted'] = kwargs.get('max_extracted', ing_conf.default_max_extracted)
+        kwargs['max_supplementary'] = kwargs.get('max_supplementary', ing_conf.default_max_supplementary)
 
         if 'description' not in kwargs or not kwargs['description']:
             kwargs['description'] = ': '.join((ing_conf.description_prefix, kwargs['sha256'] or ''))
+
+        # Fill in fields that the submitter shouldn't have any say over
+        kwargs['ingest_time'] = now()
 
         # Type/field check then push into middleman
         self.ingest_queue.push(IngestTask(kwargs).json())

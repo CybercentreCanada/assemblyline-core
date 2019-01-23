@@ -1,13 +1,12 @@
 import time
 import logging
-import threading
 import mock
 import concurrent.futures
 
 from assemblyline.common import forge
 from assemblyline.common import log
 from .ingest_worker import ingester
-from .middleman import Middleman, IngestTask
+from .middleman import Middleman
 from .client import MiddlemanClient
 
 
@@ -37,7 +36,7 @@ def send_messages(middleman_factory):
             # describe the file being ingested
             sha256='0'*64,
             file_size=100,
-            # classification='U',
+            classification='U',
             metadata={},
 
             # Information about who wants this file ingested

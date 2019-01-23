@@ -51,6 +51,6 @@ def create_filescore_key(sha256, getter, selected=None):
     if selected:
         d['selected'] = [str(x) for x in selected]
 
-    s = ', '.join([f"{k}: {k[k]}" for k in sorted(d.iterkeys())])
+    s = ', '.join([f"{k}: {d[k]}" for k in sorted(d.keys())])
 
-    return 'v'.join([str(hashlib.md5(s).hexdigest()), str(version)])
+    return 'v'.join([str(hashlib.md5(s.encode()).hexdigest()), str(version)])
