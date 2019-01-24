@@ -1,12 +1,13 @@
 import time
 import logging
+import json
 import mock
 import concurrent.futures
 
 from assemblyline.common import forge
 from assemblyline.common import log
 from .ingest_worker import ingester
-from .middleman import Middleman
+from .middleman import Middleman, IngestTask
 from .client import MiddlemanClient
 
 
@@ -20,7 +21,7 @@ class make_middleman:
         return self.instance
 
 
-def send_messages(middleman_factory):
+def send_ingest_messages(middleman_factory):
     while middleman_factory.instance is None:
         time.sleep(0.1)
     mm = middleman_factory.instance
@@ -37,7 +38,10 @@ def send_messages(middleman_factory):
             sha256='0'*64,
             file_size=100,
             classification='U',
-            metadata={},
+            metadata={
+                'tobig': 'a' * (mm.config.submission.max_metadata_length + 2),
+                'small': '100'
+            },
 
             # Information about who wants this file ingested
             submitter='user',
@@ -49,8 +53,10 @@ def send_messages(middleman_factory):
         )
 
         time.sleep(1)
-        print(mm.unique_queue.pop())
-
+        task = IngestTask(json.loads(mm.unique_queue.pop()))
+        assert task.sha256 == '0' * 64
+        assert 'tobig' not in task.metadata
+        assert task.metadata['small'] == '100'
 
     finally:
         mm.running = False
@@ -59,7 +65,7 @@ def send_messages(middleman_factory):
 def test_ingest_worker():
     middleman_factory = make_middleman()
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(send_messages, middleman_factory)
+    future = pool.submit(send_ingest_messages, middleman_factory)
 
     log.init_logging("middleman")
     logger = logging.getLogger('assemblyline.middleman.ingester')

@@ -245,7 +245,7 @@ class Middleman:
         for key in list(task.metadata.keys()):
             value = task.metadata[key]
             meta_size = len(value)
-            if meta_size > conf.max_value_size:
+            if meta_size > self.config.submission.max_metadata_length:
                 self.log.info(f'Removing {key} from {task.sha256} from {task.submitter}')
                 task.metadata.pop(key)
 
