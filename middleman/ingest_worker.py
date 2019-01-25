@@ -14,9 +14,9 @@ from assemblyline.common import log
 from .middleman import Middleman, IngestTask
 
 
-def ingester(logger):
+def ingester(logger, datastore=None):
     # Connect to all sorts of things
-    datastore = forge.get_datastore()
+    datastore = datastore or forge.get_datastore()
     classification_engine = forge.get_classification()
 
     # Initialize the middleman specific resources

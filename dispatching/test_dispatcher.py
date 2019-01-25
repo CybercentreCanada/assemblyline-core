@@ -18,26 +18,6 @@ class Error:
         self.id = docid
 
 
-class MockFactory:
-    def __init__(self, mock_type):
-        self.type = mock_type
-        self.mocks = {}
-
-    def __call__(self, name, *args):
-        if name not in self.mocks:
-            self.mocks[name] = self.type(name, *args)
-        return self.mocks[name]
-
-    def __getitem__(self, name):
-        return self.mocks[name]
-
-    def __len__(self):
-        return len(self.mocks)
-
-    def flush(self):
-        self.mocks.clear()
-
-
 class MockDispatchHash:
     def __init__(self, *args):
         self._dispatched = {}
@@ -66,46 +46,6 @@ class MockDispatchHash:
 
     def fail_dispatch(self, file_hash, service):
         self._dispatched[self._key(file_hash, service)] = 0
-
-
-class MockCollection:
-    def __init__(self):
-        self._docs = {}
-        self.next_searches = []
-
-    def get(self, key):
-        return self._docs[key]
-
-    def exists(self, key):
-        print('exists', key, self._docs, key in self._docs)
-        return key in self._docs
-
-    def save(self, key, doc):
-        self._docs[key] = doc
-
-    def search(self, query, fl=None, rows=None):
-        if self.next_searches:
-            return self.next_searches.pop(0)
-        return {
-            'items': [],
-            'total': 0,
-            'offset': 0,
-            'rows': 0
-        }
-
-
-class MockDatastore:
-    def __init__(self):
-        self._collections = {}
-
-    def register(self, name, schema):
-        assert isinstance(name, str)
-        assert issubclass(schema, assemblyline.odm.Model)
-
-    def __getattr__(self, name):
-        if name not in self._collections:
-            self._collections[name] = MockCollection()
-        return self._collections[name]
 
 
 class MockQueue:

@@ -33,6 +33,7 @@ from assemblyline.remote.datatypes.exporting_counter import AutoExportingCounter
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
+from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes import get_client
 
 
@@ -78,6 +79,7 @@ class IngestTask(odm.Model):
     max_extracted = odm.Integer()
     max_supplementary = odm.Integer()
     completed_queue = odm.Keyword()
+    notification_queue = odm.Keyword(default='')
 
     # Information about the ingestion itself
     ingest_time = odm.Date()
@@ -163,6 +165,10 @@ class Middleman:
             export_interval_secs=self.config.logging.export_interval,
             channel=forge.get_metrics_sink())
 
+        # State. The submissions in progress are stored in Redis in order to
+        # persist this state and recover in case we crash.
+        self.scanning = Hash('m-scanning-table', self.persistent_redis)
+
         # Input. An external process creates a record when any submission completes.
         self.complete_queue = NamedQueue(_completeq_name, self.redis)
 
@@ -187,6 +193,7 @@ class Middleman:
     def interrupt_handler(self, *_):
         self.log.info("Caught signal. Coming down...")
         self.running = False
+        self.stop()
 
     def stop(self):
         """Stop shared middleman auxillary components."""
@@ -196,7 +203,7 @@ class Middleman:
     def get_user_groups(self, user):
         groups = self._user_groups.get(user, None)
         if groups is None:
-            ruser = self.datastore.users.get(user)
+            ruser = self.datastore.user.get(user)
             if not ruser:
                 return None
             groups = ruser.get('groups', [])
@@ -215,11 +222,12 @@ class Middleman:
 
         # ... and groups.
         if not task.groups:
-            task.groups = self.get_user_groups(task.submitter)
-            if task.groups is None:
+            groups = self.get_user_groups(task.submitter)
+            if groups is None:
                 error_message = f"User not found [{task.submitter}] ingest failed"
-                send_notification(task, failure=error_message, logfunc=self.log.warning)
+                self.send_notification(task, failure=error_message, logfunc=self.log.warning)
                 return
+            task.groups = groups
 
         #
         if not task.selected_services:
@@ -233,12 +241,12 @@ class Middleman:
         self.ingester_counts.increment('ingest.submissions_ingested')
 
         if not task.sha256:
-            send_notification(task, failure="Invalid sha256", logfunc=self.log.warning)
+            self.send_notification(task, failure="Invalid sha256", logfunc=self.log.warning)
             return
 
         c12n = task.classification
         if not self.ce.is_valid(c12n):
-            send_notification(task, failure=f"Invalid classification {c12n}", logfunc=self.log.warning)
+            self.send_notification(task, failure=f"Invalid classification {c12n}", logfunc=self.log.warning)
             return
 
         # Clean up metadata strings, since we may delete some, iterate on a copy of the keys
@@ -399,11 +407,9 @@ class Middleman:
 
             errors = task.raw.get('error_count', 0)
             file_count = task.raw.get('file_count', 0)
-            ingester_counts.increment('ingest.submissions_completed')
-            ingester_counts.increment('ingest.files_completed', file_count)
-            ingester_counts.increment('ingest.bytes_completed', int(task.size or 0))
-
-            notice = Notice(raw)
+            self.ingester_counts.increment('ingest.submissions_completed')
+            self.ingester_counts.increment('ingest.files_completed', file_count)
+            self.ingester_counts.increment('ingest.bytes_completed', int(task.size or 0))
 
             with self.cache_lock:
                 cache[key] = {
@@ -436,31 +442,29 @@ class Middleman:
 
         return scan_key
 
-    def send_notification(self, notice, failure=None, logfunc=None):
+    def send_notification(self, task: IngestTask, failure=None, logfunc=None):
         if logfunc is None:
             logfunc = self.log.info
 
         if failure:
-            notice.set('failure', failure)
+            task.failure = failure
 
-        failure = notice.get('failure', None)
+        failure = task.failure
         if failure:
-            logfunc("%s: %s", failure, str(notice.raw))
+            logfunc("%s: %s", failure, str(task.json()))
 
-        queue_name = notice.get('notification_queue', False)
-        if not queue_name:
+        if not task.notification_queue:
             return
 
-        score = notice.get('al_score', 0)
-        threshold = notice.get('notification_threshold', None)
-        if threshold and score < int(threshold):
+        threshold = task.notification_threshold
+        if threshold is not None and task.score is not None and task.score < threshold:
             return
 
-        q = notificationq.get(queue_name, None)
+        q = notificationq.get(task.notification_queue, None)
         if not q:
-            notificationq[queue_name] = q = \
-                queue.NamedQueue(queue_name, **persistent)
-        q.push(notice.raw)
+            notificationq[task.notification_queue] = q = \
+                queue.NamedQueue(task.notification_queue, **persistent)
+        q.push(task.raw)
 
 
     def expired(self, delta, errors):
@@ -547,7 +551,6 @@ class Middleman:
 # }
 # max_retries = 10
 # max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
-# max_waiting = int(config.core.dispatcher.max.inflight) / (2 * shards)
 # retry_delay = 180
 # retryq = queue.NamedQueue('m-retry-' + shard, **persistent)  # df line queue
 # running = True
@@ -593,10 +596,6 @@ class Middleman:
 # # Output. Notifications are placed on a notification queue.
 # notificationq = {}
 #
-#
-# # State. The submissions in progress are stored in Redis in order to
-# # persist this state and recover in case we crash.
-# scanning = Hash('m-scanning-' + shard, **persistent)  # df line hash
 #
 # # Status.
 # statusq = queue.CommsQueue('status')
@@ -814,29 +813,6 @@ def is_alert(notice, score):
     return True
 
 
-def maintain_inflight():  # df node def
-    while running:
-        # If we are scanning less than the max_waiting, submit more.
-        length = scanning.length() + submissionq.length()
-        if length < 0:
-            time.sleep(1)
-            continue
-
-        num = max_waiting - length
-        if num <= 0:
-            time.sleep(1)
-            continue
-
-        entries = uniqueq.pop(num)  # df pull pop
-        if not entries:
-            time.sleep(1)
-            continue
-
-        for raw in entries:
-            # Remove the key event_timestamp if it exists.
-            raw.pop('event_timestamp', None)
-
-            submissionq.push(raw)  # df push push
 
 
 ###############################################################################

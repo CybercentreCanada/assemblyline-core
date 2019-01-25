@@ -11,6 +11,9 @@ from .middleman import Middleman, IngestTask
 from .client import MiddlemanClient
 
 
+from mocking.datastore import MockDatastore
+from assemblyline.datastore.helper import AssemblylineDatastore
+
 class make_middleman:
     def __init__(self):
         self.instance = None
@@ -21,56 +24,92 @@ class make_middleman:
         return self.instance
 
 
-def send_ingest_messages(middleman_factory):
+def send_ingest_messages(middleman_factory, ds, messages):
     while middleman_factory.instance is None:
         time.sleep(0.1)
     mm = middleman_factory.instance
     client = MiddlemanClient()
 
     try:
-        client.ingest(
-            # parameters that control middleman's handling of the task
-            # ignore_size = odm.Boolean(default=False)
-            # never_drop = odm.Boolean(default=False)
-            # ignore_cache = odm.Boolean(default=False)
+        for message in messages:
+            send = dict(
+                # describe the file being ingested
+                sha256='0'*64,
+                file_size=100,
+                classification='U',
+                metadata={},
 
-            # describe the file being ingested
-            sha256='0'*64,
-            file_size=100,
-            classification='U',
-            metadata={
-                'tobig': 'a' * (mm.config.submission.max_metadata_length + 2),
-                'small': '100'
-            },
+                # Information about who wants this file ingested
+                submitter='user',
+                groups=['users'],
 
-            # Information about who wants this file ingested
-            submitter='user',
-            groups=['abc', 'users'],
+                # What services should this be submitted to
+                selected_services=[],
+                resubmit_services=[],
+            )
+            send.update(**message)
 
-            # What services should this be submitted to
-            selected_services=[],
-            resubmit_services=[],
-        )
-
+            client.ingest(**send)
         time.sleep(1)
-        task = IngestTask(json.loads(mm.unique_queue.pop()))
-        assert task.sha256 == '0' * 64
-        assert 'tobig' not in task.metadata
-        assert task.metadata['small'] == '100'
 
     finally:
         mm.running = False
 
 
-def test_ingest_worker():
+def test_ingest_simple():
+    ds = AssemblylineDatastore(MockDatastore())
+    client = MiddlemanClient()
     middleman_factory = make_middleman()
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(send_ingest_messages, middleman_factory)
+    future = pool.submit(send_ingest_messages, middleman_factory, ds, [
+        # This submission should be dropped
+        dict(
+            sha256='1'*10,
+        ),
+        # This submission should be processed
+        dict(
+            metadata={
+                'tobig': 'a' * (client.config.submission.max_metadata_length + 2),
+                'small': '100'
+            }
+        )
+    ])
 
     log.init_logging("middleman")
     logger = logging.getLogger('assemblyline.middleman.ingester')
 
     with mock.patch('middleman.ingest_worker.Middleman', middleman_factory):
-        ingester(logger)
+        ingester(logger=logger, datastore=ds)
+
+    mm = middleman_factory.instance
+    # The only task that makes it through though fit these parameters
+    task = IngestTask(json.loads(mm.unique_queue.pop()))
+    assert task.sha256 == '0' * 64
+    assert 'tobig' not in task.metadata
+    assert task.metadata['small'] == '100'
+    print(task.json())
+
+    # None of the other tasks should reach the end
+    assert mm.unique_queue.pop() is None
+
+    future.result()
+
+
+def test_ingest_groups_error():
+    ds = AssemblylineDatastore(MockDatastore())
+    middleman_factory = make_middleman()
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(send_ingest_messages, middleman_factory, ds, [dict(
+        groups=[],
+    )])
+
+    log.init_logging("middleman")
+    logger = logging.getLogger('assemblyline.middleman.ingester')
+
+    with mock.patch('middleman.ingest_worker.Middleman', middleman_factory):
+        ingester(logger=logger, datastore=ds)
+
+    mm = middleman_factory.instance
+    assert mm.unique_queue.pop() is None
 
     future.result()
