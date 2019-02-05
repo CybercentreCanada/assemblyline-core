@@ -27,6 +27,9 @@ class MockCollection:
             'rows': 0
         }
 
+    def delete(self, key):
+        self._docs.pop(key, None)
+
 
 class MockDatastore:
     def __init__(self):

@@ -4,35 +4,43 @@ An interface to the core system for the edge services.
 
 """
 import uuid
-import json
+import logging
 
 from dispatching.dispatcher import ServiceTask, FileTask
-from dispatching.dispatcher import Submission, Result, DispatchHash
-from configuration import Scheduler, CachedObject
-
+from dispatching.dispatcher import Submission, DispatchHash
+from .configuration import Scheduler
 from assemblyline.common import forge
 
 
-class ServiceDispatchClient:
-    def __init__(self, datastore, redis, logger):
+class DispatchClient:
+    def __init__(self, datastore, redis, logger=None):
         self.redis = redis
         self.ds = datastore
-        self.log = logger
-        self.results = datastore.results
-        self.errors = datastore.errors
-        self.files = datastore.files
+        self.log = logger or logging.getLogger("assemblyline.dispatching.client")
+        self.results = datastore.result
+        self.errors = datastore.error
+        self.files = datastore.file
 
         # Create a config cache that will refresh config values periodically
-        self.config = CachedObject(forge.get_config)
-        self.scheduler = Scheduler(datastore, self.config)
+        self.config = forge.CachedObject(forge.get_config)
+        # self.scheduler = Scheduler(datastore, self.config)
 
     def dispatch_submission(self, submission: Submission):
+        """Insert a submission into the dispatching system.
+
+        Note:
+            You probably actually want to use the SubmissionTool
+
+        Prerequsits:
+            - submission should already be saved in the datastore
+            - files should already be in the datastore and filestore
+        """
         raise NotImplementedError()
 
     def request_work(self, service_name, timeout=60):
         raise NotImplementedError()
 
-    def service_finished(self, task: ServiceTask, result: Result):
+    def service_finished(self, task: ServiceTask, result):
         # Store the result object and mark the service finished in the global table
         self.results.save(task.result_key, result)
         process_table = DispatchHash(task.sid, *self.redis)

@@ -1,12 +1,18 @@
+"""
+Submit workers output files from middleman to dispatcher.
+
+"""
 import logging
+import json
 import time
 
-from assemblyline.common import forge
-from assemblyline.common import log
+from assemblyline.datastore.exceptions import DataStoreException
+from assemblyline.filestore import CorruptedFileStoreException, FileStoreException
+from assemblyline.common import forge, log, exceptions
 from middleman.middleman import Middleman, IngestTask
 
 
-def submitter(logger, datastore=None):
+def submitter(logger, datastore=None, volatile=False):
     # Connect to all sorts of things
     datastore = datastore or forge.get_datastore()
     classification_engine = forge.get_classification()
@@ -29,7 +35,7 @@ def submitter(logger, datastore=None):
             raw = middleman.unique_queue.pop()
             if not raw:
                 continue
-            task = IngestTask(raw)
+            task = IngestTask(json.loads(raw))
 
             # noinspection PyBroadException
             if len(task.sha256) != 64:
@@ -46,7 +52,7 @@ def submitter(logger, datastore=None):
 
             # Check if this file has been previously processed.
             pprevious, previous, score, scan_key = None, False, None, None
-            if not task.ignore_cache:
+            if not task.params.ignore_cache:
                 pprevious, previous, score, scan_key = middleman.check(task)
             else:
                 scan_key = middleman.stamp_filescore_key(task)
@@ -55,7 +61,7 @@ def submitter(logger, datastore=None):
             # finalize will decide what to do, and put the task back in the queue
             # rewritten properly if we are going to run it again
             if previous:
-                if not task.resubmit_to and not pprevious:
+                if not task.params.services.resubmit and not pprevious:
                     logger.warning(f"No psid for what looks like a resubmission of {task.sha256}: {scan_key}")
                 middleman.finalize(pprevious, previous, score, task)
                 continue
@@ -73,42 +79,46 @@ def submitter(logger, datastore=None):
 
             # We have managed to add the task to the scan table, so now we go
             # ahead with the submission process
-            ex = None
+            ex, traceback = None, None
             try:
-                submit(client, notice)
+                middleman.submit(task)
                 continue
-            except Exception as ex:
+            except Exception as _ex:
                 # For some reason (contained in `ex`) we have failed the submission
                 # The rest of this function is error handling/recovery
-                pass
+                ex = _ex
+                traceback = _ex.__traceback__
 
             middleman.ingester_counts.increment('ingest.error')
 
             should_retry = True
             if isinstance(ex, CorruptedFileStoreException):
-                logger.error("Submission for file '%s' failed due to corrupted filestore: %s" % (sha256, ex.message))
+                logger.error("Submission for file '%s' failed due to corrupted filestore: %s"
+                             % (task.sha256, ex.message))
                 should_retry = False
-            elif isinstance(ex, riak.RiakError):
-                if 'too_large' in ex.message:
-                    should_retry = False
-                trace = get_stacktrace_info(ex)
-                logger.error("Submission for file '%s' failed due to Riak error:\n%s" % (sha256, trace))
+            elif isinstance(ex, DataStoreException):
+                trace = exceptions.get_stacktrace_info(ex)
+                logger.error("Submission for file '%s' failed due to data store error:\n%s" % (task.sha256, trace))
             elif not isinstance(ex, FileStoreException):
-                trace = get_stacktrace_info(ex)
-                logger.error("Submission for file '%s' failed: %s" % (sha256, trace))
+                trace = exceptions.get_stacktrace_info(ex)
+                logger.error("Submission for file '%s' failed: %s" % (task.sha256, trace))
 
-            raw = scanning.pop(scan_key)
-            if not raw:
-                logger.error('No scanning entry for for %s', sha256)
+            task = IngestTask(middleman.scanning.pop(scan_key))
+            if not task:
+                logger.error('No scanning entry for for %s', task.sha256)
                 continue
 
             if not should_retry:
                 continue
 
-            retry(raw, scan_key, sha256, ex)
+            middleman.retry(task, scan_key, ex)
+            if volatile:
+                raise ex.with_traceback(traceback)
 
         except Exception:  # pylint:disable=W0703
             logger.exception("Unexpected error")
+            if volatile:
+                raise
 
 
 if __name__ == '__main__':
@@ -117,5 +127,5 @@ if __name__ == '__main__':
 
     try:
         submitter(logger)
-    except:
+    except BaseException as error:
         logger.exception("Exiting:")

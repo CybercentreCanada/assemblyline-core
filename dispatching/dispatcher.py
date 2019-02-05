@@ -7,15 +7,15 @@ from functools import reduce
 
 # TODO replace with unique queue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.remote.datatypes.hash import Hash, ExpiringHash, ExpiringSet
-from assemblyline.remote.datatypes import counter
+from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
+from assemblyline.remote.datatypes.set import ExpiringSet
+from assemblyline.remote.datatypes import counters
 from assemblyline.common import isotime, net, forge
 
-from dispatch_hash import DispatchHash
-from configuration import Scheduler, CachedObject, config_hash
+from .dispatch_hash import DispatchHash
 from assemblyline import odm
 from assemblyline.odm.models.submission import Submission
-import watcher
+import dispatching.watcher as watcher
 
 
 def service_queue_name(service):
@@ -39,7 +39,7 @@ def create_missing_file_error(submission, sha):
 @odm.model()
 class FileTask(odm.Model):
     sid = odm.Keyword()
-    parent_hash = odm.KeyWord()
+    parent_hash = odm.Keyword()
     file_hash = odm.Keyword()
     file_type = odm.Keyword()
     depth = odm.Integer()
@@ -53,7 +53,6 @@ class ServiceTask(odm.Model):
     depth = odm.Integer()
     service_name = odm.Keyword()
     service_config = odm.Keyword()
-
 
 
 FILE_QUEUE = 'dispatch-file'
@@ -72,7 +71,7 @@ class Dispatcher:
         self.files = datastore.files
 
         # Create a config cache that will refresh config values periodically
-        self.config = CachedObject(forge.get_config)
+        self.config = forge.CachedObject(forge.get_config)
         self.scheduler = Scheduler(datastore, self.config)
 
         # Connect to all of our persistant redis structures
@@ -82,7 +81,7 @@ class Dispatcher:
         self.file_queue = NamedQueue(FILE_QUEUE, redis)
 
         # Publish counters to the metrics sink.
-        self.counts = counter.AutoExportingCounters(
+        self.counts = counters.AutoExportingCounters(
             name='dispatcher-%s' % self.shard,
             host=net.get_hostname(),
             auto_flush=True,
