@@ -10,15 +10,6 @@ from middleman.run_ingest import ingester
 from middleman.run_submit import submitter
 
 
-class TrueCountTimes:
-    def __init__(self, count):
-        self.counter = count
-
-    def __bool__(self):
-        self.counter -= 1
-        return self.counter >= 0
-
-
 def test_submit_simple():
     ds = AssemblylineDatastore(MockDatastore())
     client = MiddlemanClient()
