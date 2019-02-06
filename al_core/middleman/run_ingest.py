@@ -14,13 +14,14 @@ from assemblyline.common import log
 from .middleman import Middleman, IngestTask
 
 
-def ingester(logger, datastore=None):
+def ingester(logger, datastore=None, redis=None, persistent_redis=None):
     # Connect to all sorts of things
     datastore = datastore or forge.get_datastore()
     classification_engine = forge.get_classification()
 
     # Initialize the middleman specific resources
-    middleman = Middleman(datastore=datastore, classification=classification_engine, logger=logger)
+    middleman = Middleman(datastore=datastore, classification=classification_engine, logger=logger,
+                          redis=redis, persistent_redis=persistent_redis)
 
     # Start the auxillary threads
     middleman.start()

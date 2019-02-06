@@ -10,9 +10,7 @@ be created.
 """
 
 import threading
-import redis
 import json
-import uuid
 import signal
 from datetime import datetime, timedelta
 from math import tanh
@@ -171,7 +169,7 @@ class IngestTask(odm.Model):
 class Middleman:
     """Internal interface to the ingestion queues."""
 
-    def __init__(self, datastore, logger, classification=None):
+    def __init__(self, datastore, logger, classification=None, redis=None, persistent_redis=None):
         self.datastore = datastore
         self.log = logger
 
@@ -198,13 +196,13 @@ class Middleman:
         self.threshold_value = constants.PRIORITY_THRESHOLDS
 
         # Connect to the redis servers
-        self.redis = get_client(
+        self.redis = redis or get_client(
             db=self.config.core.redis.nonpersistent.db,
             host=self.config.core.redis.nonpersistent.host,
             port=self.config.core.redis.nonpersistent.port,
             private=False,
         )
-        self.persistent_redis = get_client(
+        self.persistent_redis = persistent_redis or get_client(
             db=self.config.core.redis.persistent.db,
             host=self.config.core.redis.persistent.host,
             port=self.config.core.redis.persistent.port,
