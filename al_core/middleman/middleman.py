@@ -176,9 +176,9 @@ class Middleman:
         self.log = logger
 
         # Cache the user groups
+        self.cache_lock = threading.RLock()  # TODO are middle man instances single threaded now?
         self._user_groups = {}
         self.cache = {}
-        self.cache_lock = threading.RLock()  # TODO are middle man instances single threaded now?
         self.whitelisted = {}
         self.whitelisted_lock = threading.RLock()
         self.running = True
@@ -396,13 +396,14 @@ class Middleman:
                 self.ingester_counts.increment('ingest.cache_miss')
                 return None, False, None, key
 
-            self.cache[key] = {
-                'errors': result.errors,
-                'psid': result.psid,
-                'score': result.score,
-                'sid': result.sid,
-                'time': result.time,
-            }
+            with self.cache_lock:
+                self.cache[key] = {
+                    'errors': result.errors,
+                    'psid': result.psid,
+                    'score': result.score,
+                    'sid': result.sid,
+                    'time': result.time,
+                }
 
         current_time = now()
         delta = current_time - result.time
@@ -487,7 +488,7 @@ class Middleman:
             self.ingester_counts.increment('ingest.bytes_completed', int(task.size or 0))
 
             with self.cache_lock:
-                cache[key] = {
+                self.cache[key] = {
                     'errors': errors,
                     'psid': psid,
                     'score': score,
