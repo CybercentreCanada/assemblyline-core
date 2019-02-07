@@ -9,7 +9,7 @@ from .middleman import Middleman, IngestTask
 from .client import MiddlemanClient
 
 
-from mocking.datastore import MockDatastore
+from al_core.mocking.datastore import MockDatastore
 from assemblyline.datastore.helper import AssemblylineDatastore
 
 

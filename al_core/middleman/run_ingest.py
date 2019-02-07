@@ -23,7 +23,7 @@ def ingester(logger, datastore=None, redis=None, persistent_redis=None):
     middleman = Middleman(datastore=datastore, classification=classification_engine, logger=logger,
                           redis=redis, persistent_redis=persistent_redis)
 
-    # Start the auxillary threads
+    # Start the auxiliary threads
     middleman.start()
 
     # Move from ingest to unique and waiting queues.

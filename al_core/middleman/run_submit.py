@@ -9,16 +9,17 @@ import time
 from assemblyline.datastore.exceptions import DataStoreException
 from assemblyline.filestore import CorruptedFileStoreException, FileStoreException
 from assemblyline.common import forge, log, exceptions
-from middleman.middleman import Middleman, IngestTask
+from .middleman import Middleman, IngestTask, _dup_prefix
 
 
-def submitter(logger, datastore=None, volatile=False):
+def submitter(logger, datastore=None, volatile=False, redis=None, persistent_redis=None):
     # Connect to all sorts of things
     datastore = datastore or forge.get_datastore()
     classification_engine = forge.get_classification()
 
     # Initialize the middleman specific resources
-    middleman = Middleman(datastore=datastore, classification=classification_engine, logger=logger)
+    middleman = Middleman(datastore=datastore, classification=classification_engine, logger=logger,
+                          redis=redis, persistent_redis=persistent_redis)
 
     # Start the auxillary threads
     middleman.start()
@@ -74,7 +75,7 @@ def submitter(logger, datastore=None, volatile=False):
             if not middleman.scanning.add(scan_key, task.as_primitives()):
                 logger.debug('Duplicate %s', task.sha256)
                 middleman.ingester_counts.increment('ingest.duplicates')
-                dupq.push(dup_prefix + scan_key, notice.raw)
+                middleman.duplicate_queue.push(_dup_prefix + scan_key, task.json())
                 continue
 
             # We have managed to add the task to the scan table, so now we go

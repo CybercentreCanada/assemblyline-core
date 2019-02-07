@@ -12,15 +12,13 @@ be created.
 import threading
 import json
 import signal
-from datetime import datetime, timedelta
 from math import tanh
 from random import random
 
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
-from assemblyline.common.isotime import iso_to_epoch, now, now_as_iso
+from assemblyline.common.isotime import now
 from assemblyline.common.importing import load_module_by_path
-# from assemblyline.common.net import get_hostip, get_hostname, get_mac_for_ip
 from assemblyline.common import net
 from assemblyline.common import forge
 
@@ -35,7 +33,7 @@ from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes import get_client
 from assemblyline.odm.models.submission import Submission, SubmissionParams
 
-from dispatching.submission_tool import SubmissionTool
+from al_core.dispatching.submission_tool import SubmissionTool
 
 
 _completeq_name = 'm-complete'
@@ -153,7 +151,10 @@ class IngestTask(odm.Model):
     scan_key = odm.Keyword(default_set=True)  # the filescore key
     retries = odm.Integer(default=0)
     retry_at = odm.Date(default=0)
+
     notification_queue = odm.Keyword(default='')
+    notification_threshold = odm.Optional(odm.Integer())
+
     # If the ingestion has failed for some reason, what is it?
     failure = odm.Text(default='')
 
@@ -177,6 +178,7 @@ class Middleman:
         self.cache_lock = threading.RLock()  # TODO are middle man instances single threaded now?
         self._user_groups = {}
         self.cache = {}
+        self.notification_queues = {}
         self.whitelisted = {}
         self.whitelisted_lock = threading.RLock()
         self.running = True
@@ -244,7 +246,7 @@ class Middleman:
         # Traffic (TODO: What traffic?)
         self.traffic_queue = CommsQueue('traffic', self.redis)
 
-        # Input/Output. Unique requests are placed in and processed from this queue.
+        # Internal. Unique requests are placed in and processed from this queue.
         self.unique_queue = PriorityQueue('m-unique', self.persistent_redis)
 
         # Internal, delay queue for retrying
@@ -256,6 +258,10 @@ class Middleman:
         # Internal, queue for processing duplicates
         self.duplicate_queue = MultiQueue(self.persistent_redis)
 
+        # Output. submissions that should have alerts generated
+        self.alert_queue = NamedQueue('m-alert', self.persistent_redis)
+
+        # Utility object to help submit tasks to dispatching
         self.client = SubmissionTool(datastore=self.datastore,
                                      transport=None,
                                      redis=self.redis)
@@ -439,80 +445,80 @@ class Middleman:
 
         return key
 
-    def completed(self, task):
+    def completed(self, sub: Submission):
         """Invoked when notified that a submission has completed."""
         sha256 = task.root_sha256
 
-        psid = task.psid
+        psid = sub.params.psid
         score = task.score
         sid = task.sid
 
         scan_key = task.scan_key
 
-        with ScanLock(scan_key):
-            # Remove the entry from the hash of submissions in progress.
-            raw = scanning.pop(scan_key)  # df pull pop
-            if not raw:
-                logger.warning("Untracked submission (score=%d) for: %s %s",
-                               int(score), sha256, str(task.metadata))
+        # Remove the entry from the hash of submissions in progress.
+        raw = self.scanning.pop(scan_key)
+        if not raw:
+            # Some other worker has already popped the scanning queue?
+            self.log.warning("Submission completed twice (score=%d) for: %s %s",
+                             int(score), sha256, str(task.metadata))
 
-                # Not a result we care about. We are notified for every
-                # submission that completes. Some submissions will not be ours.
-                if task.metadata:
-                    stype = None
-                    try:
-                        stype = task.metadata.get('type', None)
-                    except:  # pylint: disable=W0702
-                        logger.exception("Malformed metadata: %s:", sid)
+            # Not a result we care about. We are notified for every
+            # submission that completes. Some submissions will not be ours.
+            if task.metadata:
+                stype = None
+                try:
+                    stype = task.metadata.get('type', None)
+                except:  # pylint: disable=W0702
+                    logger.exception("Malformed metadata: %s:", sid)
 
-                    if not stype:
-                        return scan_key
+                if not stype:
+                    return scan_key
 
-                    if (task.description or '').startswith(default_prefix):
-                        raw = {
-                            'metadata': task.metadata,
-                            'overrides': get_submission_overrides(task, overrides),
-                            'sha256': sha256,
-                            'type': stype,
-                        }
+                if (task.description or '').startswith(default_prefix):
+                    raw = {
+                        'metadata': task.metadata,
+                        'overrides': get_submission_overrides(task, overrides),
+                        'sha256': sha256,
+                        'type': stype,
+                    }
 
-                        finalize(psid, sid, score, Notice(raw))
-                return scan_key
+                    finalize(psid, sid, score, Notice(raw))
+            return scan_key
 
-            errors = task.raw.get('error_count', 0)
-            file_count = task.raw.get('file_count', 0)
-            self.ingester_counts.increment('ingest.submissions_completed')
-            self.ingester_counts.increment('ingest.files_completed', file_count)
-            self.ingester_counts.increment('ingest.bytes_completed', int(task.size or 0))
+        errors = task.raw.get('error_count', 0)
+        file_count = task.raw.get('file_count', 0)
+        self.ingester_counts.increment('ingest.submissions_completed')
+        self.ingester_counts.increment('ingest.files_completed', file_count)
+        self.ingester_counts.increment('ingest.bytes_completed', int(task.size or 0))
 
-            with self.cache_lock:
-                self.cache[key] = {
-                    'errors': errors,
-                    'psid': psid,
-                    'score': score,
-                    'sid': sid,
-                    'time': now(),
-                }
+        with self.cache_lock:
+            self.cache[key] = {
+                'errors': errors,
+                'psid': psid,
+                'score': score,
+                'sid': sid,
+                'time': now(),
+            }
 
-            finalize(psid, sid, score, notice)  # df push calls
+        finalize(psid, sid, score, notice)  # df push calls
 
-            def exhaust():
-                while True:
-                    res = dupq.pop(  # df pull pop
-                        dup_prefix + scan_key, blocking=False
-                    )
-                    if res is None:
-                        break
-                    yield res
+        def exhaust():
+            while True:
+                res = dupq.pop(  # df pull pop
+                    dup_prefix + scan_key, blocking=False
+                )
+                if res is None:
+                    break
+                yield res
 
-            # You may be tempted to remove the assignment to dups and use the
-            # value directly in the for loop below. That would be a mistake.
-            # The function finalize may push on the duplicate queue which we
-            # are pulling off and so condensing those two lines creates a
-            # potential infinite loop.
-            dups = [dup for dup in exhaust()]
-            for dup in dups:
-                finalize(psid, sid, score, Notice(dup))
+        # You may be tempted to remove the assignment to dups and use the
+        # value directly in the for loop below. That would be a mistake.
+        # The function finalize may push on the duplicate queue which we
+        # are pulling off and so condensing those two lines creates a
+        # potential infinite loop.
+        dups = [dup for dup in exhaust()]
+        for dup in dups:
+            finalize(psid, sid, score, Notice(dup))
 
         return scan_key
 
@@ -534,12 +540,11 @@ class Middleman:
         if threshold is not None and task.score is not None and task.score < threshold:
             return
 
-        q = notificationq.get(task.notification_queue, None)
+        q = self.notification_queues.get(task.notification_queue, None)
         if not q:
-            notificationq[task.notification_queue] = q = \
-                queue.NamedQueue(task.notification_queue, **persistent)
-        q.push(task.raw)
-
+            self.notification_queues[task.notification_queue] = q = \
+                NamedQueue(task.notification_queue, self.persistent_redis)
+        q.push(task.json())
 
     def expired(self, delta, errors):
         # incomplete_expire_after_seconds = 3600
@@ -608,7 +613,7 @@ class Middleman:
             params=task.params
         )
 
-        self.timeouts.push(now(_max_time), task.scan_key)
+        self.timeout_queue.push(now(_max_time), task.scan_key)
 
     def retry(self, task, scan_key, ex):
         current_time = now()
@@ -669,7 +674,6 @@ class Middleman:
         return True
 
 # # Globals
-# alertq = queue.NamedQueue('m-alert', **persistent)  # df line queue
 # chunk_size = 1000
 # date_fmt = '%Y-%m-%dT%H:%M:%SZ'
 # ip = get_hostip()
@@ -686,35 +690,6 @@ class Middleman:
 # submissionq = queue.NamedQueue('m-submission-' + shard, **persistent)  # df line queue
 # timeouts = []
 # timeouts_lock = RLock()
-#
-# dropper_threads = 1
-# try:
-#     dropper_threads = int(config.core.middleman.dropper_threads)
-# except AttributeError:
-#     logger.warning(
-#         "No dropper_threads setting. Defaulting to %d.",
-#         dropper_threads
-#     )
-#
-#
-# ingester_threads = 1
-# try:
-#     ingester_threads = int(config.core.middleman.ingester_threads)
-# except AttributeError:
-#     logger.warning(
-#         "No ingester_threads setting. Defaulting to %d.",
-#         ingester_threads
-#     )
-#
-# submitter_threads = 1
-# try:
-#     submitter_threads = int(config.core.middleman.submitter_threads)
-# except AttributeError:
-#     logger.warning(
-#         "No submitter_threads setting. Defaulting to %d.",
-#         submitter_threads
-#     )
-#
 #
 
 #
@@ -862,26 +837,6 @@ class Middleman:
 #
 #
 #
-# # noinspection PyBroadException
-# def process_timeouts():  # df node def
-#     global timeouts  # pylint:disable=W0603
-#
-#     with timeouts_lock:
-#         current_time = now()
-#         index = 0
-#
-#         for t in timeouts:
-#             if t.time >= current_time:
-#                 break
-#
-#             index += 1
-#
-#             try:
-#                 timed_out(t.scan_key)  # df push calls
-#             except:  # pylint: disable=W0702
-#                 logger.exception("Problem timing out %s:", t.scan_key)
-#
-#         timeouts = timeouts[index:]
 #
 #
 # def reinsert(datastore, msg, notice, out, retry_all=True):
