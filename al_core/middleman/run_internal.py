@@ -6,76 +6,63 @@ TODO
 
 Things handled here:
  - Retrying after a delay
- - Processing timeouts (?)
+ - Processing timeouts
  - dropper
 
 """
 
-from assemblyline.common import log
-
 import logging
+import time
+import concurrent.futures
+
+from assemblyline.common import log, forge, isotime
+from al_core.middleman.middleman import Middleman, _dup_prefix
 
 
 # noinspection PyBroadException
-def process_timeouts():  # df node def
-    global timeouts  # pylint:disable=W0603
+def process_timeouts(middleman):
+    logger = logging.getLogger("assemblyline.middleman.timeouts")
 
-    with timeouts_lock:
-        current_time = now()
-        index = 0
+    while middleman.running:
+        timeouts = middleman.timeout_queue.dequeue_range(upper_limit=isotime.now(), num=10)
 
-        for t in timeouts:
-            if t.time >= current_time:
-                break
+        # Wait for more work
+        if not timeouts:
+            time.sleep(1)
 
-            index += 1
-
+        for scan_key in timeouts:
             try:
-                timed_out(t.scan_key)  # df push calls
-            except:  # pylint: disable=W0702
-                logger.exception("Problem timing out %s:", t.scan_key)
+                actual_timeout = False
 
-        timeouts = timeouts[index:]
+                # Remove the entry from the hash of submissions in progress.
+                entry = middleman.scanning.pop(scan_key)
+                if entry:
+                    actual_timeout = True
+                    logger.error("Submission timed out for %s: %s", scan_key, str(entry))
 
+                dup = middleman.duplicate_queue.pop(_dup_prefix + scan_key, blocking=False)
+                if dup:
+                    actual_timeout = True
 
-# Invoked when a timeout fires. (Timeouts always fire).
-def timed_out(scan_key):  # df node def
-    actual_timeout = False
+                while dup:
+                    logger.error("Submission timed out for %s: %s", scan_key, str(dup))
+                    dup = middleman.duplicate_queue.pop(_dup_prefix + scan_key, blocking=False)
 
-    with ScanLock(scan_key):
-        # Remove the entry from the hash of submissions in progress.
-        entry = scanning.pop(scan_key)  # df pull pop
-        if entry:
-            actual_timeout = True
-            logger.error("Submission timed out for %s: %s", scan_key, str(entry))
-
-        dup = dupq.pop(dup_prefix + scan_key, blocking=False)  # df pull pop
-        if dup:
-            actual_timeout = True
-
-        while dup:
-            logger.error("Submission timed out for %s: %s", scan_key, str(dup))
-            dup = dupq.pop(dup_prefix + scan_key, blocking=False)
-
-    if actual_timeout:
-        ingester_counts.increment('ingest.timed_out')
+                if actual_timeout:
+                    middleman.ingester_counts.increment('ingest.timed_out')
+            except:
+                logger.exception("Problem timing out %s:", scan_key)
 
 
-def process_retries():  # df node def
-    while running:
-        raw = retryq.pop(timeout=1)  # df pull pop
-        if not raw:
-            continue
+def process_retries(middleman):
+    while middleman.running:
+        tasks = middleman.retry_queue.dequeue_range(upper_limit=isotime.now(), num=10)
 
-        retry_at = raw['retry_at']
-        delay = retry_at - now()
+        if not tasks:
+            time.sleep(1)
 
-        if delay >= 0.125:
-            retryq.unpop(raw)
-            time.sleep(min(delay, 1))
-            continue
-
-        ingestq.push(raw)  # df push push
+        for task in tasks:
+            middleman.ingest_queue.push(task)
 
 
 
@@ -130,17 +117,6 @@ def process_retries():  # df node def
 #     whitelister_counts.export()
 #
 #
-# def send_heartbeats():
-#     while running:
-#         send_heartbeat()
-#         time.sleep(1)
-#
-#
-#
-# for i in range(dropper_threads):
-#     Thread(target=dropper, name="dropper_%s" % i).start()  # df line thread
-#
-#
 #
 #
 # def dropper():  # df node def
@@ -168,17 +144,47 @@ def process_retries():  # df node def
 #
 # Thread(target=send_heartbeats, name="send_heartbeats").start()
 #
-# while running:
-# Thread(target=process_retries, name="process_retries").start()
-# dropper
-#     process_timeouts()
-#     time.sleep(60)
-
-# df text }
 
 
-def run_internals():
-    jobs
+def run_internals(logger, datastore=None, redis=None, persistent_redis=None):
+    # Connect to all sorts of things
+    datastore = datastore or forge.get_datastore()
+    classification_engine = forge.get_classification()
+
+    # Initialize the middleman specific resources
+    middleman = Middleman(datastore=datastore, classification=classification_engine, logger=logger,
+                          redis=redis, persistent_redis=persistent_redis)
+    middleman.start()
+
+    tasks = {
+        'timeouts': process_timeouts,
+        'retries': process_retries
+    }
+
+    params = {
+        'middleman': middleman
+    }
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        handles = {}
+
+        while middleman.running:
+            for name, fn in tasks.items():
+                # If we don't have a running instance of that task, start it
+                if name not in handles:
+                    handles[name] = pool.submit(fn, **params)
+                    continue
+
+                if handles[name].running():
+                    continue
+
+                # So the task WAS running, and isn't now, is there an error?
+                exception = handles[name].exception(timeout=0)
+                if exception:
+                    logger.error(f"An error was encountered while running {name}:\n {str(exception)}")
+                del handles[name]
+
+            time.sleep(3)
 
 
 if __name__ == '__main__':
@@ -186,7 +192,7 @@ if __name__ == '__main__':
     _logger = logging.getLogger('assemblyline.middleman')
 
     try:
-        run_internals()
+        run_internals(_logger)
     except BaseException as error:
         _logger.exception("Exiting:")
 

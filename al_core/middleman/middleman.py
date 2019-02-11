@@ -150,7 +150,6 @@ class IngestTask(odm.Model):
     ingest_time = odm.Date()
     scan_key = odm.Keyword(default_set=True)  # the filescore key
     retries = odm.Integer(default=0)
-    retry_at = odm.Date(default=0)
 
     notification_queue = odm.Keyword(default='')
     notification_threshold = odm.Optional(odm.Integer())
@@ -250,7 +249,7 @@ class Middleman:
         self.unique_queue = PriorityQueue('m-unique', self.persistent_redis)
 
         # Internal, delay queue for retrying
-        self.retry_queue = NamedQueue('m-retry', self.persistent_redis)
+        self.retry_queue = PriorityQueue('m-retry', self.persistent_redis)
 
         # Internal, timeout watch queue
         self.timeout_queue = PriorityQueue('m-timeout', self.redis)
@@ -632,8 +631,7 @@ class Middleman:
         else:
             self.log.info('Requeuing %s (%s)', task.sha256, ex or 'unknown')
             task.retries = retries
-            task.retry_at = now(_retry_delay)
-            self.retry_queue.push(task.json())
+            self.retry_queue.push(now(_retry_delay), task.json())
 
     def finalize(self, psid, sid, score, task: IngestTask):
         self.log.debug("Finalizing (score=%d) %s", score, task.sha256)
