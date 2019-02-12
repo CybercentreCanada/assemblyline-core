@@ -33,7 +33,7 @@ from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes import get_client
 from assemblyline.odm.models.submission import Submission, SubmissionParams
 
-from al_core.dispatching.submission_tool import SubmissionTool
+from al_core.submission_tool import SubmissionTool
 
 
 _completeq_name = 'm-complete'
@@ -686,21 +686,10 @@ class Middleman:
 
 # start_time = now()
 # submissionq = queue.NamedQueue('m-submission-' + shard, **persistent)  # df line queue
-# timeouts = []
-# timeouts_lock = RLock()
-#
 
-#
-# # Output. Notifications are placed on a notification queue.
-# notificationq = {}
-#
-#
 # # Status.
 # statusq = queue.CommsQueue('status')
 #
-
-
-
 #
 # # noinspection PyBroadException
 # def init():
@@ -857,14 +846,3 @@ class Middleman:
 #         ingestq.push(notice.raw)
 #     else:
 #         logger.info("Init: Stale%s: %s", msg, notice.get('sha256'))
-#
-#
-#
-# def return_exception(func, *args, **kwargs):
-#     try:
-#         func(*args, **kwargs)
-#         return None
-#     except Exception as ex:  # pylint: disable=W0703
-#         return ex
-#
-#

@@ -66,6 +66,27 @@ def process_retries(middleman):
 
 
 
+def dropper():  # df node def
+    datastore = forge.get_datastore()
+
+    while running:
+        raw = dropq.pop(timeout=1)  # df pull pop
+        if not raw:
+            continue
+
+        notice = Notice(raw)
+
+        send_notification(notice)
+
+        c12n = notice.get('classification', config.core.middleman.classification)
+        expiry = now_as_iso(86400)
+        sha256 = notice.get('sha256')
+
+        datastore.save_or_freshen_file(sha256, {'sha256': sha256}, expiry, c12n)
+
+    datastore.close()
+
+
 # def send_heartbeat():
 #     t = now()
 #
@@ -117,30 +138,6 @@ def process_retries(middleman):
 #     whitelister_counts.export()
 #
 #
-#
-#
-# def dropper():  # df node def
-#     datastore = forge.get_datastore()
-#
-#     while running:
-#         raw = dropq.pop(timeout=1)  # df pull pop
-#         if not raw:
-#             continue
-#
-#         notice = Notice(raw)
-#
-#         send_notification(notice)
-#
-#         c12n = notice.get('classification', config.core.middleman.classification)
-#         expiry = now_as_iso(86400)
-#         sha256 = notice.get('sha256')
-#
-#         datastore.save_or_freshen_file(sha256, {'sha256': sha256}, expiry, c12n)
-#
-#     datastore.close()
-#
-
-# init()
 #
 # Thread(target=send_heartbeats, name="send_heartbeats").start()
 #

@@ -33,7 +33,7 @@ from assemblyline.odm.models.submission import Submission, SubmissionParams
 from assemblyline.filestore import CorruptedFileStoreException
 from assemblyline.remote.datatypes.lock import Lock
 
-from .client import DispatchClient
+from al_core.dispatching.client import DispatchClient
 
 
 def assert_valid_sha256(sha256):

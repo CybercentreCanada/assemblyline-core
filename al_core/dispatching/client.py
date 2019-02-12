@@ -8,7 +8,7 @@ import logging
 
 from dispatching.dispatcher import ServiceTask, FileTask
 from dispatching.dispatcher import Submission, DispatchHash
-from .configuration import Scheduler
+from .scheduler import Scheduler
 from assemblyline.common import forge
 
 
