@@ -10,8 +10,8 @@ from retrying import retry
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from redis.exceptions import ConnectionError
 
-from submission_server import SubmissionDispatchServer
-from file_server import FileDispatchServer
+from al_core.dispatching.run_submissions import SubmissionDispatchServer
+from al_core.dispatching.run_files import FileDispatchServer
 from assemblyline.datastore.stores.es_store import ESStore
 import assemblyline.odm as odm
 import assemblyline.odm.models as models
@@ -22,10 +22,10 @@ import assemblyline.odm.models.config
 
 from assemblyline.odm.randomizer import random_model_obj
 
-# from assemblyline.odm.models.result import Result
+from assemblyline.odm.models.result import Result
 # from assemblyline.odm.models.error import Error
-from dispatcher import service_queue_name, ServiceTask
-from configuration import Service, Scheduler
+from al_core.dispatching.dispatcher import service_queue_name, ServiceTask
+# from configuration import Service, Scheduler
 # from configuration import ConfigManager, Service
 
 

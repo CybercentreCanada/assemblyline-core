@@ -1,4 +1,7 @@
 
+from .datastore import MockDatastore
+
+
 class MockFactory:
     def __init__(self, mock_type):
         self.type = mock_type

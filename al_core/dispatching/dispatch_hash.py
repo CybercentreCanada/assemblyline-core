@@ -4,7 +4,7 @@ and those that are already finished.
 """
 import time
 from assemblyline.remote.datatypes import retry_call
-from assemblyline.remote.datatypes import hash
+from assemblyline.remote.datatypes.set import ExpiringSet
 
 dispatch_tail = '-dispatch'
 finished_tail = '-finished'
@@ -24,7 +24,7 @@ class DispatchHash:
     def __init__(self, sid, client):
         self.client = client
         self.sid = sid
-        self.dropped_files = hash.ExpiringSet(sid, host=self.client)
+        self.dropped_files = ExpiringSet(sid, host=self.client)
         self._dispatch_key = f'{sid}{dispatch_tail}'
         self._finish_key = f'{sid}{finished_tail}'
         self._finish = self.client.register_script(finish_script)

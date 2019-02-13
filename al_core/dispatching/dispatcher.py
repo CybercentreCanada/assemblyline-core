@@ -9,13 +9,15 @@ from functools import reduce
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
 from assemblyline.remote.datatypes.set import ExpiringSet
-from assemblyline.remote.datatypes import counters
+from assemblyline.remote.datatypes import exporting_counter
 from assemblyline.common import isotime, net, forge
 
-from .dispatch_hash import DispatchHash
+from al_core.dispatching.scheduler import Scheduler
+from al_core.dispatching.dispatch_hash import DispatchHash
 from assemblyline import odm
+from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.submission import Submission
-import dispatching.watcher as watcher
+from al_core.dispatching import watcher
 
 
 def service_queue_name(service):
@@ -23,7 +25,7 @@ def service_queue_name(service):
 
 
 def create_missing_file_error(submission, sha):
-    odm.models.error.Error({
+    return Error({
         'created': datetime.datetime.utcnow(),
         'response': {
             'message': f'Submission {submission.sid} tried to process missing file.',
@@ -39,7 +41,7 @@ def create_missing_file_error(submission, sha):
 @odm.model()
 class FileTask(odm.Model):
     sid = odm.Keyword()
-    parent_hash = odm.Keyword()
+    parent_hash = odm.Optional(odm.Keyword())
     file_hash = odm.Keyword()
     file_type = odm.Keyword()
     depth = odm.Integer()
@@ -81,14 +83,15 @@ class Dispatcher:
         self.file_queue = NamedQueue(FILE_QUEUE, redis)
 
         # Publish counters to the metrics sink.
-        self.counts = counters.AutoExportingCounters(
-            name='dispatcher-%s' % self.shard,
+        self.counts = exporting_counter.AutoExportingCounters(
+            name='dispatcher',  # TODO we should find some way to identify instances of autoscaled components
             host=net.get_hostname(),
             auto_flush=True,
             auto_log=False,
-            export_interval_secs=self.config.system.update_interval,
+            export_interval_secs=self.config.logging.export_interval,
             channel=forge.get_metrics_sink(),
-            counter_type='dispatcher')
+            counter_type='dispatcher'
+        )
 
     def start(self):
         self.counts.start()
@@ -311,10 +314,10 @@ class Dispatcher:
 
         # Refresh the watch on the submission, we are still working on it
         watcher.touch(self.redis, key=task.sid, timeout=self.config.core.dispatcher.timeout,
-                      queue=SUBMISSION_QUEUE, message={'sid': task.sid})
+                      queue=SUBMISSION_QUEUE, message=json.dumps({'sid': task.sid}))
 
         # Open up the file/service table for this submission
-        process_table = DispatchHash(task.sid, *self.redis)
+        process_table = DispatchHash(task.sid, self.redis)
 
         # Calculate the schedule for the file
         schedule = self.scheduler.build_schedule(submission, task.file_type)
@@ -346,7 +349,7 @@ class Dispatcher:
                 #         log.info('%s Graph: "%s/%s" [label=%s];',
                 #         sid, srl, name, name)
 
-                file_count = len(self.entries[sid]) + len(self.completed[sid])
+                # file_count = len(self.entries[sid]) + len(self.completed[sid])
 
                 # Warning: Please do not change the text of the error messages below.
                 msg = None
@@ -356,9 +359,9 @@ class Dispatcher:
                     response.watermark(name, '')
                     response.nonrecoverable_failure(msg)
                     self.storage_queue.push({
-                    'type': 'error',
-                    'name': name,
-                    'response': response,
+                        'type': 'error',
+                        'name': name,
+                        'response': response,
                     })
                     return False
 
@@ -391,7 +394,7 @@ class Dispatcher:
             for service, config in outstanding.items():
                 # Check if this submission has already dispatched this service, and hasn't timed out yet
                 queued_time = time.time() - process_table.dispatch_time(file_hash, service)
-                if queued_time < self.scheduler.service_timeout(service):
+                if queued_time < self.get_service_timeout(service):
                     continue
 
                 # Build the actual service dispatch message

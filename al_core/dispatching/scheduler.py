@@ -4,6 +4,9 @@ This object encapsulates the
 """
 import re
 import logging
+from typing import Dict
+
+from assemblyline.odm.models.service import Service
 from assemblyline.common.forge import CachedObject
 
 
@@ -27,7 +30,7 @@ class Scheduler:
     def __init__(self, datastore, config):
         self.datastore = datastore
         self.config = config
-        self.services = CachedObject(self._get_services)
+        self.services = CachedObject(self._get_services)  # type: Dict[Service]
 
 
     def build_schedule(self, submission, file_type: str):
