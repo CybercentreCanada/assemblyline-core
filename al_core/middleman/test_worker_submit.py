@@ -1,5 +1,5 @@
 import logging
-import mock
+from unittest import mock
 import fakeredis
 import pytest
 import time
@@ -19,11 +19,11 @@ def clean_redis():
     return fakeredis.FakeStrictRedis()
 
 
+@mock.patch('al_core.middleman.middleman.SubmissionTool', mock.MagicMock())
 def test_submit_simple(clean_redis):
     ds = AssemblylineDatastore(MockDatastore())
     mf = MakeMiddleman()
     mf.assign('running', TrueCountTimes(1))
-    mf.assign('client', mock.MagicMock())
     mf.call('unique_queue.push', 0, IngestTask({
         'params': SubmissionParams({
             'classification': 'U',
@@ -54,6 +54,7 @@ def test_submit_simple(clean_redis):
     mm.client.submit.assert_called()
 
 
+@mock.patch('al_core.middleman.middleman.SubmissionTool', mock.MagicMock())
 def test_submit_duplicate(clean_redis):
     ds = AssemblylineDatastore(MockDatastore())
     mf = MakeMiddleman()
@@ -94,6 +95,7 @@ def test_submit_duplicate(clean_redis):
     assert mm.duplicate_queue.length(_dup_prefix + task.scan_key) == 1
 
 
+@mock.patch('al_core.middleman.middleman.SubmissionTool', mock.MagicMock())
 def test_existing_score(clean_redis):
     ds = AssemblylineDatastore(MockDatastore())
     ds.filescore.get = mock.MagicMock(return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=time.time())))

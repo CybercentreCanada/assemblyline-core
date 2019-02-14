@@ -1,11 +1,11 @@
 import logging
 import json
-import mock
+from unittest import mock
 import time
 
 from assemblyline.common import log
 from .run_ingest import ingester
-from .middleman import Middleman, IngestTask
+from al_core.middleman.middleman import Middleman, IngestTask
 from .client import MiddlemanClient
 
 
@@ -85,6 +85,7 @@ def make_message(**message):
     return send
 
 
+@mock.patch('al_core.middleman.middleman.SubmissionTool', new=mock.MagicMock())
 def test_ingest_simple():
     ds = AssemblylineDatastore(MockDatastore())
     client = MiddlemanClient()
@@ -118,6 +119,7 @@ def test_ingest_simple():
     assert mm.ingest_queue.length() == 0
 
 
+@mock.patch('al_core.middleman.middleman.SubmissionTool', new=mock.MagicMock())
 def test_ingest_stale_score_exists():
     from assemblyline.odm.models.filescore import FileScore
     ds = AssemblylineDatastore(MockDatastore())
@@ -143,6 +145,7 @@ def test_ingest_stale_score_exists():
     assert mm.ingest_queue.length() == 0
 
 
+@mock.patch('al_core.middleman.middleman.SubmissionTool', new=mock.MagicMock())
 def test_ingest_score_exists():
     from assemblyline.odm.models.filescore import FileScore
     ds = AssemblylineDatastore(MockDatastore())
@@ -162,6 +165,7 @@ def test_ingest_score_exists():
     assert mm.ingest_queue.length() == 0
 
 
+@mock.patch('al_core.middleman.middleman.SubmissionTool', new=mock.MagicMock())
 def test_ingest_groups_error():
     ds = AssemblylineDatastore(MockDatastore())
     middleman_factory = MakeMiddleman()
@@ -181,6 +185,7 @@ def test_ingest_groups_error():
     assert mm.ingest_queue.length() == 0
 
 
+@mock.patch('al_core.middleman.middleman.SubmissionTool', new=mock.MagicMock())
 def test_ingest_size_error():
     ds = AssemblylineDatastore(MockDatastore())
     middleman_factory = MakeMiddleman()

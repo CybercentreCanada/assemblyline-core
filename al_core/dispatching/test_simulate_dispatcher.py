@@ -1,6 +1,6 @@
 import logging
 import pytest
-import mock
+from unittest import mock
 import time
 import random
 import threading

@@ -1,0 +1,2 @@
+assemblyline
+fakeredis[lua]
