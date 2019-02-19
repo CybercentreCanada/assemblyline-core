@@ -1,3 +1,4 @@
+import hashlib
 import time
 import datetime
 import json
@@ -6,6 +7,7 @@ import traceback
 from functools import reduce
 
 # TODO replace with unique queue
+from assemblyline.odm.models.service import Service
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
 from assemblyline.remote.datatypes.set import ExpiringSet
@@ -51,6 +53,7 @@ class FileTask(odm.Model):
 class ServiceTask(odm.Model):
     sid = odm.Keyword()
     file_hash = odm.Keyword()
+    parent_hash = odm.Optional(odm.Keyword())
     file_type = odm.Keyword()
     depth = odm.Integer()
     service_name = odm.Keyword()
@@ -67,10 +70,10 @@ class Dispatcher:
         # Load the datastore collections that we are going to be using
         self.ds = datastore
         self.log = logger
-        self.submissions = datastore.submissions
-        self.results = datastore.results
-        self.errors = datastore.errors
-        self.files = datastore.files
+        self.submissions = datastore.submission
+        self.results = datastore.result
+        self.errors = datastore.error
+        self.files = datastore.file
 
         # Create a config cache that will refresh config values periodically
         self.config = forge.CachedObject(forge.get_config)
@@ -322,17 +325,23 @@ class Dispatcher:
         # Calculate the schedule for the file
         schedule = self.scheduler.build_schedule(submission, task.file_type)
 
+        # If we modify the dispatch table, keep track of how many services are marked incomplete
+        # this will reduce how often multiple services all trigger the check to see if the
+        # submission is finished.
+        tasks_remaining = 0
+
         # Go through each round of the schedule removing complete/failed services
         # Break when we find a stage that still needs processing
         outstanding = {}
-        tasks_remaining = 0
         while schedule and not outstanding:
             stage = schedule.pop(0)
 
-            for service in stage:
+            for service_name in stage:
+                service = self.scheduler.services.get(service_name)
+
                 # If the result is in the process table we are fine
-                if process_table.finished(file_hash, service):
-                    if not submission.params.ignore_filtering and process_table.dropped(file_hash, service):
+                if process_table.finished(file_hash, service_name):
+                    if not submission.params.ignore_filtering and process_table.dropped(file_hash, service_name):
                         schedule.clear()
                     continue
 
@@ -352,61 +361,62 @@ class Dispatcher:
                 # file_count = len(self.entries[sid]) + len(self.completed[sid])
 
                 # Warning: Please do not change the text of the error messages below.
+                # TODO: anything that relies on specific error text where we control the creation
+                #       and parsing of the error should use an exception type if both ends are in
+                #       python, or an error code field where one end is not, so that we can
+                #       make it EXPLICIT that something is expected to be machine read
                 msg = None
                 if self._service_is_down(service, now):
-                    log.debug(' '.join((msg, "Not sending %s/%s to %s." % (sid, srl, name))))
-                    response = Task(deepcopy(task.raw))
-                    response.watermark(name, '')
-                    response.nonrecoverable_failure(msg)
-                    self.storage_queue.push({
-                        'type': 'error',
-                        'name': name,
-                        'response': response,
-                    })
-                    return False
+                    self.log.debug(' '.join((msg, "Not sending %s/%s to %s." % (task.sid, file_hash, service_name))))
 
-                if service.skip(task):
-                    response = Task(deepcopy(task.raw))
-                    response.watermark(name, '')
-                    response.success()
-                    q.send_raw(response.as_dispatcher_response())
-                    return False
+                    # Create an error record
+                    error_id = uuid.uuid4().hex
+                    self.errors.save(error_id, Error({
 
-                    task.sent = now
-                    service.proxy.execute(task.priority, task.as_service_request(name))
+                    }))
 
-                # Check if something, an error/a result already exists, to resolve this service
-                config = self.scheduler.build_service_config(service, submission)
-                access_key = self._find_results(submission, file_hash, service, config)
-                if access_key:
-                    result = self.results.get(access_key)
-                    if result:
-                        drop = result.drop_file
-                        tasks_remaining = process_table.finish(file_hash, service, access_key, drop=drop)
-                        if not submission.params.ignore_filtering and drop:
-                            schedule.clear()
+                    process_table.finish(file_hash, service_name, error_id)
                     continue
 
-                outstanding[service] = config
+                # Check if something, an error/a result already exists, to resolve this service
+                config = self.build_service_config(service, submission)
+                access_key = self.build_result_key(file_hash, service, submission, config)
+                print("trying result key", access_key)
+                result = self.results.get(access_key)
+                if result:
+                    # If we have managed to load a result for this file/service/config combo
+                    # then mark this service as finished in the dispatch table.
+                    # make sure to pass on whether the file was dropped by the service
+                    # last time it was run
+                    drop = result.drop_file
+                    tasks_remaining = process_table.finish(file_hash, service_name, access_key, drop=drop)
+                    if not submission.params.ignore_filtering and drop:
+                        # Remove all stages from the schedule (the current stage will still continue)
+                        schedule.clear()
+                    continue
+
+                # If in the end, we still want to run this service, pass on the configuration
+                # we have resolved to use
+                outstanding[service_name] = service, config
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
-            for service, config in outstanding.items():
+            for service_name, (service, config) in outstanding.items():
                 # Check if this submission has already dispatched this service, and hasn't timed out yet
-                queued_time = time.time() - process_table.dispatch_time(file_hash, service)
-                if queued_time < self.get_service_timeout(service):
+                queued_time = time.time() - process_table.dispatch_time(file_hash, service_name)
+                if queued_time < service.timeout:
                     continue
 
                 # Build the actual service dispatch message
                 service_task = ServiceTask(dict(
-                    service_name=service,
+                    service_name=service_name,
                     service_config=json.dumps(config),
                     **task.as_primitives()
                 ))
 
-                queue = NamedQueue(service_queue_name(service), *self.redis)
+                queue = NamedQueue(service_queue_name(service_name), self.redis)
                 queue.push(service_task.as_primitives())
-                process_table.dispatch(file_hash, service)
+                process_table.dispatch(file_hash, service_name)
 
         else:
             # dispatcher.storage_queue.push({
@@ -438,34 +448,107 @@ class Dispatcher:
             if process_table.all_finished() and tasks_remaining == 0:
                 self.submission_queue.push({'sid': submission.sid})
 
-    def _find_results(self, sid, file_hash, service, config):
+    def _service_is_down(self, service: Service, now):
+        # If a service has been disabled while we are in the middle of dispatching it is down
+        if not service or not service.enabled:
+            return True
+
+        # If we aren't holding service instances in reserve, its always up (because we can't tell)
+        if self.config.services.min_service_workers == 0:
+            return False
+
+        # We expect instances to be running and heartbeat-ing regularly
+        raise NotImplementedError("Heartbeats")
+        last = service.metadata['last_heartbeat_at']
+        return now - last > self.config.core.dispatcher.timeouts.get('service_down', 120)
+
+    def build_service_config(self, service: Service, submission: Submission):
         """
-        Try to find any results or terminal errors that satisfy the
-        request to run `service` on `file_hash` for the configuration in `submission`
+
+        TODO this probably needs to be moved to another package
+
+        v3 names: get_service_params get_config_data
         """
-        # Look for results that match this submission/hash/service config
-        key = self.scheduler.build_result_key(file_hash, service, config_hash(config))
-        if self.results.exists(key):
-            # TODO Touch result expiry
-            return key
+        # Load the default service config
+        params = {x.name: x.default for x in service.submission_params}
 
-        # NOTE these searches can be parallel
-        # NOTE these searches need to be changed to match whatever the error log is set to
-        # Search the errors for one matching this submission/hash/service
-        # that also has a terminal flag
-        results = self.errors.search(f"sid:{sid} AND file_hash:{file_hash} AND service:{service} "
-                                     "AND catagory:'terminal'", rows=1, fl=[self.ds.ID])
-        for result in results['items']:
-            return result.id
+        # Over write it with values from the submission
+        if service.name in submission.params.service_spec:
+            params.update(submission.params.service_spec[service.name])
+        return params
 
-        # Count the crash or timeout errors for submission/hash/service
-        results = self.errors.search(f"sid:{sid} AND file_hash:{file_hash} AND service:{service} "
-                                     "AND (catagory:'timeout' OR catagory:'crash')", rows=0)
-        if results['total'] > self.scheduler.service_failure_limit(service):
-            return 'errors'
+    def build_result_key(self, file_hash: str, service: Service, submission: Submission, config=None):
+        """
 
-        # No reasons not to continue processing this file
-        return False
+        TODO this probably needs to be moved to another package
+
+        Result keys combine service name, version, file hash, and config_key.
+
+        v3 name: _get_riak_key
+        """
+        key_list = [
+            file_hash,
+            service.name.replace('.', '_'),
+            service.version.replace('.', '_'),
+            self.build_config_key(service, submission, config)
+        ]
+
+        print('input for result key', key_list)
+        return '.'.join(key_list)
+
+    def build_config_key(self, service: Service, submission: Submission, config=None):
+        """Create a hash summarizing the submission parameters that might effect the given service.
+
+        TODO this probably needs to be moved to another package
+
+        v3 name: _get_config_key
+        """
+        if service.disable_cache or submission.params.ignore_cache:
+            cfg = uuid.uuid4().hex
+        else:
+            if not config:
+                config = self.build_service_config(service, submission)
+
+            cfg = ''.join((
+                # Include submission wide parameters that potentially effect all service results
+                str(submission.params.get_hashing_keys()),
+                # Get the service name+version
+                str(service.name),
+                str(service.version),
+                # Get the service params default + submission specific
+                str(config),
+            ))
+
+        print('string to make conf key', cfg)
+        return hashlib.md5(cfg.encode()).hexdigest()
+
+    # def _find_results(self, sid, file_hash, service, config):
+    #     """
+    #     Try to find any results or terminal errors that satisfy the
+    #     request to run `service` on `file_hash` for the configuration in `submission`
+    #     """
+    #     # Look for results that match this submission/hash/service config
+    #     key = self.build_result_key(file_hash, service, config)
+    #     if self.results.exists(key):
+    #         # TODO Touch result expiry
+    #         return key
+    #
+    #     # TODO should we be searching the error bucket for reasons not to precede here
+    #     # Search the errors for one matching this submission/hash/service
+    #     # that also has a terminal flag
+    #     # results = self.errors.search(f"sid:{sid} AND file_hash:{file_hash} AND service:{service} "
+    #     #                              "AND catagory:'terminal'", rows=1, fl=[self.ds.ID])
+    #     # for result in results['items']:
+    #     #     return result.id
+    #     #
+    #     # # Count the crash or timeout errors for submission/hash/service
+    #     # results = self.errors.search(f"sid:{sid} AND file_hash:{file_hash} AND service:{service} "
+    #     #                              "AND (catagory:'timeout' OR catagory:'crash')", rows=0)
+    #     # if results['total'] > self.scheduler.service_failure_limit(service):
+    #     #     return 'errors'
+    #
+    #     # No reasons not to continue processing this file
+    #     return False
 
     # def heartbeat(self):
     #     while not self.drain:

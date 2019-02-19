@@ -74,7 +74,7 @@ class DispatchHash:
         return False
 
     def dropped(self, file_hash, service):
-        return self.dropped_files.has(file_hash + service)
+        return self.dropped_files.exist(file_hash + service)
 
     def all_finished(self):
         """Are there no outstanding tasks, and at least one finished task."""

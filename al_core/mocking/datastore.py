@@ -32,14 +32,19 @@ class MockCollection:
 
 
 class MockDatastore:
-    def __init__(self):
+    def __init__(self, collections=None):
+        self.__collection_names = collections
         self._collections = {}
 
     def register(self, name, schema=None):
         assert isinstance(name, str)
+        if self.__collection_names:
+            assert name in self.__collection_names
         self._collections[name] = MockCollection(schema)
 
     def __getattr__(self, name):
+        if self.__collection_names:
+            assert name in self.__collection_names
         if name not in self._collections:
             self._collections[name] = MockCollection()
         return self._collections[name]

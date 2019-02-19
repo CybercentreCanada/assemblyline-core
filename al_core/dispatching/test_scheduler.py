@@ -7,6 +7,21 @@ from assemblyline.odm.randomizer import random_model_obj
 
 from al_core.dispatching.scheduler import Scheduler
 
+
+def dummy_service(name, stage, accepts='', rejects=''):
+    return Service({
+        'name': name,
+        'stage': stage,
+        'category': 'static',
+        'accepts': accepts,
+        'rejects': rejects,
+        'realm': 'abc',
+        'repo': '/dev/null',
+        'version': '0',
+        'enabled': True
+    })
+
+
 class FakeDatastore:
     def __init__(self):
         self.service = self
@@ -20,6 +35,7 @@ class FakeDatastore:
                     'rejects': '',
                     'realm': 'abc',
                     'repo': '/dev/null',
+                    'version': '0',
                 }),
                 Service({
                     'name': 'AnAV',
@@ -29,6 +45,7 @@ class FakeDatastore:
                     'rejects': '',
                     'realm': 'abc',
                     'repo': '/dev/null',
+                    'version': '0',
                 }),
                 Service({
                     'name': 'cuckoo',
@@ -38,6 +55,7 @@ class FakeDatastore:
                     'rejects': '',
                     'realm': 'abc',
                     'repo': '/dev/null',
+                    'version': '0',
                 }),
                 Service({
                     'name': 'polish',
@@ -47,6 +65,7 @@ class FakeDatastore:
                     'rejects': '',
                     'realm': 'abc',
                     'repo': '/dev/null',
+                    'version': '0',
                 }),
                 Service({
                     'name': 'not_documents',
@@ -56,6 +75,7 @@ class FakeDatastore:
                     'rejects': 'document/*',
                     'realm': 'abc',
                     'repo': '/dev/null',
+                    'version': '0',
                 })
             ]}
 
