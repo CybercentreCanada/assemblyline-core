@@ -150,10 +150,10 @@ class Dispatcher:
             Hash('submissions-' + submission.params.submitter, self.redis_persist).add(sid, isotime.now_as_iso())
 
         # Open up the file/service table for this submission
-        process_table = DispatchHash(submission.sid, self.redis)
-        depth_limit = self.config.core.dispatcher.extraction_depth_limit
+        dispatch_table = DispatchHash(submission.sid, self.redis)
 
         # Try to find all files, and extracted files
+        depth_limit = self.config.submission.max_extraction_depth
         unchecked_files = []
         for file_hash in submission.files:
             file_data = self.files.get(file_hash.sha256)
@@ -167,6 +167,7 @@ class Dispatcher:
                 file_type=file_data.type,
                 depth=0
             )))
+
         encountered_files = {file.sha256 for file in submission.files}
         pending_files = {}
 
@@ -174,22 +175,24 @@ class Dispatcher:
         max_score = None
         result_classifications = []
 
-        # For each file, we will look through all its results, any exctracted files
-        # found
+        # For each file, we will look through all its results, any extracted files,
+        # found should be added to the unchecked files if they haven't been encountered already
         while unchecked_files:
             task = unchecked_files.pop()
             sha = task.file_hash
             schedule = self.scheduler.build_schedule(submission, task.file_type)
 
             for service_name in reduce(lambda a, b: a + b, schedule):
+                service = self.scheduler.services.get(service_name)
+
                 # If the service is still marked as 'in progress'
-                runtime = time.time() - process_table.dispatch_time(sha, service_name)
-                if runtime < self.scheduler.service_timeout(service_name):
+                runtime = time.time() - dispatch_table.dispatch_time(sha, service_name)
+                if runtime < service.timeout:
                     pending_files[sha] = task
                     continue
 
                 # It hasn't started, has timed out, or is finished, see if we have a result
-                result_key = process_table.finished(sha, service_name)
+                result_bucket, result_key = dispatch_table.finished(sha, service_name)
 
                 # No result found, mark the file as incomplete
                 if not result_key:
@@ -197,7 +200,7 @@ class Dispatcher:
                     continue
 
                 # The process table is marked that a service has been abandoned due to errors
-                if result_key == 'errors':
+                if result_bucket.startswith('error'):
                     continue
 
                 # If we have hit the depth limit, ignore children
@@ -210,7 +213,7 @@ class Dispatcher:
                     if sub_file not in encountered_files:
                         encountered_files.add(sub_file)
 
-                        file_type = self.files.get(file_hash).type
+                        file_type = self.files.get(sha).type
                         unchecked_files.append(FileTask(dict(
                             sid=sid,
                             file_hash=sub_file,
@@ -250,9 +253,9 @@ class Dispatcher:
 
         # All the  remove this sid as well.
         # entries.pop(sid)
-        process_table = DispatchHash(submission.sid, self.redis)
-        results = process_table.all_results()
-        process_table.delete()
+        dispatch_table = DispatchHash(submission.sid, self.redis)
+        results = dispatch_table.all_results()
+        dispatch_table.delete()
 
         # Pull in the classifications of ???
         c12ns = dispatcher.completed.pop(sid).values() # TODO where are these classifications coming from
@@ -320,7 +323,7 @@ class Dispatcher:
                       queue=SUBMISSION_QUEUE, message=json.dumps({'sid': task.sid}))
 
         # Open up the file/service table for this submission
-        process_table = DispatchHash(task.sid, self.redis)
+        dispatch_table = DispatchHash(task.sid, self.redis)
 
         # Calculate the schedule for the file
         schedule = self.scheduler.build_schedule(submission, task.file_type)
@@ -340,8 +343,8 @@ class Dispatcher:
                 service = self.scheduler.services.get(service_name)
 
                 # If the result is in the process table we are fine
-                if process_table.finished(file_hash, service_name):
-                    if not submission.params.ignore_filtering and process_table.dropped(file_hash, service_name):
+                if dispatch_table.finished(file_hash, service_name):
+                    if not submission.params.ignore_filtering and dispatch_table.dropped(file_hash, service_name):
                         schedule.clear()
                     continue
 
@@ -375,7 +378,7 @@ class Dispatcher:
 
                     }))
 
-                    process_table.finish(file_hash, service_name, error_id)
+                    dispatch_table.finish(file_hash, service_name, error_id)
                     continue
 
                 # Check if something, an error/a result already exists, to resolve this service
@@ -389,7 +392,7 @@ class Dispatcher:
                     # make sure to pass on whether the file was dropped by the service
                     # last time it was run
                     drop = result.drop_file
-                    tasks_remaining = process_table.finish(file_hash, service_name, access_key, drop=drop)
+                    tasks_remaining = dispatch_table.finish(file_hash, service_name, access_key, drop=drop)
                     if not submission.params.ignore_filtering and drop:
                         # Remove all stages from the schedule (the current stage will still continue)
                         schedule.clear()
@@ -403,7 +406,7 @@ class Dispatcher:
         if outstanding:
             for service_name, (service, config) in outstanding.items():
                 # Check if this submission has already dispatched this service, and hasn't timed out yet
-                queued_time = time.time() - process_table.dispatch_time(file_hash, service_name)
+                queued_time = time.time() - dispatch_table.dispatch_time(file_hash, service_name)
                 if queued_time < service.timeout:
                     continue
 
@@ -416,7 +419,7 @@ class Dispatcher:
 
                 queue = NamedQueue(service_queue_name(service_name), self.redis)
                 queue.push(service_task.as_primitives())
-                process_table.dispatch(file_hash, service_name)
+                dispatch_table.dispatch(file_hash, service_name)
 
         else:
             # dispatcher.storage_queue.push({
@@ -445,7 +448,7 @@ class Dispatcher:
             # If there are no outstanding ANYTHING for this submission,
             # send a message to the submission dispatcher to finalize
             self.counts.increment('dispatch.files_completed')
-            if process_table.all_finished() and tasks_remaining == 0:
+            if dispatch_table.all_finished() and tasks_remaining == 0:
                 self.submission_queue.push({'sid': submission.sid})
 
     def _service_is_down(self, service: Service, now):

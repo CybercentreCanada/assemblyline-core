@@ -40,7 +40,7 @@ def test_single(redis_connection):
         assert not disp.all_finished()
 
         # After failing, the time should be reset
-        disp.fail_dispatch(file_hash, service)
+        disp.fail_recoverable(file_hash, service)
         assert disp.dispatch_time(file_hash, service) == 0
         assert disp.dispatch_count() == 0
         assert not disp.finished(file_hash, service)
@@ -60,7 +60,7 @@ def test_single(redis_connection):
         assert disp.dispatch_count() == 0
         assert disp.finished_count() == 1
         assert disp.all_finished()
-        assert disp.finished(file_hash, service) == result_key
+        assert disp.finished(file_hash, service) == ('result', result_key)
         assert disp.all_finished()
 
     finally:

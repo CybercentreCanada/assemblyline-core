@@ -3,6 +3,7 @@ The dispatch hash is a table of services that should be running (or should soon)
 and those that are already finished.
 """
 import time
+import json
 from assemblyline.remote.datatypes import retry_call
 from assemblyline.remote.datatypes.set import ExpiringSet
 
@@ -28,6 +29,7 @@ class DispatchHash:
         self._dispatch_key = f'{sid}{dispatch_tail}'
         self._finish_key = f'{sid}{finished_tail}'
         self._finish = self.client.register_script(finish_script)
+        # TODO set these expire times from the global time limit for submissions
         retry_call(self.client.expire, self._dispatch_key, 60*60)
         retry_call(self.client.expire, self._finish_key, 60*60)
 
@@ -47,9 +49,13 @@ class DispatchHash:
             return 0
         return float(result)
 
-    def fail_dispatch(self, file_hash, service):
-        """Remove a dispatched task, without marking it as finished."""
+    def fail_recoverable(self, file_hash, service):
+        """A service task has failed, but should be retried, remove the dispatched task."""
         retry_call(self.client.hdel, self._dispatch_key, f"{file_hash}-{service}")
+
+    def fail_nonrecoverable(self, file_hash, service, error_key):
+        """A service task has failed and should not be retried, entry the error as the result."""
+        return retry_call(self._finish, args=[self.sid, f"{file_hash}-{service}", json.dumps(['error', error_key])])
 
     def finish(self, file_hash, service, result_key, drop=False):
         """
@@ -60,7 +66,7 @@ class DispatchHash:
         """
         if drop:
             self.dropped_files.add(file_hash + service, True)
-        return retry_call(self._finish, args=[self.sid, f"{file_hash}-{service}", result_key])
+        return retry_call(self._finish, args=[self.sid, f"{file_hash}-{service}", json.dumps(['result', result_key])])
 
     def finished_count(self):
         """How many tasks have been finished for this submission."""
@@ -70,7 +76,7 @@ class DispatchHash:
         """If a service has been finished, return the key of the result document."""
         result = retry_call(self.client.hget, self._finish_key, f"{file_hash}-{service}")
         if result:
-            return result.decode()
+            return tuple(json.loads(result))
         return False
 
     def dropped(self, file_hash, service):
