@@ -40,8 +40,17 @@ def create_missing_file_error(submission, sha):
     })
 
 
+# noinspection PyUnresolvedReferences
+class __TaskOperations:
+    def get_tag_set_name(self):
+        return '/'.join((self.sid, self.file_hash, 'tags'))
+
+    def get_submission_tags_name(self):
+        return "st/%s/%s" % (self.parent_hash, self.file_hash)
+
+
 @odm.model()
-class FileTask(odm.Model):
+class FileTask(odm.Model, __TaskOperations):
     sid = odm.Keyword()
     parent_hash = odm.Optional(odm.Keyword())
     file_hash = odm.Keyword()
@@ -50,7 +59,7 @@ class FileTask(odm.Model):
 
 
 @odm.model()
-class ServiceTask(odm.Model):
+class ServiceTask(odm.Model, __TaskOperations):
     sid = odm.Keyword()
     file_hash = odm.Keyword()
     parent_hash = odm.Optional(odm.Keyword())
@@ -77,13 +86,18 @@ class Dispatcher:
 
         # Create a config cache that will refresh config values periodically
         self.config = forge.CachedObject(forge.get_config)
+
+        # Build some utility classes
         self.scheduler = Scheduler(datastore, self.config)
+        self.classification_engine = forge.get_classification()
+        self.timeout_watcher = watcher.WatcherClient(redis)
 
         # Connect to all of our persistant redis structures
         self.redis = redis
         self.redis_persist = redis_persist
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, redis)
         self.file_queue = NamedQueue(FILE_QUEUE, redis)
+        self._nonper_other_queues = {}
 
         # Publish counters to the metrics sink.
         self.counts = exporting_counter.AutoExportingCounters(
@@ -128,6 +142,11 @@ class Dispatcher:
         #
         # counts.stop()
 
+    def volatile_named_queue(self, name: str) -> NamedQueue:
+        if name not in self._nonper_other_queues:
+            self._nonper_other_queues[name] = NamedQueue(name, self.redis)
+        return self._nonper_other_queues[name]
+
     def dispatch_submission(self, submission: Submission):
         """
         Find any files associated with a submission and dispatch them if they are
@@ -141,8 +160,8 @@ class Dispatcher:
 
         # Refresh the watch, this ensures that this function will be called again
         # if something goes wrong with one of the files, and it never finishes.
-        watcher.touch(self.redis, key=sid, timeout=self.config.core.dispatcher.timeout,
-                      queue=SUBMISSION_QUEUE, message={'sid': sid})
+        self.timeout_watcher.touch(key=sid, timeout=self.config.core.dispatcher.timeout,
+                                   queue=SUBMISSION_QUEUE, message=json.dumps({'sid': sid}))
 
         # Refresh the quota hold
         if submission.params.quota_item and submission.params.submitter:
@@ -155,15 +174,15 @@ class Dispatcher:
         # Try to find all files, and extracted files
         depth_limit = self.config.submission.max_extraction_depth
         unchecked_files = []
-        for file_hash in submission.files:
-            file_data = self.files.get(file_hash.sha256)
+        for submission_file in submission.files:
+            file_data = self.files.get(submission_file.sha256)
             if not file_data:
-                self.errors.save(uuid.uuid4().hex, create_missing_file_error(submission, file_hash.sha256))
+                self.errors.save(uuid.uuid4().hex, create_missing_file_error(submission, submission_file.sha256))
                 continue
 
             unchecked_files.append(FileTask(dict(
                 sid=sid,
-                file_hash=file_hash,
+                file_hash=submission_file.sha256,
                 file_type=file_data.type,
                 depth=0
             )))
@@ -192,34 +211,32 @@ class Dispatcher:
                     continue
 
                 # It hasn't started, has timed out, or is finished, see if we have a result
-                result_bucket, result_key = dispatch_table.finished(sha, service_name)
+                result_key = dispatch_table.finished(sha, service_name)
 
                 # No result found, mark the file as incomplete
                 if not result_key:
                     pending_files[sha] = task
                     continue
+                result_bucket, result_key = result_key
 
                 # The process table is marked that a service has been abandoned due to errors
                 if result_bucket.startswith('error'):
                     continue
 
-                # If we have hit the depth limit, ignore children
-                if task.depth >= depth_limit:
-                    continue
-
                 # The result should exist then, get all the sub-files
                 result = self.results.get(result_key)
-                for sub_file in result.extracted_files:
-                    if sub_file not in encountered_files:
-                        encountered_files.add(sub_file)
+                if task.depth >= depth_limit:  # If we have hit the depth limit, ignore children
+                    for sub_file in result.extracted_files:
+                        if sub_file not in encountered_files:
+                            encountered_files.add(sub_file.sha256)
 
-                        file_type = self.files.get(sha).type
-                        unchecked_files.append(FileTask(dict(
-                            sid=sid,
-                            file_hash=sub_file,
-                            file_type=file_type,
-                            depth=task.depth + 1
-                        )))
+                            file_type = self.files.get(sha).type
+                            unchecked_files.append(FileTask(dict(
+                                sid=sid,
+                                file_hash=sub_file.sha256,
+                                file_type=file_type,
+                                depth=task.depth + 1
+                            )))
 
                 # Collect information about the result
                 if max_score is None:
@@ -232,69 +249,64 @@ class Dispatcher:
         # file isn't done yet, poke those files
         if pending_files:
             for task in pending_files.values():
-                self.file_queue.push(task)
+                self.file_queue.push(task.json())
         else:
-            self.finalize_submission(submission, result_classifications, max_score)
+            self.finalize_submission(submission, result_classifications, max_score, len(encountered_files))
 
-    def finalize_submission(self, submission: Submission, result_classifications, max_score):
+    def finalize_submission(self, submission: Submission, result_classifications, max_score, file_count):
         """All of the services for all of the files in this submission have finished or failed.
 
         Update the records in the datastore, and flush the working data from redis.
         """
         sid = submission.sid
 
-        # Erase tags
-        ExpiringSet(task.get_tag_set_name()).delete()
-        ExpiringHash(task.get_submission_tags_name()).delete()
-
         if submission.params.quota_item and submission.params.submitter:
             self.log.info(f"Submission {sid} no longer counts toward quota for {submission.params.submitter}")
             Hash('submissions-' + submission.params.submitter, self.redis_persist).pop(sid)
 
-        # All the  remove this sid as well.
-        # entries.pop(sid)
+        # Pull in the classifications of results/produced by services
+        classification = self.classification_engine.UNRESTRICTED
+        for c12n in result_classifications:
+            classification = self.classification_engine.max_classification(classification, c12n)
+
+        # Pull down the dispatch table and clear it from redis
         dispatch_table = DispatchHash(submission.sid, self.redis)
-        results = dispatch_table.all_results()
+        all_results = dispatch_table.all_results()
         dispatch_table.delete()
 
-        # Pull in the classifications of ???
-        c12ns = dispatcher.completed.pop(sid).values() # TODO where are these classifications coming from
-        classification = Classification.UNRESTRICTED
-        for c12n in c12ns:
-            classification = Classification.max_classification(
-                classification, c12n
-            )
-
-        # TODO should we reverse the pointer here and start adding
-        # a SID to the error object?
-        errors = []  # dispatcher.errors.pop(sid, [])
+        # Sort the errors out of the results
+        errors = []
+        results = []
+        for bucket, key in all_results:
+            if bucket == 'error':
+                errors.append(key)
+            elif bucket == 'result':
+                results.append(key)
+            else:
+                self.log.warning(f"Unexpected service output bucket: {bucket}/{key}")
 
         # submission['original_classification'] = submission['classification']
         submission.classification = classification
         submission.error_count = len(errors)
         submission.errors = errors
-        submission.file_count = len(set([x[:64] for x in errors + results]))
-        submission['results'] = results
-        submission.max_score = max_score
+        submission.file_count = file_count
+        submission.results = results
+        submission.max_score = max_score or 0  # Submissions with no results have no score
         submission.state = 'completed'
         submission.times.completed = isotime.now_as_iso()
-        self.submissions.sive(sid, submission)
+        self.submissions.save(sid, submission)
 
         completed_queue = submission.params.completed_queue
         if completed_queue:
-            raw = submission.json()
-            raw.update({
-                'errors': errors,
-                'results': results,
-                'error_count': len(set([x[:64] for x in errors])),
-                'file_count': len(set([x[:64] for x in errors + results])),
-            })
-
-            self.open_queue(completed_queue).push(raw)
+            self.volatile_named_queue(completed_queue).push(submission.json())
 
         # Send complete message to any watchers.
-        for w in dispatcher.watchers.pop(sid, {}).values():
-            w.push({'status': 'STOP'})
+        # TODO
+        # for w in self.watchers.pop(sid, {}).values():
+        #     w.push({'status': 'STOP'})
+
+        # Clear the timeout watcher
+        self.timeout_watcher.clear(sid)
 
     def dispatch_file(self, task: FileTask):
         """ Handle a message describing a file to be processed.
@@ -319,8 +331,8 @@ class Dispatcher:
         now = time.time()
 
         # Refresh the watch on the submission, we are still working on it
-        watcher.touch(self.redis, key=task.sid, timeout=self.config.core.dispatcher.timeout,
-                      queue=SUBMISSION_QUEUE, message=json.dumps({'sid': task.sid}))
+        self.timeout_watcher.touch(key=task.sid, timeout=self.config.core.dispatcher.timeout,
+                                   queue=SUBMISSION_QUEUE, message=json.dumps({'sid': task.sid}))
 
         # Open up the file/service table for this submission
         dispatch_table = DispatchHash(task.sid, self.redis)
@@ -417,7 +429,7 @@ class Dispatcher:
                     **task.as_primitives()
                 ))
 
-                queue = NamedQueue(service_queue_name(service_name), self.redis)
+                queue = self.volatile_named_queue(service_queue_name(service_name))
                 queue.push(service_task.as_primitives())
                 dispatch_table.dispatch(file_hash, service_name)
 
@@ -444,6 +456,10 @@ class Dispatcher:
             #                 )
 
             # There are no outstanding services, this file is done
+
+            # Erase tags
+            ExpiringSet(task.get_tag_set_name()).delete()
+            ExpiringHash(task.get_submission_tags_name()).delete()
 
             # If there are no outstanding ANYTHING for this submission,
             # send a message to the submission dispatcher to finalize

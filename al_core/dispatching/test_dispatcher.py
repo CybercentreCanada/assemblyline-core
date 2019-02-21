@@ -1,4 +1,5 @@
 import time
+import json
 import logging
 from unittest import mock
 import pytest
@@ -93,13 +94,6 @@ class Scheduler(Scheduler):
         }
 
 
-class MockWatcher:
-    @staticmethod
-    def touch(*args, **kwargs):
-        pass
-
-
-@mock.patch('al_core.dispatching.dispatcher.watcher', MockWatcher)
 @mock.patch('al_core.dispatching.dispatcher.Scheduler', Scheduler)
 def test_dispatch_file(clean_redis):
 
@@ -223,7 +217,6 @@ def test_dispatch_file(clean_redis):
     assert len(disp.submission_queue) == 1
 
 
-@mock.patch('al_core.dispatching.dispatcher.watcher', MockWatcher)
 @mock.patch('al_core.dispatching.dispatcher.Scheduler', Scheduler)
 def test_dispatch_submission(clean_redis):
     ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
@@ -244,7 +237,20 @@ def test_dispatch_submission(clean_redis):
     ds.submission.save(submission.sid, submission)
 
     disp = Dispatcher(ds, logger=logging, redis=clean_redis, redis_persist=clean_redis)
-    print('==== first dispatch')
     # Submit a problem, and check that it gets added to the dispatch hash
     # and the right service queues
     disp.dispatch_submission(submission)
+
+    file_task = FileTask(json.loads(disp.file_queue.pop()))
+    assert file_task.sid == submission.sid
+    assert file_task.file_hash == file_hash
+    assert file_task.depth == 0
+    assert file_task.file_type == ds.file.get(file_hash).type
+
+    dh = DispatchHash(submission.sid, clean_redis)
+    for service_name in disp.scheduler.services.keys():
+        dh.fail_nonrecoverable(file_hash, service_name, 'error-code')
+
+    disp.dispatch_submission(submission)
+    assert ds.submission.get(submission.sid).state == 'completed'
+    assert ds.submission.get(submission.sid).errors == ['error-code']*len(disp.scheduler.services)
