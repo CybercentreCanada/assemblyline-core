@@ -1,10 +1,7 @@
-import time
 import json
 import logging
 from unittest import mock
-import pytest
 from easydict import EasyDict
-import fakeredis
 
 import assemblyline.odm.models.file
 import assemblyline.odm.models.submission
@@ -12,66 +9,13 @@ from assemblyline.odm.randomizer import random_model_obj
 from assemblyline.odm import models
 
 
-from al_core.dispatching.scheduler import Scheduler
+from al_core.dispatching.scheduler import Scheduler as RealScheduler
 from al_core.dispatching.dispatcher import Dispatcher, DispatchHash, service_queue_name, FileTask, NamedQueue
-from al_core.mocking import MockFactory, MockDatastore
+from al_core.mocking import MockDatastore, clean_redis
 from al_core.dispatching.test_scheduler import dummy_service
 
-@pytest.fixture
-def clean_redis():
-    return fakeredis.FakeStrictRedis()
 
-
-class Error:
-    def __init__(self, data, docid):
-        self.id = docid
-
-
-# class MockDispatchHash:
-#     def __init__(self, *args):
-#         self._dispatched = {}
-#         self._finished = {}
-#
-#     @staticmethod
-#     def _key(file_hash, service):
-#         return f"{file_hash}_{service}"
-#
-#     def all_finished(self):
-#         return len(self._dispatched) == 0
-#
-#     def finished(self, file_hash, service):
-#         return self._key(file_hash, service) in self._finished
-#
-#     def dispatch_time(self, file_hash, service):
-#         return self._dispatched.get(self._key(file_hash, service), 0)
-#
-#     def dispatch(self, file_hash, service):
-#         self._dispatched[self._key(file_hash, service)] = time.time()
-#
-#     def finish(self, file_hash, service, result_key):
-#         key = self._key(file_hash, service)
-#         self._finished[key] = result_key
-#         self._dispatched.pop(key, None)
-#
-#     def fail_dispatch(self, file_hash, service):
-#         self._dispatched[self._key(file_hash, service)] = 0
-#
-#
-# class MockQueue:
-#     def __init__(self, *args, **kwargs):
-#         self.queue = []
-#
-#     def push(self, obj):
-#         self.queue.append(obj)
-#
-#     def length(self):
-#         return len(self.queue)
-#
-#     def __len__(self):
-#         return len(self.queue)
-
-
-class Scheduler(Scheduler):
+class Scheduler(RealScheduler):
     def __init__(self, *args, **kwargs):
         pass
 

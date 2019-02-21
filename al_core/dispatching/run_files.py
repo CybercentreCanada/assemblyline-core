@@ -1,15 +1,16 @@
 import threading
 import logging
 import json
-from dispatcher import Dispatcher, FileTask
+
+from al_core.dispatching.dispatcher import Dispatcher, FileTask
 
 
 class FileDispatchServer(threading.Thread):
-    def __init__(self, redis, datastore, logger=None):
+    def __init__(self, datastore, redis, redis_persist, logger=None):
         super().__init__()
         self.running = False
         self.logger = logger if logger else logging.getLogger('assemblyline.dispatcher.file')
-        self.dispatcher = Dispatcher(redis=redis, datastore=datastore, logger=self.logger)
+        self.dispatcher = Dispatcher(redis=redis, redis_persist=redis_persist, datastore=datastore, logger=self.logger)
 
     def start(self):
         self.running = True
@@ -40,10 +41,10 @@ class FileDispatchServer(threading.Thread):
         self.join()
 
 
-if __name__ == '__main__':
-
-    from assemlyline.common import log
-    log.init_logging()
-
-    server = FileDispatchServer()
-    server.serve_forever()
+# if __name__ == '__main__':
+#
+#     from assemlyline.common import log
+#     log.init_logging()
+#
+#     server = FileDispatchServer()
+#     server.serve_forever()

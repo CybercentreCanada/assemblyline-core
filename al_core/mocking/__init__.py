@@ -1,3 +1,5 @@
+import pytest
+import fakeredis
 
 from .datastore import MockDatastore
 
@@ -20,3 +22,8 @@ class MockFactory:
 
     def flush(self):
         self.mocks.clear()
+
+
+@pytest.fixture
+def clean_redis():
+    return fakeredis.FakeStrictRedis()

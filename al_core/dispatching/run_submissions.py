@@ -1,15 +1,16 @@
 import threading
 import json
 import logging
-from dispatcher import Dispatcher
+
+from al_core.dispatching.dispatcher import Dispatcher
 
 
 class SubmissionDispatchServer(threading.Thread):
-    def __init__(self, redis, datastore, logger=None):
+    def __init__(self, datastore, redis=None, redis_presist=None, logger=None):
         super().__init__()
         self.running = False
         self.logger = logger if logger else logging.getLogger('assemblyline.dispatcher.submissions')
-        self.dispatcher = Dispatcher(logger=self.logger, redis=redis, datastore=datastore)
+        self.dispatcher = Dispatcher(logger=self.logger, redis=redis, redis_persist=redis_presist, datastore=datastore)
 
     def start(self):
         self.running = True
@@ -46,10 +47,10 @@ class SubmissionDispatchServer(threading.Thread):
         self.join()
 
 
-if __name__ == '__main__':
-
-    from assemlyline.common import log
-    log.init_logging()
-
-    server = SubmissionDispatchServer()
-    server.serve_forever()
+# if __name__ == '__main__':
+#
+#     from assemlyline.common import log
+#     log.init_logging()
+#
+#     server = SubmissionDispatchServer()
+#     server.serve_forever()

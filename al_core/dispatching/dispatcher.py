@@ -19,7 +19,7 @@ from al_core.dispatching.dispatch_hash import DispatchHash
 from assemblyline import odm
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.submission import Submission
-from al_core.dispatching import watcher
+from al_core import watcher
 
 
 def service_queue_name(service):
