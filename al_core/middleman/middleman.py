@@ -11,7 +11,6 @@ be created.
 
 import threading
 import json
-import signal
 from math import tanh
 from random import random
 
@@ -43,11 +42,6 @@ _min_priority = 1
 _max_retries = 10
 _retry_delay = 180
 _max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
-
-
-def install_interrupt_handler(handler):
-    signal.signal(signal.SIGINT, handler)
-    signal.signal(signal.SIGTERM, handler)
 
 
 def drop_chance(length, maximum):
@@ -180,7 +174,6 @@ class Middleman:
         self.notification_queues = {}
         self.whitelisted = {}
         self.whitelisted_lock = threading.RLock()
-        self.running = True
 
         # Create a config cache that will refresh config values periodically
         self.config = forge.CachedObject(forge.get_config)
@@ -261,22 +254,16 @@ class Middleman:
         self.alert_queue = NamedQueue('m-alert', self.persistent_redis)
 
         # Utility object to help submit tasks to dispatching
-        self.client = SubmissionTool(datastore=self.datastore,
-                                     transport=None,
-                                     redis=self.redis)
+        self.submit_tool = SubmissionTool(datastore=self.datastore,
+                                          transport=None,
+                                          redis=self.redis)
 
-    def start(self):
+    def start_counters(self):
         """Start shared middleman auxillary components."""
         self.ingester_counts.start()
         self.whitelister_counts.start()
-        install_interrupt_handler(self.interrupt_handler)
 
-    def interrupt_handler(self, *_):
-        self.log.info("Caught signal. Coming down...")
-        self.running = False
-        self.stop()
-
-    def stop(self):
+    def stop_counters(self):
         """Stop shared middleman auxillary components."""
         self.ingester_counts.stop()
         self.whitelister_counts.stop()
@@ -605,7 +592,7 @@ class Middleman:
 
     def submit(self, task: IngestTask):
 
-        self.client.submit(
+        self.submit_tool.submit(
             sha256=task.sha256,
             path=task.filename or task.sha256,
             metadata=task.metadata,

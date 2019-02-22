@@ -4,7 +4,8 @@ from unittest import mock
 import time
 
 from assemblyline.common import log
-from .run_ingest import ingester
+
+from al_core.middleman.run_ingest import MiddlemanIngester
 from al_core.middleman.middleman import Middleman, IngestTask
 from .client import MiddlemanClient
 
@@ -12,6 +13,7 @@ from .client import MiddlemanClient
 from al_core.mocking.datastore import MockDatastore
 from assemblyline.datastore.helper import AssemblylineDatastore
 
+from al_core.mocking import clean_redis
 
 class TrueCountTimes:
     def __init__(self, count):
@@ -86,26 +88,23 @@ def make_message(**message):
 
 
 @mock.patch('al_core.middleman.middleman.SubmissionTool', new=mock.MagicMock())
-def test_ingest_simple():
-    ds = AssemblylineDatastore(MockDatastore())
-    client = MiddlemanClient()
-    middleman_factory = MakeMiddleman()
-    middleman_factory.assign("running", TrueCountTimes(2))
-    middleman_factory.client_call('ingest', **make_message(sha256='1'*10))
-    middleman_factory.client_call('ingest', **make_message(
+def test_ingest_simple(clean_redis):
+    mi = MiddlemanIngester(datastore=AssemblylineDatastore(MockDatastore()), redis=clean_redis, persistent_redis=clean_redis)
+
+    mi.running = TrueCountTimes(2)
+
+    client = MiddlemanClient(redis=clean_redis, persistent_redis=clean_redis)
+    client.ingest(**make_message(sha256='1'*10))
+    client.ingest(**make_message(
         metadata={
             'tobig': 'a' * (client.config.submission.max_metadata_length + 2),
             'small': '100'
         }
     ))
 
-    log.init_logging("middleman")
-    logger = logging.getLogger('assemblyline.middleman.ingester')
+    mi.try_run()
 
-    with mock.patch('middleman.run_ingest.Middleman', middleman_factory):
-        ingester(logger=logger, datastore=ds)
-
-    mm = middleman_factory.instance
+    mm = mi.middleman
     # The only task that makes it through though fit these parameters
     task = mm.unique_queue.pop()
     assert task
@@ -120,21 +119,21 @@ def test_ingest_simple():
 
 
 @mock.patch('al_core.middleman.middleman.SubmissionTool', new=mock.MagicMock())
-def test_ingest_stale_score_exists():
+def test_ingest_stale_score_exists(clean_redis):
     from assemblyline.odm.models.filescore import FileScore
     ds = AssemblylineDatastore(MockDatastore())
     ds.filescore.get = mock.MagicMock(return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=0)))
-    middleman_factory = MakeMiddleman()
-    middleman_factory.assign("running", TrueCountTimes(1))
-    middleman_factory.client_call('ingest', **make_message())
 
-    log.init_logging("middleman")
-    logger = logging.getLogger('assemblyline.middleman.ingester')
+    mi = MiddlemanIngester(datastore=ds, redis=clean_redis, persistent_redis=clean_redis)
 
-    with mock.patch('middleman.run_ingest.Middleman', middleman_factory):
-        ingester(logger=logger, datastore=ds)
+    mi.running = TrueCountTimes(1)
 
-    mm = middleman_factory.instance
+    client = MiddlemanClient(redis=clean_redis, persistent_redis=clean_redis)
+    client.ingest(**make_message())
+
+    mi.try_run()
+
+    mm = mi.middleman
 
     task = mm.unique_queue.pop()
     assert task
@@ -146,23 +145,18 @@ def test_ingest_stale_score_exists():
 
 
 @mock.patch('al_core.middleman.middleman.SubmissionTool', new=mock.MagicMock())
-def test_ingest_score_exists():
+def test_ingest_score_exists(clean_redis):
     from assemblyline.odm.models.filescore import FileScore
     ds = AssemblylineDatastore(MockDatastore())
     ds.filescore.get = mock.MagicMock(return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=time.time())))
-    middleman_factory = MakeMiddleman()
-    middleman_factory.assign("running", TrueCountTimes(1))
-    middleman_factory.client_call('ingest', **make_message())
 
-    log.init_logging("middleman")
-    logger = logging.getLogger('assemblyline.middleman.ingester')
+    mi = MiddlemanIngester(datastore=ds, redis=clean_redis, persistent_redis=clean_redis)
+    mi.running = TrueCountTimes(1)
+    MiddlemanClient(redis=clean_redis, persistent_redis=clean_redis).ingest(**make_message())
+    mi.try_run()
 
-    with mock.patch('middleman.run_ingest.Middleman', middleman_factory):
-        ingester(logger=logger, datastore=ds)
-
-    mm = middleman_factory.instance
-    assert mm.unique_queue.length() == 0
-    assert mm.ingest_queue.length() == 0
+    assert mi.middleman.unique_queue.length() == 0
+    assert mi.middleman.ingest_queue.length() == 0
 
 
 @mock.patch('al_core.middleman.middleman.SubmissionTool', new=mock.MagicMock())

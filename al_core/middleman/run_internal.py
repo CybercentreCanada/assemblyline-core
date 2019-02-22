@@ -16,7 +16,9 @@ import time
 import concurrent.futures
 
 from assemblyline.common import log, forge, isotime
+
 from al_core.middleman.middleman import Middleman, _dup_prefix
+from al_core.server_base import ServerBase
 
 
 # noinspection PyBroadException
@@ -143,53 +145,53 @@ def dropper():  # df node def
 #
 
 
-def run_internals(logger, datastore=None, redis=None, persistent_redis=None):
-    # Connect to all sorts of things
-    datastore = datastore or forge.get_datastore()
-    classification_engine = forge.get_classification()
+class MiddlemanInternals(ServerBase):
+    def __init__(self, logger=None, datastore=None, redis=None, persistent_redis=None):
+        super().__init__('assemblyline.middleman.internals', logger)
+        # Connect to all sorts of things
+        datastore = datastore or forge.get_datastore()
+        classification_engine = forge.get_classification()
 
-    # Initialize the middleman specific resources
-    middleman = Middleman(datastore=datastore, classification=classification_engine, logger=logger,
-                          redis=redis, persistent_redis=persistent_redis)
-    middleman.start()
+        # Initialize the middleman specific resources
+        self.middleman = Middleman(datastore=datastore, classification=classification_engine, logger=self.log,
+                                   redis=redis, persistent_redis=persistent_redis)
 
-    tasks = {
-        'timeouts': process_timeouts,
-        'retries': process_retries
-    }
+    def start(self):
+        super().start()
+        self.middleman.start_counters()
 
-    params = {
-        'middleman': middleman
-    }
+    def try_run(self):
+        tasks = {
+            'timeouts': process_timeouts,
+            'retries': process_retries
+        }
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-        handles = {}
+        params = {
+            'middleman': self.middleman
+        }
 
-        while middleman.running:
-            for name, fn in tasks.items():
-                # If we don't have a running instance of that task, start it
-                if name not in handles:
-                    handles[name] = pool.submit(fn, **params)
-                    continue
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+            handles = {}
 
-                if handles[name].running():
-                    continue
+            while self.running:
+                for name, fn in tasks.items():
+                    # If we don't have a running instance of that task, start it
+                    if name not in handles:
+                        handles[name] = pool.submit(fn, **params)
+                        continue
 
-                # So the task WAS running, and isn't now, is there an error?
-                exception = handles[name].exception(timeout=0)
-                if exception:
-                    logger.error(f"An error was encountered while running {name}:\n {str(exception)}")
-                del handles[name]
+                    if handles[name].running():
+                        continue
 
-            time.sleep(3)
+                    # So the task WAS running, and isn't now, is there an error?
+                    exception = handles[name].exception(timeout=0)
+                    if exception:
+                        self.log.error(f"An error was encountered while running {name}:\n {str(exception)}")
+                    del handles[name]
+
+                time.sleep(3)
 
 
 if __name__ == '__main__':
     log.init_logging("middleman")
-    _logger = logging.getLogger('assemblyline.middleman')
-
-    try:
-        run_internals(_logger)
-    except BaseException as error:
-        _logger.exception("Exiting:")
-
+    MiddlemanInternals().serve_forever()

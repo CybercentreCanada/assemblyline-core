@@ -19,7 +19,7 @@ from al_core.dispatching.dispatch_hash import DispatchHash
 from assemblyline import odm
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.submission import Submission
-from al_core import watcher
+from al_core.watcher import __init__
 
 
 def service_queue_name(service):
@@ -90,7 +90,7 @@ class Dispatcher:
         # Build some utility classes
         self.scheduler = Scheduler(datastore, self.config)
         self.classification_engine = forge.get_classification()
-        self.timeout_watcher = watcher.WatcherClient(redis)
+        self.timeout_watcher = __init__.WatcherClient(redis)
 
         # Connect to all of our persistant redis structures
         self.redis = redis

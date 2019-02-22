@@ -1,22 +1,14 @@
-import threading
 import json
-import logging
 
 from al_core.dispatching.dispatcher import Dispatcher
+from al_core.server_base import ServerBase
 
+class SubmissionDispatchServer(ServerBase):
+    def __init__(self, datastore=None, redis=None, redis_presist=None, logger=None):
+        super().__init__('assemblyline.dispatcher.submissions', logger)
+        self.dispatcher = Dispatcher(logger=self.log, redis=redis, redis_persist=redis_presist, datastore=datastore)
 
-class SubmissionDispatchServer(threading.Thread):
-    def __init__(self, datastore, redis=None, redis_presist=None, logger=None):
-        super().__init__()
-        self.running = False
-        self.logger = logger if logger else logging.getLogger('assemblyline.dispatcher.submissions')
-        self.dispatcher = Dispatcher(logger=self.logger, redis=redis, redis_persist=redis_presist, datastore=datastore)
-
-    def start(self):
-        self.running = True
-        super().start()
-
-    def run(self):
+    def try_run(self):
 
         queue = self.dispatcher.submission_queue
         submissions = self.dispatcher.submissions
@@ -30,27 +22,20 @@ class SubmissionDispatchServer(threading.Thread):
                 message = json.loads(message)
                 sub = submissions.get(message['sid'])
                 if not sub:
-                    self.logger.error(f"Tried to dispatch submission missing from datastore: {message['sid']}")
+                    self.log.error(f"Tried to dispatch submission missing from datastore: {message['sid']}")
                     continue
 
                 self.dispatcher.dispatch_submission(sub)
             except Exception as error:
-                self.logger.exception(error)
+                self.log.exception(error)
                 break
 
     def stop(self):
-        self.running = False
         self.dispatcher.submission_queue.push(None)
-
-    def serve_forever(self):
-        self.start()
-        self.join()
+        super().stop()
 
 
-# if __name__ == '__main__':
-#
-#     from assemlyline.common import log
-#     log.init_logging()
-#
-#     server = SubmissionDispatchServer()
-#     server.serve_forever()
+if __name__ == '__main__':
+    from assemblyline.common import log
+    log.init_logging()
+    SubmissionDispatchServer().serve_forever()

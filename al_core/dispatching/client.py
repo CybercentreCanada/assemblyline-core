@@ -6,8 +6,8 @@ An interface to the core system for the edge services.
 import uuid
 import logging
 
-from dispatching.dispatcher import ServiceTask, FileTask
-from dispatching.dispatcher import Submission, DispatchHash
+from al_core.dispatching.dispatcher import ServiceTask, FileTask
+from al_core.dispatching.dispatcher import Submission, DispatchHash
 from .scheduler import Scheduler
 from assemblyline.common import forge
 

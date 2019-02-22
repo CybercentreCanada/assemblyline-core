@@ -9,18 +9,18 @@ from assemblyline.odm.models.submission import INGEST_SUBMISSION_DEFAULTS
 class MiddlemanClient:
     """A convience object that wraps the input/output queues of the middleman."""
 
-    def __init__(self):
+    def __init__(self, redis=None, persistent_redis=None):
         # Create a config cache that will refresh config values periodically
         self.config = forge.CachedObject(forge.get_config)
 
         # Connect to the redis servers
-        self.redis = get_client(
+        self.redis = redis or get_client(
             db=self.config.core.redis.nonpersistent.db,
             host=self.config.core.redis.nonpersistent.host,
             port=self.config.core.redis.nonpersistent.port,
             private=False,
         )
-        self.persistent_redis = get_client(
+        self.persistent_redis = persistent_redis or get_client(
             db=self.config.core.redis.persistent.db,
             host=self.config.core.redis.persistent.host,
             port=self.config.core.redis.persistent.port,
