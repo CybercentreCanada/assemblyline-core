@@ -8,7 +8,7 @@ import logging
 
 from assemblyline.common import forge
 from assemblyline.odm.models.submission import Submission
-from assemblyline.remote.datatypes import get_client
+from assemblyline.remote.datatypes import get_client, reply_queue_name
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from al_core.dispatching.dispatcher import ServiceTask, FileTask, SUBMISSION_QUEUE
@@ -44,6 +44,21 @@ class DispatchClient:
             - files should already be in the datastore and filestore
         """
         self.submission_queue.push(submission.json())
+
+    def outstanding_services(self, sid):
+        """
+        List outstanding services for a given submission and the number of file each
+        of them still have to process.
+
+        :param sid: Submission ID
+        :return: Dictionary of services and number of files
+                 remaining per services e.g. {"SERVICE_NAME": 1, ... }
+        """
+        # TODO: read the data structures in redis related to a given submission and count the number of files
+        #       per services that are left to process. Only return services that have at least one
+        #       file left to process.
+
+        return {}
 
     def request_work(self, service_name, timeout=60):
         raise NotImplementedError()
@@ -95,3 +110,23 @@ class DispatchClient:
             file_type=task.file_type,
             depth=task.depth,
         )))
+
+    def setup_watch_queue(self, sid):
+        """
+        This function takes a submission ID as a parameter and creates a unique queue where all service
+        result keys for that given submission will be returned to as soon as they come in.
+
+        If the submission is in the middle of processing, this will also send all currently received keys through
+        the specified queue so the client that requests the watch queue is up to date.
+
+        :param sid: Submission ID
+        :return: The name of the watch queue that was created
+        """
+        # Create a unique queue
+        queue_name = reply_queue_name(prefix="D", suffix="WQ")
+
+        # TODO: Add the newly created queue to the list of queues for the given submission
+
+        # TODO: Push all current keys to the newly created queue (Queue should have a TTL of about 30 sec to 1 minute)
+
+        return queue_name
