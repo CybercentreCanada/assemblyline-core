@@ -70,7 +70,7 @@ class ServiceTask(odm.Model, __TaskOperations):
 
 
 FILE_QUEUE = 'dispatch-file'
-SUBMISSION_QUEUE = 'submission'
+SUBMISSION_QUEUE = 'dispatch-submission'
 
 
 class Dispatcher:

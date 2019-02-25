@@ -1,7 +1,10 @@
 import json
 
+from assemblyline.odm.models.submission import Submission
+
 from al_core.dispatching.dispatcher import Dispatcher
 from al_core.server_base import ServerBase
+
 
 class SubmissionDispatchServer(ServerBase):
     def __init__(self, datastore=None, redis=None, redis_presist=None, logger=None):
@@ -20,7 +23,11 @@ class SubmissionDispatchServer(ServerBase):
                     continue
 
                 message = json.loads(message)
-                sub = submissions.get(message['sid'])
+                try:
+                    sub = Submission(message)
+                except ValueError:
+                    sub = submissions.get(message.get('sid'))
+
                 if not sub:
                     self.log.error(f"Tried to dispatch submission missing from datastore: {message['sid']}")
                     continue
@@ -28,7 +35,6 @@ class SubmissionDispatchServer(ServerBase):
                 self.dispatcher.dispatch_submission(sub)
             except Exception as error:
                 self.log.exception(error)
-                break
 
     def stop(self):
         self.dispatcher.submission_queue.push(None)

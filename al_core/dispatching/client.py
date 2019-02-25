@@ -6,24 +6,32 @@ An interface to the core system for the edge services.
 import uuid
 import logging
 
-from al_core.dispatching.dispatcher import ServiceTask, FileTask
-from al_core.dispatching.dispatcher import Submission, DispatchHash
-from .scheduler import Scheduler
 from assemblyline.common import forge
+from assemblyline.odm.models.submission import Submission
+from assemblyline.remote.datatypes import get_client
+from assemblyline.remote.datatypes.queues.named import NamedQueue
+
+from al_core.dispatching.dispatcher import ServiceTask, FileTask, SUBMISSION_QUEUE
+from al_core.dispatching.dispatch_hash import DispatchHash
 
 
 class DispatchClient:
-    def __init__(self, datastore, redis, logger=None):
-        self.redis = redis
-        self.ds = datastore
+    def __init__(self, datastore=None, redis=None, logger=None):
+        self.config = forge.get_config()
+
+        self.redis = redis or get_client(
+            db=self.config.core.redis.nonpersistent.db,
+            host=self.config.core.redis.nonpersistent.host,
+            port=self.config.core.redis.nonpersistent.port,
+            private=False,
+        )
+
+        self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
+        self.ds = datastore or forge.get_datastore(self.config)
         self.log = logger or logging.getLogger("assemblyline.dispatching.client")
         self.results = datastore.result
         self.errors = datastore.error
         self.files = datastore.file
-
-        # Create a config cache that will refresh config values periodically
-        self.config = forge.CachedObject(forge.get_config)
-        # self.scheduler = Scheduler(datastore, self.config)
 
     def dispatch_submission(self, submission: Submission):
         """Insert a submission into the dispatching system.
@@ -35,7 +43,7 @@ class DispatchClient:
             - submission should already be saved in the datastore
             - files should already be in the datastore and filestore
         """
-        raise NotImplementedError()
+        self.submission_queue.push(submission.json())
 
     def request_work(self, service_name, timeout=60):
         raise NotImplementedError()
