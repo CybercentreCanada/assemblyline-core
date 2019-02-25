@@ -50,9 +50,6 @@ class MiddlemanClient:
         if 'classification' in kwargs and 'classification' not in params:
             params['classification'] = kwargs['classification']
 
-        # Fill in fields that have a hard coded default
-        params['completed_queue'] = _completeq_name
-
         # Fill in fields that have a default set in the configuration
         params['max_extracted'] = params.get('max_extracted', ing_conf.default_max_extracted)
         params['max_supplementary'] = params.get('max_supplementary', ing_conf.default_max_supplementary)

@@ -33,6 +33,12 @@ class __TaskOperations:
 
 
 @odm.model()
+class SubmissionTask(odm.Model):
+    submission = odm.Compound(Submission)
+    completed_queue = odm.Keyword(default_set=True)                     # Which queue to notify on completion
+
+
+@odm.model()
 class FileTask(odm.Model, __TaskOperations):
     sid = odm.Keyword()
     parent_hash = odm.Optional(odm.Keyword())
@@ -54,6 +60,7 @@ class ServiceTask(odm.Model, __TaskOperations):
 
 FILE_QUEUE = 'dispatch-file'
 SUBMISSION_QUEUE = 'dispatch-submission'
+DISPATCH_TASK_HASH = 'dispatch-active-tasks'
 
 
 class Dispatcher:
@@ -81,6 +88,7 @@ class Dispatcher:
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, redis)
         self.file_queue = NamedQueue(FILE_QUEUE, redis)
         self._nonper_other_queues = {}
+        self.active_tasks = ExpiringHash(DISPATCH_TASK_HASH, host=redis)
 
         # Publish counters to the metrics sink.
         self.counts = exporting_counter.AutoExportingCounters(
@@ -130,7 +138,7 @@ class Dispatcher:
             self._nonper_other_queues[name] = NamedQueue(name, self.redis)
         return self._nonper_other_queues[name]
 
-    def dispatch_submission(self, submission: Submission):
+    def dispatch_submission(self, task: SubmissionTask):
         """
         Find any files associated with a submission and dispatch them if they are
         not marked as in progress. If all files are finished, finalize the submission.
@@ -139,6 +147,7 @@ class Dispatcher:
             - File exists in the filestore and file collection in the datastore
             - Submission is stored in the datastore
         """
+        submission = task.submission
         sid = submission.sid
 
         # Refresh the watch, this ensures that this function will be called again
@@ -233,13 +242,14 @@ class Dispatcher:
             for task in pending_files.values():
                 self.file_queue.push(task.json())
         else:
-            self.finalize_submission(submission, result_classifications, max_score, len(encountered_files))
+            self.finalize_submission(task, result_classifications, max_score, len(encountered_files))
 
-    def finalize_submission(self, submission: Submission, result_classifications, max_score, file_count):
+    def finalize_submission(self, task: SubmissionTask, result_classifications, max_score, file_count):
         """All of the services for all of the files in this submission have finished or failed.
 
         Update the records in the datastore, and flush the working data from redis.
         """
+        submission = task.submission
         sid = submission.sid
 
         if submission.params.quota_item and submission.params.submitter:
@@ -278,17 +288,16 @@ class Dispatcher:
         submission.times.completed = isotime.now_as_iso()
         self.submissions.save(sid, submission)
 
-        completed_queue = submission.params.completed_queue
-        if completed_queue:
-            self.volatile_named_queue(completed_queue).push(submission.json())
+        if task.completed_queue:
+            self.volatile_named_queue(task.completed_queue).push(submission.json())
 
         # Send complete message to any watchers.
-        # TODO
-        # for w in self.watchers.pop(sid, {}).values():
-        #     w.push({'status': 'STOP'})
+        for w in self.get_watchers(sid):
+            w.push({'status': 'STOP'})
 
         # Clear the timeout watcher
         self.timeout_watcher.clear(sid)
+        self.active_tasks.pop(sid)
 
     def dispatch_file(self, task: FileTask):
         """ Handle a message describing a file to be processed.
@@ -505,36 +514,8 @@ class Dispatcher:
                 str(config),
             ))
 
-        print('string to make conf key', cfg)
         return hashlib.md5(cfg.encode()).hexdigest()
 
-    # def _find_results(self, sid, file_hash, service, config):
-    #     """
-    #     Try to find any results or terminal errors that satisfy the
-    #     request to run `service` on `file_hash` for the configuration in `submission`
-    #     """
-    #     # Look for results that match this submission/hash/service config
-    #     key = self.build_result_key(file_hash, service, config)
-    #     if self.results.exists(key):
-    #         # TODO Touch result expiry
-    #         return key
-    #
-    #     # TODO should we be searching the error bucket for reasons not to precede here
-    #     # Search the errors for one matching this submission/hash/service
-    #     # that also has a terminal flag
-    #     # results = self.errors.search(f"sid:{sid} AND file_hash:{file_hash} AND service:{service} "
-    #     #                              "AND catagory:'terminal'", rows=1, fl=[self.ds.ID])
-    #     # for result in results['items']:
-    #     #     return result.id
-    #     #
-    #     # # Count the crash or timeout errors for submission/hash/service
-    #     # results = self.errors.search(f"sid:{sid} AND file_hash:{file_hash} AND service:{service} "
-    #     #                              "AND (catagory:'timeout' OR catagory:'crash')", rows=0)
-    #     # if results['total'] > self.scheduler.service_failure_limit(service):
-    #     #     return 'errors'
-    #
-    #     # No reasons not to continue processing this file
-    #     return False
 
     # def heartbeat(self):
     #     while not self.drain:

@@ -9,6 +9,7 @@ score received, possibly sending a message to indicate that an alert should
 be created.
 """
 
+import uuid
 import threading
 import json
 from math import tanh
@@ -31,6 +32,7 @@ from assemblyline.remote.datatypes.queues.multi import MultiQueue
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes import get_client
 from assemblyline.odm.models.submission import Submission, SubmissionParams
+from assemblyline.odm.messages.submission import Submission as SubmissionBody
 
 from al_core.submission_client import SubmissionClient
 
@@ -147,6 +149,7 @@ class IngestTask(odm.Model):
 
     notification_queue = odm.Keyword(default='')
     notification_threshold = odm.Optional(odm.Integer())
+    never_drop = odm.Boolean(default=False)
 
     # If the ingestion has failed for some reason, what is it?
     failure = odm.Text(default='')
@@ -254,8 +257,8 @@ class Middleman:
         self.alert_queue = NamedQueue('m-alert', self.persistent_redis)
 
         # Utility object to help submit tasks to dispatching
-        self.submit_tool = SubmissionClient(datastore=self.datastore,
-                                            redis=self.redis)
+        self.submit_client = SubmissionClient(datastore=self.datastore,
+                                              redis=self.redis)
 
     def start_counters(self):
         """Start shared middleman auxillary components."""
@@ -318,7 +321,7 @@ class Middleman:
                 self.log.info(f'Removing {key} from {task.sha256} from {param.submitter}')
                 task.metadata.pop(key)
 
-        if task.file_size > max_file_size and not task.params.ignore_size and not task.params.never_drop:
+        if task.file_size > max_file_size and not task.params.ignore_size and not task.never_drop:
             task.failure = f"File too large ({task.file_size} > {max_file_size})"
             self.drop_queue.push(task.json())
             self.ingester_counts.increment('ingest.skipped')
@@ -430,7 +433,10 @@ class Middleman:
         return key
 
     def completed(self, sub: Submission):
-        """Invoked when notified that a submission has completed."""
+        """Invoked when notified that a submission has completed.
+
+        TODO this is the v3 method
+        """
         sha256 = task.root_sha256
 
         psid = sub.params.psid
@@ -555,7 +561,7 @@ class Middleman:
                 if task.file_size > self.config.submission.max_file_size or task.file_size == 0:
                     dropped = True
 
-        if task.params.never_drop or not dropped:
+        if task.never_drop or not dropped:
             return False
 
         task.failure = 'Skipped'
@@ -590,11 +596,18 @@ class Middleman:
 
     def submit(self, task: IngestTask):
 
-        self.submit_tool.submit(
-            sha256=task.sha256,
-            path=task.filename or task.sha256,
-            metadata=task.metadata,
-            params=task.params
+        self.submit_client.submit(
+            SubmissionBody(dict(
+                sid=uuid.uuid4().hex,
+                files=[dict(
+                    sha256=task.sha256,
+                    name=task.filename or task.sha256,
+                )],
+                notification=None,
+                metadata=task.metadata,
+                params=task.params
+            )),
+            completed_queue=_completeq_name
         )
 
         self.timeout_queue.push(now(_max_time), task.scan_key)

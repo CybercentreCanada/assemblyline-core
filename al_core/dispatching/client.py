@@ -11,7 +11,7 @@ from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes import get_client, reply_queue_name
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
-from al_core.dispatching.dispatcher import ServiceTask, FileTask, SUBMISSION_QUEUE
+from al_core.dispatching.dispatcher import SubmissionTask, ServiceTask, FileTask, SUBMISSION_QUEUE
 from al_core.dispatching.dispatch_hash import DispatchHash
 
 
@@ -33,7 +33,7 @@ class DispatchClient:
         self.errors = datastore.error
         self.files = datastore.file
 
-    def dispatch_submission(self, submission: Submission):
+    def dispatch_submission(self, submission: Submission, completed_queue: str = None):
         """Insert a submission into the dispatching system.
 
         Note:
@@ -43,7 +43,10 @@ class DispatchClient:
             - submission should already be saved in the datastore
             - files should already be in the datastore and filestore
         """
-        self.submission_queue.push(submission.json())
+        self.submission_queue.push(SubmissionTask(dict(
+            submission=submission,
+            completed_queue=completed_queue,
+        )).json())
 
     def outstanding_services(self, sid):
         """

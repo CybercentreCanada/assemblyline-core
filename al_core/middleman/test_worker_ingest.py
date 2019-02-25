@@ -8,7 +8,7 @@ import time
 from al_core.middleman.run_ingest import MiddlemanIngester
 from al_core.middleman.middleman import IngestTask
 from .client import MiddlemanClient
-
+from al_core.submission_client import SubmissionClient
 
 from al_core.mocking.datastore import MockDatastore
 from assemblyline.datastore.helper import AssemblylineDatastore
@@ -45,7 +45,7 @@ def make_message(**message):
 
 
 @pytest.fixture
-@mock.patch('al_core.middleman.middleman.SubmissionTool', new=mock.MagicMock())
+@mock.patch('al_core.middleman.middleman.SubmissionClient', new=mock.MagicMock(spec=SubmissionClient))
 def ingest_harness(clean_redis):
     """"Setup a test environment.
 

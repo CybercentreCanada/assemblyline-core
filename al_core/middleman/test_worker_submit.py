@@ -10,12 +10,13 @@ from al_core.middleman.client import MiddlemanClient
 from .test_worker_ingest import AssemblylineDatastore, MockDatastore, TrueCountTimes
 from al_core.middleman.run_submit import MiddlemanSubmitter
 from al_core.middleman.middleman import IngestTask, _dup_prefix
+from al_core.submission_client import SubmissionClient
 
 from al_core.mocking import clean_redis
 
 
 @pytest.fixture
-@mock.patch('al_core.middleman.middleman.SubmissionTool', new=mock.MagicMock())
+@mock.patch('al_core.middleman.middleman.SubmissionClient', new=mock.MagicMock(spec=SubmissionClient))
 def submit_harness(clean_redis):
     """Setup a test environment just file for the ingest tests"""
     datastore = AssemblylineDatastore(MockDatastore())
@@ -49,7 +50,7 @@ def test_submit_simple(submit_harness):
 
     # The task has been passed to the submit tool and there are no other submissions
     mm = submitter.middleman
-    mm.submit_tool.submit.assert_called()
+    mm.submit_client.submit.assert_called()
     assert mm.unique_queue.pop() is None
 
 

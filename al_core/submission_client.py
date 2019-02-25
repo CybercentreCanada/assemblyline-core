@@ -66,7 +66,7 @@ class SubmissionClient:
         # A client for interacting with the dispatcher
         self.dispatcher = DispatchClient(datastore, redis)
 
-    def submit(self, submission_obj: SubmissionObject, local_files: List=None, cleanup=True):
+    def submit(self, submission_obj: SubmissionObject, local_files: List=None, cleanup=True, completed_queue=None):
         """Submit several files in a single submission.
 
         After this method runs, there should be no local copies of the file left.
@@ -153,8 +153,7 @@ class SubmissionClient:
             self.datastore.submission.save(sub.sid, sub)
 
             self.log.debug("Submission complete. Dispatching: %s", sub.sid)
-            # TODO: Wait for this method to be implemented.
-            # self.dispatcher.dispatch_submission(sub)
+            self.dispatcher.dispatch_submission(sub, completed_queue=completed_queue)
 
             return sub
         finally:
