@@ -1,3 +1,6 @@
+"""
+A dispatcher server that ensures all of the files in a submission are complete.
+"""
 import json
 
 from assemblyline.odm.models.submission import Submission

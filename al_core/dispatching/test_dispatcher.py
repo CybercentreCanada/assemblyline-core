@@ -43,7 +43,7 @@ def test_dispatch_file(clean_redis):
 
     service_queue = lambda name: NamedQueue(service_queue_name(name), clean_redis)
 
-    ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
+    ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file', 'filescore'])
     file_hash = 'totally-a-legit-hash'
     sub = random_model_obj(models.submission.Submission)
     sub.sid = sid = 'first-submission'
@@ -104,14 +104,14 @@ def test_dispatch_file(clean_redis):
     # for the wrench service, it should move to the second batch of services
     print('==== fourth dispatch')
     [service_queue(name).delete() for name in disp.scheduler.services]
-    dh.finish(file_hash, 'extract', 'result-key')
+    dh.finish(file_hash, 'extract', 'result-key', 0)
     wrench_result_key = disp.build_result_key(
         file_hash=file_hash,
         service=disp.scheduler.services.get('wrench'),
         submission=sub
     )
     print('wrench result key', wrench_result_key)
-    ds.result.save(wrench_result_key, EasyDict(drop_file=False))
+    ds.result.save(wrench_result_key, EasyDict(drop_file=False, score=0))
 
     disp.dispatch_file(FileTask({
         'sid': 'first-submission',
@@ -131,7 +131,7 @@ def test_dispatch_file(clean_redis):
     [service_queue(name).delete() for name in disp.scheduler.services]
     dh.fail_nonrecoverable(file_hash, 'av-a', 'error-a')
     dh.fail_nonrecoverable(file_hash, 'av-b', 'error-b')
-    dh.finish(file_hash, 'frankenstrings', 'result-key')
+    dh.finish(file_hash, 'frankenstrings', 'result-key', 0)
 
     disp.dispatch_file(FileTask({
         'sid': 'first-submission',
@@ -148,7 +148,7 @@ def test_dispatch_file(clean_redis):
     # Finish the xerox service and check if the submission completion got checked
     print('==== sixth dispatch')
     [service_queue(name).delete() for name in disp.scheduler.services]
-    dh.finish(file_hash, 'xerox', 'result-key')
+    dh.finish(file_hash, 'xerox', 'result-key', 0)
 
     disp.dispatch_file(FileTask({
         'sid': 'first-submission',

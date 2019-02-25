@@ -1,9 +1,13 @@
 """
 The dispatch hash is a table of services that should be running (or should soon)
 and those that are already finished.
+
+
+# TODO dropped hash could be done in dispatch table
 """
 import time
 import json
+import collections
 from typing import Union, Tuple, List
 
 from redis import StrictRedis, Redis
@@ -25,12 +29,16 @@ redis.call('hset', sid .. '{finished_tail}', key, result_key)
 return redis.call('hlen', sid .. '{dispatch_tail}')
 """
 
+class DispatchRow(collections.namedtuple('DispatchRow', ['bucket', 'key', 'score', 'drop'])):
+    @property
+    def is_error(self):
+        return self.bucket == 'error'
+
 
 class DispatchHash:
     def __init__(self, sid: str, client: Union[Redis, StrictRedis]):
         self.client = client
         self.sid = sid
-        self.dropped_files = ExpiringSet(sid, host=self.client)
         self._dispatch_key = f'{sid}{dispatch_tail}'
         self._finish_key = f'{sid}{finished_tail}'
         self._finish = self.client.register_script(finish_script)
@@ -63,32 +71,27 @@ class DispatchHash:
 
         Has exactly the same semantics as `finish` but for errors.
         """
-        return retry_call(self._finish, args=[self.sid, f"{file_hash}-{service}", json.dumps(['error', error_key])])
+        return retry_call(self._finish, args=[self.sid, f"{file_hash}-{service}", json.dumps(['error', error_key, 0, False])])
 
-    def finish(self, file_hash, service, result_key, drop=False) -> int:
+    def finish(self, file_hash, service, result_key, score, drop=False) -> int:
         """
         As a single transaction:
          - Remove the service from the dispatched list
          - Add the file to the finished list, with the given result key
          - return the number of items in the dispatched list
         """
-        if drop:
-            self.dropped_files.add(file_hash + service, True)
-        return retry_call(self._finish, args=[self.sid, f"{file_hash}-{service}", json.dumps(['result', result_key])])
+        return retry_call(self._finish, args=[self.sid, f"{file_hash}-{service}", json.dumps(['result', result_key, score, drop])])
 
     def finished_count(self) -> int:
         """How many tasks have been finished for this submission."""
         return retry_call(self.client.hlen, self._finish_key)
 
-    def finished(self, file_hash, service) -> Union[bool, Tuple[str, str]]:
+    def finished(self, file_hash, service) -> Union[DispatchRow, None]:
         """If a service has been finished, return the key of the result document."""
         result = retry_call(self.client.hget, self._finish_key, f"{file_hash}-{service}")
         if result:
-            return tuple(json.loads(result))
-        return False
-
-    def dropped(self, file_hash, service):
-        return self.dropped_files.exist(file_hash + service)
+            return DispatchRow(*json.loads(result))
+        return None
 
     def all_finished(self) -> bool:
         """Are there no outstanding tasks, and at least one finished task."""
@@ -96,12 +99,11 @@ class DispatchHash:
             return False
         return self.dispatch_count() == 0
 
-    def all_results(self) -> List[Tuple[str, str]]:
+    def all_results(self) -> List[DispatchRow]:
         rows = retry_call(self.client.hgetall, self._finish_key)
-        return [tuple(json.loads(item)) for item in rows.values()]
+        return [DispatchRow(*json.loads(item)) for item in rows.values()]
 
     def delete(self):
         """Clear the tables from the redis server."""
         retry_call(self.client.delete, self._dispatch_key)
         retry_call(self.client.delete, self._finish_key)
-        self.dropped_files.delete()

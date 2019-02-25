@@ -55,12 +55,12 @@ def test_single(redis_connection):
         assert not disp.all_finished()
 
         # Success rather than failure
-        disp.finish(file_hash, service, result_key)
+        disp.finish(file_hash, service, result_key, 0)
         assert disp.dispatch_time(file_hash, service) == 0
         assert disp.dispatch_count() == 0
         assert disp.finished_count() == 1
         assert disp.all_finished()
-        assert disp.finished(file_hash, service) == ('result', result_key)
+        assert disp.finished(file_hash, service) == dispatch_hash.DispatchRow('result', result_key, 0, False)
         assert disp.all_finished()
 
     finally:

@@ -80,9 +80,9 @@ class DispatchClient:
     def service_failed(self, task: ServiceTask, error=None):
         # Add an error to the datastore
         if error:
-            self.errors.save(uuid.guid4().hex, error)
+            self.errors.save(uuid.uuid4().hex, error)
         else:
-            self.errors.save(uuid.guid4().hex, create_generic_error(task))
+            self.errors.save(uuid.uuid4().hex, create_generic_error(task))
 
         # Mark the attempt to process the file over in the dispatch table
         process_table = DispatchHash(task.sid, *self.redis)

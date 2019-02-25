@@ -422,11 +422,10 @@ class Middleman:
         if not sha256:
             sha256 = task.sha256
 
-        selected = task.params.services.selected
         key = task.scan_key
 
         if not key:
-            key = task.params.create_filescore_key(sha256, selected)
+            key = task.params.create_filescore_key(sha256)
             task.scan_key = key
 
         return key

@@ -1,9 +1,7 @@
 import hashlib
 import time
-import datetime
 import json
 import uuid
-import traceback
 from functools import reduce
 
 # TODO replace with unique queue
@@ -19,26 +17,11 @@ from al_core.dispatching.dispatch_hash import DispatchHash
 from assemblyline import odm
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.submission import Submission
-from al_core.watcher import __init__
+import al_core.watcher
 
 
 def service_queue_name(service):
     return 'service-queue-'+service
-
-
-def create_missing_file_error(submission, sha):
-    return Error({
-        'created': datetime.datetime.utcnow(),
-        'response': {
-            'message': f'Submission {submission.sid} tried to process missing file.',
-            'service_debug_info': traceback.format_stack(),
-            'service_name': 'dispatcher',
-            'service_version': '4',
-            'status': 'FAIL_NONRECOVERABLE',
-        },
-        'sha256': sha
-    })
-
 
 # noinspection PyUnresolvedReferences
 class __TaskOperations:
@@ -77,7 +60,7 @@ class Dispatcher:
 
     def __init__(self, datastore, redis, redis_persist, logger):
         # Load the datastore collections that we are going to be using
-        self.ds = datastore
+        self.datastore = datastore
         self.log = logger
         self.submissions = datastore.submission
         self.results = datastore.result
@@ -90,7 +73,7 @@ class Dispatcher:
         # Build some utility classes
         self.scheduler = Scheduler(datastore, self.config)
         self.classification_engine = forge.get_classification()
-        self.timeout_watcher = __init__.WatcherClient(redis)
+        self.timeout_watcher = al_core.watcher.WatcherClient(redis)
 
         # Connect to all of our persistant redis structures
         self.redis = redis
@@ -177,7 +160,7 @@ class Dispatcher:
         for submission_file in submission.files:
             file_data = self.files.get(submission_file.sha256)
             if not file_data:
-                self.errors.save(uuid.uuid4().hex, create_missing_file_error(submission, submission_file.sha256))
+                self.log.error(f'Submission {submission.sid} tried to process missing file: {submission_file.sha256}.')
                 continue
 
             unchecked_files.append(FileTask(dict(
@@ -211,20 +194,19 @@ class Dispatcher:
                     continue
 
                 # It hasn't started, has timed out, or is finished, see if we have a result
-                result_key = dispatch_table.finished(sha, service_name)
+                result_row = dispatch_table.finished(sha, service_name)
 
                 # No result found, mark the file as incomplete
-                if not result_key:
+                if not result_row:
                     pending_files[sha] = task
                     continue
-                result_bucket, result_key = result_key
 
                 # The process table is marked that a service has been abandoned due to errors
-                if result_bucket.startswith('error'):
+                if result_row.is_error:
                     continue
 
                 # The result should exist then, get all the sub-files
-                result = self.results.get(result_key)
+                result = self.results.get(result_row.key)
                 if task.depth >= depth_limit:  # If we have hit the depth limit, ignore children
                     for sub_file in result.extracted_files:
                         if sub_file not in encountered_files:
@@ -277,13 +259,13 @@ class Dispatcher:
         # Sort the errors out of the results
         errors = []
         results = []
-        for bucket, key in all_results:
-            if bucket == 'error':
-                errors.append(key)
-            elif bucket == 'result':
-                results.append(key)
+        for row in all_results:
+            if row.is_error:
+                errors.append(row.key)
+            elif row.bucket == 'result':
+                results.append(row.key)
             else:
-                self.log.warning(f"Unexpected service output bucket: {bucket}/{key}")
+                self.log.warning(f"Unexpected service output bucket: {row.bucket}/{row.key}")
 
         # submission['original_classification'] = submission['classification']
         submission.classification = classification
@@ -348,6 +330,8 @@ class Dispatcher:
         # Go through each round of the schedule removing complete/failed services
         # Break when we find a stage that still needs processing
         outstanding = {}
+        score = 0
+        errors = 0
         while schedule and not outstanding:
             stage = schedule.pop(0)
 
@@ -355,25 +339,35 @@ class Dispatcher:
                 service = self.scheduler.services.get(service_name)
 
                 # If the result is in the process table we are fine
-                if dispatch_table.finished(file_hash, service_name):
-                    if not submission.params.ignore_filtering and dispatch_table.dropped(file_hash, service_name):
+                finished = dispatch_table.finished(file_hash, service_name)
+                if finished:
+                    # If the service terminated in an error, count the error and continue
+                    if finished.is_error:
+                        errors += 1
+                        continue
+
+                    # if the service finished, count the score, and check if the file has been dropped
+                    score += finished.score
+                    if not submission.params.ignore_filtering and finished.drop:
                         schedule.clear()
                     continue
 
-                # queue_size = self.queue_size[name] = self.queue_size.get(name, 0) + 1
-                # entry.retries[name] = entry.retries.get(name, -1) + 1
-
-                # if task.profile:
-                #     if entry.retries[name]:
-                #         log.info('%s Graph: "%s" -> "%s/%s" [label=%d];',
-                #         sid, srl, srl, name, entry.retries[name])
-                #     else:
-                #         log.info('%s Graph: "%s" -> "%s/%s";',
-                #         sid, srl, srl, name)
-                #         log.info('%s Graph: "%s/%s" [label=%s];',
-                #         sid, srl, name, name)
-
-                # file_count = len(self.entries[sid]) + len(self.completed[sid])
+                # Check if something, an error/a result already exists, to resolve this service
+                config = self.build_service_config(service, submission)
+                access_key = self.build_result_key(file_hash, service, submission, config)
+                result = self.results.get(access_key)
+                if result:
+                    score += result.score
+                    # If we have managed to load a result for this file/service/config combo
+                    # then mark this service as finished in the dispatch table.
+                    # make sure to pass on whether the file was dropped by the service
+                    # last time it was run
+                    drop = result.drop_file
+                    tasks_remaining = dispatch_table.finish(file_hash, service_name, access_key, result.score, drop=drop)
+                    if not submission.params.ignore_filtering and drop:
+                        # Remove all stages from the schedule (the current stage will still continue)
+                        schedule.clear()
+                    continue
 
                 # Warning: Please do not change the text of the error messages below.
                 # TODO: anything that relies on specific error text where we control the creation
@@ -387,27 +381,10 @@ class Dispatcher:
                     # Create an error record
                     error_id = uuid.uuid4().hex
                     self.errors.save(error_id, Error({
-
+                        # TODO
                     }))
 
-                    dispatch_table.finish(file_hash, service_name, error_id)
-                    continue
-
-                # Check if something, an error/a result already exists, to resolve this service
-                config = self.build_service_config(service, submission)
-                access_key = self.build_result_key(file_hash, service, submission, config)
-                print("trying result key", access_key)
-                result = self.results.get(access_key)
-                if result:
-                    # If we have managed to load a result for this file/service/config combo
-                    # then mark this service as finished in the dispatch table.
-                    # make sure to pass on whether the file was dropped by the service
-                    # last time it was run
-                    drop = result.drop_file
-                    tasks_remaining = dispatch_table.finish(file_hash, service_name, access_key, drop=drop)
-                    if not submission.params.ignore_filtering and drop:
-                        # Remove all stages from the schedule (the current stage will still continue)
-                        schedule.clear()
+                    dispatch_table.fail_nonrecoverable(file_hash, service_name, error_id)
                     continue
 
                 # If in the end, we still want to run this service, pass on the configuration
@@ -434,28 +411,18 @@ class Dispatcher:
                 dispatch_table.dispatch(file_hash, service_name)
 
         else:
-            # dispatcher.storage_queue.push({
-            #     'type': 'complete',
-            #     'expiry': task.__expiry_ts__,
-            #     'filescore_key': task.scan_key,
-            #     'now': now,
-            #     'psid': task.psid,
-            #     'score': int(dispatcher.score.get(sid, None) or 0),
-            #     'sid': sid,
-            # })
-            #
-            #             key = msg['filescore_key']
-            #             if key:
-            #                 store.save_filescore(
-            #                     key, msg['expiry'], {
-            #                         'psid': msg['psid'],
-            #                         'sid': msg['sid'],
-            #                         'score': msg['score'],
-            #                         'time': msg['now'],
-            #                     }
-            #                 )
-
             # There are no outstanding services, this file is done
+
+            # Store the file's score under this configuration into the
+            filescore_key = submission.params.create_filescore_key(file_hash)
+            self.datastore.filescore.save(filescore_key, {
+                'psid': submission.params.psid,
+                'expiry_ts': submission.expiry_ts,
+                'score': score,
+                'sid': submission.sid,
+                'time': now,
+            })
+
 
             # Erase tags
             ExpiringSet(task.get_tag_set_name()).delete()
