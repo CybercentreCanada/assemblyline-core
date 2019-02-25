@@ -32,7 +32,7 @@ from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes import get_client
 from assemblyline.odm.models.submission import Submission, SubmissionParams
 
-from al_core.submission_tool import SubmissionTool
+from al_core.submission_client import SubmissionClient
 
 
 _completeq_name = 'm-complete'
@@ -254,9 +254,8 @@ class Middleman:
         self.alert_queue = NamedQueue('m-alert', self.persistent_redis)
 
         # Utility object to help submit tasks to dispatching
-        self.submit_tool = SubmissionTool(datastore=self.datastore,
-                                          transport=None,
-                                          redis=self.redis)
+        self.submit_tool = SubmissionClient(datastore=self.datastore,
+                                            redis=self.redis)
 
     def start_counters(self):
         """Start shared middleman auxillary components."""
