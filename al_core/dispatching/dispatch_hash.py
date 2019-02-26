@@ -8,13 +8,12 @@ and those that are already finished.
 import time
 import json
 import collections
-from typing import Union, Tuple, List
+from typing import Union, List, Tuple, Dict
 
 from redis import StrictRedis, Redis
 
-
 from assemblyline.remote.datatypes import retry_call
-from assemblyline.remote.datatypes.set import ExpiringSet
+from assemblyline.remote.datatypes.hash import ExpiringHash
 
 dispatch_tail = '-dispatch'
 finished_tail = '-finished'
@@ -29,6 +28,7 @@ redis.call('hset', sid .. '{finished_tail}', key, result_key)
 return redis.call('hlen', sid .. '{dispatch_tail}')
 """
 
+
 class DispatchRow(collections.namedtuple('DispatchRow', ['bucket', 'key', 'score', 'drop'])):
     @property
     def is_error(self):
@@ -42,13 +42,13 @@ class DispatchHash:
         self._dispatch_key = f'{sid}{dispatch_tail}'
         self._finish_key = f'{sid}{finished_tail}'
         self._finish = self.client.register_script(finish_script)
+        self.schedules = ExpiringHash(f'dispatch-hash-schedules-{sid}', host=self.client)
         # TODO set these expire times from the global time limit for submissions
         retry_call(self.client.expire, self._dispatch_key, 60*60)
         retry_call(self.client.expire, self._finish_key, 60*60)
 
     def dispatch(self, file_hash: str, service: str):
         """Mark that a service has been dispatched for the given sha."""
-        # TODO use a script to get the time function in redis?
         retry_call(self.client.hset, self._dispatch_key, f"{file_hash}-{service}", time.time())
 
     def dispatch_count(self):
@@ -63,7 +63,7 @@ class DispatchHash:
         return float(result)
 
     def fail_recoverable(self, file_hash: str, service: str):
-        """A service task has failed, but should be retried, remove the dispatched task."""
+        """A service task has failed, but should be retried, clear that it has been dispatched."""
         retry_call(self.client.hdel, self._dispatch_key, f"{file_hash}-{service}")
 
     def fail_nonrecoverable(self, file_hash: str, service, error_key) -> int:
@@ -99,11 +99,22 @@ class DispatchHash:
             return False
         return self.dispatch_count() == 0
 
-    def all_results(self) -> List[DispatchRow]:
+    def all_results(self) -> Dict[str, Dict[str, DispatchRow]]:
+        """Get all the records stored in the dispatch table.
+
+        :return: outpu[file_hash][service_name] -> DispatchRow
+        """
         rows = retry_call(self.client.hgetall, self._finish_key)
-        return [DispatchRow(*json.loads(item)) for item in rows.values()]
+        output = {}
+        for key, status in rows.items():
+            file_hash, service = key.split(b'-', maxsplit=1)
+            if file_hash not in output:
+                output[file_hash] = {}
+            output[file_hash][service] = DispatchRow(*json.loads(status))
+        return output
 
     def delete(self):
         """Clear the tables from the redis server."""
         retry_call(self.client.delete, self._dispatch_key)
         retry_call(self.client.delete, self._finish_key)
+        self.schedules.delete()
