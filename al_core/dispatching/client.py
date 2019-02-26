@@ -137,12 +137,13 @@ class DispatchClient:
 
         # FAKE DATA
         # TODO: remove fake data when done
-        watch_queue.push(WatchQueueMessage({"status": "START"}))
+        watch_queue.push(WatchQueueMessage({"status": "START"}).as_primitives())
         sub = self.ds.submission.get(sid, as_obj=False) or {}
         for key in sub.get('results', []):
-            watch_queue.push(WatchQueueMessage({"status": "OK", "cache_key": key}))
+            watch_queue.push(WatchQueueMessage({"status": "OK", "cache_key": key}).as_primitives())
         for key in sub.get('errors', []):
-            watch_queue.push(WatchQueueMessage({"status": "FAIL", "cache_key": key}))
+            watch_queue.push(WatchQueueMessage({"status": "FAIL", "cache_key": key}).as_primitives())
+        watch_queue.push(WatchQueueMessage({"status": "STOP"}).as_primitives())
         # END OF FAKE DATA
 
         return queue_name
