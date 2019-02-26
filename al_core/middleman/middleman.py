@@ -149,7 +149,6 @@ class IngestTask(odm.Model):
 
     notification_queue = odm.Keyword(default='')
     notification_threshold = odm.Optional(odm.Integer())
-    never_drop = odm.Boolean(default=False)
 
     # If the ingestion has failed for some reason, what is it?
     failure = odm.Text(default='')
@@ -321,7 +320,7 @@ class Middleman:
                 self.log.info(f'Removing {key} from {task.sha256} from {param.submitter}')
                 task.metadata.pop(key)
 
-        if task.file_size > max_file_size and not task.params.ignore_size and not task.never_drop:
+        if task.file_size > max_file_size and not task.params.ignore_size and not task.params.never_drop:
             task.failure = f"File too large ({task.file_size} > {max_file_size})"
             self.drop_queue.push(task.json())
             self.ingester_counts.increment('ingest.skipped')
@@ -561,7 +560,7 @@ class Middleman:
                 if task.file_size > self.config.submission.max_file_size or task.file_size == 0:
                     dropped = True
 
-        if task.never_drop or not dropped:
+        if task.params.never_drop or not dropped:
             return False
 
         task.failure = 'Skipped'

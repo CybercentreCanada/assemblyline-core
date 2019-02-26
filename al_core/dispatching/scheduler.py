@@ -28,14 +28,14 @@ class Scheduler:
     def __init__(self, datastore, config):
         self.datastore = datastore
         self.config = config
-        self.services = CachedObject(self._get_services)  # type: Dict[str, Service]
+        self.services: Dict[str, Service] = CachedObject(self._get_services)
 
     @property
     def system_category(self):
         return self.config.services.system_category
 
     def build_schedule(self, submission, file_type: str):
-        all_services = dict(self.services.items())
+        all_services = dict(self.services)
 
         # Load the selected and excluded services by category
         excluded = self.expand_categories(submission.params.services.excluded)

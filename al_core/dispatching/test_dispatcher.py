@@ -10,7 +10,7 @@ from assemblyline.odm import models
 
 
 from al_core.dispatching.scheduler import Scheduler as RealScheduler
-from al_core.dispatching.dispatcher import Dispatcher, DispatchHash, service_queue_name, FileTask, NamedQueue
+from al_core.dispatching.dispatcher import Dispatcher, DispatchHash, service_queue_name, FileTask, NamedQueue, SubmissionTask
 from al_core.mocking import MockDatastore, clean_redis
 from al_core.dispatching.test_scheduler import dummy_service
 
@@ -48,9 +48,9 @@ def test_dispatch_file(clean_redis):
     sub = random_model_obj(models.submission.Submission)
     sub.sid = sid = 'first-submission'
     sub.params.ignore_cache = False
-    ds.submission.save(sid, sub)
 
     disp = Dispatcher(ds, clean_redis, clean_redis, logging)
+    disp.active_tasks.add(sid, SubmissionTask(dict(submission=sub)).json())
     dh = DispatchHash(sid=sid, client=clean_redis)
     print('==== first dispatch')
     # Submit a problem, and check that it gets added to the dispatch hash
@@ -178,12 +178,12 @@ def test_dispatch_submission(clean_redis):
     ))
 
     submission.sid = 'first-submission'
-    ds.submission.save(submission.sid, submission)
 
     disp = Dispatcher(ds, logger=logging, redis=clean_redis, redis_persist=clean_redis)
     # Submit a problem, and check that it gets added to the dispatch hash
     # and the right service queues
-    disp.dispatch_submission(submission)
+    task = SubmissionTask(dict(submission=submission))
+    disp.dispatch_submission(task)
 
     file_task = FileTask(json.loads(disp.file_queue.pop()))
     assert file_task.sid == submission.sid
@@ -195,6 +195,6 @@ def test_dispatch_submission(clean_redis):
     for service_name in disp.scheduler.services.keys():
         dh.fail_nonrecoverable(file_hash, service_name, 'error-code')
 
-    disp.dispatch_submission(submission)
+    disp.dispatch_submission(task)
     assert ds.submission.get(submission.sid).state == 'completed'
     assert ds.submission.get(submission.sid).errors == ['error-code']*len(disp.scheduler.services)

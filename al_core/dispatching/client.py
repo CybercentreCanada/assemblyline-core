@@ -5,16 +5,18 @@ An interface to the core system for the edge services.
 """
 import uuid
 import logging
+from typing import Dict
 
 from assemblyline.common import forge
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes import get_client, reply_queue_name
 from assemblyline.remote.datatypes.queues.named import NamedQueue
+from assemblyline.remote.datatypes.hash import ExpiringHash
 
-from al_core.dispatching.dispatcher import SubmissionTask, ServiceTask, FileTask, SUBMISSION_QUEUE
+from al_core.dispatching.dispatcher import SubmissionTask, ServiceTask, FileTask, SUBMISSION_QUEUE, DISPATCH_TASK_HASH
 from al_core.dispatching.dispatch_hash import DispatchHash
-
+from al_core.dispatching.scheduler import Scheduler
 
 class DispatchClient:
     def __init__(self, datastore=None, redis=None, logger=None):
@@ -33,6 +35,7 @@ class DispatchClient:
         self.results = datastore.result
         self.errors = datastore.error
         self.files = datastore.file
+        self.schedule_builder = Scheduler(self.ds, self.config)
 
     def dispatch_submission(self, submission: Submission, completed_queue: str = None):
         """Insert a submission into the dispatching system.
@@ -49,7 +52,7 @@ class DispatchClient:
             completed_queue=completed_queue,
         )).json())
 
-    def outstanding_services(self, sid):
+    def outstanding_services(self, sid) -> Dict[str, int]:
         """
         List outstanding services for a given submission and the number of file each
         of them still have to process.
@@ -58,12 +61,31 @@ class DispatchClient:
         :return: Dictionary of services and number of files
                  remaining per services e.g. {"SERVICE_NAME": 1, ... }
         """
-        # TODO: read the data structures in redis related to a given submission and count the number of files
-        #       per services that are left to process. Only return services that have at least one
-        #       file left to process.
+        # Download the entire status table from redis
+        dispatch_hash = DispatchHash(sid, self.redis)
+        all_service_status = dispatch_hash.all_results()
 
-        # Return FAKE DATA until we have a working function
-        return {"APKaye": 13, "Espresso": 5}
+        output: Dict[str, int] = {}
+
+        for file_hash, status_values in all_service_status.items():
+            # The schedule might not be in the cache if the submission or file was just issued,
+            # but it will be as soon as the file passes through the dispatcher
+            schedule = dispatch_hash.schedules.get(file_hash)
+
+            # Go through the schedule stage by stage so we can react to drops
+            # either we have a result and we don't need to count the file (but might drop it)
+            # or we don't have a result, and we need to count that file
+            while schedule:
+                stage = schedule.pop(0)
+                for service_name in stage:
+                    status = status_values.get(service_name)
+                    if status:
+                        if status.drop:
+                            schedule.clear()
+                    else:
+                        output[service_name] = output.get(service_name, 0) + 1
+
+        return output
 
     def request_work(self, service_name, timeout=60):
         raise NotImplementedError()
@@ -97,6 +119,13 @@ class DispatchClient:
                 depth=task.depth,
             )))
 
+
+        cache_key = task.cache_key
+        if cache_key:
+            msg = {'status': status[:4], 'cache_key': cache_key}
+            for w in self.watchers.get(sid, {}).itervalues():
+                w.push(msg)
+
     def service_failed(self, task: ServiceTask, error=None):
         # Add an error to the datastore
         if error:
@@ -115,6 +144,12 @@ class DispatchClient:
             file_type=task.file_type,
             depth=task.depth,
         )))
+
+        cache_key = task.cache_key
+        if cache_key:
+            msg = {'status': status[:4], 'cache_key': cache_key}
+            for w in self.watchers.get(sid, {}).itervalues():
+                w.push(msg)
 
     def setup_watch_queue(self, sid):
         """
@@ -147,3 +182,6 @@ class DispatchClient:
         # END OF FAKE DATA
 
         return queue_name
+
+    def _get_watcher_list(self, sid):
+        return ExpiringSet(make_watcher_list_name(sid), host=self.redis).members()

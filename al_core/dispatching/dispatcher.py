@@ -5,6 +5,7 @@ import uuid
 from functools import reduce
 
 # TODO replace with unique queue
+from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.models.service import Service
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
@@ -23,6 +24,9 @@ import al_core.watcher
 def service_queue_name(service):
     return 'service-queue-'+service
 
+def make_watcher_list_name(sid):
+    return 'dispatch-watcher-list-' + sid
+
 # noinspection PyUnresolvedReferences
 class __TaskOperations:
     def get_tag_set_name(self):
@@ -37,7 +41,9 @@ class SubmissionTask(odm.Model):
     submission = odm.Compound(Submission)
     completed_queue = odm.Keyword(default_set=True)                     # Which queue to notify on completion
 
-
+# TODO determine what parameters from the submission are actually used in task scheduling
+#      and store them directly in the task so that the full submission does not need to be retrieved
+#      until the finalization of the submission
 @odm.model()
 class FileTask(odm.Model, __TaskOperations):
     sid = odm.Keyword()
@@ -150,6 +156,9 @@ class Dispatcher:
         submission = task.submission
         sid = submission.sid
 
+        if not self.active_tasks.exists(sid):
+            self.active_tasks.add(sid, task.json())
+
         # Refresh the watch, this ensures that this function will be called again
         # if something goes wrong with one of the files, and it never finishes.
         self.timeout_watcher.touch(key=sid, timeout=self.config.core.dispatcher.timeout,
@@ -189,9 +198,9 @@ class Dispatcher:
         # For each file, we will look through all its results, any extracted files,
         # found should be added to the unchecked files if they haven't been encountered already
         while unchecked_files:
-            task = unchecked_files.pop()
-            sha = task.file_hash
-            schedule = self.scheduler.build_schedule(submission, task.file_type)
+            file_task = unchecked_files.pop()
+            sha = file_task.file_hash
+            schedule = self.build_schedule(dispatch_table, submission, sha, file_task.file_type)
 
             for service_name in reduce(lambda a, b: a + b, schedule):
                 service = self.scheduler.services.get(service_name)
@@ -199,7 +208,7 @@ class Dispatcher:
                 # If the service is still marked as 'in progress'
                 runtime = time.time() - dispatch_table.dispatch_time(sha, service_name)
                 if runtime < service.timeout:
-                    pending_files[sha] = task
+                    pending_files[sha] = file_task
                     continue
 
                 # It hasn't started, has timed out, or is finished, see if we have a result
@@ -207,7 +216,7 @@ class Dispatcher:
 
                 # No result found, mark the file as incomplete
                 if not result_row:
-                    pending_files[sha] = task
+                    pending_files[sha] = file_task
                     continue
 
                 # The process table is marked that a service has been abandoned due to errors
@@ -269,13 +278,14 @@ class Dispatcher:
         # Sort the errors out of the results
         errors = []
         results = []
-        for row in all_results:
-            if row.is_error:
-                errors.append(row.key)
-            elif row.bucket == 'result':
-                results.append(row.key)
-            else:
-                self.log.warning(f"Unexpected service output bucket: {row.bucket}/{row.key}")
+        for row in all_results.values():
+            for status in row.values():
+                if status.is_error:
+                    errors.append(status.key)
+                elif status.bucket == 'result':
+                    results.append(status.key)
+                else:
+                    self.log.warning(f"Unexpected service output bucket: {status.bucket}/{status.key}")
 
         # submission['original_classification'] = submission['classification']
         submission.classification = classification
@@ -292,10 +302,12 @@ class Dispatcher:
             self.volatile_named_queue(task.completed_queue).push(submission.json())
 
         # Send complete message to any watchers.
-        for w in self.get_watchers(sid):
-            w.push({'status': 'STOP'})
+        watcher_list = ExpiringSet(make_watcher_list_name(sid), host=self.redis)
+        for w in watcher_list.members():
+            w.push(WatchQueueMessage({'status': 'STOP'}))
 
         # Clear the timeout watcher
+        watcher_list.delete()
         self.timeout_watcher.clear(sid)
         self.active_tasks.pop(sid)
 
@@ -318,7 +330,8 @@ class Dispatcher:
         """
         # Read the message content
         file_hash = task.file_hash
-        submission = self.submissions.get(task.sid)
+        submission_task = SubmissionTask(json.loads(self.active_tasks.get(task.sid)))
+        submission = submission_task.submission
         now = time.time()
 
         # Refresh the watch on the submission, we are still working on it
@@ -329,7 +342,9 @@ class Dispatcher:
         dispatch_table = DispatchHash(task.sid, self.redis)
 
         # Calculate the schedule for the file
-        schedule = self.scheduler.build_schedule(submission, task.file_type)
+        schedule = self.build_schedule(dispatch_table, submission, file_hash, task.file_type)
+
+        # TODO HMGET the entire schedule's results here rather than one at a time later
 
         # If we modify the dispatch table, keep track of how many services are marked incomplete
         # this will reduce how often multiple services all trigger the check to see if the
@@ -432,7 +447,6 @@ class Dispatcher:
                 'time': now,
             })
 
-
             # Erase tags
             ExpiringSet(task.get_tag_set_name()).delete()
             ExpiringHash(task.get_submission_tags_name()).delete()
@@ -442,6 +456,14 @@ class Dispatcher:
             self.counts.increment('dispatch.files_completed')
             if dispatch_table.all_finished() and tasks_remaining == 0:
                 self.submission_queue.push({'sid': submission.sid})
+
+    def build_schedule(self, dispatch_hash: DispatchHash, submission: Submission, file_hash, file_type):
+        """Rather than rebuilding the schedule every time we see a file, build it once and cache in redis."""
+        cached_schedule = dispatch_hash.schedules.get(file_hash)
+        if not cached_schedule:
+            cached_schedule = self.scheduler.build_schedule(submission, file_type)
+            dispatch_hash.schedules.add(file_hash, cached_schedule)
+        return cached_schedule
 
     def _service_is_down(self, service: Service, now):
         # If a service has been disabled while we are in the middle of dispatching it is down
@@ -515,7 +537,6 @@ class Dispatcher:
             ))
 
         return hashlib.md5(cfg.encode()).hexdigest()
-
 
     # def heartbeat(self):
     #     while not self.drain:
