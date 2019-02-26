@@ -7,6 +7,7 @@ import uuid
 import logging
 
 from assemblyline.common import forge
+from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes import get_client, reply_queue_name
 from assemblyline.remote.datatypes.queues.named import NamedQueue
@@ -61,7 +62,8 @@ class DispatchClient:
         #       per services that are left to process. Only return services that have at least one
         #       file left to process.
 
-        return {}
+        # Return FAKE DATA until we have a working function
+        return {"APKaye": 13, "Espresso": 5}
 
     def request_work(self, service_name, timeout=60):
         raise NotImplementedError()
@@ -127,9 +129,20 @@ class DispatchClient:
         """
         # Create a unique queue
         queue_name = reply_queue_name(prefix="D", suffix="WQ")
+        watch_queue = NamedQueue(queue_name, ttl=30)
 
         # TODO: Add the newly created queue to the list of queues for the given submission
 
         # TODO: Push all current keys to the newly created queue (Queue should have a TTL of about 30 sec to 1 minute)
+
+        # FAKE DATA
+        # TODO: remove fake data when done
+        watch_queue.push(WatchQueueMessage({"status": "START"}))
+        sub = self.ds.submission.get(sid, as_obj=False) or {}
+        for key in sub.get('results', []):
+            watch_queue.push(WatchQueueMessage({"status": "OK", "cache_key": key}))
+        for key in sub.get('errors', []):
+            watch_queue.push(WatchQueueMessage({"status": "FAIL", "cache_key": key}))
+        # END OF FAKE DATA
 
         return queue_name
