@@ -96,7 +96,7 @@ class DispatchClient:
         # Store the result object and mark the service finished in the global table
         self.results.save(task.result_key, result)
         process_table = DispatchHash(task.sid, *self.redis)
-        remaining = process_table.finish(task.sha256, task.service, task.result_key, drop=result.drop_file)
+        remaining = process_table.finish(task.sha256, task.service, task.result_key, result.score, result.drop_file)
 
         if files.pop(srl, None):
             dispatcher.completed[sid][srl] = entry.task.classification
@@ -124,7 +124,7 @@ class DispatchClient:
         # Send the result key to any watching systems
         if result.cache_key:
             msg = {'status': 'OK', 'cache_key': result.cache_key}
-            for w in self._get_watcher_list(task.sid):
+            for w in self._get_watcher_list(task.sid).members():
                 w.push(msg)
 
     def service_failed(self, task: ServiceTask, error=None):
@@ -177,9 +177,9 @@ class DispatchClient:
         for status_values in all_service_status.values():
             for status in status_values.values():
                 if status.is_error:
-                    watch_queue.push(WatchQueueMessage({"status": "FAIL", "cache_key": status.key}))
+                    watch_queue.push(WatchQueueMessage({"status": "FAIL", "cache_key": status.key}).as_primitives())
                 else:
-                    watch_queue.push(WatchQueueMessage({"status": "OK", "cache_key": status.key}))
+                    watch_queue.push(WatchQueueMessage({"status": "OK", "cache_key": status.key}).as_primitives())
 
         return queue_name
 
