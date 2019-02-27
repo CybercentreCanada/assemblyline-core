@@ -12,11 +12,13 @@ from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes import get_client, reply_queue_name
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.remote.datatypes.hash import ExpiringHash
 
-from al_core.dispatching.dispatcher import SubmissionTask, ServiceTask, FileTask, SUBMISSION_QUEUE, DISPATCH_TASK_HASH
+from al_core.dispatching.dispatcher import SubmissionTask, ServiceTask, FileTask, SUBMISSION_QUEUE, \
+    make_watcher_list_name
 from al_core.dispatching.dispatch_hash import DispatchHash
 from al_core.dispatching.scheduler import Scheduler
+from assemblyline.remote.datatypes.set import ExpiringSet
+
 
 class DispatchClient:
     def __init__(self, datastore=None, redis=None, logger=None):
@@ -119,19 +121,19 @@ class DispatchClient:
                 depth=task.depth,
             )))
 
-
-        cache_key = task.cache_key
-        if cache_key:
-            msg = {'status': status[:4], 'cache_key': cache_key}
-            for w in self.watchers.get(sid, {}).itervalues():
+        # Send the result key to any watching systems
+        if result.cache_key:
+            msg = {'status': 'OK', 'cache_key': result.cache_key}
+            for w in self._get_watcher_list(task.sid):
                 w.push(msg)
 
     def service_failed(self, task: ServiceTask, error=None):
         # Add an error to the datastore
+        error_id = uuid.uuid4().hex
         if error:
-            self.errors.save(uuid.uuid4().hex, error)
+            self.errors.save(error_id, error)
         else:
-            self.errors.save(uuid.uuid4().hex, create_generic_error(task))
+            self.errors.save(error_id, create_generic_error(task))
 
         # Mark the attempt to process the file over in the dispatch table
         process_table = DispatchHash(task.sid, *self.redis)
@@ -145,11 +147,10 @@ class DispatchClient:
             depth=task.depth,
         )))
 
-        cache_key = task.cache_key
-        if cache_key:
-            msg = {'status': status[:4], 'cache_key': cache_key}
-            for w in self.watchers.get(sid, {}).itervalues():
-                w.push(msg)
+        # Send the result key to any watching systems
+        msg = {'status': 'FAIL', 'cache_key': error_id}
+        for w in self._get_watcher_list(task.sid).members():
+            w.push(msg)
 
     def setup_watch_queue(self, sid):
         """
@@ -166,22 +167,21 @@ class DispatchClient:
         queue_name = reply_queue_name(prefix="D", suffix="WQ")
         watch_queue = NamedQueue(queue_name, ttl=30)
 
-        # TODO: Add the newly created queue to the list of queues for the given submission
+        # Add the newly created queue to the list of queues for the given submission
+        self._get_watcher_list(sid).add(queue_name)
 
-        # TODO: Push all current keys to the newly created queue (Queue should have a TTL of about 30 sec to 1 minute)
-
-        # FAKE DATA
-        # TODO: remove fake data when done
-        watch_queue.push(WatchQueueMessage({"status": "START"}).as_primitives())
-        sub = self.ds.submission.get(sid, as_obj=False) or {}
-        for key in sub.get('results', []):
-            watch_queue.push(WatchQueueMessage({"status": "OK", "cache_key": key}).as_primitives())
-        for key in sub.get('errors', []):
-            watch_queue.push(WatchQueueMessage({"status": "FAIL", "cache_key": key}).as_primitives())
-        watch_queue.push(WatchQueueMessage({"status": "STOP"}).as_primitives())
-        # END OF FAKE DATA
+        # Push all current keys to the newly created queue (Queue should have a TTL of about 30 sec to 1 minute)
+        # Download the entire status table from redis
+        dispatch_hash = DispatchHash(sid, self.redis)
+        all_service_status = dispatch_hash.all_results()
+        for status_values in all_service_status.values():
+            for status in status_values.values():
+                if status.is_error:
+                    watch_queue.push(WatchQueueMessage({"status": "FAIL", "cache_key": status.key}))
+                else:
+                    watch_queue.push(WatchQueueMessage({"status": "OK", "cache_key": status.key}))
 
         return queue_name
 
     def _get_watcher_list(self, sid):
-        return ExpiringSet(make_watcher_list_name(sid), host=self.redis).members()
+        return ExpiringSet(make_watcher_list_name(sid), host=self.redis)
