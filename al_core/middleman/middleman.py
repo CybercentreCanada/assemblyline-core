@@ -159,7 +159,7 @@ class IngestTask(odm.Model):
     filename = odm.Keyword(default='')
     classification = odm.Keyword()
     metadata = odm.Mapping(odm.Keyword())
-    score = odm.Float(default=float('NaN'))  # Score from previous processing of this file
+    score = odm.Optional(odm.Float())  # Score from previous processing of this file
 
 
 class Middleman:
@@ -214,7 +214,7 @@ class Middleman:
             auto_flush=True,
             auto_log=False,
             export_interval_secs=self.config.logging.export_interval,
-            channel=forge.get_metrics_sink())
+            channel=forge.get_metrics_sink(self.redis))
 
         self.whitelister_counts = AutoExportingCounters(
             name='whitelister',
@@ -222,7 +222,7 @@ class Middleman:
             auto_flush=True,
             auto_log=False,
             export_interval_secs=self.config.logging.export_interval,
-            channel=forge.get_metrics_sink())
+            channel=forge.get_metrics_sink(self.redis))
 
         # State. The submissions in progress are stored in Redis in order to
         # persist this state and recover in case we crash.

@@ -5,7 +5,7 @@ import json
 
 from assemblyline.odm.models.submission import Submission
 
-from al_core.dispatching.dispatcher import Dispatcher
+from al_core.dispatching.dispatcher import Dispatcher, SubmissionTask
 from al_core.server_base import ServerBase
 
 
@@ -26,14 +26,11 @@ class SubmissionDispatchServer(ServerBase):
                     continue
 
                 message = json.loads(message)
-                try:
-                    sub = Submission(message)
-                except ValueError:
-                    sub = submissions.get(message.get('sid'))
+                sub = SubmissionTask(message)
 
-                if not sub:
-                    self.log.error(f"Tried to dispatch submission missing from datastore: {message['sid']}")
-                    continue
+                # if not sub:
+                #     self.log.error(f"Tried to dispatch submission missing from datastore: {message}")
+                #     continue
 
                 self.dispatcher.dispatch_submission(sub)
             except Exception as error:

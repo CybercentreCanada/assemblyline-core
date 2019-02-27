@@ -1,28 +1,13 @@
 import uuid
 import time
 
-import pytest
-from redis.exceptions import ConnectionError
-
+from al_core.mocking import clean_redis
 import dispatch_hash
 
 
-@pytest.fixture(scope='session')
-def redis_connection():
-    from assemblyline.remote.datatypes import get_client
-    c = get_client(None, None, None, False)
-    try:
-        ret_val = c.ping()
-        if ret_val:
-            return c
-    except ConnectionError:
-        pass
 
-    return pytest.skip("Connection to the Redis server failed. This test cannot be performed...")
-
-
-def test_single(redis_connection):
-    disp = dispatch_hash.DispatchHash('test-disptach-hash', redis_connection)
+def test_single(clean_redis):
+    disp = dispatch_hash.DispatchHash('test-disptach-hash', clean_redis)
     try:
         file_hash = uuid.uuid4().hex
         service = 'service_name'

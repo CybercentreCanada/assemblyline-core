@@ -1,5 +1,3 @@
-import json
-
 from al_core.dispatching.dispatcher import Dispatcher, FileTask
 from al_core.server_base import ServerBase
 
@@ -17,7 +15,7 @@ class FileDispatchServer(ServerBase):
                 if not message:
                     continue
 
-                message = FileTask(json.loads(message))
+                message = FileTask(message)
                 self.dispatcher.dispatch_file(message)
             except Exception as error:
                 self.log.exception(error)

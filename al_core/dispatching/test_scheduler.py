@@ -26,58 +26,62 @@ class FakeDatastore:
     def __init__(self):
         self.service = self
 
-    def search(self, *args, **kwargs):
-        return {'items': [Service({
-                    'name': 'extract',
-                    'stage': 'pre',
-                    'category': 'static',
-                    'accepts': 'archive/.*',
-                    'rejects': '',
-                    'realm': 'abc',
-                    'repo': '/dev/null',
-                    'version': '0',
-                }),
-                Service({
-                    'name': 'AnAV',
-                    'stage': 'core',
-                    'category': 'av',
-                    'accepts': '.*',
-                    'rejects': '',
-                    'realm': 'abc',
-                    'repo': '/dev/null',
-                    'version': '0',
-                }),
-                Service({
-                    'name': 'cuckoo',
-                    'stage': 'core',
-                    'category': 'dynamic',
-                    'accepts': 'document/.*|executable/.*',
-                    'rejects': '',
-                    'realm': 'abc',
-                    'repo': '/dev/null',
-                    'version': '0',
-                }),
-                Service({
-                    'name': 'polish',
-                    'stage': 'post',
-                    'category': 'static',
-                    'accepts': '.*',
-                    'rejects': '',
-                    'realm': 'abc',
-                    'repo': '/dev/null',
-                    'version': '0',
-                }),
-                Service({
-                    'name': 'not_documents',
-                    'stage': 'post',
-                    'category': 'static',
-                    'accepts': '.*',
-                    'rejects': 'document/*',
-                    'realm': 'abc',
-                    'repo': '/dev/null',
-                    'version': '0',
-                })
-            ]}
+    def stream_search(self, *args, **kwargs):
+        return []
+
+    def multiget(self, *args, **kwargs):
+        return {
+            'extract': Service({
+                'name': 'extract',
+                'stage': 'pre',
+                'category': 'static',
+                'accepts': 'archive/.*',
+                'rejects': '',
+                'realm': 'abc',
+                'repo': '/dev/null',
+                'version': '0',
+            }),
+            'AnAV': Service({
+                'name': 'AnAV',
+                'stage': 'core',
+                'category': 'av',
+                'accepts': '.*',
+                'rejects': '',
+                'realm': 'abc',
+                'repo': '/dev/null',
+                'version': '0',
+            }),
+            'cuckoo': Service({
+                'name': 'cuckoo',
+                'stage': 'core',
+                'category': 'dynamic',
+                'accepts': 'document/.*|executable/.*',
+                'rejects': '',
+                'realm': 'abc',
+                'repo': '/dev/null',
+                'version': '0',
+            }),
+            'polish': Service({
+                'name': 'polish',
+                'stage': 'post',
+                'category': 'static',
+                'accepts': '.*',
+                'rejects': '',
+                'realm': 'abc',
+                'repo': '/dev/null',
+                'version': '0',
+            }),
+            'not_documents': Service({
+                'name': 'not_documents',
+                'stage': 'post',
+                'category': 'static',
+                'accepts': '.*',
+                'rejects': 'document/*',
+                'realm': 'abc',
+                'repo': '/dev/null',
+                'version': '0',
+            })
+        }
 
 
 def submission(selected, excluded):
@@ -99,13 +103,16 @@ def test_schedule_simple(scheduler):
     for a, b in zip(schedule, [[], ['AnAV'], ['polish']]):
         assert set(a) == set(b)
 
+
 def test_schedule_no_excludes(scheduler):
     schedule = scheduler.build_schedule(submission(['static', 'av', 'dynamic'], []), 'document/word')
     assert all(set(a) == set(b) for a, b in zip(schedule, [[], ['AnAV', 'cuckoo'], ['polish']]))
 
+
 def test_schedule_all_defaults_word(scheduler):
     schedule = scheduler.build_schedule(submission([], []), 'document/word')
     assert all(set(a) == set(b) for a, b in zip(schedule, [[], ['AnAV', 'cuckoo'], ['polish']]))
+
 
 def test_schedule_all_defaults_zip(scheduler):
     schedule = scheduler.build_schedule(submission([], []), 'archive/zip')

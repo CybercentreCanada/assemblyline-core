@@ -10,14 +10,15 @@ from typing import Dict
 from assemblyline.common import forge
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.models.submission import Submission
+from assemblyline.odm.models.error import Error
 from assemblyline.remote.datatypes import get_client, reply_queue_name
 from assemblyline.remote.datatypes.queues.named import NamedQueue
+from assemblyline.remote.datatypes.set import ExpiringSet
 
 from al_core.dispatching.dispatcher import SubmissionTask, ServiceTask, FileTask, SUBMISSION_QUEUE, \
     make_watcher_list_name
 from al_core.dispatching.dispatch_hash import DispatchHash
 from al_core.dispatching.scheduler import Scheduler
-from assemblyline.remote.datatypes.set import ExpiringSet
 
 
 class DispatchClient:
@@ -94,7 +95,7 @@ class DispatchClient:
 
     def service_finished(self, task: ServiceTask, result):
         # Store the result object and mark the service finished in the global table
-        self.results.save(task.result_key, result)
+        self.results.save(task.result_key(), result)
         process_table = DispatchHash(task.sid, *self.redis)
         remaining = process_table.finish(task.sha256, task.service, task.result_key, result.score, result.drop_file)
 
@@ -127,17 +128,17 @@ class DispatchClient:
             for w in self._get_watcher_list(task.sid).members():
                 w.push(msg)
 
-    def service_failed(self, task: ServiceTask, error=None):
+    def service_failed(self, task: ServiceTask, error: Error):
         # Add an error to the datastore
         error_id = uuid.uuid4().hex
-        if error:
-            self.errors.save(error_id, error)
-        else:
-            self.errors.save(error_id, create_generic_error(task))
+        self.errors.save(error_id, error)
 
         # Mark the attempt to process the file over in the dispatch table
         process_table = DispatchHash(task.sid, *self.redis)
-        process_table.fail_dispatch(task.sha256, task.service_name)
+        if error.response.status == "FAIL_RECOVERABLE":
+            process_table.fail_recoverable(task.sha256, task.service_name)
+        else:
+            process_table.fail_nonrecoverable(task.sha256, task.service_name, error_id)
 
         # Send a message to prompt the re-issue of the task if needed
         self.file_queue.push(FileTask(dict(

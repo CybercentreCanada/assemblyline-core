@@ -1,4 +1,3 @@
-import json
 import logging
 from unittest import mock
 from easydict import EasyDict
@@ -21,9 +20,9 @@ class Scheduler(RealScheduler):
 
     def build_schedule(self, *args):
         return [
-            ['extract', 'wrench'],
-            ['av-a', 'av-b', 'frankenstrings'],
-            ['xerox']
+            {'extract': '', 'wrench': ''},
+            {'av-a': '', 'av-b': '', 'frankenstrings': ''},
+            {'xerox': ''}
         ]
 
     @property
@@ -50,17 +49,17 @@ def test_dispatch_file(clean_redis):
     sub.params.ignore_cache = False
 
     disp = Dispatcher(ds, clean_redis, clean_redis, logging)
-    disp.active_tasks.add(sid, SubmissionTask(dict(submission=sub)).json())
+    disp.active_tasks.add(sid, SubmissionTask(dict(submission=sub)).as_primitives())
     dh = DispatchHash(sid=sid, client=clean_redis)
     print('==== first dispatch')
     # Submit a problem, and check that it gets added to the dispatch hash
     # and the right service queues
-    disp.dispatch_file(FileTask({
+    file_task = FileTask({
         'sid': 'first-submission',
-        'file_hash': file_hash,
-        'file_type': 'unknown',
+        'file_info': dict(sha256=file_hash, type='unknown', magic='a', md5='a', mime='a', sha1='a', size=10),
         'depth': 0
-    }))
+    })
+    disp.dispatch_file(file_task)
 
     assert dh.dispatch_time(file_hash, 'extract') > 0
     assert dh.dispatch_time(file_hash, 'wrench') > 0
@@ -69,12 +68,7 @@ def test_dispatch_file(clean_redis):
 
     # Making the same call again should have no effect
     print('==== second dispatch')
-    disp.dispatch_file(FileTask({
-        'sid': 'first-submission',
-        'file_hash': file_hash,
-        'file_type': 'unknown',
-        'depth': 0
-    }))
+    disp.dispatch_file(file_task)
 
     assert dh.dispatch_time(file_hash, 'extract') > 0
     assert dh.dispatch_time(file_hash, 'wrench') > 0
@@ -88,12 +82,7 @@ def test_dispatch_file(clean_redis):
     [service_queue(name).delete() for name in disp.scheduler.services]
     dh.fail_recoverable(file_hash, 'extract')
 
-    disp.dispatch_file(FileTask({
-        'sid': 'first-submission',
-        'file_hash': file_hash,
-        'file_type': 'unknown',
-        'depth': 0
-    }))
+    disp.dispatch_file(file_task)
 
     assert dh.dispatch_time(file_hash, 'extract') > 0
     assert dh.dispatch_time(file_hash, 'wrench') > 0
@@ -113,12 +102,7 @@ def test_dispatch_file(clean_redis):
     print('wrench result key', wrench_result_key)
     ds.result.save(wrench_result_key, EasyDict(drop_file=False, score=0))
 
-    disp.dispatch_file(FileTask({
-        'sid': 'first-submission',
-        'file_hash': file_hash,
-        'file_type': 'unknown',
-        'depth': 0
-    }))
+    disp.dispatch_file(file_task)
 
     assert dh.finished(file_hash, 'extract')
     assert dh.finished(file_hash, 'wrench')
@@ -133,12 +117,7 @@ def test_dispatch_file(clean_redis):
     dh.fail_nonrecoverable(file_hash, 'av-b', 'error-b')
     dh.finish(file_hash, 'frankenstrings', 'result-key', 0)
 
-    disp.dispatch_file(FileTask({
-        'sid': 'first-submission',
-        'file_hash': file_hash,
-        'file_type': 'unknown',
-        'depth': 0
-    }))
+    disp.dispatch_file(file_task)
 
     assert dh.finished(file_hash, 'av-a')
     assert dh.finished(file_hash, 'av-b')
@@ -150,12 +129,7 @@ def test_dispatch_file(clean_redis):
     [service_queue(name).delete() for name in disp.scheduler.services]
     dh.finish(file_hash, 'xerox', 'result-key', 0)
 
-    disp.dispatch_file(FileTask({
-        'sid': 'first-submission',
-        'file_hash': file_hash,
-        'file_type': 'unknown',
-        'depth': 0
-    }))
+    disp.dispatch_file(file_task)
 
     assert dh.finished(file_hash, 'xerox')
     assert len(disp.submission_queue) == 1
@@ -185,11 +159,11 @@ def test_dispatch_submission(clean_redis):
     task = SubmissionTask(dict(submission=submission))
     disp.dispatch_submission(task)
 
-    file_task = FileTask(json.loads(disp.file_queue.pop()))
+    file_task = FileTask(disp.file_queue.pop())
     assert file_task.sid == submission.sid
-    assert file_task.file_hash == file_hash
+    assert file_task.file_info.sha256 == file_hash
     assert file_task.depth == 0
-    assert file_task.file_type == ds.file.get(file_hash).type
+    assert file_task.file_info.type == ds.file.get(file_hash).type
 
     dh = DispatchHash(submission.sid, clean_redis)
     for service_name in disp.scheduler.services.keys():

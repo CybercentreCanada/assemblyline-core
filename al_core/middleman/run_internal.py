@@ -22,10 +22,10 @@ from al_core.server_base import ServerBase
 
 
 # noinspection PyBroadException
-def process_timeouts(middleman):
+def process_timeouts(server, middleman):
     logger = logging.getLogger("assemblyline.middleman.timeouts")
 
-    while middleman.running:
+    while server.running:
         timeouts = middleman.timeout_queue.dequeue_range(upper_limit=isotime.now(), num=10)
 
         # Wait for more work
@@ -56,8 +56,8 @@ def process_timeouts(middleman):
                 logger.exception("Problem timing out %s:", scan_key)
 
 
-def process_retries(middleman):
-    while middleman.running:
+def process_retries(server, middleman):
+    while server.running:
         tasks = middleman.retry_queue.dequeue_range(upper_limit=isotime.now(), num=10)
 
         if not tasks:
@@ -84,7 +84,7 @@ def dropper():  # df node def
         expiry = now_as_iso(86400)
         sha256 = notice.get('sha256')
 
-        datastore.save_or_freshen_file(sha256, {'sha256': sha256}, expiry, c12n)
+        datastore.save_or_freshen_file(sha256, {'sha256': sha256}, expiry, c12n, redis=redis)
 
     datastore.close()
 
@@ -167,13 +167,16 @@ class MiddlemanInternals(ServerBase):
         }
 
         params = {
+            'server': self,
             'middleman': self.middleman
         }
+
+        error_limit = 4
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
             handles = {}
 
-            while self.running:
+            while self.running and error_limit > 0:
                 for name, fn in tasks.items():
                     # If we don't have a running instance of that task, start it
                     if name not in handles:
@@ -186,10 +189,12 @@ class MiddlemanInternals(ServerBase):
                     # So the task WAS running, and isn't now, is there an error?
                     exception = handles[name].exception(timeout=0)
                     if exception:
-                        self.log.error(f"An error was encountered while running {name}:\n {str(exception)}")
+                        self.log.exception(f"An error was encountered while running {name}:\n {str(exception)}")
+                        error_limit -= 1
                     del handles[name]
 
-                time.sleep(3)
+                time.sleep(0.5)
+            self.stop()
 
 
 if __name__ == '__main__':

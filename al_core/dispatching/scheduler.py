@@ -4,7 +4,7 @@ This object encapsulates the
 """
 import re
 import logging
-from typing import Dict
+from typing import Dict, List
 
 from assemblyline.odm.models.service import Service
 from assemblyline.common.forge import CachedObject
@@ -34,7 +34,7 @@ class Scheduler:
     def system_category(self):
         return self.config.services.system_category
 
-    def build_schedule(self, submission, file_type: str):
+    def build_schedule(self, submission, file_type: str) -> List[Dict[str, Service]]:
         all_services = dict(self.services)
 
         # Load the selected and excluded services by category
@@ -48,7 +48,7 @@ class Scheduler:
         system_services = [k for k, v in all_services.items() if v.category == self.system_category]
 
         # Add all selected, accepted, and not rejected services to the schedule
-        schedule = [{} for _ in self.stages()]
+        schedule: List[Dict[str, Service]] = [{} for _ in self.config.core.dispatcher.stages]
         services = list((set(selected) - set(excluded)) | set(system_services))
         selected = []
         skipped = []
@@ -114,13 +114,10 @@ class Scheduler:
         return all_categories
 
     def stage_index(self, stage):
-        return self.stages().index(stage)
-
-    def stages(self):
-        return self.config.core.dispatcher.stages
+        return self.config.core.dispatcher.stages.index(stage)
 
     def _get_services(self):
-        return {ser.name: ser for ser in self.datastore.service.search('*:*', fl='*', filter='enabled: True', rows=1000)['items']}
+        return self.datastore.service.multiget([x.id for x in self.datastore.service.stream_search('enabled:true', fl='id')])
 
     # def build_service_config(self, service_name, submission):
     #     """

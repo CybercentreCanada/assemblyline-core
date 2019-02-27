@@ -61,6 +61,7 @@ class SubmissionClient:
         self.config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
         self.filestore = filestore or forge.get_filestore(self.config)
+        self.redis = redis
         self.classification_engine = cl_engine or forge.get_classification()
 
         # A client for interacting with the dispatcher
@@ -180,7 +181,7 @@ class SubmissionClient:
             if sha256 is not None and fileinfo['sha256'] != sha256:
                 raise CorruptedFileStoreException('SHA256 mismatch between received '
                                                   'and calculated sha256. %s != %s' % (sha256, fileinfo['sha256']))
-            self.datastore.save_or_freshen_file(fileinfo['sha256'], fileinfo, expiry, classification)
+            self.datastore.save_or_freshen_file(fileinfo['sha256'], fileinfo, expiry, classification, redis=self.redis)
 
             # Check if there is an integrated decode process for this file
             # eg. files that are packaged, and the contained file (not the package
@@ -192,7 +193,7 @@ class SubmissionClient:
                 local_path = massaged_path
                 sha256 = fileinfo['sha256']
                 self.filestore.put(local_path, sha256)
-                self.datastore.save_or_freshen_file(sha256, fileinfo, expiry, classification)
+                self.datastore.save_or_freshen_file(sha256, fileinfo, expiry, classification, redis=self.redis)
 
             return fileinfo['sha256'], fileinfo['size'], al_meta
 
