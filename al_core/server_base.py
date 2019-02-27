@@ -5,9 +5,11 @@ import time
 import threading
 import logging
 import signal
+import sys
 
 
 SHUTDOWN_SECONDS_LIMIT = 10
+
 
 class ServerBase(threading.Thread):
     """Utility class for Assmblyline server processes.
@@ -20,7 +22,8 @@ class ServerBase(threading.Thread):
         super().__init__(name=component_name)
         self.running = None
         self.log = logger or logging.getLogger(component_name)
-
+        self._exception = None
+        self._traceback = None
 
     def start(self):
         """Start the server workload."""
@@ -40,6 +43,7 @@ class ServerBase(threading.Thread):
         try:
             self.try_run()
         except:
+            _, self._exception, self._traceback = sys.exc_info()
             self.log.exception("Exiting:")
 
     def stop(self):
@@ -64,3 +68,8 @@ class ServerBase(threading.Thread):
     def serve_forever(self):
         self.start()
         self.join()
+
+    def raising_join(self):
+        self.join()
+        if self._traceback and self._exception:
+            raise self._exception.with_traceback(self._traceback)
