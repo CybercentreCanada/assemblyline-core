@@ -95,7 +95,7 @@ class DispatchClient:
 
     def service_finished(self, task: ServiceTask, result):
         # Store the result object and mark the service finished in the global table
-        self.results.save(task.result_key(), result)
+        self.results.save(result.result_key(), result)
         process_table = DispatchHash(task.sid, *self.redis)
         remaining = process_table.finish(task.sha256, task.service, task.result_key, result.score, result.drop_file)
 
@@ -167,6 +167,7 @@ class DispatchClient:
         # Create a unique queue
         queue_name = reply_queue_name(prefix="D", suffix="WQ")
         watch_queue = NamedQueue(queue_name, ttl=30)
+        watch_queue.push(WatchQueueMessage({'status': 'START'}).as_primitives())
 
         # Add the newly created queue to the list of queues for the given submission
         self._get_watcher_list(sid).add(queue_name)
@@ -174,13 +175,23 @@ class DispatchClient:
         # Push all current keys to the newly created queue (Queue should have a TTL of about 30 sec to 1 minute)
         # Download the entire status table from redis
         dispatch_hash = DispatchHash(sid, self.redis)
-        all_service_status = dispatch_hash.all_results()
-        for status_values in all_service_status.values():
-            for status in status_values.values():
-                if status.is_error:
-                    watch_queue.push(WatchQueueMessage({"status": "FAIL", "cache_key": status.key}).as_primitives())
-                else:
-                    watch_queue.push(WatchQueueMessage({"status": "OK", "cache_key": status.key}).as_primitives())
+        if dispatch_hash.dispatch_count() == 0 and dispatch_hash.finished_count() == 0:
+            # This table is empty? do we have this submission at all?
+            submission = self.ds.submission.get(sid)
+            if not submission or submission.state == 'completed':
+                watch_queue.push(WatchQueueMessage({"status": "STOP"}).as_primitives())
+            else:
+                # We do have a submission, remind the dispatcher to work on it
+                self.submission_queue.push({'sid': sid})
+
+        else:
+            all_service_status = dispatch_hash.all_results()
+            for status_values in all_service_status.values():
+                for status in status_values.values():
+                    if status.is_error:
+                        watch_queue.push(WatchQueueMessage({"status": "FAIL", "cache_key": status.key}).as_primitives())
+                    else:
+                        watch_queue.push(WatchQueueMessage({"status": "OK", "cache_key": status.key}).as_primitives())
 
         return queue_name
 
