@@ -8,6 +8,7 @@ from functools import reduce
 # TODO replace with unique queue
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
+from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
@@ -41,7 +42,7 @@ def get_submission_tags_name(task):
 
 @odm.model()
 class SubmissionTask(odm.Model):
-    submission = odm.Compound(Submission)
+    submission: Submission = odm.Compound(Submission)
     completed_queue = odm.Keyword(default_set=True)                     # Which queue to notify on completion
 
 
@@ -54,17 +55,6 @@ class FileTask(odm.Model):
     parent_hash = odm.Optional(odm.Keyword())
     file_info: FileInfo = odm.Compound(FileInfo)
     depth = odm.Integer()
-
-
-# @odm.model()
-# class ServiceTask(odm.Model, __TaskOperations):
-#     sid = odm.Keyword()
-#     file_hash = odm.Keyword()
-#     parent_hash = odm.Optional(odm.Keyword())
-#     file_type = odm.Keyword()
-#     depth = odm.Integer()
-#     service_name = odm.Keyword()
-#     service_config = odm.Keyword()
 
 
 FILE_QUEUE = 'dispatch-file'
@@ -97,7 +87,7 @@ class Dispatcher:
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, redis)
         self.file_queue = NamedQueue(FILE_QUEUE, redis)
         self._nonper_other_queues = {}
-        self.active_tasks = ExpiringHash(DISPATCH_TASK_HASH, host=redis)
+        self.active_tasks = ExpiringHash(DISPATCH_TASK_HASH, host=redis_persist)
 
         # Publish counters to the metrics sink.
         self.counts = exporting_counter.AutoExportingCounters(
@@ -176,7 +166,6 @@ class Dispatcher:
         dispatch_table = DispatchHash(submission.sid, self.redis)
 
         # Try to find all files, and extracted files
-        depth_limit = self.config.submission.max_extraction_depth
         unchecked_files = []
         for submission_file in submission.files:
             file_data = self.files.get(submission_file.sha256)
@@ -200,6 +189,7 @@ class Dispatcher:
 
         encountered_files = {file.sha256 for file in submission.files}
         pending_files = {}
+        file_parents = {}
 
         # Track information about the results as we hit them
         max_score = None
@@ -235,18 +225,27 @@ class Dispatcher:
 
                 # The result should exist then, get all the sub-files
                 result = self.results.get(result_row.key)
-                if task.depth >= depth_limit:  # If we have hit the depth limit, ignore children
-                    for sub_file in result.extracted_files:
-                        if sub_file not in encountered_files:
-                            encountered_files.add(sub_file.sha256)
+                for sub_file in result.extracted_files:
+                    file_parents[sub_file.sha256] = file_parents.get(sub_file.sha256, []) + [sha]
 
-                            file_type = self.files.get(sha).type
-                            unchecked_files.append(FileTask(dict(
-                                sid=sid,
-                                file_hash=sub_file.sha256,
-                                file_type=file_type,
-                                depth=task.depth + 1
-                            )))
+                    if sub_file.sha256 in encountered_files:
+                        continue
+
+                    encountered_files.add(sub_file.sha256)
+                    file_data = self.datastore.file.get(sub_file.sha256)
+                    unchecked_files.append(FileTask(dict(
+                        sid=sid,
+                        file_info=dict(
+                            magic=file_data.magic,
+                            md5=file_data.md5,
+                            mime=file_data.mime,
+                            sha1=file_data.sha1,
+                            sha256=file_data.sha256,
+                            size=file_data.size,
+                            type=file_data.type,
+                        ),
+                        depth=-1  # This will be set later
+                    )))
 
                 # Collect information about the result
                 if max_score is None:
@@ -255,11 +254,21 @@ class Dispatcher:
                     max_score = max(max_score, result.score)
                 result_classifications.append(result.classification)
 
+        # Now that we have seen the entire file tree, we can recalulate the depth of each file in the tree
+        depth_limit = self.config.submission.max_extraction_depth
+        def file_depth(sha):
+            # A root file won't have any parents in the dict
+            if sha not in file_parents:
+                return 0
+            return min(file_depth(parent) for parent in file_parents[sha])
+
         # If there are pending files, then at least one service, on at least one
         # file isn't done yet, poke those files
         if pending_files:
             for task in pending_files.values():
-                self.file_queue.push(task.as_primitives())
+                task.depth = file_depth(task.file_info.sha256)
+                if task.depth < depth_limit:
+                    self.file_queue.push(task.as_primitives())
         else:
             self.finalize_submission(task, result_classifications, max_score, len(encountered_files))
 
@@ -309,7 +318,7 @@ class Dispatcher:
         self.submissions.save(sid, submission)
 
         if task.completed_queue:
-            self.volatile_named_queue(task.completed_queue).push(submission.as_primatives())
+            self.volatile_named_queue(task.completed_queue).push(submission.as_primitives())
 
         # Send complete message to any watchers.
         watcher_list = ExpiringSet(make_watcher_list_name(sid), host=self.redis)
@@ -388,16 +397,18 @@ class Dispatcher:
 
                 # Check if something, an error/a result already exists, to resolve this service
                 config = self.build_service_config(service, submission)
-                access_key = self.build_result_key(file_hash, service, submission, config)
+                config_key = self.build_config_key(service, submission, config)
+                access_key = Result.help_build_key(file_hash, service.name, service.version, config_key)
                 result = self.results.get(access_key)
                 if result:
-                    score += result.score
+                    score += result.result.score
                     # If we have managed to load a result for this file/service/config combo
                     # then mark this service as finished in the dispatch table.
                     # make sure to pass on whether the file was dropped by the service
                     # last time it was run
                     drop = result.drop_file
-                    tasks_remaining = dispatch_table.finish(file_hash, service_name, access_key, result.score, drop=drop)
+                    tasks_remaining = dispatch_table.finish(file_hash, service_name, access_key,
+                                                            result.result.score, drop=drop)
                     if not submission.params.ignore_filtering and drop:
                         # Remove all stages from the schedule (the current stage will still continue)
                         schedule.clear()
@@ -423,11 +434,11 @@ class Dispatcher:
 
                 # If in the end, we still want to run this service, pass on the configuration
                 # we have resolved to use
-                outstanding[service_name] = service, config
+                outstanding[service_name] = service, config, config_key
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
-            for service_name, (service, config) in outstanding.items():
+            for service_name, (service, config, config_key) in outstanding.items():
                 # Check if this submission has already dispatched this service, and hasn't timed out yet
                 queued_time = time.time() - dispatch_table.dispatch_time(file_hash, service_name)
                 if queued_time < service.timeout:
@@ -438,6 +449,7 @@ class Dispatcher:
                     sid=task.sid,
                     service_name=service_name,
                     service_config=json.dumps(config),
+                    config_key=config_key,
                     fileinfo=task.file_info,
                     depth=task.depth,
                 ))
@@ -452,9 +464,10 @@ class Dispatcher:
             # Store the file's score under this configuration into the
             filescore_key = submission.params.create_filescore_key(file_hash)
             self.datastore.filescore.save(filescore_key, {
-                'psid': submission.params.psid,
+                'psid': submission.params.psid if submission.params.psid else None,
                 'expiry_ts': submission.expiry_ts,
                 'score': score,
+                'errors': errors,
                 'sid': submission.sid,
                 'time': now,
             })
@@ -508,25 +521,6 @@ class Dispatcher:
         if service.name in submission.params.service_spec:
             params.update(submission.params.service_spec[service.name])
         return params
-
-    def build_result_key(self, file_hash: str, service: Service, submission: Submission, config=None):
-        """
-
-        TODO this probably needs to be moved to another package
-
-        Result keys combine service name, version, file hash, and config_key.
-
-        v3 name: _get_riak_key
-        """
-        key_list = [
-            file_hash,
-            service.name.replace('.', '_'),
-            service.version.replace('.', '_'),
-            self.build_config_key(service, submission, config)
-        ]
-
-        print('input for result key', key_list)
-        return '.'.join(key_list)
 
     def build_config_key(self, service: Service, submission: Submission, config=None):
         """Create a hash summarizing the submission parameters that might effect the given service.

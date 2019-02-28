@@ -25,14 +25,19 @@ class SubmissionDispatchServer(ServerBase):
                 if not message:
                     continue
 
-                message = json.loads(message)
-                sub = SubmissionTask(message)
+                # This is probably a complete task
+                if 'submission' in message:
+                    task = SubmissionTask(message)
 
-                # if not sub:
-                #     self.log.error(f"Tried to dispatch submission missing from datastore: {message}")
-                #     continue
+                # This is just as sid nudge, this submission should already be running
+                elif 'sid' in message:
+                    task = SubmissionTask(self.dispatcher.active_tasks.get(message['sid']))
 
-                self.dispatcher.dispatch_submission(sub)
+                else:
+                    self.log.error(f'Corrupted submission message in dispatcher {message}')
+                    continue
+
+                self.dispatcher.dispatch_submission(task)
             except Exception as error:
                 self.log.exception(error)
 

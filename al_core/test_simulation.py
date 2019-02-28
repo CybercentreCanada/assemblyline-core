@@ -1,3 +1,4 @@
+import uuid
 import random
 import json
 import hashlib
@@ -129,7 +130,7 @@ def test_simulate_core(es_connection, clean_redis):
         # =========================================================================
 
         body = {
-
+            'salt': uuid.uuid4().hex
         }
         body = json.dumps(body).encode()
         sha256 = hashlib.sha256()
@@ -146,12 +147,11 @@ def test_simulate_core(es_connection, clean_redis):
             ),
         )
 
-        result = notification_queue.pop(timeout=5)
-        assert result
+        first_result = notification_queue.pop(timeout=5)
 
     finally:
         [t.stop() for t in threads]
         [t.raising_join() for t in threads]
 
-    assert False
+    assert first_result
 

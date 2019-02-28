@@ -1,6 +1,7 @@
 from al_core.dispatching.dispatcher import Dispatcher, FileTask
 from al_core.server_base import ServerBase
 
+
 class FileDispatchServer(ServerBase):
     def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None):
         super().__init__('assemblyline.dispatcher.file', logger)

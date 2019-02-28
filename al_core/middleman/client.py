@@ -71,4 +71,4 @@ class MiddlemanClient:
         kwargs['ingest_time'] = now()
 
         # Type/field check then push into middleman
-        self.ingest_queue.push(IngestTask(kwargs).json())
+        self.ingest_queue.push(IngestTask(kwargs).as_primitives())

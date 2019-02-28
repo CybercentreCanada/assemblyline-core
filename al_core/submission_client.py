@@ -71,6 +71,7 @@ class SubmissionClient:
         """Submit several files in a single submission.
 
         After this method runs, there should be no local copies of the file left.
+        TODO UPDATE
 
         Params:
             file_locations: a mapping from file hash to local path to a file.

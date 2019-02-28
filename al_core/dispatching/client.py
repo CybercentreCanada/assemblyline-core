@@ -9,6 +9,7 @@ from typing import Dict
 
 from assemblyline.common import forge
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
+from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.error import Error
 from assemblyline.remote.datatypes import get_client, reply_queue_name
@@ -16,7 +17,7 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 
 from al_core.dispatching.dispatcher import SubmissionTask, ServiceTask, FileTask, SUBMISSION_QUEUE, \
-    make_watcher_list_name
+    make_watcher_list_name, FILE_QUEUE
 from al_core.dispatching.dispatch_hash import DispatchHash
 from al_core.dispatching.scheduler import Scheduler
 
@@ -33,6 +34,7 @@ class DispatchClient:
         )
 
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
+        self.file_queue = NamedQueue(FILE_QUEUE, self.redis)
         self.ds = datastore or forge.get_datastore(self.config)
         self.log = logger or logging.getLogger("assemblyline.dispatching.client")
         self.results = datastore.result
@@ -53,7 +55,7 @@ class DispatchClient:
         self.submission_queue.push(SubmissionTask(dict(
             submission=submission,
             completed_queue=completed_queue,
-        )).json())
+        )).as_primitives())
 
     def outstanding_services(self, sid) -> Dict[str, int]:
         """
@@ -93,40 +95,39 @@ class DispatchClient:
     def request_work(self, service_name, timeout=60):
         raise NotImplementedError()
 
-    def service_finished(self, task: ServiceTask, result):
+    def service_finished(self, task: ServiceTask, result: Result):
         # Store the result object and mark the service finished in the global table
-        self.results.save(result.result_key(), result)
-        process_table = DispatchHash(task.sid, *self.redis)
-        remaining = process_table.finish(task.sha256, task.service, task.result_key, result.score, result.drop_file)
+        result_key = result.build_key(task.config_key)
+        self.results.save(result_key, result)
+        process_table = DispatchHash(task.sid, self.redis)
+        remaining = process_table.finish(task.fileinfo.sha256, task.service_name, result_key,
+                                         result.result.score, result.drop_file)
 
-        if files.pop(srl, None):
-            dispatcher.completed[sid][srl] = entry.task.classification
-
-        # Add the extracted files
-        for extracted_data in result.response.extracted:
-            file_data = self.files.get(extracted_data.sha256)
-            self.file_queue.push(FileTask(dict(
-                sid=task.sid,
-                sha256=extracted_data.sha256,
-                file_type=file_data.type,
-                depth=task.depth+1,
-            )))
+        # Send the extracted files to the dispatcher
+        depth_limit = self.config.submission.max_extraction_depth
+        if task.depth < depth_limit:
+            for extracted_data in result.response.extracted:
+                file_data = self.files.get(extracted_data.sha256)
+                self.file_queue.push(FileTask(dict(
+                    sid=task.sid,
+                    file_info=file_data,
+                    depth=task.depth+1,
+                    parent_hash=task.fileinfo.sha256,
+                )).as_primitives())
 
         # If the global table said that this was the last outstanding service,
         # send a message to the dispatchers.
         if remaining == 0:
             self.file_queue.push(FileTask(dict(
                 sid=task.sid,
-                sha256=task.sha256,
-                file_type=task.file_type,
+                file_info=task.fileinfo,
                 depth=task.depth,
-            )))
+            )).as_primitives())
 
         # Send the result key to any watching systems
-        if result.cache_key:
-            msg = {'status': 'OK', 'cache_key': result.cache_key}
-            for w in self._get_watcher_list(task.sid).members():
-                w.push(msg)
+        msg = {'status': 'OK', 'cache_key': result_key}
+        for w in self._get_watcher_list(task.sid).members():
+            w.push(msg)
 
     def service_failed(self, task: ServiceTask, error: Error):
         # Add an error to the datastore

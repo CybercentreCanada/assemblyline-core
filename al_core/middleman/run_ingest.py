@@ -51,7 +51,7 @@ class MiddlemanIngester(ServerBase):
 
             middleman.traffic_queue.publish(message)
             try:
-                task = IngestTask(json.loads(message))
+                task = IngestTask(message)
             except ValueError:
                 self.log.warning(f"Dropped ingest submission {message}")
                 continue
