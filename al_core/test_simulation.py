@@ -6,7 +6,7 @@ import pytest
 from unittest import mock
 from typing import List
 
-
+from al_core.middleman.middleman import IngestTask
 from assemblyline.common import forge
 
 from al_core.dispatching.client import DispatchClient
@@ -29,6 +29,7 @@ from al_core.mocking import clean_redis
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
+from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 
@@ -94,36 +95,34 @@ class MockService(ServerBase):
 
 
 def test_simulate_core(es_connection, clean_redis):
+    ds = es_connection
     threads = []
     filestore = forge.get_filestore()
     try:
         threads: List[ServerBase] = [
             # Start the middleman components
-            MiddlemanIngester(datastore=es_connection, redis=clean_redis, persistent_redis=clean_redis),
-            MiddlemanSubmitter(datastore=es_connection, redis=clean_redis, persistent_redis=clean_redis),
-            MiddlemanInternals(datastore=es_connection, redis=clean_redis, persistent_redis=clean_redis),
+            MiddlemanIngester(datastore=ds, redis=clean_redis, persistent_redis=clean_redis),
+            MiddlemanSubmitter(datastore=ds, redis=clean_redis, persistent_redis=clean_redis),
+            MiddlemanInternals(datastore=ds, redis=clean_redis, persistent_redis=clean_redis),
 
             # Start the dispatcher
-            FileDispatchServer(datastore=es_connection, redis=clean_redis, redis_persist=clean_redis),
-            SubmissionDispatchServer(datastore=es_connection, redis=clean_redis, redis_persist=clean_redis),
+            FileDispatchServer(datastore=ds, redis=clean_redis, redis_persist=clean_redis),
+            SubmissionDispatchServer(datastore=ds, redis=clean_redis, redis_persist=clean_redis),
         ]
 
-        es_connection.service.delete_matching('*')
-        es_connection.service.save('pre', dummy_service('pre', 'extract'))
-        threads.append(MockService('pre', es_connection, clean_redis, filestore))
-        es_connection.service.save('core-a', dummy_service('core-a', 'core'))
-        threads.append(MockService('core-a', es_connection, clean_redis, filestore))
-        es_connection.service.save('core-b', dummy_service('core-b', 'core'))
-        threads.append(MockService('core-b', es_connection, clean_redis, filestore))
-        es_connection.service.save('post', dummy_service('finish', 'post'))
-        threads.append(MockService('post', es_connection, clean_redis, filestore))
+        ds.service.delete_matching('*')
+        ds.service.save('pre', dummy_service('pre', 'extract'))
+        threads.append(MockService('pre', ds, clean_redis, filestore))
+        ds.service.save('core-a', dummy_service('core-a', 'core'))
+        threads.append(MockService('core-a', ds, clean_redis, filestore))
+        ds.service.save('core-b', dummy_service('core-b', 'core'))
+        threads.append(MockService('core-b', ds, clean_redis, filestore))
+        ds.service.save('post', dummy_service('finish', 'post'))
+        threads.append(MockService('post', ds, clean_redis, filestore))
 
         for t in threads:
             t.daemon = True
             t.start()
-
-        notification_queue_name = 'test-feedback-queue'
-        notification_queue = NamedQueue(notification_queue_name, clean_redis)
 
         client = MiddlemanClient(clean_redis, clean_redis)
 
@@ -137,6 +136,25 @@ def test_simulate_core(es_connection, clean_redis):
         sha256.update(body)
         filestore.save(sha256.hexdigest(), body)
 
+        # Submit two identical jobs, check that they get deduped by middleman
+        for _ in range(2):
+            client.ingest(
+                sha256=sha256.hexdigest(),
+                file_size=len(body),
+                classification='U',
+                metadata={},
+                params=dict(
+                    groups=['user'],
+                ),
+                notification_queue='1',
+                notification_threshold=0
+            )
+
+        notification_queue = NamedQueue('1', clean_redis)
+        first_task = notification_queue.pop(timeout=5)
+        second_task = notification_queue.pop(timeout=5)
+
+        # Submit the same body, but change a parameter so the cache key misses,
         client.ingest(
             sha256=sha256.hexdigest(),
             file_size=len(body),
@@ -144,16 +162,36 @@ def test_simulate_core(es_connection, clean_redis):
             metadata={},
             params=dict(
                 groups=['user'],
+                max_extracted=10000
             ),
-            notification_queue=notification_queue_name,
+            notification_queue='2',
             notification_threshold=0
         )
 
-        first_result = notification_queue.pop(timeout=5)
+        notification_queue = NamedQueue('2', clean_redis)
+        third_task = notification_queue.pop(timeout=5)
 
     finally:
         [t.stop() for t in threads]
         [t.raising_join() for t in threads]
 
-    assert first_result
+    # One of the submission will get processed fully
+    first_task = IngestTask(first_task)
+    first_submission: Submission = ds.submission.get(first_task.sid)
+    assert len(first_submission.files) == 1
+    assert len(first_submission.results) == 4
+
+    # The other will get processed as a duplicate
+    # (Which one is the 'real' one and which is the duplicate isn't important for our purposes)
+    second_task = IngestTask(second_task)
+    assert second_task.sid == first_task.sid
+
+    # The third task should not be deduplicated by middleman, so will have a different submission
+    third_task = IngestTask(third_task)
+    third_submission: Submission = ds.submission.get(third_task.sid)
+    assert first_submission.sid != third_submission.sid
+    assert len(third_submission.files) == 1
+    assert len(third_submission.results) == 4
+
+
 

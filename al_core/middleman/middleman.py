@@ -14,7 +14,7 @@ import threading
 import json
 from math import tanh
 from random import random
-from typing import Iterable
+from typing import Iterable, Union
 
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
@@ -145,6 +145,9 @@ class IngestTask(odm.Model):
     metadata = odm.Mapping(odm.Keyword())
     score = odm.Optional(odm.Float())  # Score from previous processing of this file
 
+    # After a task is complete the submission id is added
+    sid: Union[str, None] = odm.Optional(odm.Keyword())
+
 
 class Middleman:
     """Internal interface to the ingestion queues."""
@@ -212,7 +215,7 @@ class Middleman:
         # persist this state and recover in case we crash.
         self.scanning = Hash('m-scanning-table', self.persistent_redis)
 
-        # Input. An external process creates a record when any submission completes.
+        # Input. The dispatcher creates a record when any submission completes.
         self.complete_queue = NamedQueue(_completeq_name, self.redis)
 
         # Internal. Dropped entries are placed on this queue.
@@ -234,6 +237,12 @@ class Middleman:
         self.timeout_queue = PriorityQueue('m-timeout', self.redis)
 
         # Internal, queue for processing duplicates
+        #   When a duplicate file is detected (same cache key => same file, and same
+        #   submission parameters) the file won't be ingested normally, but instead a reference
+        #   will be written to a duplicate queue. Whenever a file is finished, in the complete
+        #   method, not only is the original ingestion finalized, but all entries in the duplicate queue
+        #   are finalized as well. This has the effect that all concurrent ingestion of the same file
+        #   are 'merged' into a single submission to the system.
         self.duplicate_queue = MultiQueue(self.persistent_redis)
 
         # Output. submissions that should have alerts generated
@@ -456,6 +465,7 @@ class Middleman:
             return scan_key
 
         task = IngestTask(raw)
+        task.sid = sid
 
         errors = sub.error_count
         file_count = sub.file_count
@@ -479,7 +489,9 @@ class Middleman:
                 res = self.duplicate_queue.pop(_dup_prefix + scan_key, blocking=False)
                 if res is None:
                     break
-                yield IngestTask(res)
+                res = IngestTask(res)
+                res.sid = sid
+                yield res
 
         # You may be tempted to remove the assignment to dups and use the
         # value directly in the for loop below. That would be a mistake.
@@ -514,7 +526,7 @@ class Middleman:
         if not q:
             self.notification_queues[task.notification_queue] = q = \
                 NamedQueue(task.notification_queue, self.persistent_redis)
-        q.push(task.json())
+        q.push(task.as_primitives())
 
     def expired(self, delta: float, errors) -> bool:
         # incomplete_expire_after_seconds = 3600
