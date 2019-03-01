@@ -4,6 +4,7 @@ from easydict import EasyDict
 
 import assemblyline.odm.models.file
 import assemblyline.odm.models.submission
+from assemblyline.odm.models.result import Result
 from assemblyline.odm.randomizer import random_model_obj
 from assemblyline.odm import models
 
@@ -94,13 +95,14 @@ def test_dispatch_file(clean_redis):
     print('==== fourth dispatch')
     [service_queue(name).delete() for name in disp.scheduler.services]
     dh.finish(file_hash, 'extract', 'result-key', 0)
-    wrench_result_key = disp.build_result_key(
-        file_hash=file_hash,
-        service=disp.scheduler.services.get('wrench'),
-        submission=sub
+    wrench_result_key = Result.help_build_key(
+        sha256=file_hash,
+        service_name='wrench',
+        service_version=disp.scheduler.services.get('wrench').version,
+        conf_key=disp.build_config_key(disp.scheduler.services.get('wrench'), submission=sub)
     )
     print('wrench result key', wrench_result_key)
-    ds.result.save(wrench_result_key, EasyDict(drop_file=False, score=0))
+    ds.result.save(wrench_result_key, EasyDict(drop_file=False, result=EasyDict(score=0)))
 
     disp.dispatch_file(file_task)
 

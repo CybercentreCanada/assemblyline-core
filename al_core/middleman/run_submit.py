@@ -27,13 +27,14 @@ class MiddlemanSubmitter(ServerBase):
 
     def start(self):
         super().start()
-        # Start the auxillary threads
+        # Start the auxiliary threads
         self.middleman.start_counters()
 
     def try_run(self, volatile=False):
         middleman = self.middleman
         logger = self.log
         while self.running:
+            # noinspection PyBroadException
             try:
                 # Check if there is room for more submissions
                 length = middleman.scanning.length()
@@ -53,7 +54,7 @@ class MiddlemanSubmitter(ServerBase):
                     continue
 
                 # If between the initial ingestion and now the drop/whitelist status
-                # of this submission has chaged, then drop it now
+                # of this submission has changed, then drop it now
                 if middleman.drop(task):
                     continue
 
@@ -84,7 +85,7 @@ class MiddlemanSubmitter(ServerBase):
                 if not middleman.scanning.add(scan_key, task.as_primitives()):
                     logger.debug('Duplicate %s', task.sha256)
                     middleman.ingester_counts.increment('ingest.duplicates')
-                    middleman.duplicate_queue.push(_dup_prefix + scan_key, task.json())
+                    middleman.duplicate_queue.push(_dup_prefix + scan_key, task.as_primitives())
                     continue
 
                 # We have managed to add the task to the scan table, so now we go
@@ -103,7 +104,7 @@ class MiddlemanSubmitter(ServerBase):
                 should_retry = True
                 if isinstance(ex, CorruptedFileStoreException):
                     logger.error("Submission for file '%s' failed due to corrupted filestore: %s"
-                                 % (task.sha256, ex.message))
+                                 % (task.sha256, str(ex)))
                     should_retry = False
                 elif isinstance(ex, DataStoreException):
                     trace = exceptions.get_stacktrace_info(ex)
@@ -124,7 +125,7 @@ class MiddlemanSubmitter(ServerBase):
                 if volatile:
                     raise ex.with_traceback(traceback)
 
-            except Exception:  # pylint:disable=W0703
+            except Exception:
                 logger.exception("Unexpected error")
                 if volatile:
                     raise

@@ -225,7 +225,7 @@ class Dispatcher:
 
                 # The result should exist then, get all the sub-files
                 result = self.results.get(result_row.key)
-                for sub_file in result.extracted_files:
+                for sub_file in result.response.extracted:
                     file_parents[sub_file.sha256] = file_parents.get(sub_file.sha256, []) + [sha]
 
                     if sub_file.sha256 in encountered_files:
@@ -249,12 +249,12 @@ class Dispatcher:
 
                 # Collect information about the result
                 if max_score is None:
-                    max_score = result.score
+                    max_score = result.result.score
                 else:
-                    max_score = max(max_score, result.score)
+                    max_score = max(max_score, result.result.score)
                 result_classifications.append(result.classification)
 
-        # Now that we have seen the entire file tree, we can recalulate the depth of each file in the tree
+        # Now that we have seen the entire file tree, we can recalculate the depth of each file in the tree
         depth_limit = self.config.submission.max_extraction_depth
         def file_depth(sha):
             # A root file won't have any parents in the dict

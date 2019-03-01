@@ -13,6 +13,8 @@ from assemblyline.common import log
 
 from al_core.middleman.middleman import Middleman, IngestTask
 from al_core.server_base import ServerBase
+from assemblyline.odm.models.submission import Submission
+
 
 class MiddlemanIngester(ServerBase):
     def __init__(self, logger=None, datastore=None, redis=None, persistent_redis=None):
@@ -43,7 +45,7 @@ class MiddlemanIngester(ServerBase):
                 if not result:
                     break
 
-                middleman.completed(result)
+                middleman.completed(Submission(result))
 
             message = middleman.ingest_queue.pop(timeout=1)
             if not message:

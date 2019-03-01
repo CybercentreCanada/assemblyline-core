@@ -145,6 +145,8 @@ def test_simulate_core(es_connection, clean_redis):
             params=dict(
                 groups=['user'],
             ),
+            notification_queue=notification_queue_name,
+            notification_threshold=0
         )
 
         first_result = notification_queue.pop(timeout=5)

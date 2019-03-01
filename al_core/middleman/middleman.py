@@ -14,6 +14,7 @@ import threading
 import json
 from math import tanh
 from random import random
+from typing import Iterable
 
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
@@ -117,23 +118,6 @@ def should_resubmit(score):
     resubmit_probability = 1.0 / 10 ** ((500 - score) / 100)
 
     return random() < resubmit_probability
-
-
-# TODO move to config file
-@odm.model()
-class Ingest(odm.Model):
-    # The ingest defaults are the values given to ingest tasks when no input
-    # has been provided
-    default_user = odm.Keyword()
-    default_services = odm.List(odm.Keyword(), default=['Antivirus', 'Extraction', 'Filtering',
-                                                        'Networking', 'Static Analysis'])
-    default_resubmit_services = odm.List(odm.Keyword(), default=['Dynamic Analysis'])
-
-    # Maximum permitted length of metadata values
-    max_value_size = odm.Integer()
-
-    # Maximum file size for ingestion
-    max_size = odm.Integer()
 
 
 @odm.model()
@@ -436,52 +420,51 @@ class Middleman:
 
         TODO this is the v3 method
         """
-        sha256 = task.root_sha256
+        # There is only one file in the submissions we have made
+        sha256 = sub.files[0].sha256
+        scan_key = sub.params.create_filescore_key(sha256)
+        raw = self.scanning.pop(scan_key)
 
         psid = sub.params.psid
-        score = task.score
-        sid = task.sid
+        score = sub.max_score
+        sid = sub.sid
 
-        scan_key = task.scan_key
-
-        # Remove the entry from the hash of submissions in progress.
-        raw = self.scanning.pop(scan_key)
         if not raw:
             # Some other worker has already popped the scanning queue?
             self.log.warning("Submission completed twice (score=%d) for: %s %s",
-                             int(score), sha256, str(task.metadata))
+                             int(score), sha256, str(sub.metadata))
 
+            # TODO Why is all of this being done? How many times should a task be finalized?
             # Not a result we care about. We are notified for every
             # submission that completes. Some submissions will not be ours.
-            if task.metadata:
-                stype = None
-                try:
-                    stype = task.metadata.get('type', None)
-                except:  # pylint: disable=W0702
-                    logger.exception("Malformed metadata: %s:", sid)
-
-                if not stype:
-                    return scan_key
-
-                if (task.description or '').startswith(default_prefix):
-                    raw = {
-                        'metadata': task.metadata,
-                        'overrides': get_submission_overrides(task, overrides),
-                        'sha256': sha256,
-                        'type': stype,
-                    }
-
-                    finalize(psid, sid, score, Notice(raw))
+            # if sub.metadata:
+            #     stype = sub.metadata.get('type', None)
+            #
+            #     if not stype:
+            #         return scan_key
+            #
+            #     if sub.params.description.startswith(self.config.core.middleman):
+            #         raw = {
+            #             'metadata': sub.metadata,
+            #             'overrides': sub.params.get_hashing_keys(),
+            #             'sha256': sha256,
+            #             'type': stype,
+            #         }
+            #         raw['overrides']['service_spec'] = sub.params.service_spec
+            #
+            #         self.finalize(psid, sid, score, raw)
             return scan_key
 
-        errors = task.raw.get('error_count', 0)
-        file_count = task.raw.get('file_count', 0)
+        task = IngestTask(raw)
+
+        errors = sub.error_count
+        file_count = sub.file_count
         self.ingester_counts.increment('ingest.submissions_completed')
         self.ingester_counts.increment('ingest.files_completed', file_count)
-        self.ingester_counts.increment('ingest.bytes_completed', int(task.size or 0))
+        self.ingester_counts.increment('ingest.bytes_completed', task.file_size)
 
         with self.cache_lock:
-            self.cache[key] = {
+            self.cache[self] = {
                 'errors': errors,
                 'psid': psid,
                 'score': score,
@@ -489,16 +472,14 @@ class Middleman:
                 'time': now(),
             }
 
-        finalize(psid, sid, score, notice)  # df push calls
+        self.finalize(psid, sid, score, task)
 
-        def exhaust():
+        def exhaust() -> Iterable[IngestTask]:
             while True:
-                res = dupq.pop(  # df pull pop
-                    dup_prefix + scan_key, blocking=False
-                )
+                res = self.duplicate_queue.pop(_dup_prefix + scan_key, blocking=False)
                 if res is None:
                     break
-                yield res
+                yield IngestTask(res)
 
         # You may be tempted to remove the assignment to dups and use the
         # value directly in the for loop below. That would be a mistake.
@@ -507,7 +488,7 @@ class Middleman:
         # potential infinite loop.
         dups = [dup for dup in exhaust()]
         for dup in dups:
-            finalize(psid, sid, score, Notice(dup))
+            self.finalize(psid, sid, score, dup)
 
         return scan_key
 
@@ -535,7 +516,7 @@ class Middleman:
                 NamedQueue(task.notification_queue, self.persistent_redis)
         q.push(task.json())
 
-    def expired(self, delta, errors):
+    def expired(self, delta: float, errors) -> bool:
         # incomplete_expire_after_seconds = 3600
 
         if errors:
