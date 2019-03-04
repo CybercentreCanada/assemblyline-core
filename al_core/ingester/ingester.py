@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-Middleman
+Ingester
 
-Middleman is responsible for monitoring for incoming submission requests,
+Ingester is responsible for monitoring for incoming submission requests,
 sending submissions, waiting for submissions to complete, sending a message
 to a notification queue as specified by the submission and, based on the
 score received, possibly sending a message to indicate that an alert should
@@ -126,7 +126,7 @@ class IngestTask(odm.Model):
     params = odm.Compound(SubmissionParams)
 
     # Information about the ingestion itself, parameters irrelivant to the
-    # system outside of middleman
+    # system outside of ingester
     ingest_time = odm.Date()
     scan_key = odm.Keyword(default_set=True)  # the filescore key
     retries = odm.Integer(default=0)
@@ -149,7 +149,7 @@ class IngestTask(odm.Model):
     sid: Union[str, None] = odm.Optional(odm.Keyword())
 
 
-class Middleman:
+class Ingester:
     """Internal interface to the ingestion queues."""
 
     def __init__(self, datastore, logger, classification=None, redis=None, persistent_redis=None):
@@ -168,9 +168,9 @@ class Middleman:
         self.config = forge.CachedObject(forge.get_config)
 
         # TODO Should any of these values be read dynamically
-        self.is_low_priority = load_module_by_path(self.config.core.middleman.is_low_priority)
-        self.get_whitelist_verdict = load_module_by_path(self.config.core.middleman.get_whitelist_verdict)
-        self.whitelist = load_module_by_path(self.config.core.middleman.whitelist)
+        self.is_low_priority = load_module_by_path(self.config.core.ingester.is_low_priority)
+        self.get_whitelist_verdict = load_module_by_path(self.config.core.ingester.get_whitelist_verdict)
+        self.whitelist = load_module_by_path(self.config.core.ingester.whitelist)
 
         # Constants are loaded based on a non-constant path, so has to be done at init rather than load
         constants = forge.get_constants(self.config)
@@ -253,12 +253,12 @@ class Middleman:
                                               redis=self.redis)
 
     def start_counters(self):
-        """Start shared middleman auxillary components."""
+        """Start shared ingester auxillary components."""
         self.ingester_counts.start()
         self.whitelister_counts.start()
 
     def stop_counters(self):
-        """Stop shared middleman auxillary components."""
+        """Stop shared ingester auxillary components."""
         self.ingester_counts.stop()
         self.whitelister_counts.stop()
 
@@ -275,7 +275,7 @@ class Middleman:
     def ingest(self, task: IngestTask):
         # Load a snapshot of ingest parameters as of right now.
         # self.config is a timed cache
-        conf = self.config.core.middleman
+        conf = self.config.core.ingester
         max_file_size = self.config.submission.max_file_size
         param = task.params
 
@@ -408,9 +408,9 @@ class Middleman:
 
     def stale(self, delta: float, errors: int):
         if errors:
-            return delta >= self.config.core.middleman.incomplete_stale_after_seconds
+            return delta >= self.config.core.ingester.incomplete_stale_after_seconds
         else:
-            return delta >= self.config.core.middleman.stale_after_seconds
+            return delta >= self.config.core.ingester.stale_after_seconds
 
     def stamp_filescore_key(self, task: IngestTask, sha256=None):
         if not sha256:
@@ -452,7 +452,7 @@ class Middleman:
             #     if not stype:
             #         return scan_key
             #
-            #     if sub.params.description.startswith(self.config.core.middleman):
+            #     if sub.params.description.startswith(self.config.core.ingester):
             #         raw = {
             #             'metadata': sub.metadata,
             #             'overrides': sub.params.get_hashing_keys(),
@@ -532,13 +532,13 @@ class Middleman:
         # incomplete_expire_after_seconds = 3600
 
         if errors:
-            return delta >= self.config.core.middleman.incomplete_expire_after_seconds
+            return delta >= self.config.core.ingester.incomplete_expire_after_seconds
         else:
-            return delta >= self.config.core.middleman.expire_after
+            return delta >= self.config.core.ingester.expire_after
 
     def drop(self, task: IngestTask) -> bool:
         priority = task.params.priority
-        sample_threshold = self.config.core.middleman.sampling_at
+        sample_threshold = self.config.core.ingester.sampling_at
 
         dropped = False
         if priority <= _min_priority:
@@ -713,18 +713,18 @@ class Middleman:
 #     # Outstanding is the set of things Riak believes are being scanned.
 #     outstanding = set(submitted.keys())
 #
-#     # Keys is the set of things middleman believes are being scanned.
+#     # Keys is the set of things ingester believes are being scanned.
 #     keys = set(scanning.keys())
 #
-#     # Inflight is the set of submissions middleman and Riak agree are inflight.
+#     # Inflight is the set of submissions ingester and Riak agree are inflight.
 #     inflight = outstanding.intersection(keys)
 #
-#     # Missing is the set of submissions middleman thinks are in flight but
+#     # Missing is the set of submissions ingester thinks are in flight but
 #     # according to Riak are not incomplete.
 #     missing = keys.difference(inflight)
 #
 #     # Process the set of submissions Riak believes are incomplete but
-#     # middleman doesn't know about.
+#     # ingester doesn't know about.
 #     for scan_key in outstanding.difference(inflight):
 #         sid = submitted.get(scan_key, None)
 #
@@ -795,7 +795,7 @@ class Middleman:
 #         except:  # pylint: disable=W0702
 #             pass
 #
-#     # Process the set of submissions middleman thinks are in flight but
+#     # Process the set of submissions ingester thinks are in flight but
 #     # according to Riak are not incomplete.
 #     for scan_key in missing:
 #         raw = scanning.pop(scan_key)

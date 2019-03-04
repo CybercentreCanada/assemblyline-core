@@ -1,13 +1,13 @@
 import copy
 
-from .middleman import forge, NamedQueue, IngestTask
-from .middleman import _completeq_name, _ingestq_name
-from .middleman import get_client, now
+from .ingester import forge, NamedQueue, IngestTask
+from .ingester import _completeq_name, _ingestq_name
+from .ingester import get_client, now
 from assemblyline.odm.models.submission import INGEST_SUBMISSION_DEFAULTS
 
 
-class MiddlemanClient:
-    """A convience object that wraps the input/output queues of the middleman."""
+class IngesterClient:
+    """A convience object that wraps the input/output queues of the ingester."""
 
     def __init__(self, redis=None, persistent_redis=None):
         # Create a config cache that will refresh config values periodically
@@ -36,7 +36,7 @@ class MiddlemanClient:
     def ingest(self, **kwargs):
         # Load a snapshot of ingest parameters as of right now.
         # self.config is a timed cache
-        ing_conf = self.config.core.middleman
+        ing_conf = self.config.core.ingester
 
         # In case the submission has 'all default' parameters
         kwargs['params'] = kwargs.get('params', {})
@@ -70,5 +70,5 @@ class MiddlemanClient:
         # Fill in fields that the submitter shouldn't have any say over
         kwargs['ingest_time'] = now()
 
-        # Type/field check then push into middleman
+        # Type/field check then push into ingester
         self.ingest_queue.push(IngestTask(kwargs).as_primitives())

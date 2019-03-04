@@ -1,5 +1,5 @@
 """
-The internal worker for middleman runs several routing processes
+The internal worker for ingester runs several routing processes
 
 TODO
  - can any of the processes in this can be inlined to the ingest/submit processes
@@ -17,16 +17,16 @@ import concurrent.futures
 
 from assemblyline.common import log, forge, isotime
 
-from al_core.middleman.middleman import Middleman, _dup_prefix
+from al_core.ingester.ingester import Ingester, _dup_prefix
 from al_core.server_base import ServerBase
 
 
 # noinspection PyBroadException
-def process_timeouts(server, middleman):
-    logger = logging.getLogger("assemblyline.middleman.timeouts")
+def process_timeouts(server, ingester):
+    logger = logging.getLogger("assemblyline.ingester.timeouts")
 
     while server.running:
-        timeouts = middleman.timeout_queue.dequeue_range(upper_limit=isotime.now(), num=10)
+        timeouts = ingester.timeout_queue.dequeue_range(upper_limit=isotime.now(), num=10)
 
         # Wait for more work
         if not timeouts:
@@ -37,34 +37,34 @@ def process_timeouts(server, middleman):
                 actual_timeout = False
 
                 # Remove the entry from the hash of submissions in progress.
-                entry = middleman.scanning.pop(scan_key)
+                entry = ingester.scanning.pop(scan_key)
                 if entry:
                     actual_timeout = True
                     logger.error("Submission timed out for %s: %s", scan_key, str(entry))
 
-                dup = middleman.duplicate_queue.pop(_dup_prefix + scan_key, blocking=False)
+                dup = ingester.duplicate_queue.pop(_dup_prefix + scan_key, blocking=False)
                 if dup:
                     actual_timeout = True
 
                 while dup:
                     logger.error("Submission timed out for %s: %s", scan_key, str(dup))
-                    dup = middleman.duplicate_queue.pop(_dup_prefix + scan_key, blocking=False)
+                    dup = ingester.duplicate_queue.pop(_dup_prefix + scan_key, blocking=False)
 
                 if actual_timeout:
-                    middleman.ingester_counts.increment('ingest.timed_out')
+                    ingester.ingester_counts.increment('ingest.timed_out')
             except:
                 logger.exception("Problem timing out %s:", scan_key)
 
 
-def process_retries(server, middleman):
+def process_retries(server, ingester):
     while server.running:
-        tasks = middleman.retry_queue.dequeue_range(upper_limit=isotime.now(), num=10)
+        tasks = ingester.retry_queue.dequeue_range(upper_limit=isotime.now(), num=10)
 
         if not tasks:
             time.sleep(1)
 
         for task in tasks:
-            middleman.ingest_queue.push(task)
+            ingester.ingest_queue.push(task)
 
 
 
@@ -80,7 +80,7 @@ def dropper():  # df node def
 
         send_notification(notice)
 
-        c12n = notice.get('classification', config.core.middleman.classification)
+        c12n = notice.get('classification', config.core.ingester.classification)
         expiry = now_as_iso(86400)
         sha256 = notice.get('sha256')
 
@@ -131,7 +131,7 @@ def dropper():  # df node def
 #     heartbeat.update(exported)
 #
 #     # Send our heartbeat.
-#     raw = message.Message(to="*", sender='middleman',
+#     raw = message.Message(to="*", sender='ingester',
 #                           mtype=message.MT_INGESTHEARTBEAT,
 #                           body=heartbeat).as_dict()
 #     statusq.publish(raw)
@@ -145,20 +145,20 @@ def dropper():  # df node def
 #
 
 
-class MiddlemanInternals(ServerBase):
+class IngesterInternals(ServerBase):
     def __init__(self, logger=None, datastore=None, redis=None, persistent_redis=None):
-        super().__init__('assemblyline.middleman.internals', logger)
+        super().__init__('assemblyline.ingester.internals', logger)
         # Connect to all sorts of things
         datastore = datastore or forge.get_datastore()
         classification_engine = forge.get_classification()
 
-        # Initialize the middleman specific resources
-        self.middleman = Middleman(datastore=datastore, classification=classification_engine, logger=self.log,
+        # Initialize the ingester specific resources
+        self.ingester = Ingester(datastore=datastore, classification=classification_engine, logger=self.log,
                                    redis=redis, persistent_redis=persistent_redis)
 
     def start(self):
         super().start()
-        self.middleman.start_counters()
+        self.ingester.start_counters()
 
     def try_run(self):
         tasks = {
@@ -168,7 +168,7 @@ class MiddlemanInternals(ServerBase):
 
         params = {
             'server': self,
-            'middleman': self.middleman
+            'ingester': self.ingester
         }
 
         error_limit = 4
@@ -198,5 +198,5 @@ class MiddlemanInternals(ServerBase):
 
 
 if __name__ == '__main__':
-    log.init_logging("middleman")
-    MiddlemanInternals().serve_forever()
+    log.init_logging("ingester")
+    IngesterInternals().serve_forever()

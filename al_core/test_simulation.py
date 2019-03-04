@@ -6,19 +6,19 @@ import pytest
 from unittest import mock
 from typing import List
 
-from al_core.middleman.middleman import IngestTask
+from al_core.ingester.ingester import IngestTask
 from assemblyline.common import forge
 
 from al_core.dispatching.client import DispatchClient
 from al_core.dispatching.dispatcher import service_queue_name, ServiceTask
-from al_core.middleman.client import MiddlemanClient
+from al_core.ingester.client import IngesterClient
 from al_core.submission_client import SubmissionClient
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.datastore.stores.es_store import ESStore
 
-from al_core.middleman.run_ingest import MiddlemanIngester
-from al_core.middleman.run_internal import MiddlemanInternals
-from al_core.middleman.run_submit import MiddlemanSubmitter
+from al_core.ingester.run_ingest import IngesterInput
+from al_core.ingester.run_internal import IngesterInternals
+from al_core.ingester.run_submit import IngesterSubmitter
 
 from al_core.dispatching.run_files import FileDispatchServer
 from al_core.dispatching.run_submissions import SubmissionDispatchServer
@@ -100,10 +100,10 @@ def test_simulate_core(es_connection, clean_redis):
     filestore = forge.get_filestore()
     try:
         threads: List[ServerBase] = [
-            # Start the middleman components
-            MiddlemanIngester(datastore=ds, redis=clean_redis, persistent_redis=clean_redis),
-            MiddlemanSubmitter(datastore=ds, redis=clean_redis, persistent_redis=clean_redis),
-            MiddlemanInternals(datastore=ds, redis=clean_redis, persistent_redis=clean_redis),
+            # Start the ingester components
+            IngesterInput(datastore=ds, redis=clean_redis, persistent_redis=clean_redis),
+            IngesterSubmitter(datastore=ds, redis=clean_redis, persistent_redis=clean_redis),
+            IngesterInternals(datastore=ds, redis=clean_redis, persistent_redis=clean_redis),
 
             # Start the dispatcher
             FileDispatchServer(datastore=ds, redis=clean_redis, redis_persist=clean_redis),
@@ -124,7 +124,7 @@ def test_simulate_core(es_connection, clean_redis):
             t.daemon = True
             t.start()
 
-        client = MiddlemanClient(clean_redis, clean_redis)
+        client = IngesterClient(clean_redis, clean_redis)
 
         # =========================================================================
 
@@ -136,7 +136,7 @@ def test_simulate_core(es_connection, clean_redis):
         sha256.update(body)
         filestore.save(sha256.hexdigest(), body)
 
-        # Submit two identical jobs, check that they get deduped by middleman
+        # Submit two identical jobs, check that they get deduped by ingester
         for _ in range(2):
             client.ingest(
                 sha256=sha256.hexdigest(),
@@ -186,7 +186,7 @@ def test_simulate_core(es_connection, clean_redis):
     second_task = IngestTask(second_task)
     assert second_task.sid == first_task.sid
 
-    # The third task should not be deduplicated by middleman, so will have a different submission
+    # The third task should not be deduplicated by ingester, so will have a different submission
     third_task = IngestTask(third_task)
     third_submission: Submission = ds.submission.get(third_task.sid)
     assert first_submission.sid != third_submission.sid

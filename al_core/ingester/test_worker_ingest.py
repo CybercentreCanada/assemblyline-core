@@ -5,9 +5,9 @@ from unittest import mock
 import time
 
 
-from al_core.middleman.run_ingest import MiddlemanIngester
-from al_core.middleman.middleman import IngestTask
-from .client import MiddlemanClient
+from al_core.ingester.run_ingest import IngesterInput
+from al_core.ingester.ingester import IngestTask
+from .client import IngesterClient
 from al_core.submission_client import SubmissionClient
 
 from al_core.mocking.datastore import MockDatastore
@@ -45,7 +45,7 @@ def make_message(**message):
 
 
 @pytest.fixture
-@mock.patch('al_core.middleman.middleman.SubmissionClient', new=mock.MagicMock(spec=SubmissionClient))
+@mock.patch('al_core.ingester.ingester.SubmissionClient', new=mock.MagicMock(spec=SubmissionClient))
 def ingest_harness(clean_redis):
     """"Setup a test environment.
 
@@ -55,8 +55,8 @@ def ingest_harness(clean_redis):
            isolating this test from any other test run at the same time
     """
     datastore = AssemblylineDatastore(MockDatastore())
-    ingester = MiddlemanIngester(datastore=datastore, redis=clean_redis, persistent_redis=clean_redis)
-    client = MiddlemanClient(redis=clean_redis, persistent_redis=clean_redis)
+    ingester = IngesterInput(datastore=datastore, redis=clean_redis, persistent_redis=clean_redis)
+    client = IngesterClient(redis=clean_redis, persistent_redis=clean_redis)
     ingester.running = TrueCountTimes(1)
     return datastore, ingester, client
 
@@ -79,7 +79,7 @@ def test_ingest_simple(ingest_harness):
     # Process those messages
     ingester.try_run()
 
-    mm = ingester.middleman
+    mm = ingester.ingester
     # The only task that makes it through though fit these parameters
     task = mm.unique_queue.pop()
     assert task
@@ -108,7 +108,7 @@ def test_ingest_stale_score_exists(ingest_harness):
     datastore.filescore.get.assert_called_once()
 
     # but message was ingested as a cache miss
-    mm = ingester.middleman
+    mm = ingester.ingester
     task = mm.unique_queue.pop()
     assert task
     task = IngestTask(json.loads(task))
@@ -131,8 +131,8 @@ def test_ingest_score_exists(ingest_harness):
 
     # No file has made it into the internal buffer => cache hit and drop
     datastore.filescore.get.assert_called_once()
-    assert ingester.middleman.unique_queue.length() == 0
-    assert ingester.middleman.ingest_queue.length() == 0
+    assert ingester.ingester.unique_queue.length() == 0
+    assert ingester.ingester.ingest_queue.length() == 0
 
 
 def test_ingest_groups_error(ingest_harness):
@@ -143,8 +143,8 @@ def test_ingest_groups_error(ingest_harness):
     ingester.try_run()
 
     # dropped file with no known user
-    assert ingester.middleman.unique_queue.length() == 0
-    assert ingester.middleman.ingest_queue.length() == 0
+    assert ingester.ingester.unique_queue.length() == 0
+    assert ingester.ingester.ingest_queue.length() == 0
 
 
 def test_ingest_size_error(ingest_harness):
@@ -155,7 +155,7 @@ def test_ingest_size_error(ingest_harness):
     ingester.try_run()
 
     # No files in the internal buffer
-    mm = ingester.middleman
+    mm = ingester.ingester
     assert mm.unique_queue.length() == 0
     assert mm.ingest_queue.length() == 0
 
