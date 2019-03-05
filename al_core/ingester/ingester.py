@@ -25,7 +25,7 @@ from assemblyline.common import forge
 
 from assemblyline import odm
 
-from assemblyline.remote.datatypes.exporting_counter import AutoExportingCounters
+from assemblyline.remote.datatypes.counters import MetricCounter
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
@@ -195,21 +195,22 @@ class Ingester:
         # Classification engine
         self.ce = classification or forge.get_classification()
 
-        self.ingester_counts = AutoExportingCounters(
-            name='ingester',
-            host=net.get_hostip(),
-            auto_flush=True,
-            auto_log=False,
-            export_interval_secs=self.config.logging.export_interval,
-            channel=forge.get_metrics_sink(self.redis))
+        self.cache_miss_counter = MetricCounter('ingest.cache_miss', self.redis)
+        self.cache_expired_counter = MetricCounter('ingest.cache_expired', self.redis)
+        self.cache_stale_counter = MetricCounter('ingest.cache_stale', self.redis)
+        self.cache_local_hit_counter = MetricCounter('ingest.cache_hit_local', self.redis)
+        self.cache_hit_counter = MetricCounter('ingest.cache_hit', self.redis)
 
-        self.whitelister_counts = AutoExportingCounters(
-            name='whitelister',
-            host=net.get_hostip(),
-            auto_flush=True,
-            auto_log=False,
-            export_interval_secs=self.config.logging.export_interval,
-            channel=forge.get_metrics_sink(self.redis))
+        self.submissions_completed_counter = MetricCounter('ingest.submissions_completed', self.redis)
+        self.submissions_ingested_counter = MetricCounter('ingest.submissions_ingested', self.redis)
+        self.files_completed_counter = MetricCounter('ingest.files_completed', self.redis)
+        self.bytes_completed_counter = MetricCounter('ingest.bytes_completed', self.redis)
+        self.bytes_ingested_counter = MetricCounter('ingest.bytes_ingested', self.redis)
+
+        self.skipped_counter = MetricCounter('ingest.skipped', self.redis)
+        self.whitelisted_counter = MetricCounter('ingest.whitelisted', self.redis)
+        self.duplicates_counter = MetricCounter('ingest.duplicates', self.redis)
+        self.error_counter = MetricCounter('ingest.error', self.redis)
 
         # State. The submissions in progress are stored in Redis in order to
         # persist this state and recover in case we crash.
@@ -252,16 +253,6 @@ class Ingester:
         self.submit_client = SubmissionClient(datastore=self.datastore,
                                               redis=self.redis)
 
-    def start_counters(self):
-        """Start shared ingester auxillary components."""
-        self.ingester_counts.start()
-        self.whitelister_counts.start()
-
-    def stop_counters(self):
-        """Stop shared ingester auxillary components."""
-        self.ingester_counts.stop()
-        self.whitelister_counts.stop()
-
     def get_user_groups(self, user):
         groups = self._user_groups.get(user, None)
         if groups is None:
@@ -288,8 +279,8 @@ class Ingester:
                 return
             param.groups = groups
 
-        self.ingester_counts.increment('ingest.bytes_ingested', task.file_size)
-        self.ingester_counts.increment('ingest.submissions_ingested')
+        self.bytes_ingested_counter.increment(task.file_size)
+        self.submissions_ingested_counter.increment()
 
         if not task.sha256:
             self.send_notification(task, failure="Invalid sha256", logfunc=self.log.warning)
@@ -316,7 +307,7 @@ class Ingester:
         if task.file_size > max_file_size and not task.params.ignore_size and not task.params.never_drop:
             task.failure = f"File too large ({task.file_size} > {max_file_size})"
             self.drop_queue.push(task.json())
-            self.ingester_counts.increment('ingest.skipped')
+            self.skipped_counter.increment()
             return
 
         pprevious, previous, score = None, False, None
@@ -349,7 +340,7 @@ class Ingester:
         # Do this after priority has been assigned.
         # (So we don't end up dropping the resubmission).
         if previous:
-            self.ingester_counts.increment('ingest.duplicates')
+            self.duplicates_counter.increment()
             self.finalize(pprevious, previous, score, task)
             return
 
@@ -367,17 +358,17 @@ class Ingester:
         with self.cache_lock:
             result = self.cache.get(key, None)
 
-        counter_name = 'ingest.cache_hit_local'
+        counter = self.cache_local_hit_counter
         if result:
             self.log.info('Local cache hit')
         else:
-            counter_name = 'ingest.cache_hit'
+            counter = self.cache_hit_counter
 
             result = self.datastore.filescore.get(key)
             if result:
                 self.log.info('Remote cache hit')
             else:
-                self.ingester_counts.increment('ingest.cache_miss')
+                self.cache_miss_counter.increment()
                 return None, False, None, key
 
             with self.cache_lock:
@@ -394,15 +385,15 @@ class Ingester:
         errors = result.errors
 
         if self.expired(delta, errors):
-            self.ingester_counts.increment('ingest.cache_expired')
+            self.cache_expired_counter.increment()
             self.cache.pop(key, None)
             self.datastore.filescore.delete(key)
             return None, False, None, key
         elif self.stale(delta, errors):
-            self.ingester_counts.increment('ingest.cache_stale')
+            self.cache_stale_counter.increment()
             return None, False, result.score, key
 
-        self.ingester_counts.increment(counter_name)
+        counter.increment()
 
         return result.psid, result.sid, result.score, key
 
@@ -469,9 +460,9 @@ class Ingester:
 
         errors = sub.error_count
         file_count = sub.file_count
-        self.ingester_counts.increment('ingest.submissions_completed')
-        self.ingester_counts.increment('ingest.files_completed', file_count)
-        self.ingester_counts.increment('ingest.bytes_completed', task.file_size)
+        self.submissions_completed_counter.increment()
+        self.files_completed_counter.increment(file_count)
+        self.bytes_completed_counter.increment(task.file_size)
 
         with self.cache_lock:
             self.cache[self] = {
@@ -559,7 +550,7 @@ class Ingester:
         task.failure = 'Skipped'
         self.drop_queue.push(task.json())
 
-        self.ingester_counts.increment('ingest.skipped')
+        self.skipped_counter.increment()
 
         return True
 
@@ -581,8 +572,8 @@ class Ingester:
             task.failure = "Whitelisting due to reason %s (%s)" % (dotdump(safe_str(reason)), hit)
             self.drop_queue.push(task.json())
 
-            self.ingester_counts.increment('ingest.whitelisted')
-            self.whitelister_counts.increment('whitelist.' + reason)
+            self.whitelisted_counter.increment()
+            MetricCounter('whitelist.' + reason, self.redis).increment()
 
         return reason
 

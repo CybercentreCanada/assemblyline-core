@@ -156,10 +156,6 @@ class IngesterInternals(ServerBase):
         self.ingester = Ingester(datastore=datastore, classification=classification_engine, logger=self.log,
                                    redis=redis, persistent_redis=persistent_redis)
 
-    def start(self):
-        super().start()
-        self.ingester.start_counters()
-
     def try_run(self):
         tasks = {
             'timeouts': process_timeouts,
