@@ -1,5 +1,5 @@
 import pytest
-import fakeredis
+import birdisle.redis
 
 from .datastore import MockDatastore
 
@@ -26,4 +26,4 @@ class MockFactory:
 
 @pytest.fixture
 def clean_redis():
-    return fakeredis.FakeStrictRedis()
+    return birdisle.redis.StrictRedis()

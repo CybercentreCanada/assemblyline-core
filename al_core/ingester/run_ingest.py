@@ -27,11 +27,6 @@ class IngesterInput(ServerBase):
         self.ingester = Ingester(datastore=datastore, classification=classification_engine, logger=self.log,
                                    redis=redis, persistent_redis=persistent_redis)
 
-    def start(self):
-        super().start()
-        # Start the auxiliary threads
-        self.ingester.start_counters()
-
     def try_run(self):
         ingester = self.ingester
 
@@ -68,10 +63,6 @@ class IngesterInput(ServerBase):
             task.sha256 = sha256.lower()
 
             ingester.ingest(task)
-
-    def stop(self):
-        super().stop()
-        self.ingester.stop_counters()
 
 
 if __name__ == '__main__':

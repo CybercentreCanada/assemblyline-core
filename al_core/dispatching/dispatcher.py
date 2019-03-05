@@ -13,7 +13,7 @@ from assemblyline.odm.models.service import Service
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
 from assemblyline.remote.datatypes.set import ExpiringSet
-from assemblyline.remote.datatypes import exporting_counter
+from assemblyline.remote.datatypes.counters import MetricCounter
 from assemblyline.common import isotime, net, forge
 
 from al_core.dispatching.scheduler import Scheduler
@@ -81,7 +81,7 @@ class Dispatcher:
         self.classification_engine = forge.get_classification()
         self.timeout_watcher = al_core.watcher.WatcherClient(redis)
 
-        # Connect to all of our persistant redis structures
+        # Connect to all of our persistent redis structures
         self.redis = redis
         self.redis_persist = redis_persist
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, redis)
@@ -90,20 +90,7 @@ class Dispatcher:
         self.active_tasks = ExpiringHash(DISPATCH_TASK_HASH, host=redis_persist)
 
         # Publish counters to the metrics sink.
-        self.counts = exporting_counter.AutoExportingCounters(
-            name='dispatcher',  # TODO we should find some way to identify instances of autoscaled components
-            host=net.get_hostname(),
-            auto_flush=True,
-            auto_log=False,
-            export_interval_secs=self.config.logging.export_interval,
-            channel=forge.get_metrics_sink(),
-            counter_type='dispatcher'
-        )
-
-    def start(self):
-        self.counts.start()
-
-        # self.service_manager.start()
+        self.files_complete_counter = MetricCounter('dispatch.files_complete', self.redis)
 
         # This starts a thread that polls for messages with an exponential
         # backoff, if no messages are found, to a maximum of one second.
@@ -478,7 +465,7 @@ class Dispatcher:
 
             # If there are no outstanding ANYTHING for this submission,
             # send a message to the submission dispatcher to finalize
-            self.counts.increment('dispatch.files_completed')
+            self.files_complete_counter.increment()
             if dispatch_table.all_finished() and tasks_remaining == 0:
                 self.submission_queue.push({'sid': submission.sid})
 

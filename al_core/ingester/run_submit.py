@@ -25,11 +25,6 @@ class IngesterSubmitter(ServerBase):
         self.ingester = Ingester(datastore=datastore, classification=classification_engine, logger=self.log,
                                    redis=redis, persistent_redis=persistent_redis)
 
-    def start(self):
-        super().start()
-        # Start the auxiliary threads
-        self.ingester.start_counters()
-
     def try_run(self, volatile=False):
         ingester = self.ingester
         logger = self.log
@@ -84,7 +79,7 @@ class IngesterSubmitter(ServerBase):
                 # as a duplicate then.
                 if not ingester.scanning.add(scan_key, task.as_primitives()):
                     logger.debug('Duplicate %s', task.sha256)
-                    ingester.ingester_counts.increment('ingest.duplicates')
+                    ingester.duplicates_counter.increment()
                     ingester.duplicate_queue.push(_dup_prefix + scan_key, task.as_primitives())
                     continue
 
@@ -99,7 +94,7 @@ class IngesterSubmitter(ServerBase):
                     ex = _ex
                     traceback = _ex.__traceback__
 
-                ingester.ingester_counts.increment('ingest.error')
+                ingester.error_counter.increment()
 
                 should_retry = True
                 if isinstance(ex, CorruptedFileStoreException):
