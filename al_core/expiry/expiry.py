@@ -4,9 +4,9 @@ import logging
 import time
 
 from assemblyline.common import forge, log as al_log
+from assemblyline.filestore import FileStore
 
 config = forge.get_config()
-SLEEP_TIME = 5
 
 
 class ExpiryManager(object):
@@ -14,7 +14,7 @@ class ExpiryManager(object):
         self.log = log
         self.datastore = forge.get_datastore()
         self.filestore = forge.get_filestore()
-        self.cachestore = forge.get_cachestore("")
+        self.cachestore = FileStore(*config.filestore.cache)
         self.expirable_collections = []
 
         self.fs_hashmap = {
@@ -42,23 +42,21 @@ class ExpiryManager(object):
                 if number_to_delete != 0:
                     if config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
                         # Delete associated files
-                        self.log.info('\tStarted to delete associated files from the filestore...')
                         with concurrent.futures.ThreadPoolExecutor(config.core.expiry.workers) as executor:
                             res = {item['id']: executor.submit(self.fs_hashmap[collection.name], item['id'])
                                    for item in collection.stream_search(delete_query, fl='id', as_obj=False)}
                         for v in res.values():
                             v.result()
-                        self.log.info('\tDone!')
-
-                    self.log.info(f"\tStarting to delete {number_to_delete} items...")
+                        self.log.info(f'    Deleted associated files from the '
+                                      f'{"cachestore" if "cache" in collection.name else "filestore"}...')
 
                     # Proceed with deletion
                     collection.delete_matching(delete_query, workers=config.core.expiry.workers)
-                    self.log.info("\tDone!")
+                    self.log.info(f"    Deleted {number_to_delete} items from the datastore...")
                 else:
-                    self.log.info("\tNothing to delete in this collection.")
+                    self.log.debug("    Nothing to delete in this collection.")
 
-            time.sleep(SLEEP_TIME)
+            time.sleep(config.core.expiry.sleep_time)
 
 
 if __name__ == "__main__":
