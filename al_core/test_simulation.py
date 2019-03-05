@@ -30,6 +30,7 @@ from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
+from assemblyline.remote.datatypes.counters import MetricCounter
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 
@@ -54,6 +55,7 @@ class MockService(ServerBase):
         self.service_name = name
         self.queue = NamedQueue(service_queue_name(name), redis)
         self.dispatch_client = DispatchClient(datastore, redis)
+        self.datastore = datastore
         self.filestore = filestore
 
     def try_run(self):
@@ -91,9 +93,13 @@ class MockService(ServerBase):
             result_data.update(instructions.get('result', {}))
 
             result = Result(result_data)
-            self.dispatch_client.service_finished(task, result)
+            result_key = instructions.get('result_key', uuid.uuid4().hex)
+            self.datastore.result.save(result_key, result)
+            self.dispatch_client.service_finished(task, result, result_key)
 
 
+@mock.patch('al_core.ingester.ingester.MetricCounter', new=mock.MagicMock(spec=MetricCounter))
+@mock.patch('al_core.dispatching.dispatcher.MetricCounter', new=mock.MagicMock(spec=MetricCounter))
 def test_simulate_core(es_connection, clean_redis):
     ds = es_connection
     threads = []
@@ -187,6 +193,7 @@ def test_simulate_core(es_connection, clean_redis):
     assert second_task.sid == first_task.sid
 
     # The third task should not be deduplicated by ingester, so will have a different submission
+    print('third', third_task)
     third_task = IngestTask(third_task)
     third_submission: Submission = ds.submission.get(third_task.sid)
     assert first_submission.sid != third_submission.sid

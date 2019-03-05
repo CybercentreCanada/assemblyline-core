@@ -13,6 +13,7 @@ from al_core.dispatching.scheduler import Scheduler as RealScheduler
 from al_core.dispatching.dispatcher import Dispatcher, DispatchHash, service_queue_name, FileTask, NamedQueue, SubmissionTask
 from al_core.mocking import MockDatastore, clean_redis
 from al_core.dispatching.test_scheduler import dummy_service
+from assemblyline.remote.datatypes.counters import MetricCounter
 
 
 class Scheduler(RealScheduler):
@@ -39,6 +40,7 @@ class Scheduler(RealScheduler):
 
 
 @mock.patch('al_core.dispatching.dispatcher.Scheduler', Scheduler)
+@mock.patch('al_core.dispatching.dispatcher.MetricCounter', new=mock.MagicMock(spec=MetricCounter))
 def test_dispatch_file(clean_redis):
 
     service_queue = lambda name: NamedQueue(service_queue_name(name), clean_redis)
@@ -90,19 +92,11 @@ def test_dispatch_file(clean_redis):
     assert service_queue('extract').length() == 1
     # assert len(mq) == 1
 
-    # Mark extract as finished in the dispatch table, add a result object
-    # for the wrench service, it should move to the second batch of services
+    # Mark extract as finished, wrench as failed
     print('==== fourth dispatch')
     [service_queue(name).delete() for name in disp.scheduler.services]
     dh.finish(file_hash, 'extract', 'result-key', 0)
-    wrench_result_key = Result.help_build_key(
-        sha256=file_hash,
-        service_name='wrench',
-        service_version=disp.scheduler.services.get('wrench').version,
-        conf_key=disp.build_config_key(disp.scheduler.services.get('wrench'), submission=sub)
-    )
-    print('wrench result key', wrench_result_key)
-    ds.result.save(wrench_result_key, EasyDict(drop_file=False, result=EasyDict(score=0)))
+    dh.fail_nonrecoverable(file_hash, 'wrench', 'error-key')
 
     disp.dispatch_file(file_task)
 

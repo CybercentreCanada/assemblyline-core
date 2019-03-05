@@ -7,6 +7,7 @@ import time
 
 from al_core.ingester.run_ingest import IngesterInput
 from al_core.ingester.ingester import IngestTask
+from assemblyline.remote.datatypes.counters import MetricCounter
 from .client import IngesterClient
 from al_core.submission_client import SubmissionClient
 
@@ -46,6 +47,7 @@ def make_message(**message):
 
 @pytest.fixture
 @mock.patch('al_core.ingester.ingester.SubmissionClient', new=mock.MagicMock(spec=SubmissionClient))
+@mock.patch('al_core.ingester.ingester.MetricCounter', new=mock.MagicMock(spec=MetricCounter))
 def ingest_harness(clean_redis):
     """"Setup a test environment.
 

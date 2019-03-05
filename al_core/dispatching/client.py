@@ -95,10 +95,9 @@ class DispatchClient:
     def request_work(self, service_name, timeout=60):
         raise NotImplementedError()
 
-    def service_finished(self, task: ServiceTask, result: Result):
+    def service_finished(self, task: ServiceTask, result: Result, result_key):
+        """Notifies the dispatcher of service completion, and possible new files to dispatch."""
         # Store the result object and mark the service finished in the global table
-        result_key = result.build_key(task.config_key)
-        self.results.save(result_key, result)
         process_table = DispatchHash(task.sid, self.redis)
         remaining = process_table.finish(task.fileinfo.sha256, task.service_name, result_key,
                                          result.result.score, result.drop_file)

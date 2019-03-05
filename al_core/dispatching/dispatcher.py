@@ -8,13 +8,12 @@ from functools import reduce
 # TODO replace with unique queue
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
-from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline.remote.datatypes.counters import MetricCounter
-from assemblyline.common import isotime, net, forge
+from assemblyline.common import isotime, forge
 
 from al_core.dispatching.scheduler import Scheduler
 from al_core.dispatching.dispatch_hash import DispatchHash
@@ -101,8 +100,6 @@ class Dispatcher:
         # threading.Thread(target=self.heartbeat).start()
         # for _ in range(8):
         #     threading.Thread(target=self.writer).start()
-        #
-        # signal.signal(signal.SIGINT, self.interrupt)
         #
         # time.sleep(2 * int(config.system.update_interval))
 
@@ -212,6 +209,10 @@ class Dispatcher:
 
                 # The result should exist then, get all the sub-files
                 result = self.results.get(result_row.key)
+                if not result:
+                    self.log.error(f"Service responded to dispatcher with missing result: {result_row.key}")
+                    continue
+
                 for sub_file in result.response.extracted:
                     file_parents[sub_file.sha256] = file_parents.get(sub_file.sha256, []) + [sha]
 
@@ -382,25 +383,6 @@ class Dispatcher:
                         schedule.clear()
                     continue
 
-                # Check if something, an error/a result already exists, to resolve this service
-                config = self.build_service_config(service, submission)
-                config_key = self.build_config_key(service, submission, config)
-                access_key = Result.help_build_key(file_hash, service.name, service.version, config_key)
-                result = self.results.get(access_key)
-                if result:
-                    score += result.result.score
-                    # If we have managed to load a result for this file/service/config combo
-                    # then mark this service as finished in the dispatch table.
-                    # make sure to pass on whether the file was dropped by the service
-                    # last time it was run
-                    drop = result.drop_file
-                    tasks_remaining = dispatch_table.finish(file_hash, service_name, access_key,
-                                                            result.result.score, drop=drop)
-                    if not submission.params.ignore_filtering and drop:
-                        # Remove all stages from the schedule (the current stage will still continue)
-                        schedule.clear()
-                    continue
-
                 # Warning: Please do not change the text of the error messages below.
                 # TODO: anything that relies on specific error text where we control the creation
                 #       and parsing of the error should use an exception type if both ends are in
@@ -421,22 +403,23 @@ class Dispatcher:
 
                 # If in the end, we still want to run this service, pass on the configuration
                 # we have resolved to use
-                outstanding[service_name] = service, config, config_key
+                outstanding[service_name] = service
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
-            for service_name, (service, config, config_key) in outstanding.items():
+            for service_name, service in outstanding.items():
                 # Check if this submission has already dispatched this service, and hasn't timed out yet
                 queued_time = time.time() - dispatch_table.dispatch_time(file_hash, service_name)
                 if queued_time < service.timeout:
                     continue
+
+                config = self.build_service_config(service, submission)
 
                 # Build the actual service dispatch message
                 service_task = ServiceTask(dict(
                     sid=task.sid,
                     service_name=service_name,
                     service_config=json.dumps(config),
-                    config_key=config_key,
                     fileinfo=task.file_info,
                     depth=task.depth,
                 ))
@@ -490,14 +473,11 @@ class Dispatcher:
             return False
 
         # We expect instances to be running and heartbeat-ing regularly
-        raise NotImplementedError("Heartbeats")
-        last = service.metadata['last_heartbeat_at']
-        return now - last > self.config.core.dispatcher.timeouts.get('service_down', 120)
+        # TODO service heartbeating not finalized
+        return False
 
     def build_service_config(self, service: Service, submission: Submission):
-        """
-
-        TODO this probably needs to be moved to another package
+        """Prepare the service config that will be used downstream.
 
         v3 names: get_service_params get_config_data
         """
@@ -508,31 +488,6 @@ class Dispatcher:
         if service.name in submission.params.service_spec:
             params.update(submission.params.service_spec[service.name])
         return params
-
-    def build_config_key(self, service: Service, submission: Submission, config=None):
-        """Create a hash summarizing the submission parameters that might effect the given service.
-
-        TODO this probably needs to be moved to another package
-
-        v3 name: _get_config_key
-        """
-        if service.disable_cache or submission.params.ignore_cache:
-            cfg = uuid.uuid4().hex
-        else:
-            if not config:
-                config = self.build_service_config(service, submission)
-
-            cfg = ''.join((
-                # Include submission wide parameters that potentially effect all service results
-                str(submission.params.get_hashing_keys()),
-                # Get the service name+version
-                str(service.name),
-                str(service.version),
-                # Get the service params default + submission specific
-                str(config),
-            ))
-
-        return hashlib.md5(cfg.encode()).hexdigest()
 
     # def heartbeat(self):
     #     while not self.drain:

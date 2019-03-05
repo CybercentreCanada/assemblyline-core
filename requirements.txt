@@ -3,3 +3,4 @@ assemblyline
 
 # For testing
 birdisle
+fakeredis[lua]
