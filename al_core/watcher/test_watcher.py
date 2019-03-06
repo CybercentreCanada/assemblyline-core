@@ -67,5 +67,15 @@ def test_watcher(redis_connection):
         assert out_queue.pop() == {'first': '100'}
         assert out_queue.pop() == {'first': 'last'}
 
+        # Send a simple event to occur soon, then stop it
+        redis.time.current = 0
+        client.touch(10, 'one-second', queue_name, {'first': 'one'})
+        server.try_run()
+        assert out_queue.length() == 0  # Nothing yet
+        client.clear('one-second')
+        redis.time.current = 12  # Jump forward 12 seconds
+        server.try_run()
+        assert out_queue.length() == 0  # still nothing because it was cleared
+
     finally:
         out_queue.delete()

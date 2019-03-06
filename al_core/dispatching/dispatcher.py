@@ -139,7 +139,7 @@ class Dispatcher:
         # Refresh the watch, this ensures that this function will be called again
         # if something goes wrong with one of the files, and it never finishes.
         self.timeout_watcher.touch(key=sid, timeout=self.config.core.dispatcher.timeout,
-                                   queue=SUBMISSION_QUEUE, message=task.as_primitives())
+                                   queue=SUBMISSION_QUEUE, message={'sid': sid})
 
         # Refresh the quota hold
         if submission.params.quota_item and submission.params.submitter:

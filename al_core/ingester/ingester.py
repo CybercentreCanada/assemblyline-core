@@ -16,16 +16,11 @@ from math import tanh
 from random import random
 from typing import Iterable, Union
 
-from al_core.alerter.alerter import ALERT_QUEUE_NAME
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
 from assemblyline.common.isotime import now
 from assemblyline.common.importing import load_module_by_path
-from assemblyline.common import net
 from assemblyline.common import forge
-
-from assemblyline import odm
-
 from assemblyline.remote.datatypes.counters import MetricCounter
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue
@@ -33,9 +28,11 @@ from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.multi import MultiQueue
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes import get_client
+from assemblyline import odm
 from assemblyline.odm.models.submission import Submission, SubmissionParams
 from assemblyline.odm.messages.submission import Submission as SubmissionBody
 
+from al_core.alerter.alerter import ALERT_QUEUE_NAME
 from al_core.submission_client import SubmissionClient
 
 
