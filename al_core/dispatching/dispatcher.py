@@ -78,7 +78,7 @@ class Dispatcher:
         # Build some utility classes
         self.scheduler = Scheduler(datastore, self.config)
         self.classification_engine = forge.get_classification()
-        self.timeout_watcher = al_core.watcher.WatcherClient(redis)
+        self.timeout_watcher = al_core.watcher.WatcherClient(redis_persist)
 
         # Connect to all of our persistent redis structures
         self.redis = redis
@@ -409,6 +409,10 @@ class Dispatcher:
         if outstanding:
             for service_name, service in outstanding.items():
                 # Check if this submission has already dispatched this service, and hasn't timed out yet
+                # NOTE: This isn't for checking if a service has failed due to time out or generating
+                #       related errors. This is a DISPATCHING timer, to be sure that we don't send the
+                #       same sumbission+file+service to the service queues too often. This is part of what
+                #       makes repeated dispatching of a submission or file largely idempotent.
                 queued_time = time.time() - dispatch_table.dispatch_time(file_hash, service_name)
                 if queued_time < service.timeout:
                     continue

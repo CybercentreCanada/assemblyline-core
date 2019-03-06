@@ -8,12 +8,12 @@ from assemblyline.odm.models.filescore import FileScore
 from assemblyline.remote.datatypes.counters import MetricCounter
 
 from al_core.ingester.client import IngesterClient
-from .test_worker_ingest import AssemblylineDatastore, MockDatastore, TrueCountTimes
+from .test_worker_ingest import AssemblylineDatastore, MockDatastore
 from al_core.ingester.run_submit import IngesterSubmitter
 from al_core.ingester.ingester import IngestTask, _dup_prefix
 from al_core.submission_client import SubmissionClient
 
-from al_core.mocking import clean_redis
+from al_core.mocking import clean_redis, TrueCountTimes
 
 
 @pytest.fixture

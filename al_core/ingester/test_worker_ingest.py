@@ -14,16 +14,7 @@ from al_core.submission_client import SubmissionClient
 from al_core.mocking.datastore import MockDatastore
 from assemblyline.datastore.helper import AssemblylineDatastore
 
-from al_core.mocking import clean_redis
-
-class TrueCountTimes:
-    """A helper object that replaces a boolean, switching from true to false after its value is read."""
-    def __init__(self, count):
-        self.counter = count
-
-    def __bool__(self):
-        self.counter -= 1
-        return self.counter >= 0
+from al_core.mocking import clean_redis, TrueCountTimes
 
 
 def make_message(**message):
