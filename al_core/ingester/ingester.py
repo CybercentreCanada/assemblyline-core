@@ -16,6 +16,7 @@ from math import tanh
 from random import random
 from typing import Iterable, Union
 
+from al_core.alerter.alerter import ALERT_QUEUE_NAME
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
 from assemblyline.common.isotime import now
@@ -143,7 +144,7 @@ class IngestTask(odm.Model):
     filename = odm.Keyword(default='')
     classification = odm.Keyword()
     metadata = odm.Mapping(odm.Keyword())
-    score = odm.Optional(odm.Float())  # Score from previous processing of this file
+    score = odm.Optional(odm.Integer())  # Score from previous processing of this file
 
     # After a task is complete the submission id is added
     sid: Union[str, None] = odm.Optional(odm.Keyword())
@@ -247,7 +248,7 @@ class Ingester:
         self.duplicate_queue = MultiQueue(self.persistent_redis)
 
         # Output. submissions that should have alerts generated
-        self.alert_queue = NamedQueue('m-alert', self.persistent_redis)
+        self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.persistent_redis)
 
         # Utility object to help submit tasks to dispatching
         self.submit_client = SubmissionClient(datastore=self.datastore,
