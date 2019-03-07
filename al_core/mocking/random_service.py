@@ -7,7 +7,7 @@ from assemblyline.odm.messages.task import Task as ServiceTask
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.file import File
 from assemblyline.odm.models.result import Result
-from assemblyline.odm.randomizer import random_model_obj
+from assemblyline.odm.randomizer import random_model_obj, random_minimal_obj
 from assemblyline.remote.datatypes.queues.named import NamedQueue, select
 
 
@@ -47,8 +47,12 @@ class RandomService(object):
             queue, msg = message
             task = ServiceTask(msg)
             print(f"\tQueue {queue} received a new task for sid {task.sid}.")
-            if random.randint(1, 10) >= 2:
-                result = random_model_obj(Result)
+            action = random.randint(1, 10)
+            if action >= 2:
+                if action > 8:
+                    result = random_minimal_obj(Result)
+                else:
+                    result = random_model_obj(Result)
                 result.sha256 = task.fileinfo.sha256
                 result.response.service_name = task.service_name
                 result_key = result.build_key(task.service_config)
