@@ -118,7 +118,7 @@ def should_resubmit(score):
     return random() < resubmit_probability
 
 
-# @odm.model()
+@odm.model()
 class IngestTask(odm.Model):
     # Submission Parameters
     submission: Submission = odm.Compound(Submission)
