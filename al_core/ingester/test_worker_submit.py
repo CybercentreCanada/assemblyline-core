@@ -122,7 +122,7 @@ def test_existing_score(submit_harness):
                 'name': 'abc',
             }],
             'metadata': {},
-            'notification':{
+            'notification': {
                 'queue': 'our_queue'
             }
         },

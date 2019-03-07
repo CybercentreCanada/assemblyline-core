@@ -438,7 +438,7 @@ class Ingester:
             return scan_key
 
         task = IngestTask(raw)
-        task.sid = sid
+        task.submission.sid = sid
 
         errors = sub.error_count
         file_count = sub.file_count
@@ -463,7 +463,7 @@ class Ingester:
                 if res is None:
                     break
                 res = IngestTask(res)
-                res.sid = sid
+                res.submission.sid = sid
                 yield res
 
         # You may be tempted to remove the assignment to dups and use the

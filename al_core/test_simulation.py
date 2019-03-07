@@ -11,8 +11,8 @@ from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.datastore.stores.es_store import ESStore
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.result import Result
-from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
+from assemblyline.odm.messages.submission import Submission as SubmissionInput
 from assemblyline.remote.datatypes.counters import MetricCounter
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
@@ -142,10 +142,13 @@ def test_simulate_core(es_connection, clean_redis, replace_config):
             WatcherServer(redis=clean_redis),
         ]
 
+        ingester_input_thread: IngesterInput = threads[0]
+        ingest_queue = ingester_input_thread.ingester.ingest_queue
+
         ds.service.delete_matching('*')
         ds.service.save('pre', dummy_service('pre', 'extract'))
         threads.append(MockService('pre', ds, clean_redis, filestore))
-        pre_service = threads[-1]
+        pre_service: MockService = threads[-1]
         ds.service.save('core-a', dummy_service('core-a', 'core'))
         threads.append(MockService('core-a', ds, clean_redis, filestore))
         ds.service.save('core-b', dummy_service('core-b', 'core'))
@@ -156,8 +159,6 @@ def test_simulate_core(es_connection, clean_redis, replace_config):
         for t in threads:
             t.daemon = True
             t.start()
-
-        client = IngesterClient(clean_redis, clean_redis)
 
         # =========================================================================
 
@@ -171,38 +172,70 @@ def test_simulate_core(es_connection, clean_redis, replace_config):
 
         # Submit two identical jobs, check that they get deduped by ingester
         for _ in range(2):
-            client.ingest(
-                sha256=sha256.hexdigest(),
-                file_size=len(body),
-                classification='U',
+            ingest_queue.push(SubmissionInput(dict(
                 metadata={},
                 params=dict(
+                    services=dict(selected=''),
+                    submitter='user',
                     groups=['user'],
                 ),
-                notification_queue='1',
-                notification_threshold=0
-            )
+                notification=dict(
+                    queue='1',
+                    threshold=0
+                ),
+                files=[dict(
+                    sha256=sha256.hexdigest(),
+                    size=len(body),
+                    name='abc123'
+                )]
+            )).as_primitives())
 
         notification_queue = NamedQueue('1', clean_redis)
         first_task = notification_queue.pop(timeout=5)
         second_task = notification_queue.pop(timeout=5)
 
+        # One of the submission will get processed fully
+        first_task = IngestTask(first_task)
+        first_submission: Submission = ds.submission.get(first_task.submission.sid)
+        assert first_submission.state == 'completed'
+        assert len(first_submission.files) == 1
+        assert len(first_submission.results) == 4
+
+        # The other will get processed as a duplicate
+        # (Which one is the 'real' one and which is the duplicate isn't important for our purposes)
+        second_task = IngestTask(second_task)
+        assert second_task.submission.sid == first_task.submission.sid
+
         # Submit the same body, but change a parameter so the cache key misses,
-        client.ingest(
-            sha256=sha256.hexdigest(),
-            file_size=len(body),
-            classification='U',
+        ingest_queue.push(SubmissionInput(dict(
             metadata={},
             params=dict(
+                services=dict(selected=''),
+                submitter='user',
                 groups=['user'],
                 max_extracted=10000
             ),
-            notification_queue='2',
-            notification_threshold=0
-        )
+            notification=dict(
+                queue='2',
+                threshold=0
+            ),
+            files=[dict(
+                sha256=sha256.hexdigest(),
+                size=len(body),
+                name='abc123'
+            )]
+        )).as_primitives())
 
         notification_queue = NamedQueue('2', clean_redis)
         third_task = notification_queue.pop(timeout=5)
+
+        # The third task should not be deduplicated by ingester, so will have a different submission
+        third_task = IngestTask(third_task)
+        third_submission: Submission = ds.submission.get(third_task.submission.sid)
+        assert third_submission.state == 'completed'
+        assert first_submission.sid != third_submission.sid
+        assert len(third_submission.files) == 1
+        assert len(third_submission.results) == 4
 
         body = {
             'salt': uuid.uuid4().hex,
@@ -214,18 +247,24 @@ def test_simulate_core(es_connection, clean_redis, replace_config):
         filestore.save(sha256.hexdigest(), body)
 
         # This time have a service drop, this is comparable to a crash in the service server
-        client.ingest(
-            sha256=sha256.hexdigest(),
-            file_size=len(body),
-            classification='U',
+        ingest_queue.push(SubmissionInput(dict(
             metadata={},
             params=dict(
+                services=dict(selected=''),
+                submitter='user',
                 groups=['user'],
                 max_extracted=10000
             ),
-            notification_queue='drop',
-            notification_threshold=0
-        )
+            notification=dict(
+                queue='drop',
+                threshold=0
+            ),
+            files=[dict(
+                sha256=sha256.hexdigest(),
+                size=len(body),
+                name='abc123'
+            )]
+        )).as_primitives())
 
         notification_queue = NamedQueue('drop', clean_redis)
         dropped_task = notification_queue.pop(timeout=10)
@@ -236,26 +275,3 @@ def test_simulate_core(es_connection, clean_redis, replace_config):
     finally:
         [t.stop() for t in threads]
         [t.raising_join() for t in threads]
-
-    # One of the submission will get processed fully
-    first_task = IngestTask(first_task)
-    first_submission: Submission = ds.submission.get(first_task.sid)
-    assert first_submission.state == 'completed'
-    assert len(first_submission.files) == 1
-    assert len(first_submission.results) == 4
-
-    # The other will get processed as a duplicate
-    # (Which one is the 'real' one and which is the duplicate isn't important for our purposes)
-    second_task = IngestTask(second_task)
-    assert second_task.sid == first_task.sid
-
-    # The third task should not be deduplicated by ingester, so will have a different submission
-    third_task = IngestTask(third_task)
-    third_submission: Submission = ds.submission.get(third_task.sid)
-    assert third_submission.state == 'completed'
-    assert first_submission.sid != third_submission.sid
-    assert len(third_submission.files) == 1
-    assert len(third_submission.results) == 4
-
-
-
