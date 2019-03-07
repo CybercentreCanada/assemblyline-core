@@ -7,6 +7,7 @@ from assemblyline.common.dict_utils import recursive_update
 from assemblyline.common.str_utils import safe_str
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.odm.messages.alert import AlertMessage
+from assemblyline.remote.datatypes.lock import Lock
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
 CACHE_LEN = 60 * 60 * 24
@@ -176,21 +177,26 @@ AL_FIELDS = [
 ]
 def perform_alert_update(datastore, logger, alert):
     alert_id = alert.get('alert_id')
-    old_alert = datastore.alert.get(alert_id, as_obj=False) or {}
 
-    # Merge fields...
-    merged = {
-        x: list(set(old_alert.get('al', {}).get(x, [])).union(set(alert['al'].get(x, [])))) for x in AL_FIELDS
-    }
+    with Lock(f"alert-update-{alert_id}", 5):
+        old_alert = datastore.alert.get(alert_id, as_obj=False)
+        if old_alert is None:
+            raise KeyError(f"{alert_id} is missing from the alert collection.")
 
-    # Sanity check.
-    if not all([old_alert.get(x, None) == alert.get(x, None) for x in config.core.alerter.constant_alert_fields]):
-        raise ValueError("Constant alert field changed. (%s, %s)" % (str(old_alert), str(alert)))
+        # Merge fields...
+        merged = {
+            x: list(set(old_alert.get('al', {}).get(x, [])).union(set(alert['al'].get(x, [])))) for x in AL_FIELDS
+        }
 
-    old_alert = recursive_update(old_alert, alert)
-    old_alert['al'] = recursive_update(old_alert['al'], merged)
+        # Sanity check.
+        if not all([old_alert.get(x, None) == alert.get(x, None) for x in config.core.alerter.constant_alert_fields]):
+            raise ValueError("Constant alert field changed. (%s, %s)" % (str(old_alert), str(alert)))
 
-    datastore.alert.save(alert_id, old_alert)
+        old_alert = recursive_update(old_alert, alert)
+        old_alert['al'] = recursive_update(old_alert['al'], merged)
+
+        datastore.alert.save(alert_id, old_alert)
+
     logger.info(f"Alert {alert_id} has been updated.")
 
 
