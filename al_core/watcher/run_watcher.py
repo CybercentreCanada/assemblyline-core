@@ -29,7 +29,10 @@ class WatcherServer(ServerBase):
             messages = self.queue.dequeue_range(0, seconds)
             for key in messages:
                 message = self.hash.pop(key)
-                self.handle(message)
+                if message:
+                    self.handle(message)
+                else:
+                    self.log.warning("Handled watch twice: " + key)
 
             if not messages:
                 time.sleep(0.1)

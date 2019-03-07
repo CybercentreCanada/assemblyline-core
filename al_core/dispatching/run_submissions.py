@@ -17,7 +17,6 @@ class SubmissionDispatchServer(ServerBase):
     def try_run(self):
 
         queue = self.dispatcher.submission_queue
-        submissions = self.dispatcher.submissions
 
         while self.running:
             try:
