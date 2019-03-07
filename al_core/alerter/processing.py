@@ -1,5 +1,4 @@
 import hashlib
-import time
 
 from assemblyline.common import forge
 from assemblyline.common.classification import InvalidClassification
@@ -29,11 +28,9 @@ def get_submission_record(counter, datastore, sid):
 
     if not srecord:
         counter.increment('alert.err_no_submission')
-        time.sleep(1.0)
         raise Exception("Couldn't find submission: %s" % sid)
 
     if srecord.get('state', 'unknown') != 'completed':
-        time.sleep(1.0)
         raise Exception("Submission not finalized: %s" % sid)
 
     return srecord
@@ -123,23 +120,23 @@ def get_summary(datastore, srecord):
 
 def generate_alert_id(alert_data):
     parts = [
-        alert_data['params']['psid'] or alert_data['sid'],
-        alert_data['metadata'].get('ts', alert_data['ingest_time'])
+        alert_data['submission']['params']['psid'] or alert_data['submission']['sid'],
+        alert_data['submission']['time']
     ]
     return hashlib.md5("-".join(parts).encode("utf-8")).hexdigest()
 
 
 # noinspection PyBroadException
-def parse_submission_record(counter, datastore, sid, psid, logger):
+def parse_submission_record(counter, datastore, alert_data, logger):
+    sid = alert_data['submission']['sid']
+    psid = alert_data['submission']['params']['psid']
     srecord = get_submission_record(counter, datastore, sid)
 
     max_classification, summary = get_summary(datastore, srecord)
     summary_list = list(summary['FILE_SUMMARY'])
 
-    extended_scan = 'unknown'
-    if not psid:
-        extended_scan = 'submitted' if psid is None else 'skipped'
-    else:
+    extended_scan = alert_data['extended_scan']
+    if psid:
         try:
             # Get errors from parent submission and submission. Strip keys
             # to only sha256 and service name. If there are any keys that
@@ -205,7 +202,8 @@ def save_alert(datastore, counter, logger, alert, psid):
     else:
         msg_type = "AlertCreated"
         datastore.alert.save(alert['alert_id'], alert)
-        counter.increment('alert.saved')
+        logger.info(f"Alert {alert['alert_id']} has been created.")
+        counter.increment('alert.created')
 
     msg = AlertMessage({
         "msg": alert,
@@ -219,11 +217,11 @@ def save_alert(datastore, counter, logger, alert, psid):
 def get_alert_update_parts(counter, datastore, alert_data, logger):
     global cache
     # Check cache
-    alert_update_p1, alert_update_p2 = cache.get(alert_data['sid'], (None, None))
+    alert_file = alert_data['submission']['files'][0]
+    alert_update_p1, alert_update_p2 = cache.get(alert_data['submission']['sid'], (None, None))
     if alert_update_p1 is None or alert_update_p2 is None:
-        parsed_record = parse_submission_record(counter, datastore, alert_data['sid'],
-                                                alert_data['params']['psid'], logger)
-        file_record = datastore.file.get(alert_data['sha256'], as_obj=False)
+        parsed_record = parse_submission_record(counter, datastore, alert_data, logger)
+        file_record = datastore.file.get(alert_file['sha256'], as_obj=False)
         alert_update_p1 = {
             'extended_scan': parsed_record['extended_scan'],
             'al': {
@@ -251,10 +249,10 @@ def get_alert_update_parts(counter, datastore, alert_data, logger):
                 'type': file_record['type']
             }
         }
-        cache.add(alert_data['sid'], (alert_update_p1, alert_update_p2))
+        cache.add(alert_data['submission']['sid'], (alert_update_p1, alert_update_p2))
 
     alert_update_p1['reporting_ts'] = now_as_iso()
-    alert_update_p1['file'] = {'name': alert_data['filename']}
+    alert_update_p1['file'] = {'name': alert_file['name']}
 
     return alert_update_p1, alert_update_p2
 
@@ -276,10 +274,10 @@ def process_alert_message(counter, datastore, logger, alert_data):
         },
         'alert_id': generate_alert_id(alert_data),
         'expiry_ts': now_as_iso(config.core.alerter.alert_ttl * 24 * 60 *60),
-        'metadata': {safe_str(key): value for key, value in alert_data['metadata'].items()},
-        'sid': alert_data['sid'],
-        'ts': alert_data['ingest_time'],
-        'type': alert_data['params']['type']
+        'metadata': {safe_str(key): value for key, value in alert_data['submission']['metadata'].items()},
+        'sid': alert_data['submission']['sid'],
+        'ts': alert_data['submission']['time'],
+        'type': alert_data['submission']['params']['type']
     }
 
     ###############################
@@ -296,4 +294,4 @@ def process_alert_message(counter, datastore, logger, alert_data):
     # Update alert with computed values
     alert = recursive_update(alert, alert_update_p2)
 
-    save_alert(datastore, counter, logger, alert, alert_data['params']['psid'])
+    save_alert(datastore, counter, logger, alert, alert_data['submission']['params']['psid'])

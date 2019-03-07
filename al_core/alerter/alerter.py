@@ -69,7 +69,7 @@ class Alerter(object):
             try:
                 self.process_alert_message(self.counter, self.datastore, self.log, alert)
             except Exception as ex:  # pylint: disable=W0703
-                retries = alert['retries'] = alert.get('retries', 0) + 1
+                retries = alert['alert_retries'] = alert.get('alert_retries', 0) + 1
                 if retries > MAX_RETRIES:
                     self.log.exception(f'Max retries exceeded for: {alert}')
                 else:
