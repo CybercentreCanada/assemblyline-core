@@ -274,7 +274,7 @@ class Ingester:
         self.bytes_ingested_counter.increment(task.file_size)
         self.submissions_ingested_counter.increment()
 
-        if not any(len(file.sha256) != 64 for file in task.submission.files):
+        if any(len(file.sha256) != 64 for file in task.submission.files):
             self.send_notification(task, failure="Invalid sha256", logfunc=self.log.warning)
             return
 

@@ -23,7 +23,7 @@ class IngesterSubmitter(ServerBase):
 
         # Initialize the ingester specific resources
         self.ingester = Ingester(datastore=datastore, classification=classification_engine, logger=self.log,
-                                   redis=redis, persistent_redis=persistent_redis)
+                                 redis=redis, persistent_redis=persistent_redis)
 
     def try_run(self, volatile=False):
         ingester = self.ingester
@@ -41,11 +41,11 @@ class IngesterSubmitter(ServerBase):
                 raw = ingester.unique_queue.pop()
                 if not raw:
                     continue
-                task = IngestTask(json.loads(raw))
+                task = IngestTask(raw)
 
                 # noinspection PyBroadException
-                if len(task.sha256) != 64:
-                    logger.error("Malformed entry on submission queue: %s", raw)
+                if any(len(file.sha256) != 64 for file in task.submission.files):
+                    logger.error("Malformed entry on submission queue: %s", task.ingest_id)
                     continue
 
                 # If between the initial ingestion and now the drop/whitelist status
@@ -58,7 +58,7 @@ class IngesterSubmitter(ServerBase):
 
                 # Check if this file has been previously processed.
                 pprevious, previous, score, scan_key = None, False, None, None
-                if not task.params.ignore_cache:
+                if not task.submission.params.ignore_cache:
                     pprevious, previous, score, scan_key = ingester.check(task)
                 else:
                     scan_key = ingester.stamp_filescore_key(task)
@@ -67,8 +67,8 @@ class IngesterSubmitter(ServerBase):
                 # finalize will decide what to do, and put the task back in the queue
                 # rewritten properly if we are going to run it again
                 if previous:
-                    if not task.params.services.resubmit and not pprevious:
-                        logger.warning(f"No psid for what looks like a resubmission of {task.sha256}: {scan_key}")
+                    if not task.submission.params.services.resubmit and not pprevious:
+                        logger.warning(f"No psid for what looks like a resubmission of {task.submission.files[0].sha256}: {scan_key}")
                     ingester.finalize(pprevious, previous, score, task)
                     continue
 
@@ -78,7 +78,7 @@ class IngesterSubmitter(ServerBase):
                 # workers, so if it fails, someone beat us to the punch, record the file
                 # as a duplicate then.
                 if not ingester.scanning.add(scan_key, task.as_primitives()):
-                    logger.debug('Duplicate %s', task.sha256)
+                    logger.debug('Duplicate %s', task.submission.files[0].sha256)
                     ingester.duplicates_counter.increment()
                     ingester.duplicate_queue.push(_dup_prefix + scan_key, task.as_primitives())
                     continue

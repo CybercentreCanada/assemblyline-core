@@ -18,7 +18,6 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from al_core.dispatching.client import DispatchClient
 from al_core.dispatching.dispatcher import service_queue_name, ServiceTask
-from al_core.ingester.client import IngesterClient
 from al_core.submission_client import SubmissionClient
 from al_core.ingester.ingester import IngestTask
 from al_core.watcher import WatcherServer

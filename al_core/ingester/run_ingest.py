@@ -14,6 +14,7 @@ from assemblyline.common import log
 from al_core.ingester.ingester import Ingester, IngestTask
 from al_core.server_base import ServerBase
 from assemblyline.odm.models.submission import Submission
+from assemblyline.odm.messages.submission import Submission as SubmissionInput, SubmissionMessage
 
 
 class IngesterInput(ServerBase):
@@ -25,9 +26,9 @@ class IngesterInput(ServerBase):
 
         # Initialize the ingester specific resources
         self.ingester = Ingester(datastore=datastore, classification=classification_engine, logger=self.log,
-                                   redis=redis, persistent_redis=persistent_redis)
+                                 redis=redis, persistent_redis=persistent_redis)
 
-    def try_run(self):
+    def try_run(self, volatile=False):
         ingester = self.ingester
 
         # Move from ingest to unique and waiting queues.
@@ -46,26 +47,33 @@ class IngesterInput(ServerBase):
             if not message:
                 continue
 
-            # Write all input to the traffic queue
-            ingester.traffic_queue.publish(SubmissionMessage(message))
-
             try:
-                task.ingest_id = task.submission.sid
+                sub = SubmissionInput(message)
+                # Write all input to the traffic queue
+                ingester.traffic_queue.publish(SubmissionMessage({
+                    'msg': sub,
+                    'msg_type': 'SubmissionIngested',
+                    'sender': 'ingester',
+                }).as_primitives())
+
+                task = IngestTask(dict(
+                    submission=sub,
+                    ingest_id=sub.sid,
+                ))
                 task.submission.sid = None  # Reset to new random uuid
 
-                task = IngestTask(message)
             except ValueError:
                 self.log.warning(f"Dropped ingest submission {message}")
+                if volatile:
+                    raise
                 continue
 
-            sha256 = task.sha256
-            if not sha256 or len(sha256) != 64:
-                self.log.error(f"Invalid sha256: {sha256}")
+            if any(len(file.sha256) != 64 for file in task.submission.files):
+                self.log.error(f"Invalid sha256: {[file.sha256 for file in task.submission.files]}")
                 continue
 
-            # task.md5 = task.md5.lower()
-            # task.sha1 = task.sha1.lower()
-            task.sha256 = sha256.lower()
+            for file in task.submission.files:
+                file.sha256 = file.sha256.lower()
 
             ingester.ingest(task)
 
