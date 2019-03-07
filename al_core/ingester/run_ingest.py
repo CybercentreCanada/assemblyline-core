@@ -19,7 +19,7 @@ from assemblyline.odm.messages.submission import Submission as SubmissionInput, 
 
 class IngesterInput(ServerBase):
     def __init__(self, logger=None, datastore=None, redis=None, persistent_redis=None):
-        super().__init__('assemblyline.ingester.ingester', logger)
+        super().__init__('assemblyline.ingester.input')
         # Connect to all sorts of things
         datastore = datastore or forge.get_datastore()
         classification_engine = forge.get_classification()
@@ -79,6 +79,5 @@ class IngesterInput(ServerBase):
 
 
 if __name__ == '__main__':
-    log.init_logging("ingester")
     IngesterInput().serve_forever()
 

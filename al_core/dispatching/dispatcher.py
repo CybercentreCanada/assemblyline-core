@@ -9,6 +9,7 @@ from functools import reduce
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.service import Service
+from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
 from assemblyline.remote.datatypes.set import ExpiringSet
@@ -78,15 +79,26 @@ class Dispatcher:
         # Build some utility classes
         self.scheduler = Scheduler(datastore, self.config)
         self.classification_engine = forge.get_classification()
-        self.timeout_watcher = al_core.watcher.WatcherClient(redis_persist)
 
         # Connect to all of our persistent redis structures
-        self.redis = redis
-        self.redis_persist = redis_persist
-        self.submission_queue = NamedQueue(SUBMISSION_QUEUE, redis)
-        self.file_queue = NamedQueue(FILE_QUEUE, redis)
+        self.redis = redis or get_client(
+            db=self.config.core.redis.nonpersistent.db,
+            host=self.config.core.redis.nonpersistent.host,
+            port=self.config.core.redis.nonpersistent.port,
+            private=False,
+        )
+        self.redis_persist = redis_persist or get_client(
+            db=self.config.core.redis.persistent.db,
+            host=self.config.core.redis.persistent.host,
+            port=self.config.core.redis.persistent.port,
+            private=False,
+        )
+        self.timeout_watcher = al_core.watcher.WatcherClient(self.redis_persist)
+
+        self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
+        self.file_queue = NamedQueue(FILE_QUEUE, self.redis)
         self._nonper_other_queues = {}
-        self.active_tasks = ExpiringHash(DISPATCH_TASK_HASH, host=redis_persist)
+        self.active_tasks = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
 
         # Publish counters to the metrics sink.
         self.files_complete_counter = MetricCounter('dispatch.files_complete', self.redis)
@@ -337,7 +349,13 @@ class Dispatcher:
         """
         # Read the message content
         file_hash = task.file_info.sha256
-        submission_task = SubmissionTask(self.active_tasks.get(task.sid))
+        active_task = self.active_tasks.get(task.sid)
+
+        if active_task is None:
+            self.log.warning(f"Untracked submission is being processed: {task.sid}")
+            return
+
+        submission_task = SubmissionTask(active_task)
         submission = submission_task.submission
         now = time.time()
 

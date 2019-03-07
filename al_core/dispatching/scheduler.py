@@ -48,7 +48,7 @@ class Scheduler:
         system_services = [k for k, v in all_services.items() if v.category == self.system_category]
 
         # Add all selected, accepted, and not rejected services to the schedule
-        schedule: List[Dict[str, Service]] = [{} for _ in self.config.core.dispatcher.stages]
+        schedule: List[Dict[str, Service]] = [{} for _ in self.config.services.stages]
         services = list((set(selected) - set(excluded)) | set(system_services))
         selected = []
         skipped = []
@@ -114,7 +114,7 @@ class Scheduler:
         return all_categories
 
     def stage_index(self, stage):
-        return self.config.core.dispatcher.stages.index(stage)
+        return self.config.services.stages.index(stage)
 
     def _get_services(self):
         return self.datastore.service.multiget([x.id for x in self.datastore.service.stream_search('enabled:true', fl='id')])

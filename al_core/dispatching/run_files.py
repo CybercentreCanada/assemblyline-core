@@ -1,3 +1,5 @@
+
+from assemblyline.common import forge
 from al_core.dispatching.dispatcher import Dispatcher, FileTask
 from al_core.server_base import ServerBase
 
@@ -5,6 +7,7 @@ from al_core.server_base import ServerBase
 class FileDispatchServer(ServerBase):
     def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None):
         super().__init__('assemblyline.dispatcher.file', logger)
+        datastore = datastore or forge.get_datastore()
         self.dispatcher = Dispatcher(redis=redis, redis_persist=redis_persist, datastore=datastore, logger=self.log)
 
     def try_run(self):
@@ -28,6 +31,4 @@ class FileDispatchServer(ServerBase):
 
 
 if __name__ == '__main__':
-    from assemblyline.common import log
-    log.init_logging()
     FileDispatchServer().serve_forever()
