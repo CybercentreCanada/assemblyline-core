@@ -134,19 +134,18 @@ class DispatchClient:
         self.errors.save(error_id, error)
 
         # Mark the attempt to process the file over in the dispatch table
-        process_table = DispatchHash(task.sid, *self.redis)
+        process_table = DispatchHash(task.sid, self.redis)
         if error.response.status == "FAIL_RECOVERABLE":
-            process_table.fail_recoverable(task.sha256, task.service_name)
+            process_table.fail_recoverable(task.fileinfo.sha256, task.service_name)
         else:
-            process_table.fail_nonrecoverable(task.sha256, task.service_name, error_id)
+            process_table.fail_nonrecoverable(task.fileinfo.sha256, task.service_name, error_id)
 
         # Send a message to prompt the re-issue of the task if needed
         self.file_queue.push(FileTask(dict(
             sid=task.sid,
-            sha256=task.sha256,
-            file_type=task.file_type,
+            file_info=task.fileinfo,
             depth=task.depth,
-        )))
+        )).as_primitives())
 
         # Send the result key to any watching systems
         msg = {'status': 'FAIL', 'cache_key': error_id}
