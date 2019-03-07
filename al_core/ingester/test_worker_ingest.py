@@ -49,9 +49,10 @@ def ingest_harness(clean_redis):
     """
     datastore = AssemblylineDatastore(MockDatastore())
     ingester = IngesterInput(datastore=datastore, redis=clean_redis, persistent_redis=clean_redis)
-    client = IngesterClient(redis=clean_redis, persistent_redis=clean_redis)
+    client = IngesterClient(persistent_redis=clean_redis)
     ingester.running = TrueCountTimes(1)
     return datastore, ingester, client
+
 
 def test_ingest_simple(ingest_harness):
     datastore, ingester, client = ingest_harness

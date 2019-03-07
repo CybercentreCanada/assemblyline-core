@@ -9,12 +9,10 @@ score received, possibly sending a message to indicate that an alert should
 be created.
 """
 
-import uuid
 import threading
-import json
 from math import tanh
 from random import random
-from typing import Iterable, Union
+from typing import Iterable
 
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
@@ -29,8 +27,9 @@ from assemblyline.remote.datatypes.queues.multi import MultiQueue
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes import get_client
 from assemblyline import odm
-from assemblyline.odm.models.submission import Submission, SubmissionParams
-from assemblyline.odm.messages.submission import Submission as SubmissionBody
+from assemblyline.odm.models.submission import SubmissionParams
+from assemblyline.odm.models.alert import EXTENDED_SCAN_VALUES
+from assemblyline.odm.messages.submission import Submission
 
 from al_core.alerter.alerter import ALERT_QUEUE_NAME
 from al_core.submission_client import SubmissionClient
@@ -39,6 +38,7 @@ from al_core.submission_client import SubmissionClient
 _completeq_name = 'm-complete'
 _ingestq_name = 'm-ingest'
 _dup_prefix = 'w-m-'
+_notification_queue_prefix = 'm-n-'
 _min_priority = 1
 _max_retries = 10
 _retry_delay = 180
@@ -118,33 +118,29 @@ def should_resubmit(score):
     return random() < resubmit_probability
 
 
-@odm.model()
+# @odm.model()
 class IngestTask(odm.Model):
     # Submission Parameters
-    params = odm.Compound(SubmissionParams)
+    submission: Submission = odm.Compound(Submission)
 
-    # Information about the ingestion itself, parameters irrelivant to the
-    # system outside of ingester
-    ingest_time = odm.Date()
+    # Shortcut for properties of the submission
+    @property
+    def file_size(self) -> int:
+        return sum(file.size for file in self.submission.files)
+
+    @property
+    def params(self) -> SubmissionParams:
+        return self.submission.params
+
+    # Information about the ingestion itself, parameters irrelevant
     scan_key = odm.Keyword(default_set=True)  # the filescore key
     retries = odm.Integer(default=0)
 
-    notification_queue = odm.Keyword(default='')
-    notification_threshold = odm.Optional(odm.Integer())
-
-    # If the ingestion has failed for some reason, what is it?
-    failure = odm.Text(default='')
-
-    # describe the file being ingested
-    sha256 = odm.Keyword()
-    file_size = odm.Integer()
-    filename = odm.Keyword(default='')
-    classification = odm.Keyword()
-    metadata = odm.Mapping(odm.Keyword())
+    # Fields added after a submission is complete for notification/bookkeeping processes
+    failure = odm.Text(default='')  # If the ingestion has failed for some reason, what is it?
     score = odm.Optional(odm.Integer())  # Score from previous processing of this file
-
-    # After a task is complete the submission id is added
-    sid: Union[str, None] = odm.Optional(odm.Keyword())
+    extended_scan = odm.Enum(EXTENDED_SCAN_VALUES, default="skipped")
+    ingest_id = odm.UUID()
 
 
 class Ingester:
@@ -223,8 +219,8 @@ class Ingester:
         # Input. An external process places submission requests on this queue.
         self.ingest_queue = NamedQueue(_ingestq_name, self.persistent_redis)
 
-        # Traffic (TODO: What traffic?)
-        self.traffic_queue = CommsQueue('traffic', self.redis)
+        # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
+        self.traffic_queue = CommsQueue('submissions', self.redis)
 
         # Internal. Unique requests are placed in and processed from this queue.
         self.unique_queue = PriorityQueue('m-unique', self.persistent_redis)
@@ -263,8 +259,6 @@ class Ingester:
 
     def ingest(self, task: IngestTask):
         # Load a snapshot of ingest parameters as of right now.
-        # self.config is a timed cache
-        conf = self.config.core.ingester
         max_file_size = self.config.submission.max_file_size
         param = task.params
 
@@ -280,31 +274,21 @@ class Ingester:
         self.bytes_ingested_counter.increment(task.file_size)
         self.submissions_ingested_counter.increment()
 
-        if not task.sha256:
+        if not any(len(file.sha256) != 64 for file in task.submission.files):
             self.send_notification(task, failure="Invalid sha256", logfunc=self.log.warning)
             return
 
-        if not self.ce.is_valid(task.classification):
-            _message = f"Invalid classification {task.classification}"
-            self.send_notification(task, failure=_message, logfunc=self.log.warning)
-            return
-
-        if not self.ce.is_valid(param.classification):
-            _message = f"Invalid classification {param.classification}"
-            self.send_notification(task, failure=_message, logfunc=self.log.warning)
-            return
-
         # Clean up metadata strings, since we may delete some, iterate on a copy of the keys
-        for key in list(task.metadata.keys()):
-            value = task.metadata[key]
+        for key in list(task.submission.metadata.keys()):
+            value = task.submission.metadata[key]
             meta_size = len(value)
             if meta_size > self.config.submission.max_metadata_length:
-                self.log.info(f'Removing {key} from {task.sha256} from {param.submitter}')
-                task.metadata.pop(key)
+                self.log.info(f'Removing {key} from {task.ingest_id} from {param.submitter}')
+                task.submission.metadata.pop(key)
 
         if task.file_size > max_file_size and not task.params.ignore_size and not task.params.never_drop:
             task.failure = f"File too large ({task.file_size} > {max_file_size})"
-            self.drop_queue.push(task.json())
+            self.drop_queue.push(task.as_primitives())
             self.skipped_counter.increment()
             return
 
@@ -330,7 +314,7 @@ class Ingester:
 
         # Reduce the priority by an order of magnitude for very old files.
         current_time = now()
-        if priority and self.expired(current_time - task.ingest_time.timestamp(), 0):
+        if priority and self.expired(current_time - task.submission.time.timestamp(), 0):
             priority = (priority / 10) or 1
 
         param.priority = priority
@@ -348,7 +332,7 @@ class Ingester:
         if self.is_whitelisted(task):
             return
 
-        self.unique_queue.push(priority, task.json())
+        self.unique_queue.push(priority, task.as_primitives())
 
     def check(self, task: IngestTask):
         key = self.stamp_filescore_key(task)
@@ -403,7 +387,7 @@ class Ingester:
 
     def stamp_filescore_key(self, task: IngestTask, sha256=None):
         if not sha256:
-            sha256 = task.sha256
+            sha256 = task.submission.files[0].sha256
 
         key = task.scan_key
 
@@ -413,7 +397,7 @@ class Ingester:
 
         return key
 
-    def completed(self, sub: Submission):
+    def completed(self, sub):
         """Invoked when notified that a submission has completed.
 
         TODO this is the v3 method
@@ -504,17 +488,17 @@ class Ingester:
         if failure:
             logfunc("%s: %s", failure, str(task.json()))
 
-        if not task.notification_queue:
+        note_queue = task.submission.notification.queue
+        threshold = task.submission.notification.threshold
+        if not note_queue:
             return
 
-        threshold = task.notification_threshold
         if threshold is not None and task.score is not None and task.score < threshold:
             return
 
-        q = self.notification_queues.get(task.notification_queue, None)
+        q = self.notification_queues.get(note_queue, None)
         if not q:
-            self.notification_queues[task.notification_queue] = q = \
-                NamedQueue(task.notification_queue, self.persistent_redis)
+            self.notification_queues[note_queue] = q = NamedQueue(note_queue, self.persistent_redis)
         q.push(task.as_primitives())
 
     def expired(self, delta: float, errors) -> bool:
@@ -555,17 +539,18 @@ class Ingester:
     def is_whitelisted(self, task: IngestTask):
         reason, hit = self.get_whitelist_verdict(self.whitelist, task)
         hit = {x: dotdump(safe_str(y)) for x, y in hit.items()}
+        sha256 = task.submission.files[0].sha256
 
         if not reason:
             with self.whitelisted_lock:
-                reason = self.whitelisted.get(task.sha256, None)
+                reason = self.whitelisted.get(sha256, None)
                 if reason:
                     hit = 'cached'
 
         if reason:
             if hit != 'cached':
                 with self.whitelisted_lock:
-                    self.whitelisted[task.sha256] = reason
+                    self.whitelisted[sha256] = reason
 
             task.failure = "Whitelisting due to reason %s (%s)" % (dotdump(safe_str(reason)), hit)
             self.drop_queue.push(task.json())
@@ -578,17 +563,8 @@ class Ingester:
     def submit(self, task: IngestTask):
 
         self.submit_client.submit(
-            SubmissionBody(dict(
-                sid=uuid.uuid4().hex,
-                files=[dict(
-                    sha256=task.sha256,
-                    name=task.filename or task.sha256,
-                )],
-                notification=None,
-                metadata=task.metadata,
-                params=task.params
-            )),
-            completed_queue=_completeq_name
+            submission_obj=task.submission,
+            completed_queue=_completeq_name,
         )
 
         self.timeout_queue.push(now(_max_time), task.scan_key)
@@ -613,10 +589,11 @@ class Ingester:
             self.retry_queue.push(now(_retry_delay), task.json())
 
     def finalize(self, psid, sid, score, task: IngestTask):
-        self.log.debug("Finalizing (score=%d) %s", score, task.sha256)
+        self.log.debug("Finalizing (score=%d) %s", score, task.submission.files[0].sha256)
         if psid:
             task.params.psid = psid
         task.score = score
+        task.submission.sid = sid
 
         selected = task.params.services.selected
         resubmit_to = task.params.services.resubmit
@@ -624,12 +601,11 @@ class Ingester:
         resubmit_selected = determine_resubmit_selected(selected, resubmit_to)
         will_resubmit = resubmit_selected and should_resubmit(score)
         if will_resubmit:
-            task.params.psid = ''
+            task.extend_scan = 'submitted'
+            task.params.psid = None
 
         if self.is_alert(task, score):
-            obj = task.as_primitives()
-            obj['sid'] = sid
-            self.alert_queue.push(json.dumps(obj))
+            self.alert_queue.push(task.as_primitives())
 
         self.send_notification(task)
 
@@ -639,7 +615,7 @@ class Ingester:
             task.scan_key = None
             task.selected = resubmit_selected
 
-            self.unique_queue.push(task.priority, task.json())
+            self.unique_queue.push(task.params.priority, task.as_primitives())
 
     def is_alert(self, task: IngestTask, score):
         if not task.params.generate_alert:

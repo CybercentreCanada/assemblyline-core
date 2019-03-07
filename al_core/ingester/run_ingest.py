@@ -46,8 +46,13 @@ class IngesterInput(ServerBase):
             if not message:
                 continue
 
-            ingester.traffic_queue.publish(message)
+            # Write all input to the traffic queue
+            ingester.traffic_queue.publish(SubmissionMessage(message))
+
             try:
+                task.ingest_id = task.submission.sid
+                task.submission.sid = None  # Reset to new random uuid
+
                 task = IngestTask(message)
             except ValueError:
                 self.log.warning(f"Dropped ingest submission {message}")

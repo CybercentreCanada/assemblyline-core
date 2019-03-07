@@ -7,28 +7,18 @@ from assemblyline.odm.models.submission import INGEST_SUBMISSION_DEFAULTS
 
 
 class IngesterClient:
-    """A convience object that wraps the input/output queues of the ingester."""
+    """A convience object that wraps the input queue of the ingester."""
 
-    def __init__(self, redis=None, persistent_redis=None):
+    def __init__(self, persistent_redis=None):
         # Create a config cache that will refresh config values periodically
         self.config = forge.CachedObject(forge.get_config)
 
-        # Connect to the redis servers
-        self.redis = redis or get_client(
-            db=self.config.core.redis.nonpersistent.db,
-            host=self.config.core.redis.nonpersistent.host,
-            port=self.config.core.redis.nonpersistent.port,
-            private=False,
-        )
         self.persistent_redis = persistent_redis or get_client(
             db=self.config.core.redis.persistent.db,
             host=self.config.core.redis.persistent.host,
             port=self.config.core.redis.persistent.port,
             private=False,
         )
-
-        # MM Input. An external process creates a record when any submission completes.
-        self.complete_queue = NamedQueue(_completeq_name, self.redis)
 
         # MM Input. An external process places submission requests on this queue.
         self.ingest_queue = NamedQueue(_ingestq_name, self.persistent_redis)
