@@ -149,8 +149,7 @@ class SubmissionClient:
                 params=submission_obj.params,
                 results=[],
                 sid=submission_obj.sid,
-                state='submitted',
-                times=dict(submitted=now_as_iso())
+                state='submitted'
             ))
             self.datastore.submission.save(sub.sid, sub)
 

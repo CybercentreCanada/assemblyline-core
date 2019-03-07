@@ -129,20 +129,6 @@ def generate_alert_id(alert_data):
     return hashlib.md5("-".join(parts).encode("utf-8")).hexdigest()
 
 
-def init_alert_parts(alert_data, extra_fields=None, extra_key_data=None):
-    if extra_fields is None:
-        extra_fields = []
-    if extra_key_data is None:
-        extra_key_data = []
-
-    psid = alert_data['params']['psid'] or None
-    sid = alert_data['sid']
-    fields = extra_fields + ['filename', 'sid', 'al_score', 'ts', 'type']
-    key_data = extra_key_data + [psid or sid, alert_data['metadata'].get('ts', alert_data['ingest_time'])]
-
-    return psid, sid, fields, key_data
-
-
 # noinspection PyBroadException
 def parse_submission_record(counter, datastore, sid, psid, logger):
     srecord = get_submission_record(counter, datastore, sid)
