@@ -274,7 +274,7 @@ class Ingester:
         self.bytes_ingested_counter.increment(task.file_size)
         self.submissions_ingested_counter.increment()
 
-        if not any(len(file.sha256) != 64 for file in task.submission.files):
+        if any(len(file.sha256) != 64 for file in task.submission.files):
             self.send_notification(task, failure="Invalid sha256", logfunc=self.log.warning)
             return
 
@@ -438,7 +438,7 @@ class Ingester:
             return scan_key
 
         task = IngestTask(raw)
-        task.sid = sid
+        task.submission.sid = sid
 
         errors = sub.error_count
         file_count = sub.file_count
@@ -463,7 +463,7 @@ class Ingester:
                 if res is None:
                     break
                 res = IngestTask(res)
-                res.sid = sid
+                res.submission.sid = sid
                 yield res
 
         # You may be tempted to remove the assignment to dups and use the
