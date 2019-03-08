@@ -18,7 +18,8 @@ def dummy_service(name, stage, accepts='', rejects=''):
         'realm': 'abc',
         'repo': '/dev/null',
         'version': '0',
-        'enabled': True
+        'enabled': True,
+        'timeout': 2
     })
 
 

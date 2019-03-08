@@ -5,14 +5,14 @@ from assemblyline.remote.datatypes.queues.priority import UniquePriorityQueue
 from assemblyline.remote.datatypes.hash import ExpiringHash
 
 from al_core.server_base import ServerBase
-from al_core.watcher.client import WATCHER_HASH, WATCHER_QUEUE
+from al_core.watcher.client import WATCHER_HASH, WATCHER_QUEUE, MAX_TIMEOUT
 
 
 class WatcherServer(ServerBase):
     def __init__(self, redis):
         super().__init__('assemblyline.watcher')
         self.redis = redis
-        self.hash = ExpiringHash(WATCHER_HASH, redis)
+        self.hash = ExpiringHash(name=WATCHER_HASH, ttl=MAX_TIMEOUT, host=redis)
         self.queue = UniquePriorityQueue(WATCHER_QUEUE, redis)
 
     def handle(self, message):
@@ -29,10 +29,11 @@ class WatcherServer(ServerBase):
             messages = self.queue.dequeue_range(0, seconds)
             for key in messages:
                 message = self.hash.pop(key)
+                self.log.warning(f'Handle watch: {key} {len(key)} {type(key)}')
                 if message:
                     self.handle(message)
                 else:
-                    self.log.warning("Handled watch twice: " + key)
+                    self.log.warning(f'Handled watch twice: {key} {len(key)} {type(key)}')
 
             if not messages:
                 time.sleep(0.1)

@@ -20,18 +20,24 @@ MAX_TIMEOUT = 60*60*48
 class WatcherClient:
     def __init__(self, redis):
         self.redis = redis
-        self.hash = ExpiringHash(WATCHER_HASH, MAX_TIMEOUT, redis)
+        self.hash = ExpiringHash(name=WATCHER_HASH, ttl=MAX_TIMEOUT, host=redis)
         self.queue = UniquePriorityQueue(WATCHER_QUEUE, redis)
 
     def touch(self, timeout: int, key: str, queue: str, message: object):
         if timeout >= MAX_TIMEOUT:
             raise ValueError(f"Can't set watcher timeouts over {MAX_TIMEOUT}")
 
+        import logging
+        logging.warning(f'set watch: {key} {len(key)} {type(key)}')
+
         self.hash.set(key, {'queue': queue, 'message': message})
         seconds, _ = self.redis.time()
         self.queue.push(int(seconds + timeout), key)
+        assert self.hash.exists(key)
 
     def clear(self, key: str):
+        import logging
+        logging.warning(f'Clear watch: {key} {len(key)} {type(key)}')
         self.queue.remove(key)
         self.hash.pop(key)
 

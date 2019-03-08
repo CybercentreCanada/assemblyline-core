@@ -117,7 +117,7 @@ def replace_config(request):
 
     def new_config(*_, **__):
         config = old_get_config()
-        config.core.dispatcher.timeout = 3
+        config.core.dispatcher.timeout = 4
         return config
     forge._get_config = new_config
 
@@ -199,6 +199,7 @@ def test_simulate_core(es_connection, clean_redis, replace_config):
         first_submission: Submission = ds.submission.get(first_task.submission.sid)
         assert first_submission.state == 'completed'
         assert len(first_submission.files) == 1
+        assert len(first_submission.errors) == 0
         assert len(first_submission.results) == 4
 
         # The other will get processed as a duplicate
@@ -267,7 +268,7 @@ def test_simulate_core(es_connection, clean_redis, replace_config):
         )).as_primitives())
 
         notification_queue = NamedQueue('drop', clean_redis)
-        dropped_task = notification_queue.pop(timeout=10)
+        dropped_task = notification_queue.pop(timeout=16)
         assert dropped_task and IngestTask(dropped_task)
         assert pre_service.drops[sha256.hexdigest()] == 1
         assert pre_service.hits[sha256.hexdigest()] == 2
