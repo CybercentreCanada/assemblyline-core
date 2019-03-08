@@ -1,5 +1,5 @@
+import hashlib
 import random
-import signal
 
 from al_core.dispatching.client import DispatchClient
 from al_core.dispatching.dispatcher import service_queue_name
@@ -48,10 +48,10 @@ class RandomService(ServerBase):
                     result = random_model_obj(Result)
                 result.sha256 = task.fileinfo.sha256
                 result.response.service_name = task.service_name
-                result_key = result.build_key(task.service_config)
+                result_key = result.build_key(hashlib.md5(task.service_config.encode("utf-8")).hexdigest())
 
-                result.response.extracted = result.response.extracted[task.depth+1:]
-                result.response.supplementary = result.response.supplementary[task.depth+1:]
+                result.response.extracted = result.response.extracted[task.depth+2:]
+                result.response.supplementary = result.response.supplementary[task.depth+2:]
 
                 self.log.info(f"\t\tA result was generated for this task: {result_key}")
 
@@ -71,9 +71,10 @@ class RandomService(ServerBase):
                 error = random_model_obj(Error)
                 error.sha256 = task.fileinfo.sha256
                 error.response.service_name = task.service_name
-                print(f"\t\tA {error.response.status} error was generated for this task: {error.response.message}")
+                error_key = error.build_key(hashlib.md5(task.service_config.encode("utf-8")).hexdigest())
+                print(f"\t\tA {error.response.status} error was generated for this task: {error_key}")
 
-                self.dispatch_client.service_failed(task, error)
+                self.dispatch_client.service_failed(task, error, error_key)
 
 
 if __name__ == "__main__":
