@@ -32,7 +32,11 @@ class SubmissionDispatchServer(ServerBase):
 
                 # This is just as sid nudge, this submission should already be running
                 elif 'sid' in message:
-                    task = SubmissionTask(self.dispatcher.active_tasks.get(message['sid']))
+                    active_task = self.dispatcher.active_tasks.get(message['sid'])
+                    if active_task is None:
+                        continue
+
+                    task = SubmissionTask(active_task)
 
                 else:
                     self.log.error(f'Corrupted submission message in dispatcher {message}')
