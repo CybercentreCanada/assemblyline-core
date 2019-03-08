@@ -136,17 +136,16 @@ class DispatchClient:
         for w in self._get_watcher_list(task.sid).members():
             NamedQueue(w).push(msg)
 
-    def service_failed(self, task: ServiceTask, error: Error):
+    def service_failed(self, task: ServiceTask, error: Error, error_key):
         # Add an error to the datastore
-        error_id = uuid.uuid4().hex
-        self.errors.save(error_id, error)
+        self.errors.save(error_key, error)
 
         # Mark the attempt to process the file over in the dispatch table
         process_table = DispatchHash(task.sid, self.redis)
         if error.response.status == "FAIL_RECOVERABLE":
             process_table.fail_recoverable(task.fileinfo.sha256, task.service_name)
         else:
-            process_table.fail_nonrecoverable(task.fileinfo.sha256, task.service_name, error_id)
+            process_table.fail_nonrecoverable(task.fileinfo.sha256, task.service_name, error_key)
 
         # Send a message to prompt the re-issue of the task if needed
         self.file_queue.push(FileTask(dict(
@@ -156,7 +155,7 @@ class DispatchClient:
         )).as_primitives())
 
         # Send the result key to any watching systems
-        msg = {'status': 'FAIL', 'cache_key': error_id}
+        msg = {'status': 'FAIL', 'cache_key': error_key}
         for w in self._get_watcher_list(task.sid).members():
             NamedQueue(w).push(msg)
 

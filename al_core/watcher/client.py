@@ -26,18 +26,12 @@ class WatcherClient:
     def touch(self, timeout: int, key: str, queue: str, message: object):
         if timeout >= MAX_TIMEOUT:
             raise ValueError(f"Can't set watcher timeouts over {MAX_TIMEOUT}")
-
-        import logging
-        logging.warning(f'set watch: {key} {len(key)} {type(key)}')
-
         self.hash.set(key, {'queue': queue, 'message': message})
         seconds, _ = self.redis.time()
         self.queue.push(int(seconds + timeout), key)
         assert self.hash.exists(key)
 
     def clear(self, key: str):
-        import logging
-        logging.warning(f'Clear watch: {key} {len(key)} {type(key)}')
         self.queue.remove(key)
         self.hash.pop(key)
 
