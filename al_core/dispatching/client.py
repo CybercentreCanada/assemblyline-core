@@ -109,7 +109,15 @@ class DispatchClient:
                 file_data = self.files.get(extracted_data.sha256)
                 self.file_queue.push(FileTask(dict(
                     sid=task.sid,
-                    file_info=file_data,
+                    file_info=dict(
+                        magic=file_data.magic,
+                        md5=file_data.md5,
+                        mime=file_data.mime,
+                        sha1=file_data.sha1,
+                        sha256=file_data.sha256,
+                        size=file_data.size,
+                        type=file_data.type,
+                    ),
                     depth=task.depth+1,
                     parent_hash=task.fileinfo.sha256,
                 )).as_primitives())
@@ -126,7 +134,7 @@ class DispatchClient:
         # Send the result key to any watching systems
         msg = {'status': 'OK', 'cache_key': result_key}
         for w in self._get_watcher_list(task.sid).members():
-            w.push(msg)
+            NamedQueue(w).push(msg)
 
     def service_failed(self, task: ServiceTask, error: Error):
         # Add an error to the datastore
@@ -150,7 +158,7 @@ class DispatchClient:
         # Send the result key to any watching systems
         msg = {'status': 'FAIL', 'cache_key': error_id}
         for w in self._get_watcher_list(task.sid).members():
-            w.push(msg)
+            NamedQueue(w).push(msg)
 
     def setup_watch_queue(self, sid):
         """
