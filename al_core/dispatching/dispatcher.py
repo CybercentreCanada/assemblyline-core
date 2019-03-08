@@ -198,61 +198,66 @@ class Dispatcher:
             sha = file_task.file_info.sha256
             schedule = self.build_schedule(dispatch_table, submission, sha, file_task.file_info.type)
 
-            for service_name in reduce(lambda a, b: a + b, schedule):
-                service = self.scheduler.services.get(service_name)
+            while schedule:
+                stage = schedule.pop(0)
+                for service_name in stage:
+                    service = self.scheduler.services.get(service_name)
 
-                # If the service is still marked as 'in progress'
-                runtime = time.time() - dispatch_table.dispatch_time(sha, service_name)
-                if runtime < service.timeout:
-                    pending_files[sha] = file_task
-                    continue
-
-                # It hasn't started, has timed out, or is finished, see if we have a result
-                result_row = dispatch_table.finished(sha, service_name)
-
-                # No result found, mark the file as incomplete
-                if not result_row:
-                    pending_files[sha] = file_task
-                    continue
-
-                # The process table is marked that a service has been abandoned due to errors
-                if result_row.is_error:
-                    continue
-
-                # The result should exist then, get all the sub-files
-                result = self.results.get(result_row.key)
-                if not result:
-                    self.log.error(f"Service responded to dispatcher with missing result: {result_row.key}")
-                    continue
-
-                for sub_file in result.response.extracted:
-                    file_parents[sub_file.sha256] = file_parents.get(sub_file.sha256, []) + [sha]
-
-                    if sub_file.sha256 in encountered_files:
+                    # If the service is still marked as 'in progress'
+                    runtime = time.time() - dispatch_table.dispatch_time(sha, service_name)
+                    if runtime < service.timeout:
+                        pending_files[sha] = file_task
                         continue
 
-                    encountered_files.add(sub_file.sha256)
-                    file_data = self.datastore.file.get(sub_file.sha256)
-                    unchecked_files.append(FileTask(dict(
-                        sid=sid,
-                        file_info=dict(
-                            magic=file_data.magic,
-                            md5=file_data.md5,
-                            mime=file_data.mime,
-                            sha1=file_data.sha1,
-                            sha256=file_data.sha256,
-                            size=file_data.size,
-                            type=file_data.type,
-                        ),
-                        depth=-1  # This will be set later
-                    )))
+                    # It hasn't started, has timed out, or is finished, see if we have a result
+                    result_row = dispatch_table.finished(sha, service_name)
 
-                # Collect information about the result
-                if max_score is None:
-                    max_score = result.result.score
-                else:
-                    max_score = max(max_score, result.result.score)
-                result_classifications.append(result.classification)
+                    # No result found, mark the file as incomplete
+                    if not result_row:
+                        pending_files[sha] = file_task
+                        continue
+
+                    # The process table is marked that a service has been abandoned due to errors
+                    if result_row.is_error:
+                        continue
+
+                    if not submission.params.ignore_filtering and result_row.drop:
+                        schedule.clear()
+
+                    # The result should exist then, get all the sub-files
+                    result = self.results.get(result_row.key)
+                    if not result:
+                        self.log.error(f"Service responded to dispatcher with missing result: {result_row.key}")
+                        continue
+
+                    for sub_file in result.response.extracted:
+                        file_parents[sub_file.sha256] = file_parents.get(sub_file.sha256, []) + [sha]
+
+                        if sub_file.sha256 in encountered_files:
+                            continue
+
+                        encountered_files.add(sub_file.sha256)
+                        file_data = self.datastore.file.get(sub_file.sha256)
+                        unchecked_files.append(FileTask(dict(
+                            sid=sid,
+                            file_info=dict(
+                                magic=file_data.magic,
+                                md5=file_data.md5,
+                                mime=file_data.mime,
+                                sha1=file_data.sha1,
+                                sha256=file_data.sha256,
+                                size=file_data.size,
+                                type=file_data.type,
+                            ),
+                            depth=-1  # This will be set later
+                        )))
+
+                    # Collect information about the result
+                    if max_score is None:
+                        max_score = result.result.score
+                    else:
+                        max_score = max(max_score, result.result.score)
+                    result_classifications.append(result.classification)
 
         # Now that we have seen the entire file tree, we can recalculate the depth of each file in the tree
         depth_limit = self.config.submission.max_extraction_depth
