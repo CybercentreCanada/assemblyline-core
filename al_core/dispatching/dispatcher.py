@@ -6,6 +6,7 @@ from typing import List
 from functools import reduce
 
 # TODO replace with unique queue
+from assemblyline.odm import ClassificationObject
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.service import Service
@@ -290,9 +291,9 @@ class Dispatcher:
             Hash('submissions-' + submission.params.submitter, self.redis_persist).pop(sid)
 
         # Pull in the classifications of results/produced by services
-        classification = self.classification_engine.UNRESTRICTED
+        classification = submission.params.classification
         for c12n in result_classifications:
-            classification = self.classification_engine.max_classification(classification, c12n)
+            classification = classification.max(c12n)
 
         # Pull down the dispatch table and clear it from redis
         dispatch_table = DispatchHash(submission.sid, self.redis)
@@ -328,7 +329,7 @@ class Dispatcher:
         # Send complete message to any watchers.
         watcher_list = ExpiringSet(make_watcher_list_name(sid), host=self.redis)
         for w in watcher_list.members():
-            w.push(WatchQueueMessage({'status': 'STOP'}))
+            NamedQueue(w).push(WatchQueueMessage({'status': 'STOP'}).as_primitives())
 
         # Clear the timeout watcher
         watcher_list.delete()
