@@ -8,6 +8,7 @@ import signal
 import sys
 
 from assemblyline.common import log as al_log
+# al_log.init_logging(component_name)
 
 SHUTDOWN_SECONDS_LIMIT = 10
 
@@ -21,7 +22,8 @@ class ServerBase(threading.Thread):
     """
     def __init__(self, component_name, logger=None):
         super().__init__(name=component_name)
-        al_log.init_logging(component_name)
+        # al_log.init_logging(component_name)  # Note this changes global properties, should be disabled for tests
+                                               # or modified so subsequint calls do nothing
         self.running = None
         self.log = logger or logging.getLogger(component_name)
         self._exception = None

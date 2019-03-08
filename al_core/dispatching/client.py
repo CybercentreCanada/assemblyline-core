@@ -104,8 +104,11 @@ class DispatchClient:
 
         # Send the extracted files to the dispatcher
         depth_limit = self.config.submission.max_extraction_depth
-        if task.depth < depth_limit:
+        new_depth = task.depth + 1
+        if new_depth < depth_limit:
             for extracted_data in result.response.extracted:
+                if not process_table.add_file(extracted_data.sha256, task.max_files):
+                    continue
                 file_data = self.files.get(extracted_data.sha256)
                 self.file_queue.push(FileTask(dict(
                     sid=task.sid,
@@ -118,8 +121,9 @@ class DispatchClient:
                         size=file_data.size,
                         type=file_data.type,
                     ),
-                    depth=task.depth+1,
+                    depth=new_depth,
                     parent_hash=task.fileinfo.sha256,
+                    max_files=task.max_files
                 )).as_primitives())
 
         # If the global table said that this was the last outstanding service,
@@ -129,6 +133,7 @@ class DispatchClient:
                 sid=task.sid,
                 file_info=task.fileinfo,
                 depth=task.depth,
+                max_files=task.max_files
             )).as_primitives())
 
         # Send the result key to any watching systems
@@ -152,6 +157,7 @@ class DispatchClient:
             sid=task.sid,
             file_info=task.fileinfo,
             depth=task.depth,
+            max_files=task.max_files
         )).as_primitives())
 
         # Send the result key to any watching systems

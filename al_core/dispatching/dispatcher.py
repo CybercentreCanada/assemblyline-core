@@ -2,6 +2,7 @@ import hashlib
 import time
 import json
 import uuid
+import logging
 from typing import List
 from functools import reduce
 
@@ -56,6 +57,7 @@ class FileTask(odm.Model):
     parent_hash = odm.Optional(odm.Keyword())
     file_info: FileInfo = odm.Compound(FileInfo)
     depth = odm.Integer()
+    max_files = odm.Integer()
 
 
 FILE_QUEUE = 'dispatch-file'
@@ -76,6 +78,9 @@ class Dispatcher:
 
         # Create a config cache that will refresh config values periodically
         self.config = forge.CachedObject(forge.get_config)
+
+        if self.config.core.dispatcher.debug_logging:
+            self.log.setLevel(logging.DEBUG)
 
         # Build some utility classes
         self.scheduler = Scheduler(datastore, self.config)
@@ -147,7 +152,10 @@ class Dispatcher:
         sid = submission.sid
 
         if not self.active_tasks.exists(sid):
+            self.log.debug(f"Starting submission {sid} for {submission.params.submitter}")
             self.active_tasks.add(sid, task.as_primitives())
+        else:
+            self.log.debug(f"Check if submission {sid} is complete")
 
         # Refresh the watch, this ensures that this function will be called again
         # if something goes wrong with one of the files, and it never finishes.
@@ -163,6 +171,7 @@ class Dispatcher:
         dispatch_table = DispatchHash(submission.sid, self.redis)
 
         # Try to find all files, and extracted files
+        max_files = len(submission.files) + submission.params.max_extracted
         unchecked_files = []
         for submission_file in submission.files:
             file_data = self.files.get(submission_file.sha256)
@@ -181,7 +190,8 @@ class Dispatcher:
                     size=file_data.size,
                     type=file_data.type,
                 ),
-                depth=0
+                depth=0,
+                max_files=max_files
             )))
 
         encountered_files = {file.sha256 for file in submission.files}
@@ -239,6 +249,12 @@ class Dispatcher:
 
                         encountered_files.add(sub_file.sha256)
                         file_data = self.datastore.file.get(sub_file.sha256)
+
+                        if not file_data:
+                            self.log.debug(f'Extracted file {sub_file} excluded from {sid} could'
+                                           f' be error or due to extraction limits.')
+                            continue
+
                         unchecked_files.append(FileTask(dict(
                             sid=sid,
                             file_info=dict(
@@ -250,7 +266,8 @@ class Dispatcher:
                                 size=file_data.size,
                                 type=file_data.type,
                             ),
-                            depth=-1  # This will be set later
+                            depth=-1,  # This will be set later
+                            max_files=max_files,
                         )))
 
                     # Collect information about the result
@@ -266,16 +283,26 @@ class Dispatcher:
             # A root file won't have any parents in the dict
             if sha not in file_parents:
                 return 0
-            return min(file_depth(parent) for parent in file_parents[sha])
+            return min(file_depth(parent) for parent in file_parents[sha]) + 1
+
+        # Apply the depths, and filter out those over the limit
+        for file_task in pending_files.values():
+            file_task.depth = file_depth(file_task.file_info.sha256)
+        pending_files = {sha: ft for sha, ft in pending_files.items() if ft.depth < depth_limit}
+
+        # Filter out files based on the extraction limits
+        pending_files = {sha: ft for sha, ft in pending_files.items() if dispatch_table.add_file(sha, max_files)}
 
         # If there are pending files, then at least one service, on at least one
-        # file isn't done yet, poke those files
+        # file isn't done yet, and hasn't been filtered by any of the previous few steps
+        # poke those files
         if pending_files:
-            for task in pending_files.values():
-                task.depth = file_depth(task.file_info.sha256)
-                if task.depth < depth_limit:
-                    self.file_queue.push(task.as_primitives())
+            self.log.debug(f"Dispatching {len(pending_files)} files for submission {sid}: {list(pending_files.keys())}")
+
+            for file_task in pending_files.values():
+                self.file_queue.push(file_task.as_primitives())
         else:
+            self.log.debug(f"Finishing submission {sid} for {submission.params.submitter}")
             self.finalize_submission(task, result_classifications, max_score, len(encountered_files))
 
     def finalize_submission(self, task: SubmissionTask, result_classifications, max_score, file_count):
@@ -335,6 +362,7 @@ class Dispatcher:
         watcher_list.delete()
         self.timeout_watcher.clear(sid)
         self.active_tasks.pop(sid)
+        self.log.debug(f"Finished submission {sid} for {submission.params.submitter}")
 
     def dispatch_file(self, task: FileTask):
         """ Handle a message describing a file to be processed.
@@ -364,6 +392,7 @@ class Dispatcher:
         submission_task = SubmissionTask(active_task)
         submission = submission_task.submission
         now = time.time()
+        self.log.debug(f"Dispatching:  {file_hash} at depth {task.depth} for {submission.sid}")
 
         # Refresh the watch on the submission, we are still working on it
         self.timeout_watcher.touch(key=task.sid, timeout=self.config.core.dispatcher.timeout,
@@ -374,7 +403,7 @@ class Dispatcher:
 
         # Calculate the schedule for the file
         schedule = self.build_schedule(dispatch_table, submission, file_hash, task.file_info.type)
-
+        started_stages = []
         # TODO HMGET the entire schedule's results here rather than one at a time later
 
         # If we modify the dispatch table, keep track of how many services are marked incomplete
@@ -389,6 +418,7 @@ class Dispatcher:
         errors = 0
         while schedule and not outstanding:
             stage = schedule.pop(0)
+            started_stages.append(stage)
 
             for service_name in stage:
                 service = self.scheduler.services.get(service_name)
@@ -405,6 +435,8 @@ class Dispatcher:
                     score += finished.score
                     if not submission.params.ignore_filtering and finished.drop:
                         schedule.clear()
+                        if schedule:  # If there are still stages in the schedule, over write them for next time
+                            dispatch_table.schedules.set(file_hash, started_stages)
                     continue
 
                 # Warning: Please do not change the text of the error messages below.
@@ -431,6 +463,8 @@ class Dispatcher:
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
+            self.log.debug(f"File {file_hash} is being sent to: {list(outstanding.keys())}")
+
             for service_name, service in outstanding.items():
                 # Check if this submission has already dispatched this service, and hasn't timed out yet
                 # NOTE: This isn't for checking if a service has failed due to time out or generating
@@ -450,6 +484,7 @@ class Dispatcher:
                     service_config=json.dumps(config),
                     fileinfo=task.file_info,
                     depth=task.depth,
+                    max_files=task.max_files,
                 ))
 
                 queue = self.volatile_named_queue(service_queue_name(service_name))
@@ -476,6 +511,7 @@ class Dispatcher:
 
             # If there are no outstanding ANYTHING for this submission,
             # send a message to the submission dispatcher to finalize
+            self.log.debug(f"Finished: {submission.sid}/{file_hash}")
             self.files_complete_counter.increment()
             if dispatch_table.all_finished() and tasks_remaining == 0:
                 self.submission_queue.push({'sid': submission.sid})

@@ -14,6 +14,7 @@ from redis import StrictRedis, Redis
 
 from assemblyline.remote.datatypes import retry_call
 from assemblyline.remote.datatypes.hash import ExpiringHash
+from assemblyline.remote.datatypes.set import ExpiringSet
 
 dispatch_tail = '-dispatch'
 finished_tail = '-finished'
@@ -43,9 +44,28 @@ class DispatchHash:
         self._finish_key = f'{sid}{finished_tail}'
         self._finish = self.client.register_script(finish_script)
         self.schedules = ExpiringHash(f'dispatch-hash-schedules-{sid}', host=self.client)
+        self._files = ExpiringSet(f'dispatch-hash-files-{sid}', host=self.client)
+        self._cached_files = set(self._files.members())
         # TODO set these expire times from the global time limit for submissions
         retry_call(self.client.expire, self._dispatch_key, 60*60)
         retry_call(self.client.expire, self._finish_key, 60*60)
+
+    def add_file(self, file_hash: str, file_limit):
+        # If it was already in the set, we don't need to check remotely
+        if file_hash in self._cached_files:
+            return True
+
+        # If the set is already full, and its not in the set, then we don't need to check remotely
+        if len(self._cached_files) >= file_limit:
+            return False
+
+        # Our local checks are unclear, check remotely
+        result = self._files.limited_add(file_hash, file_limit)
+
+        # If it was added, add it to the local cache so we don't need to check again
+        if result:
+            self._cached_files.add(file_hash)
+        return result
 
     def dispatch(self, file_hash: str, service: str):
         """Mark that a service has been dispatched for the given sha."""
@@ -95,9 +115,7 @@ class DispatchHash:
 
     def all_finished(self) -> bool:
         """Are there no outstanding tasks, and at least one finished task."""
-        if retry_call(self.client.hlen, self._finish_key) == 0:
-            return False
-        return self.dispatch_count() == 0
+        return self.finished_count() > 0 and self.dispatch_count() == 0
 
     def all_results(self) -> Dict[str, Dict[str, DispatchRow]]:
         """Get all the records stored in the dispatch table.

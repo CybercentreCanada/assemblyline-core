@@ -11,6 +11,7 @@ class FileDispatchServer(ServerBase):
         self.dispatcher = Dispatcher(redis=redis, redis_persist=redis_persist, datastore=datastore, logger=self.log)
 
     def try_run(self):
+        self.log.info("starting")
         queue = self.dispatcher.file_queue
 
         while self.running:
@@ -24,6 +25,7 @@ class FileDispatchServer(ServerBase):
             except Exception as error:
                 self.log.exception(error)
                 break
+        self.log.info("stopped")
 
     def stop(self):
         self.dispatcher.file_queue.push(None)

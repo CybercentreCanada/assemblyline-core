@@ -17,7 +17,7 @@ class SubmissionDispatchServer(ServerBase):
         self.dispatcher = Dispatcher(logger=self.log, redis=redis, redis_persist=redis_persist, datastore=datastore)
 
     def try_run(self):
-
+        self.log.info("starting")
         queue = self.dispatcher.submission_queue
 
         while self.running:
@@ -45,6 +45,8 @@ class SubmissionDispatchServer(ServerBase):
                 self.dispatcher.dispatch_submission(task)
             except Exception as error:
                 self.log.exception(error)
+
+        self.log.info("stopped")
 
     def stop(self):
         self.dispatcher.submission_queue.push(None)
