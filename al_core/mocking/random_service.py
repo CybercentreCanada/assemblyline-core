@@ -50,6 +50,9 @@ class RandomService(ServerBase):
                 result.response.service_name = task.service_name
                 result_key = result.build_key(task.service_config)
 
+                result.response.extracted = result.response.extracted[task.depth+1:]
+                result.response.supplementary = result.response.supplementary[task.depth+1:]
+
                 self.log.info(f"\t\tA result was generated for this task: {result_key}")
 
                 new_files = result.response.extracted + result.response.supplementary
