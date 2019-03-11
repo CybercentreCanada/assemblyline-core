@@ -167,7 +167,7 @@ class Dispatcher:
         file_parents = {}
 
         # Track information about the results as we hit them
-        max_score = None
+        file_scores = {}
         result_classifications = []
 
         # For each file, we will look through all its results, any extracted files,
@@ -239,14 +239,10 @@ class Dispatcher:
                         )))
 
                     # Collect information about the result
-                    if max_score is None:
-                        max_score = result.result.score
-                    else:
-                        max_score = max(max_score, result.result.score)
+                    file_scores[sha] = file_scores.get(sha, 0) + result.result.score
                     result_classifications.append(result.classification)
 
-        # Now that we have seen the entire file tree, we can recalculate the depth of each file in the tree
-        depth_limit = self.config.submission.max_extraction_depth
+        # Using the file tree we can recalculate the depth of any file
         def file_depth(sha):
             # A root file won't have any parents in the dict
             if sha not in file_parents:
@@ -256,6 +252,7 @@ class Dispatcher:
         # Apply the depths, and filter out those over the limit
         for file_task in pending_files.values():
             file_task.depth = file_depth(file_task.file_info.sha256)
+        depth_limit = self.config.submission.max_extraction_depth
         pending_files = {sha: ft for sha, ft in pending_files.items() if ft.depth < depth_limit}
 
         # Filter out files based on the extraction limits
@@ -271,6 +268,7 @@ class Dispatcher:
                 self.file_queue.push(file_task.as_primitives())
         else:
             self.log.debug(f"Finishing submission {sid} for {submission.params.submitter}")
+            max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
             self.finalize_submission(task, result_classifications, max_score, len(encountered_files))
 
     def finalize_submission(self, task: SubmissionTask, result_classifications, max_score, file_count):
@@ -313,7 +311,7 @@ class Dispatcher:
         submission.errors = errors
         submission.file_count = file_count
         submission.results = results
-        submission.max_score = max_score or 0  # Submissions with no results have no score
+        submission.max_score = max_score
         submission.state = 'completed'
         submission.times.completed = isotime.now_as_iso()
         self.submissions.save(sid, submission)
