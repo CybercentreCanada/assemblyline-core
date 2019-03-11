@@ -434,18 +434,6 @@ class Dispatcher:
 
         else:
             # There are no outstanding services, this file is done
-
-            # Store the file's score under this configuration into the
-            filescore_key = submission.params.create_filescore_key(file_hash)
-            self.datastore.filescore.save(filescore_key, {
-                'psid': submission.params.psid if submission.params.psid else None,
-                'expiry_ts': submission.expiry_ts,
-                'score': score,
-                'errors': errors,
-                'sid': submission.sid,
-                'time': now,
-            })
-
             # Erase tags
             ExpiringSet(get_tag_set_name(task), host=self.redis).delete()
             ExpiringHash(get_submission_tags_name(task), host=self.redis).delete()
