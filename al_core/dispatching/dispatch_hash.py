@@ -24,7 +24,9 @@ local sid = ARGV[1]
 local key = ARGV[2]
 local result_key = ARGV[3]
 
--- If the dispatch table has already been erased/task finished then don't create a new key
+-- If the dispatch table has already been erased/task finished then don't create a new key.
+-- We don't want the dispatch table to be re-created this way, after the submission has actually been
+-- finalized.
 if redis.call('hdel', sid .. '{dispatch_tail}', key) then
     redis.call('hsetnx', sid .. '{finished_tail}', key, result_key)
 end
