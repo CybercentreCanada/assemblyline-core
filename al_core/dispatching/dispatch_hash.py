@@ -24,8 +24,12 @@ local sid = ARGV[1]
 local key = ARGV[2]
 local result_key = ARGV[3]
 
-redis.call('hdel', sid .. '{dispatch_tail}', key)
-redis.call('hset', sid .. '{finished_tail}', key, result_key)
+-- If the dispatch table has already been erased/task finished then don't create a new key.
+-- We don't want the dispatch table to be re-created this way, after the submission has actually been
+-- finalized.
+if redis.call('hdel', sid .. '{dispatch_tail}', key) then
+    redis.call('hsetnx', sid .. '{finished_tail}', key, result_key)
+end
 return redis.call('hlen', sid .. '{dispatch_tail}')
 """
 
@@ -83,7 +87,11 @@ class DispatchHash:
         return float(result)
 
     def fail_recoverable(self, file_hash: str, service: str):
-        """A service task has failed, but should be retried, clear that it has been dispatched."""
+        """A service task has failed, but should be retried, clear that it has been dispatched.
+
+        After this call, the service is in a non-dispatched state, and the status can't be update
+        until it is dispatched again.
+        """
         retry_call(self.client.hdel, self._dispatch_key, f"{file_hash}-{service}")
 
     def fail_nonrecoverable(self, file_hash: str, service, error_key) -> int:
