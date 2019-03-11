@@ -1,9 +1,6 @@
 """
 The dispatch hash is a table of services that should be running (or should soon)
 and those that are already finished.
-
-
-# TODO dropped hash could be done in dispatch table
 """
 import time
 import json

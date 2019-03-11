@@ -16,7 +16,7 @@ from typing import Iterable
 
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
-from assemblyline.common.isotime import now
+from assemblyline.common.isotime import now, now_as_iso
 from assemblyline.common.importing import load_module_by_path
 from assemblyline.common import forge
 from assemblyline.odm.models.filescore import FileScore
@@ -201,6 +201,7 @@ class Ingester:
         self.files_completed_counter = MetricCounter('ingest.files_completed', self.redis)
         self.bytes_completed_counter = MetricCounter('ingest.bytes_completed', self.redis)
         self.bytes_ingested_counter = MetricCounter('ingest.bytes_ingested', self.redis)
+        self.ingest_timeout_counter = MetricCounter('ingest.timed_out', self.redis)
 
         self.skipped_counter = MetricCounter('ingest.skipped', self.redis)
         self.whitelisted_counter = MetricCounter('ingest.whitelisted', self.redis)
@@ -215,7 +216,7 @@ class Ingester:
         self.complete_queue = NamedQueue(_completeq_name, self.redis)
 
         # Internal. Dropped entries are placed on this queue.
-        self.drop_queue = NamedQueue('m-drop', self.persistent_redis)
+        # self.drop_queue = NamedQueue('m-drop', self.persistent_redis)
 
         # Input. An external process places submission requests on this queue.
         self.ingest_queue = NamedQueue(_ingestq_name, self.persistent_redis)
@@ -289,7 +290,7 @@ class Ingester:
 
         if task.file_size > max_file_size and not task.params.ignore_size and not task.params.never_drop:
             task.failure = f"File too large ({task.file_size} > {max_file_size})"
-            self.drop_queue.push(task.as_primitives())
+            self.__drop(task)
             self.skipped_counter.increment()
             return
 
@@ -523,11 +524,18 @@ class Ingester:
             return False
 
         task.failure = 'Skipped'
-        self.drop_queue.push(task.json())
-
+        self.__drop(task)
         self.skipped_counter.increment()
-
         return True
+
+    def __drop(self, task: IngestTask):
+        self.send_notification(task)
+
+        c12n = task.params.classification
+        expiry = now_as_iso(86400)
+        sha256 = task.submission.files[0].sha256
+
+        self.datastore.save_or_freshen_file(sha256, {'sha256': sha256}, expiry, c12n, redis=self.redis)
 
     def is_whitelisted(self, task: IngestTask):
         reason, hit = self.get_whitelist_verdict(self.whitelist, task)
@@ -546,7 +554,7 @@ class Ingester:
                     self.whitelisted[sha256] = reason
 
             task.failure = "Whitelisting due to reason %s (%s)" % (dotdump(safe_str(reason)), hit)
-            self.drop_queue.push(task.json())
+            self.__drop(task)
 
             self.whitelisted_counter.increment()
             MetricCounter('whitelist.' + reason, self.redis).increment()
