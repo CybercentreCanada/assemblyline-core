@@ -24,6 +24,13 @@ summary_tags = (
     "TECHNIQUE_OBFUSCATION", "THREAT_ACTOR",
 )
 
+def service_name_from_key(key):
+    # noinspection PyBroadException
+    try:
+        return key.split('.')[1]
+    except Exception:
+        return ""
+
 def get_submission_record(counter, datastore, sid):
     srecord = datastore.submission.get(sid, as_obj=False)
 
@@ -108,7 +115,7 @@ def get_summary(datastore, srecord):
                 if len(av_name) == 2:
                     av_name = av_name[1]
                 else:
-                    av_name = datastore.service_name_from_key(t['key'])
+                    av_name = service_name_from_key(t['key'])
 
                 if av_name:
                     tag_value = "[%s] %s" % (av_name, tag_value)
