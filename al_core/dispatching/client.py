@@ -3,7 +3,6 @@ An interface to the core system for the edge services.
 
 
 """
-import uuid
 import logging
 from typing import Dict
 
@@ -95,6 +94,14 @@ class DispatchClient:
     def request_work(self, service_name, timeout=60):
         raise NotImplementedError()
 
+    def _dispatching_error(self, task, process_table, error):
+        error_key = error.build_key()
+        if process_table.add_error(error_key):
+            self.errors.save(error_key, error)
+            msg = {'status': 'FAIL', 'cache_key': error_key}
+            for w in self._get_watcher_list(task.sid).members():
+                NamedQueue(w).push(msg)
+
     def service_finished(self, task: ServiceTask, result: Result, result_key):
         """Notifies the dispatcher of service completion, and possible new files to dispatch."""
         if result.drop_file:
@@ -114,6 +121,19 @@ class DispatchClient:
         if new_depth < depth_limit:
             for extracted_data in result.response.extracted:
                 if not process_table.add_file(extracted_data.sha256, task.max_files):
+                    self._dispatching_error(task, process_table, Error({
+                        'expiry_ts': result.expiry_ts,
+                        'response': {
+                            'message': f"Too many files extracted for submission {task.sid} "
+                                       f"{extracted_data.sha256} extracted by "
+                                       f"{task.service_name} will be dropped",
+                            'service_name': 'dispatcher',
+                            'service_version': '0',  # TODO what values actually make sense for service_*
+                            'status': 'FAIL_NONRECOVERABLE'
+                        },
+                        'sha256': extracted_data.sha256,
+                        'type': 'MAX FILES REACHED'
+                    }))
                     continue
                 file_data = self.files.get(extracted_data.sha256)
                 self.file_queue.push(FileTask(dict(
@@ -131,6 +151,20 @@ class DispatchClient:
                     parent_hash=task.fileinfo.sha256,
                     max_files=task.max_files
                 )).as_primitives())
+        else:
+            for extracted_data in result.response.extracted:
+                self._dispatching_error(task, process_table, Error({
+                    'expiry_ts': result.expiry_ts,
+                    'response': {
+                        'message': f"{task.service_name} has extracted a file "
+                                   f"{extracted_data.sha256} beyond the depth limits",
+                        'service_name': 'dispatcher',
+                        'service_version': '0',  # TODO what values actually make sense for service_*
+                        'status': 'FAIL_NONRECOVERABLE'
+                    },
+                    'sha256': extracted_data.sha256,
+                    'type': 'MAX DEPTH REACHED'
+                }))
 
         # If the global table said that this was the last outstanding service,
         # send a message to the dispatchers.
@@ -156,7 +190,7 @@ class DispatchClient:
         # Mark the attempt to process the file over in the dispatch table
         process_table = DispatchHash(task.sid, self.redis)
         if error.response.status == "FAIL_RECOVERABLE":
-            process_table.fail_recoverable(task.fileinfo.sha256, task.service_name)
+            process_table.fail_recoverable(task.fileinfo.sha256, task.service_name, error_key)
         else:
             process_table.fail_nonrecoverable(task.fileinfo.sha256, task.service_name, error_key)
 

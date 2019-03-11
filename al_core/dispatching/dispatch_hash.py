@@ -45,13 +45,21 @@ class DispatchHash:
         self._finish_key = f'{sid}{finished_tail}'
         self._finish = self.client.register_script(finish_script)
         self.schedules = ExpiringHash(f'dispatch-hash-schedules-{sid}', host=self.client)
+        # The set of files that are included in this submission, this set is used primarily for
+        # enforcing max file per submission constraints
         self._files = ExpiringSet(f'dispatch-hash-files-{sid}', host=self.client)
+        # Errors that are related to a submission, but not the terminal errors of a service
+        self._other_errors = ExpiringSet(f'dispatch-hash-errors-{sid}', host=self.client)
         self._cached_files = set(self._files.members())
         # TODO set these expire times from the global time limit for submissions
         retry_call(self.client.expire, self._dispatch_key, 60*60)
         retry_call(self.client.expire, self._finish_key, 60*60)
 
-    def add_file(self, file_hash: str, file_limit):
+    def add_file(self, file_hash: str, file_limit) -> bool:
+        """Add a file to a submission.
+
+        Returns: Whether the file could be added to the submission or has been rejected.
+        """
         # If it was already in the set, we don't need to check remotely
         if file_hash in self._cached_files:
             return True
@@ -68,6 +76,15 @@ class DispatchHash:
             self._cached_files.add(file_hash)
         return result
 
+    def add_error(self, error_key: str) -> bool:
+        """Add an error to a submission.
+
+        NOTE: This method is for errors occuring outside of any errors handled via 'fail_*recoverable'
+
+        Returns true if the error is new, false if the error is a duplicate.
+        """
+        return self._other_errors.add(error_key) > 0
+
     def dispatch(self, file_hash: str, service: str):
         """Mark that a service has been dispatched for the given sha."""
         retry_call(self.client.hset, self._dispatch_key, f"{file_hash}-{service}", time.time())
@@ -83,12 +100,14 @@ class DispatchHash:
             return 0
         return float(result)
 
-    def fail_recoverable(self, file_hash: str, service: str):
+    def fail_recoverable(self, file_hash: str, service: str, error_key: str = None):
         """A service task has failed, but should be retried, clear that it has been dispatched.
 
         After this call, the service is in a non-dispatched state, and the status can't be update
         until it is dispatched again.
         """
+        if error_key:
+            self._other_errors.add(error_key)
         retry_call(self.client.hdel, self._dispatch_key, f"{file_hash}-{service}")
 
     def fail_nonrecoverable(self, file_hash: str, service, error_key) -> int:
@@ -136,8 +155,14 @@ class DispatchHash:
             output[file_hash][service] = DispatchRow(*json.loads(status))
         return output
 
+    def all_extra_errors(self):
+        """Return the set of errors not part of the dispatch table itself."""
+        return self._other_errors.members()
+
     def delete(self):
         """Clear the tables from the redis server."""
         retry_call(self.client.delete, self._dispatch_key)
         retry_call(self.client.delete, self._finish_key)
         self.schedules.delete()
+        self._files.delete()
+        self._other_errors.delete()

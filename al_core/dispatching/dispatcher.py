@@ -1,7 +1,5 @@
 import time
 import json
-import uuid
-import logging
 from typing import List
 
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
@@ -17,7 +15,6 @@ from assemblyline.common import isotime, forge
 from al_core.dispatching.scheduler import Scheduler
 from al_core.dispatching.dispatch_hash import DispatchHash
 from assemblyline import odm
-from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.submission import Submission
 import al_core.watcher
 
@@ -249,6 +246,9 @@ class Dispatcher:
                 return 0
             return min(file_depth(parent) for parent in file_parents[sha]) + 1
 
+        # The errors for these excluded files should have been generated in the client when
+        # the result was first sent back to the dispatcher.
+
         # Apply the depths, and filter out those over the limit
         for file_task in pending_files.values():
             file_task.depth = file_depth(file_task.file_info.sha256)
@@ -291,10 +291,10 @@ class Dispatcher:
         # Pull down the dispatch table and clear it from redis
         dispatch_table = DispatchHash(submission.sid, self.redis)
         all_results = dispatch_table.all_results()
+        errors = dispatch_table.all_extra_errors()
         dispatch_table.delete()
 
         # Sort the errors out of the results
-        errors = []
         results = []
         for row in all_results.values():
             for status in row.values():
@@ -468,44 +468,3 @@ class Dispatcher:
         if service.name in submission.params.service_spec:
             params.update(submission.params.service_spec[service.name])
         return params
-
-    # def heartbeat(self):
-    #     while not self.drain:
-    #         with self.lock:
-    #             heartbeat = {
-    #                 'shard': self.shard,
-    #                 'entries': len(self.entries),
-    #                 'errors': len(self.errors),
-    #                 'results': len(self.results),
-    #                 'resources': {
-    #                     "cpu_usage.percent": psutil.cpu_percent(),
-    #                     "mem_usage.percent": psutil.virtual_memory().percent,
-    #                     "disk_usage.percent": psutil.disk_usage('/').percent,
-    #                     "disk_usage.free": psutil.disk_usage('/').free,
-    #                 },
-    #                 'services': self._service_info(), 'queues': {
-    #                     'max_inflight': self.high,
-    #                     'control': self.control_queue.length(),
-    #                     'ingest': q.length(self.ingest_queue),
-    #                     'response': q.length(self.response_queue),
-    #                 },
-    #                 'hostinfo': self.hostinfo
-    #             }
-    #
-    #             msg = message.Message(to="*", sender='dispatcher', mtype=message.MT_DISPHEARTBEAT, body=heartbeat)
-    #             CommsQueue('status').publish(msg.as_dict())
-    #
-    #         time.sleep(1)
-    #
-    # # noinspection PyUnusedLocal
-    # def interrupt(self, unused1, unused2):  # pylint: disable=W0613
-    #     if self.drain:
-    #         log.info('Forced shutdown.')
-    #         self.running = False
-    #         return
-    #
-    #     log.info('Shutting down gracefully...')
-    #     # Rename control queue to 'control-<hostname>-<pid>-<seconds>-<shard>'.
-    #     self.control_queue = \
-    #         forge.get_control_queue('control-' + self.response_queue)
-    #     self.drain = True

@@ -481,7 +481,7 @@ def test_depth_limit(core):
     assert len(sub.files) == 1
     # We should only get results for each file up to the max depth
     assert len(sub.results) == 4 * core.config.submission.max_extraction_depth
-    assert len(sub.errors) == 0
+    assert len(sub.errors) == 1
 
 
 def test_max_extracted_in_one(core):
@@ -514,7 +514,7 @@ def test_max_extracted_in_one(core):
     assert len(sub.files) == 1
     # We should only get results for each file up to the max depth
     assert len(sub.results) == 4 * (1 + 3)
-    assert len(sub.errors) == 0
+    assert len(sub.errors) == 2  # The number of children that errored out
 
 
 def test_max_extracted_in_several(core):
@@ -550,4 +550,4 @@ def test_max_extracted_in_several(core):
     assert len(sub.files) == 1
     # We should only get results for each file up to the max depth
     assert len(sub.results) == 4 * (1 + 3)
-    assert len(sub.errors) == 0
+    assert len(sub.errors) == 3  # The number of children that errored out
