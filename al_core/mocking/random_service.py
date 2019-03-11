@@ -18,7 +18,7 @@ class RandomService(ServerBase):
     Including service API, in the future probably include that in this test.
     """
     def __init__(self, datastore, filestore):
-        super().__init__("assemblyline.mock.randomservice")
+        super().__init__("assemblyline.randomservice")
         self.datastore = datastore
         self.filestore = filestore
 

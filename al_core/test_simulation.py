@@ -64,7 +64,7 @@ class MockService(ServerBase):
     Including service API, in the future probably include that in this test.
     """
     def __init__(self, name, datastore, redis, filestore):
-        super().__init__('service.'+name)
+        super().__init__('assemblyline.service.'+name)
         self.service_name = name
         self.queue = NamedQueue(service_queue_name(name), redis)
         self.dispatch_client = DispatchClient(datastore, redis)
@@ -151,7 +151,7 @@ class CoreSession:
 @mock.patch('al_core.dispatching.dispatcher.MetricCounter', new=mock.MagicMock(spec=MetricCounter))
 def core(request, es_connection, redis, replace_config):
     from assemblyline.common import log as al_log
-    al_log.init_logging()
+    al_log.init_logging("simulation")
 
     fields = CoreSession()
     fields.redis = redis
