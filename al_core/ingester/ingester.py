@@ -19,6 +19,7 @@ from assemblyline.common.exceptions import get_stacktrace_info
 from assemblyline.common.isotime import now
 from assemblyline.common.importing import load_module_by_path
 from assemblyline.common import forge
+from assemblyline.odm.models.filescore import FileScore
 from assemblyline.remote.datatypes.counters import MetricCounter
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue
@@ -354,13 +355,7 @@ class Ingester:
                 return None, False, None, key
 
             with self.cache_lock:
-                self.cache[key] = {
-                    'errors': result.errors,
-                    'psid': result.psid,
-                    'score': result.score,
-                    'sid': result.sid,
-                    'time': result.time,
-                }
+                self.cache[key] = result
 
         current_time = now()
         delta = current_time - result.time
@@ -447,13 +442,13 @@ class Ingester:
         self.bytes_completed_counter.increment(task.file_size)
 
         with self.cache_lock:
-            self.cache[self] = {
+            self.cache[scan_key] = FileScore({
                 'errors': errors,
                 'psid': psid,
                 'score': score,
                 'sid': sid,
                 'time': now(),
-            }
+            })
 
         self.finalize(psid, sid, score, task)
 

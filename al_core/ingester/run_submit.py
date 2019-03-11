@@ -15,7 +15,7 @@ from al_core.server_base import ServerBase
 
 class IngesterSubmitter(ServerBase):
     def __init__(self, logger=None, datastore=None, redis=None, persistent_redis=None):
-        super().__init__('assemblyline.ingester.submitter')
+        super().__init__('assemblyline.ingester.submitter', logger=logger)
 
         # Connect to all sorts of things
         datastore = datastore or forge.get_datastore()

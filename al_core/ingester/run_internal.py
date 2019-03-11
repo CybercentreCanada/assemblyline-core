@@ -147,7 +147,7 @@ def dropper():  # df node def
 
 class IngesterInternals(ServerBase):
     def __init__(self, logger=None, datastore=None, redis=None, persistent_redis=None):
-        super().__init__('assemblyline.ingester.internals')
+        super().__init__('assemblyline.ingester.internals', logger=logger)
         # Connect to all sorts of things
         datastore = datastore or forge.get_datastore()
         classification_engine = forge.get_classification()
