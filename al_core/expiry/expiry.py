@@ -22,7 +22,7 @@ class ExpiryManager(ServerBase):
             host=net.get_hostip(),
             export_interval_secs=5,
             channel=forge.get_metrics_sink(),
-            auto_log=True,
+            auto_log=False,
             auto_flush=True)
         self.counter.start()
 

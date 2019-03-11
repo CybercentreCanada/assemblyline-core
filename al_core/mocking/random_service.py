@@ -75,8 +75,9 @@ class RandomService(ServerBase):
                 error = random_model_obj(Error)
                 error.sha256 = task.fileinfo.sha256
                 error.response.service_name = task.service_name
+                error.type = random.choice(["EXCEPTION", "SERVICE DOWN", "SERVICE BUSY"])
                 error_key = error.build_key(hashlib.md5(task.service_config.encode("utf-8")).hexdigest())
-                self.log.info(f"\t\tA {error.response.status} error was generated for this task: {error_key}")
+                self.log.info(f"\t\tA {error.response.status}:{error.type} error was generated for this task: {error_key}")
 
                 self.dispatch_client.service_failed(task, error, error_key)
 
