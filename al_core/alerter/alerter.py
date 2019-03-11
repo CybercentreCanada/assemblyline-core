@@ -1,9 +1,6 @@
 
-import logging
-import signal
-
+from al_core.server_base import ServerBase
 from assemblyline.common import forge
-from assemblyline.common import log as al_log
 from assemblyline.common import net
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.exporting_counter import AutoExportingCounters
@@ -14,8 +11,9 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 ALERT_QUEUE_NAME = 'm-alert'
 MAX_RETRIES = 10
 
-class Alerter(object):
-    def __init__(self, logger):
+class Alerter(ServerBase):
+    def __init__(self):
+        super().__init__('assemblyline.alerter')
         self.config = forge.get_config()
         # Publish counters to the metrics sink.
         self.counter = AutoExportingCounters(
@@ -27,7 +25,6 @@ class Alerter(object):
             auto_flush=True)
         self.counter.start()
         self.datastore = forge.get_datastore(self.config)
-        self.log = logger
         self.persistent_redis = get_client(
             db=self.config.core.redis.persistent.db,
             host=self.config.core.redis.persistent.host,
@@ -38,28 +35,12 @@ class Alerter(object):
         self.running = False
 
         self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.persistent_redis)
-        signal.signal(signal.SIGINT, self.interrupt)
-        signal.signal(signal.SIGTERM, self.interrupt)
-
-    def __enter__(self):
-        self.log.info('Alerter ready to process alerts!')
-        return self
-
-    def __exit__(self):
-        self.close()
-        self.log.info('Alerter stopped.')
-
-    # noinspection PyUnusedLocal
-    def interrupt(self, unused1, unused2):
-        self.log.info("Caught signal. Coming down...")
-        self.running = False
 
     def close(self):
         if self.counter:
             self.counter.stop()
 
-    def run(self):
-        self.running = True
+    def try_run(self):
         while self.running:
             alert = self.alert_queue.pop(timeout=1)
             if not alert:
@@ -79,13 +60,5 @@ class Alerter(object):
 
 
 if __name__ == "__main__":
-    al_log.init_logging("alerter")
-    log = logging.getLogger('assemblyline.alerter')
-
-    log.info('Starting Alerter...')
-    # noinspection PyBroadException
-    try:
-        with Alerter(log) as alerter:
-            alerter.run()
-    except Exception:
-        log.exception("Unhandled exception caught while processing alerts:")
+    with Alerter() as alerter:
+        alerter.serve_forever()

@@ -1,21 +1,30 @@
 
 import concurrent.futures
-import logging
 import time
 
-from assemblyline.common import forge, log as al_log
+from al_core.server_base import ServerBase
+from assemblyline.common import forge, net
 from assemblyline.filestore import FileStore
+from assemblyline.remote.datatypes.exporting_counter import AutoExportingCounters
 
 config = forge.get_config()
 
 
-class ExpiryManager(object):
-    def __init__(self, log):
-        self.log = log
+class ExpiryManager(ServerBase):
+    def __init__(self):
+        super().__init__('assemblyline.expiry', shutdown_timeout=config.core.expiry.sleep_time + 5)
         self.datastore = forge.get_datastore()
         self.filestore = forge.get_filestore()
         self.cachestore = FileStore(*config.filestore.cache)
         self.expirable_collections = []
+        self.counter = AutoExportingCounters(
+            name='expiry',
+            host=net.get_hostip(),
+            export_interval_secs=5,
+            channel=forge.get_metrics_sink(),
+            auto_log=True,
+            auto_flush=True)
+        self.counter.start()
 
         self.fs_hashmap = {
             'file': self.filestore.delete,
@@ -26,8 +35,12 @@ class ExpiryManager(object):
             if hasattr(definition, 'expiry_ts'):
                 self.expirable_collections.append(getattr(self.datastore, name))
 
-    def run(self):
-        while True:
+    def close(self):
+        if self.counter:
+            self.counter.stop()
+
+    def try_run(self):
+        while self.running:
             for collection in self.expirable_collections:
                 if config.core.expiry.batch_delete:
                     delete_query = f"expiry_ts:[* TO {self.datastore.ds.now}-{config.core.expiry.delay}" \
@@ -52,6 +65,8 @@ class ExpiryManager(object):
 
                     # Proceed with deletion
                     collection.delete_matching(delete_query, workers=config.core.expiry.workers)
+                    self.counter.increment(f'expiry.{collection.name}', increment_by=number_to_delete)
+
                     self.log.info(f"    Deleted {number_to_delete} items from the datastore...")
                 else:
                     self.log.debug("    Nothing to delete in this collection.")
@@ -60,6 +75,5 @@ class ExpiryManager(object):
 
 
 if __name__ == "__main__":
-    al_log.init_logging("expiry")
-    em = ExpiryManager(logging.getLogger('assemblyline.expiry'))
-    em.run()
+    with ExpiryManager() as em:
+        em.serve_forever()
