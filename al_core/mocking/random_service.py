@@ -1,5 +1,7 @@
 import hashlib
+import logging
 import random
+import time
 
 from al_core.dispatching.client import DispatchClient
 from al_core.dispatching.dispatcher import service_queue_name
@@ -18,7 +20,8 @@ class RandomService(ServerBase):
     Including service API, in the future probably include that in this test.
     """
     def __init__(self, datastore, filestore):
-        super().__init__("assemblyline.randomservice")
+        log_level = logging.DEBUG if forge.get_config().core.dispatcher.debug_logging else logging.INFO
+        super().__init__("assemblyline.randomservice", log_level=log_level)
         self.datastore = datastore
         self.filestore = filestore
 
@@ -64,6 +67,7 @@ class RandomService(ServerBase):
                     if not self.filestore.exists(f.sha256):
                         self.filestore.save(f.sha256, f.sha256)
 
+                time.sleep(random.randint(0, 4))
 
                 self.datastore.result.save(result_key, result)
                 self.dispatch_client.service_finished(task, result, result_key)
@@ -72,7 +76,7 @@ class RandomService(ServerBase):
                 error.sha256 = task.fileinfo.sha256
                 error.response.service_name = task.service_name
                 error_key = error.build_key(hashlib.md5(task.service_config.encode("utf-8")).hexdigest())
-                print(f"\t\tA {error.response.status} error was generated for this task: {error_key}")
+                self.log.info(f"\t\tA {error.response.status} error was generated for this task: {error_key}")
 
                 self.dispatch_client.service_failed(task, error, error_key)
 

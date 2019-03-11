@@ -79,9 +79,6 @@ class Dispatcher:
         # Create a config cache that will refresh config values periodically
         self.config = forge.CachedObject(forge.get_config)
 
-        if self.config.core.dispatcher.debug_logging:
-            self.log.setLevel(logging.DEBUG)
-
         # Build some utility classes
         self.scheduler = Scheduler(datastore, self.config)
         self.classification_engine = forge.get_classification()

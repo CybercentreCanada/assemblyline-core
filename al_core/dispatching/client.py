@@ -97,6 +97,12 @@ class DispatchClient:
 
     def service_finished(self, task: ServiceTask, result: Result, result_key):
         """Notifies the dispatcher of service completion, and possible new files to dispatch."""
+        if result.drop_file:
+            self.log.debug(f"Service {task.service_name} succeeded. "
+                           f"Result will be stored in {result_key} but processing will stop after this service.")
+        else:
+            self.log.debug(f"Service {task.service_name} succeeded. Result will be stored in {result_key}")
+
         # Store the result object and mark the service finished in the global table
         process_table = DispatchHash(task.sid, self.redis)
         remaining = process_table.finish(task.fileinfo.sha256, task.service_name, result_key,
@@ -142,6 +148,8 @@ class DispatchClient:
             NamedQueue(w).push(msg)
 
     def service_failed(self, task: ServiceTask, error: Error, error_key):
+        self.log.debug(f"Service {task.service_name} failed with {error.response.status} error.")
+
         # Add an error to the datastore
         self.errors.save(error_key, error)
 

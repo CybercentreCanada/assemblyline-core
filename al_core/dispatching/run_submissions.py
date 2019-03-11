@@ -2,6 +2,7 @@
 A dispatcher server that ensures all of the files in a submission are complete.
 """
 import json
+import logging
 
 from assemblyline.odm.models.submission import Submission
 from assemblyline.common import forge
@@ -12,7 +13,9 @@ from al_core.server_base import ServerBase
 
 class SubmissionDispatchServer(ServerBase):
     def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None):
-        super().__init__('assemblyline.dispatcher.submissions', logger)
+        log_level = logging.DEBUG if forge.get_config().core.dispatcher.debug_logging else logging.INFO
+        super().__init__('assemblyline.dispatcher.submissions', logger, log_level=log_level)
+
         datastore = datastore or forge.get_datastore()
         self.dispatcher = Dispatcher(logger=self.log, redis=redis, redis_persist=redis_persist, datastore=datastore)
 
