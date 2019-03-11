@@ -33,6 +33,8 @@ from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.str_utils import safe_str
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.messages.submission import Submission as SubmissionObject
+from assemblyline.odm.messages.task import Task
+from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import Submission
 from assemblyline.filestore import CorruptedFileStoreException, FileStore
 
@@ -56,29 +58,20 @@ class SubmissionClient:
     """
 
     def __init__(self, datastore: AssemblylineDatastore=None, filestore: FileStore=None,
-                 config=None, cl_engine: Classification=None, redis=None):
+                 config=None, redis=None):
         self.log = logging.getLogger('assemblyline.submission_client')
         self.config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
         self.filestore = filestore or forge.get_filestore(self.config)
         self.redis = redis
-        self.classification_engine = cl_engine or forge.get_classification()
 
         # A client for interacting with the dispatcher
         self.dispatcher = DispatchClient(datastore, redis)
 
-    def submit(self, submission_obj: SubmissionObject, local_files: List=None, cleanup=True, completed_queue=None):
+    def submit(self, submission_obj: SubmissionObject, local_files: List = None, cleanup=True, completed_queue=None):
         """Submit several files in a single submission.
 
         After this method runs, there should be no local copies of the file left.
-        TODO UPDATE
-
-        Params:
-            file_locations: a mapping from file hash to local path to a file.
-                            if the location is empty, the file must exist in the file store.
-            metadata: will be passed to the Submission model as metadata
-            params: Submission and processing parameters for these files.
-            file_names: a mapping from file hash to the 'real name' of a file (optional)
         """
         if local_files is None:
             local_files = []
@@ -167,7 +160,6 @@ class SubmissionClient:
                         except:
                             self.log.error("Couldn't delete dangling file %s", path)
 
-
     def _ready_file(self, local_path: str, expiry, classification, cleanup, sha256=None) -> Tuple[str, int, dict]:
         """Take a file from local storage and prepare it for submission.
 
@@ -208,3 +200,47 @@ class SubmissionClient:
                 if os.path.exists(local_path):
                     os.unlink(local_path)
 
+    # TODO this would be nice to have
+    # def submit_extracted(self, task: Task, result: Result, local_files: List[str], cleanup=True):
+    #     """Submit several files in a single submission.
+    #
+    #     After this method runs, there should be no local copies of the file left.
+    #     """
+    #     try:
+    #         max_size = self.config.submission.max_file_size
+    #         expiry = now_as_iso(submission_obj.params.ttl * 60 * 60 * 24)
+    #         extracted_ok = []
+    #
+    #         for local_file, extraction_info in local_files:
+    #             # Upload/download, extract, analyze files
+    #             classification = extraction_info.classification
+    #             file_hash, size, new_metadata = self._ready_file(local_file, expiry, classification, cleanup)
+    #             self.filestore.put(local_file, file_hash)
+    #
+    #             # Check that after we have resolved exactly what to pass on, that it
+    #             # remains a valid target for scanning
+    #             if size > max_size and not submission_obj.params.ignore_size:
+    #                 self.log.error(f"{task.service_name} has extracted oversize file {size} > {max_size}")
+    #                 continue
+    #             elif size == 0:
+    #                 self.log.warning(f"{task.service_name} has extracted an empty file.")
+    #                 continue
+    #
+    #             if new_metadata:
+    #                 self.log.warning(f"{task.service_name} has extracted a file with "
+    #                                  f"new metadata, which is being ignored.")
+    #
+    #             extracted_ok
+    #
+    #         for
+    #         self.log.debug("Submission complete. Dispatching: %s", sub.sid)
+    #         self.dispatcher.dispatch_submission(sub, completed_queue=completed_queue)
+    #     finally:
+    #         # Just in case this method fails clean up local files
+    #         if cleanup:
+    #             for path in local_files:
+    #                 if path and os.path.exists(path):
+    #                     try:
+    #                         os.unlink(path)
+    #                     except:
+    #                         self.log.error("Couldn't delete dangling file %s", path)

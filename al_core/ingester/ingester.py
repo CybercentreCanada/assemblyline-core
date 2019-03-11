@@ -398,10 +398,7 @@ class Ingester:
         return key
 
     def completed(self, sub):
-        """Invoked when notified that a submission has completed.
-
-        TODO this is the v3 method
-        """
+        """Invoked when notified that a submission has completed."""
         # There is only one file in the submissions we have made
         sha256 = sub.files[0].sha256
         scan_key = sub.params.create_filescore_key(sha256)
@@ -417,6 +414,7 @@ class Ingester:
                              int(score), sha256, str(sub.metadata))
 
             # TODO Why is all of this being done? How many times should a task be finalized?
+            #      I don't think we need this any more, but I'm not 100% sure
             # Not a result we care about. We are notified for every
             # submission that completes. Some submissions will not be ours.
             # if sub.metadata:

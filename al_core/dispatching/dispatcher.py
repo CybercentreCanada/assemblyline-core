@@ -1,13 +1,9 @@
-import hashlib
 import time
 import json
 import uuid
 import logging
 from typing import List
-from functools import reduce
 
-# TODO replace with unique queue
-from assemblyline.odm import ClassificationObject
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.service import Service
@@ -77,7 +73,7 @@ class Dispatcher:
         self.files = datastore.file
 
         # Create a config cache that will refresh config values periodically
-        self.config = forge.CachedObject(forge.get_config)
+        self.config = forge.get_config()
 
         # Build some utility classes
         self.scheduler = Scheduler(datastore, self.config)
@@ -105,31 +101,6 @@ class Dispatcher:
 
         # Publish counters to the metrics sink.
         self.files_complete_counter = MetricCounter('dispatch.files_complete', self.redis)
-
-        # This starts a thread that polls for messages with an exponential
-        # backoff, if no messages are found, to a maximum of one second.
-        # minimum = -6
-        # maximum = 0
-        # self.running = True
-        #
-        # threading.Thread(target=self.heartbeat).start()
-        # for _ in range(8):
-        #     threading.Thread(target=self.writer).start()
-        #
-        # time.sleep(2 * int(config.system.update_interval))
-
-        # exp = minimum
-        # while self.running:
-        #     if self.poll(len(self.entries)):
-        #         exp = minimum
-        #         continue
-        #     if self.drain and not self.entries:
-        #         break
-        #     time.sleep(2**exp)
-        #     exp = exp + 1 if exp < maximum else exp
-        #     self.check_timeouts()
-        #
-        # counts.stop()
 
     def volatile_named_queue(self, name: str) -> NamedQueue:
         if name not in self._nonper_other_queues:
@@ -161,7 +132,7 @@ class Dispatcher:
 
         # Refresh the quota hold
         if submission.params.quota_item and submission.params.submitter:
-            self.log.info(f"Submission {sid} counts toward quota for {submission.params.submitter}")
+            self.log.debug(f"Submission {sid} counts toward quota for {submission.params.submitter}")
             Hash('submissions-' + submission.params.submitter, self.redis_persist).add(sid, isotime.now_as_iso())
 
         # Open up the file/service table for this submission
@@ -389,7 +360,7 @@ class Dispatcher:
         submission_task = SubmissionTask(active_task)
         submission = submission_task.submission
         now = time.time()
-        self.log.debug(f"Dispatching:  {file_hash} at depth {task.depth} for {submission.sid}")
+        self.log.debug(f"Dispatching:  {file_hash} at depth {task.depth} for {task.sid}")
 
         # Refresh the watch on the submission, we are still working on it
         self.timeout_watcher.touch(key=task.sid, timeout=self.config.core.dispatcher.timeout,
@@ -403,11 +374,6 @@ class Dispatcher:
         started_stages = []
         # TODO HMGET the entire schedule's results here rather than one at a time later
 
-        # If we modify the dispatch table, keep track of how many services are marked incomplete
-        # this will reduce how often multiple services all trigger the check to see if the
-        # submission is finished.
-        tasks_remaining = 0
-
         # Go through each round of the schedule removing complete/failed services
         # Break when we find a stage that still needs processing
         outstanding = {}
@@ -420,43 +386,23 @@ class Dispatcher:
             for service_name in stage:
                 service = self.scheduler.services.get(service_name)
 
-                # If the result is in the process table we are fine
+                # Load the results, if there are no results, then the service must be dispatched later
                 finished = dispatch_table.finished(file_hash, service_name)
-                if finished:
-                    # If the service terminated in an error, count the error and continue
-                    if finished.is_error:
-                        errors += 1
-                        continue
-
-                    # if the service finished, count the score, and check if the file has been dropped
-                    score += finished.score
-                    if not submission.params.ignore_filtering and finished.drop:
-                        schedule.clear()
-                        if schedule:  # If there are still stages in the schedule, over write them for next time
-                            dispatch_table.schedules.set(file_hash, started_stages)
+                if not finished:
+                    outstanding[service_name] = service
                     continue
 
-                # Warning: Please do not change the text of the error messages below.
-                # TODO: anything that relies on specific error text where we control the creation
-                #       and parsing of the error should use an exception type if both ends are in
-                #       python, or an error code field where one end is not, so that we can
-                #       make it EXPLICIT that something is expected to be machine read
-                msg = None
-                if self._service_is_down(service, now):
-                    self.log.debug(' '.join((msg, "Not sending %s/%s to %s." % (task.sid, file_hash, service_name))))
-
-                    # Create an error record
-                    error_id = uuid.uuid4().hex
-                    self.errors.save(error_id, Error({
-                        # TODO
-                    }))
-
-                    dispatch_table.fail_nonrecoverable(file_hash, service_name, error_id)
+                # If the service terminated in an error, count the error and continue
+                if finished.is_error:
+                    errors += 1
                     continue
 
-                # If in the end, we still want to run this service, pass on the configuration
-                # we have resolved to use
-                outstanding[service_name] = service
+                # if the service finished, count the score, and check if the file has been dropped
+                score += finished.score
+                if not submission.params.ignore_filtering and finished.drop:
+                    schedule.clear()
+                    if schedule:  # If there are still stages in the schedule, over write them for next time
+                        dispatch_table.schedules.set(file_hash, started_stages)
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
@@ -466,7 +412,7 @@ class Dispatcher:
                 # Check if this submission has already dispatched this service, and hasn't timed out yet
                 # NOTE: This isn't for checking if a service has failed due to time out or generating
                 #       related errors. This is a DISPATCHING timer, to be sure that we don't send the
-                #       same sumbission+file+service to the service queues too often. This is part of what
+                #       same submission+file+service to the service queues too often. This is part of what
                 #       makes repeated dispatching of a submission or file largely idempotent.
                 queued_time = time.time() - dispatch_table.dispatch_time(file_hash, service_name)
                 if queued_time < service.timeout:
@@ -510,7 +456,7 @@ class Dispatcher:
             # send a message to the submission dispatcher to finalize
             self.log.debug(f"Finished: {submission.sid}/{file_hash}")
             self.files_complete_counter.increment()
-            if dispatch_table.all_finished() and tasks_remaining == 0:
+            if dispatch_table.all_finished():
                 self.submission_queue.push({'sid': submission.sid})
 
     def build_schedule(self, dispatch_hash: DispatchHash, submission: Submission, file_hash, file_type) -> List[List[str]]:
@@ -523,19 +469,6 @@ class Dispatcher:
             cached_schedule = [list(stage.keys()) for stage in obj_schedule]
             dispatch_hash.schedules.add(file_hash, cached_schedule)
         return cached_schedule
-
-    def _service_is_down(self, service: Service, now):
-        # If a service has been disabled while we are in the middle of dispatching it is down
-        if not service or not service.enabled:
-            return True
-
-        # If we aren't holding service instances in reserve, its always up (because we can't tell)
-        if self.config.services.min_service_workers == 0:
-            return False
-
-        # We expect instances to be running and heartbeat-ing regularly
-        # TODO service heartbeating not finalized
-        return False
 
     def build_service_config(self, service: Service, submission: Submission):
         """Prepare the service config that will be used downstream.
