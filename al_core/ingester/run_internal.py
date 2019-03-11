@@ -1,13 +1,9 @@
 """
 The internal worker for ingester runs several routing processes
 
-TODO
- - can any of the processes in this can be inlined to the ingest/submit processes
-
 Things handled here:
  - Retrying after a delay
  - Processing timeouts
- - dropper
 
 """
 

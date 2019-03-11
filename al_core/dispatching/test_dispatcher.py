@@ -60,7 +60,8 @@ def test_dispatch_file(clean_redis):
     file_task = FileTask({
         'sid': 'first-submission',
         'file_info': dict(sha256=file_hash, type='unknown', magic='a', md5='a', mime='a', sha1='a', size=10),
-        'depth': 0
+        'depth': 0,
+        'max_files': 5
     })
     disp.dispatch_file(file_task)
 

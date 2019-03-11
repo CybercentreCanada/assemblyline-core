@@ -290,7 +290,7 @@ class Ingester:
 
         if task.file_size > max_file_size and not task.params.ignore_size and not task.params.never_drop:
             task.failure = f"File too large ({task.file_size} > {max_file_size})"
-            self.__drop(task)
+            self._notify_drop(task)
             self.skipped_counter.increment()
             return
 
@@ -441,13 +441,14 @@ class Ingester:
         self.bytes_completed_counter.increment(task.file_size)
 
         with self.cache_lock:
-            self.cache[scan_key] = FileScore({
+            fs = self.cache[scan_key] = FileScore({
                 'errors': errors,
                 'psid': psid,
                 'score': score,
                 'sid': sid,
                 'time': now(),
             })
+            self.datastore.filescore.save(scan_key, fs.as_primitives())
 
         self.finalize(psid, sid, score, task)
 
@@ -524,11 +525,11 @@ class Ingester:
             return False
 
         task.failure = 'Skipped'
-        self.__drop(task)
+        self._notify_drop(task)
         self.skipped_counter.increment()
         return True
 
-    def __drop(self, task: IngestTask):
+    def _notify_drop(self, task: IngestTask):
         self.send_notification(task)
 
         c12n = task.params.classification
@@ -554,7 +555,7 @@ class Ingester:
                     self.whitelisted[sha256] = reason
 
             task.failure = "Whitelisting due to reason %s (%s)" % (dotdump(safe_str(reason)), hit)
-            self.__drop(task)
+            self._notify_drop(task)
 
             self.whitelisted_counter.increment()
             MetricCounter('whitelist.' + reason, self.redis).increment()

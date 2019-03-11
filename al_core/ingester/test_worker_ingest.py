@@ -147,16 +147,16 @@ def test_ingest_groups_error(ingest_harness):
 
 def test_ingest_size_error(ingest_harness):
     datastore, ingester, in_queue = ingest_harness
+    mm = ingester.ingester
+    mm._notify_drop = mock.MagicMock(side_effect=mm._notify_drop)
 
     # Send a rather big file
     in_queue.push(make_message(files={'size': 10**10}))
     ingester.try_run(volatile=True)
 
     # No files in the internal buffer
-    mm = ingester.ingester
     assert mm.unique_queue.length() == 0
     assert mm.ingest_queue.length() == 0
 
     # A file was dropped
-    assert mm.drop_queue.pop(blocking=False) is not None
-    assert mm.drop_queue.length() == 0
+    mm._notify_drop.assert_called_once()

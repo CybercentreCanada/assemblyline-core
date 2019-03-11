@@ -5,9 +5,11 @@ class MockCollection:
         self.next_searches = []
         self.schema = schema
 
-    def get(self, key):
+    def get(self, key, as_obj=False):
         if key not in self._docs:
             return None
+        if as_obj:
+            return self._docs[key].as_primatives()
         return self._docs[key]
 
     def exists(self, key):

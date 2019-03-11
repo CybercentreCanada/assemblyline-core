@@ -95,7 +95,7 @@ def submission(selected, excluded):
 @pytest.fixture
 def scheduler():
     config = Config(DEFAULT_CONFIG)
-    config.core.dispatcher.stages = ['pre', 'core', 'post']
+    config.services.stages = ['pre', 'core', 'post']
     return Scheduler(FakeDatastore(), config)
 
 
