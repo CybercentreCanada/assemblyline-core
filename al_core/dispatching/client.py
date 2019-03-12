@@ -4,7 +4,7 @@ An interface to the core system for the edge services.
 
 """
 import logging
-from typing import Dict
+from typing import Dict, Union
 
 from assemblyline.common import forge
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
@@ -16,7 +16,7 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 
 from al_core.dispatching.dispatcher import SubmissionTask, ServiceTask, FileTask, SUBMISSION_QUEUE, \
-    make_watcher_list_name, FILE_QUEUE
+    make_watcher_list_name, FILE_QUEUE, service_queue_name
 from al_core.dispatching.dispatch_hash import DispatchHash
 from al_core.dispatching.scheduler import Scheduler
 
@@ -91,8 +91,12 @@ class DispatchClient:
 
         return output
 
-    def request_work(self, service_name, timeout=60):
-        raise NotImplementedError()
+    def request_work(self, service_name, timeout=60, blocking=True) -> Union[ServiceTask, None]:
+        work_queue = NamedQueue(service_queue_name(service_name), host=self.redis)
+        result = work_queue.pop(blocking=blocking, timeout=timeout)
+        if result:
+            return ServiceTask(result)
+        return None
 
     def _dispatching_error(self, task, process_table, error):
         error_key = error.build_key()

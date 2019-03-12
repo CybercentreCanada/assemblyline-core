@@ -51,9 +51,9 @@ class DispatchHash:
         # The set of files that are included in this submission, this set is used primarily for
         # enforcing max file per submission constraints
         self._files = ExpiringHash(f'dispatch-hash-files-{sid}', host=self.client)
+        self._cached_files = set(self._files.keys())
         # Errors that are related to a submission, but not the terminal errors of a service
         self._other_errors = ExpiringSet(f'dispatch-hash-errors-{sid}', host=self.client)
-        self._cached_files = set(self._files.keys())
         # TODO set these expire times from the global time limit for submissions
         retry_call(self.client.expire, self._dispatch_key, 60*60)
         retry_call(self.client.expire, self._finish_key, 60*60)
@@ -71,7 +71,10 @@ class DispatchHash:
         if len(self._cached_files) >= file_limit:
             return False
 
-        # Our local checks are unclear, check remotely
+        # Our local checks are unclear, check remotely,
+        # 0 => already exists, still want to return true
+        # 1 => didn't exist before
+        # None => over size limit, return false
         if self._files.limited_add(file_hash, 0, file_limit) is not None:
             # If it was added, add it to the local cache so we don't need to check again
             self._cached_files.add(file_hash)
