@@ -133,6 +133,10 @@ class IngestTask(odm.Model):
     def params(self) -> SubmissionParams:
         return self.submission.params
 
+    @property
+    def sha256(self) -> str:
+        return self.submission.files[0].sha256
+
     # Information about the ingestion itself, parameters irrelevant
     scan_key = odm.Keyword(default_set=True)  # the filescore key
     retries = odm.Integer(default=0)
@@ -249,34 +253,17 @@ class Ingester:
         self.submit_client = SubmissionClient(datastore=self.datastore,
                                               redis=self.redis)
 
-    def get_user_groups(self, user):
-        groups = self._user_groups.get(user, None)
-        if groups is None:
-            ruser = self.datastore.user.get(user)
-            if not ruser:
-                return None
-            groups = ruser.get('groups', [])
-            self._user_groups[user] = groups
-        return groups
-
     def ingest(self, task: IngestTask):
+        self.log.info(f"[{task.ingest_id} :: {task.sha256}] Task received for processing")
         # Load a snapshot of ingest parameters as of right now.
         max_file_size = self.config.submission.max_file_size
         param = task.params
-
-        # ... and groups.
-        if not param.groups:
-            groups = self.get_user_groups(param.submitter)
-            if groups is None:
-                error_message = f"User not found [{param.submitter}] ingest failed"
-                self.send_notification(task, failure=error_message, logfunc=self.log.warning)
-                return
-            param.groups = groups
 
         self.bytes_ingested_counter.increment(task.file_size)
         self.submissions_ingested_counter.increment()
 
         if any(len(file.sha256) != 64 for file in task.submission.files):
+            self.log.error(f"[{task.ingest_id} :: {task.sha256}] Invalid sha256, skipped")
             self.send_notification(task, failure="Invalid sha256", logfunc=self.log.warning)
             return
 
@@ -285,13 +272,14 @@ class Ingester:
             value = task.submission.metadata[key]
             meta_size = len(value)
             if meta_size > self.config.submission.max_metadata_length:
-                self.log.info(f'Removing {key} from {task.ingest_id} from {param.submitter}')
+                self.log.info(f'[{task.ingest_id} :: {task.sha256}] Removing {key} from metadata because value is too big')
                 task.submission.metadata.pop(key)
 
         if task.file_size > max_file_size and not task.params.ignore_size and not task.params.never_drop:
             task.failure = f"File too large ({task.file_size} > {max_file_size})"
             self._notify_drop(task)
             self.skipped_counter.increment()
+            self.log.error(f"[{task.ingest_id} :: {task.sha256}] {task.failure}")
             return
 
         pprevious, previous, score = None, False, None
@@ -329,9 +317,11 @@ class Ingester:
             return
 
         if self.drop(task):
+            self.log.info(f"[{task.ingest_id} :: {task.sha256}] Dropped")
             return
 
         if self.is_whitelisted(task):
+            self.log.info(f"[{task.ingest_id} :: {task.sha256}] Whitelisted")
             return
 
         self.unique_queue.push(priority, task.as_primitives())
@@ -344,13 +334,13 @@ class Ingester:
 
         counter = self.cache_local_hit_counter
         if result:
-            self.log.info('Local cache hit')
+            self.log.info(f'[{task.ingest_id} :: {task.sha256}] Local cache hit')
         else:
             counter = self.cache_hit_counter
 
             result = self.datastore.filescore.get(key)
             if result:
-                self.log.info('Remote cache hit')
+                self.log.info(f'[{task.ingest_id} :: {task.sha256}] Remote cache hit')
             else:
                 self.cache_miss_counter.increment()
                 return None, False, None, key
@@ -406,8 +396,8 @@ class Ingester:
 
         if not raw:
             # Some other worker has already popped the scanning queue?
-            self.log.warning("Submission completed twice (score=%d) for: %s %s",
-                             int(score), sha256, str(sub.metadata))
+            self.log.warning(f"[{sub.metadata.get('ingest_id', 'unknown')} :: {sha256}] "
+                             f"Submission completed twice (score={score})")
 
             # TODO Why is all of this being done? How many times should a task be finalized?
             #      I don't think we need this any more, but I'm not 100% sure
@@ -563,13 +553,13 @@ class Ingester:
         return reason
 
     def submit(self, task: IngestTask):
-
         self.submit_client.submit(
             submission_obj=task.submission,
             completed_queue=_completeq_name,
         )
 
         self.timeout_queue.push(now(_max_time), task.scan_key)
+        self.log.info(f"[{task.ingest_id} :: {task.sha256}] Submitted to dispatcher for analysis")
 
     def retry(self, task, scan_key, ex):
         current_time = now()
@@ -580,18 +570,18 @@ class Ingester:
             trace = ''
             if ex:
                 trace = ': ' + get_stacktrace_info(ex)
-            self.log.error('Max retries exceeded for %s%s', task.sha256, trace)
+            self.log.error(f'[{task.ingest_id} :: {task.sha256}] Max retries exceeded {trace}')
             self.duplicate_queue.delete(_dup_prefix + scan_key)
         elif self.expired(current_time - task.ingest_time.timestamp(), 0):
-            self.log.info('No point retrying expired submission for %s', task.sha256)
+            self.log.info(f'[{task.ingest_id} :: {task.sha256}] No point retrying expired submission')
             self.duplicate_queue.delete(_dup_prefix + scan_key)
         else:
-            self.log.info('Requeuing %s (%s)', task.sha256, ex or 'unknown')
+            self.log.info(f'[{task.ingest_id} :: {task.sha256}] Requeuing ({ex or "unknown"})')
             task.retries = retries
             self.retry_queue.push(now(_retry_delay), task.json())
 
     def finalize(self, psid, sid, score, task: IngestTask):
-        self.log.debug("Finalizing (score=%d) %s", score, task.submission.files[0].sha256)
+        self.log.info(f"[{task.ingest_id} :: {task.sha256}] Completed. (score={score})")
         if psid:
             task.params.psid = psid
         task.score = score
@@ -607,6 +597,7 @@ class Ingester:
             task.params.psid = None
 
         if self.is_alert(task, score):
+            self.log.info(f"[{task.ingest_id} :: {task.sha256}] Notifying alerter to generate an alert")
             self.alert_queue.push(task.as_primitives())
 
         self.send_notification(task)

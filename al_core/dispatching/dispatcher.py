@@ -117,10 +117,10 @@ class Dispatcher:
         sid = submission.sid
 
         if not self.active_tasks.exists(sid):
-            self.log.debug(f"Starting submission {sid} for {submission.params.submitter}")
+            self.log.info(f"[{sid}] New submission received")
             self.active_tasks.add(sid, task.as_primitives())
         else:
-            self.log.debug(f"Check if submission {sid} is complete")
+            self.log.info(f"[{sid}] Received a pre-existing submission, check if it is complete")
 
         # Refresh the watch, this ensures that this function will be called again
         # if something goes wrong with one of the files, and it never finishes.
@@ -129,7 +129,7 @@ class Dispatcher:
 
         # Refresh the quota hold
         if submission.params.quota_item and submission.params.submitter:
-            self.log.debug(f"Submission {sid} counts toward quota for {submission.params.submitter}")
+            self.log.info(f"[{sid}] Submission will count towards {submission.params.submitter.upper()} quota")
             Hash('submissions-' + submission.params.submitter, self.redis_persist).add(sid, isotime.now_as_iso())
 
         # Open up the file/service table for this submission
@@ -141,7 +141,7 @@ class Dispatcher:
         for submission_file in submission.files:
             file_data = self.files.get(submission_file.sha256)
             if not file_data:
-                self.log.error(f'Submission {submission.sid} tried to process missing file: {submission_file.sha256}.')
+                self.log.error(f'[{sid}] Missing file for submission: {submission_file.sha256}.')
                 continue
 
             unchecked_files.append(FileTask(dict(
@@ -203,7 +203,7 @@ class Dispatcher:
                     # The result should exist then, get all the sub-files
                     result = self.results.get(result_row.key)
                     if not result:
-                        self.log.error(f"Service responded to dispatcher with missing result: {result_row.key}")
+                        self.log.error(f"[{sid}] Missing result: {result_row.key}")
                         continue
 
                     for sub_file in result.response.extracted:
@@ -216,8 +216,7 @@ class Dispatcher:
                         file_data = self.datastore.file.get(sub_file.sha256)
 
                         if not file_data:
-                            self.log.debug(f'Extracted file {sub_file} excluded from {sid} could'
-                                           f' be error or due to extraction limits.')
+                            self.log.warning(f'[{sid}] Missing extracted file: {sub_file}')
                             continue
 
                         unchecked_files.append(FileTask(dict(
@@ -262,12 +261,11 @@ class Dispatcher:
         # file isn't done yet, and hasn't been filtered by any of the previous few steps
         # poke those files
         if pending_files:
-            self.log.debug(f"Dispatching {len(pending_files)} files for submission {sid}: {list(pending_files.keys())}")
+            self.log.debug(f"[{sid}] Dispatching {len(pending_files)} files: {list(pending_files.keys())}")
 
             for file_task in pending_files.values():
                 self.file_queue.push(file_task.as_primitives())
         else:
-            self.log.debug(f"Finishing submission {sid} for {submission.params.submitter}")
             max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
             self.finalize_submission(task, result_classifications, max_score, len(encountered_files))
 
@@ -280,7 +278,7 @@ class Dispatcher:
         sid = submission.sid
 
         if submission.params.quota_item and submission.params.submitter:
-            self.log.info(f"Submission {sid} no longer counts toward quota for {submission.params.submitter}")
+            self.log.info(f"[{sid}] Submission no longer counts toward {submission.params.submitter.upper()} quota")
             Hash('submissions-' + submission.params.submitter, self.redis_persist).pop(sid)
 
         # Pull in the classifications of results/produced by services
@@ -303,7 +301,7 @@ class Dispatcher:
                 elif status.bucket == 'result':
                     results.append(status.key)
                 else:
-                    self.log.warning(f"Unexpected service output bucket: {status.bucket}/{status.key}")
+                    self.log.warning(f"[{sid}] Unexpected service output bucket: {status.bucket}/{status.key}")
 
         # submission['original_classification'] = submission['classification']
         submission.classification = classification
@@ -328,7 +326,7 @@ class Dispatcher:
         watcher_list.delete()
         self.timeout_watcher.clear(sid)
         self.active_tasks.pop(sid)
-        self.log.debug(f"Finished submission {sid} for {submission.params.submitter}")
+        self.log.info(f"[{sid}] Completed")
 
     def dispatch_file(self, task: FileTask):
         """ Handle a message describing a file to be processed.
@@ -352,13 +350,11 @@ class Dispatcher:
         active_task = self.active_tasks.get(task.sid)
 
         if active_task is None:
-            self.log.warning(f"Untracked submission is being processed: {task.sid}")
+            self.log.warning(f"[{task.sid}] Untracked submission is being processed")
             return
 
         submission_task = SubmissionTask(active_task)
         submission = submission_task.submission
-        now = time.time()
-        self.log.debug(f"Dispatching:  {file_hash} at depth {task.depth} for {task.sid}")
 
         # Refresh the watch on the submission, we are still working on it
         self.timeout_watcher.touch(key=task.sid, timeout=self.config.core.dispatcher.timeout,
@@ -404,7 +400,7 @@ class Dispatcher:
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
-            self.log.debug(f"File {file_hash} is being sent to: {list(outstanding.keys())}")
+            self.log.info(f"[{task.sid}] File {file_hash} sent to services : {', '.join(list(outstanding.keys()))}")
 
             for service_name, service in outstanding.items():
                 # Check if this submission has already dispatched this service, and hasn't timed out yet
@@ -440,7 +436,7 @@ class Dispatcher:
 
             # If there are no outstanding ANYTHING for this submission,
             # send a message to the submission dispatcher to finalize
-            self.log.debug(f"Finished: {submission.sid}/{file_hash}")
+            self.log.debug(f"[{task.sid}] Finished processing file '{file_hash}'")
             self.files_complete_counter.increment()
             if dispatch_table.all_finished():
                 self.submission_queue.push({'sid': submission.sid})

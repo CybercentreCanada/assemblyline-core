@@ -188,7 +188,7 @@ class DispatchClient:
         process_table = DispatchHash(task.sid, self.redis)
         if error.response.status == "FAIL_RECOVERABLE":
             # Because the error is recoverable, we will not save it nor we will notify the user
-            process_table.fail_recoverable(task.fileinfo.sha256, task.service_name, error_key)
+            process_table.fail_recoverable(task.fileinfo.sha256, task.service_name)
         else:
             # This is a NON_RECOVERABLE error, error will be saved and transmitted to the user
             self.errors.save(error_key, error)
