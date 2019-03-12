@@ -349,15 +349,17 @@ class Ingester:
                 self.cache[key] = result
 
         current_time = now()
-        delta = current_time - result.time
+        age = current_time - result.time
         errors = result.errors
 
-        if self.expired(delta, errors):
+        if self.expired(age, errors):
+            self.log.info(f"[{task.ingest_id} :: {task.sha256}] Cache hit dropped, cache has expired")
             self.cache_expired_counter.increment()
             self.cache.pop(key, None)
             self.datastore.filescore.delete(key)
             return None, False, None, key
-        elif self.stale(delta, errors):
+        elif self.stale(age, errors):
+            self.log.info(f"[{task.ingest_id} :: {task.sha256}] Cache hit dropped, cache is stale")
             self.cache_stale_counter.increment()
             return None, False, result.score, key
 
@@ -487,8 +489,6 @@ class Ingester:
         q.push(task.as_primitives())
 
     def expired(self, delta: float, errors) -> bool:
-        # incomplete_expire_after_seconds = 3600
-
         if errors:
             return delta >= self.config.core.ingester.incomplete_expire_after_seconds
         else:
@@ -611,8 +611,10 @@ class Ingester:
             task.scan_key = None
             task.params.services.selected = resubmit_selected
 
-            # TODO: Check cache here...
-            self.unique_queue.push(task.params.priority, task.as_primitives())
+            # Check if our new task is a cache hit
+            _, previous, _, _ = self.check(task)
+            if not previous:
+                self.unique_queue.push(task.params.priority, task.as_primitives())
 
     def is_alert(self, task: IngestTask, score):
         if not task.params.generate_alert:

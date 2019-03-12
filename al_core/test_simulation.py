@@ -37,9 +37,6 @@ from al_core.dispatching.run_submissions import SubmissionDispatchServer
 from al_core.server_base import ServerBase
 
 from al_core.mocking import RedisTime
-
-
-
 from al_core.dispatching.test_scheduler import dummy_service
 
 
@@ -144,11 +141,16 @@ class CoreSession:
         self.ds: AssemblylineDatastore = None
         self.filestore = None
         self.config: Config = None
+        self.ingest: IngesterInput = None
+
+
+def make_magic(*_, **__):
+    return mock.MagicMock(spec=MetricCounter)
 
 
 @pytest.fixture(scope='module')
-@mock.patch('al_core.ingester.ingester.MetricCounter', new=mock.MagicMock(spec=MetricCounter))
-@mock.patch('al_core.dispatching.dispatcher.MetricCounter', new=mock.MagicMock(spec=MetricCounter))
+@mock.patch('al_core.ingester.ingester.MetricCounter', new=make_magic)
+@mock.patch('al_core.dispatching.dispatcher.MetricCounter', new=make_magic)
 def core(request, es_connection, redis, replace_config):
     from assemblyline.common import log as al_log
     al_log.init_logging("simulation")
@@ -171,6 +173,7 @@ def core(request, es_connection, redis, replace_config):
     ]
 
     ingester_input_thread: IngesterInput = threads[0]
+    fields.ingest = ingester_input_thread
     fields.ingest_queue = ingester_input_thread.ingester.ingest_queue
 
     ds.service.delete_matching('*')
@@ -556,3 +559,66 @@ def test_max_extracted_in_several(core):
     # We should only get results for each file up to the max depth
     assert len(sub.results) == 4 * (1 + 3)
     assert len(sub.errors) == 3  # The number of children that errored out
+
+
+def test_caching(core: CoreSession):
+    misses = core.ingest.ingester.cache_miss_counter.increment
+    local_hits = core.ingest.ingester.cache_local_hit_counter.increment
+    remote_hits = core.ingest.ingester.cache_hit_counter.increment
+
+    sha, size = ready_body(core)
+
+    def run_once():
+        misses.reset_mock()
+        local_hits.reset_mock()
+        remote_hits.reset_mock()
+
+        core.ingest_queue.push(SubmissionInput(dict(
+            metadata={},
+            params=dict(
+                services=dict(selected=''),
+                submitter='user',
+                groups=['user'],
+            ),
+            notification=dict(
+                queue='1',
+                threshold=0
+            ),
+            files=[dict(
+                sha256=sha,
+                size=size,
+                name='abc123'
+            )]
+        )).as_primitives())
+
+        notification_queue = NamedQueue('1', core.redis)
+        first_task = notification_queue.pop(timeout=5)
+
+        # One of the submission will get processed fully
+        assert first_task is not None
+        first_task = IngestTask(first_task)
+        first_submission: Submission = core.ds.submission.get(first_task.submission.sid)
+        assert first_submission.state == 'completed'
+        assert len(first_submission.files) == 1
+        assert len(first_submission.errors) == 0
+        assert len(first_submission.results) == 4
+        return first_submission.sid
+
+    sid1 = run_once()
+    misses.assert_called_once()
+    local_hits.assert_not_called()
+    remote_hits.assert_not_called()
+
+    sid2 = run_once()
+    misses.assert_not_called()
+    local_hits.assert_called_once()
+    remote_hits.assert_not_called()
+    assert sid1 == sid2
+
+    core.ingest.ingester.cache = {}
+
+    sid3 = run_once()
+    misses.assert_not_called()
+    local_hits.assert_not_called()
+    remote_hits.assert_called_once()
+    assert sid1 == sid3

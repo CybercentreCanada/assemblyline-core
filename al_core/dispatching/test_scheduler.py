@@ -15,8 +15,6 @@ def dummy_service(name, stage, accepts='', rejects=''):
         'category': 'static',
         'accepts': accepts,
         'rejects': rejects,
-        'realm': 'abc',
-        'repo': '/dev/null',
         'version': '0',
         'enabled': True,
         'timeout': 2
@@ -38,8 +36,6 @@ class FakeDatastore:
                 'category': 'static',
                 'accepts': 'archive/.*',
                 'rejects': '',
-                'realm': 'abc',
-                'repo': '/dev/null',
                 'version': '0',
             }),
             'AnAV': Service({
@@ -48,8 +44,6 @@ class FakeDatastore:
                 'category': 'av',
                 'accepts': '.*',
                 'rejects': '',
-                'realm': 'abc',
-                'repo': '/dev/null',
                 'version': '0',
             }),
             'cuckoo': Service({
@@ -58,8 +52,6 @@ class FakeDatastore:
                 'category': 'dynamic',
                 'accepts': 'document/.*|executable/.*',
                 'rejects': '',
-                'realm': 'abc',
-                'repo': '/dev/null',
                 'version': '0',
             }),
             'polish': Service({
@@ -68,8 +60,6 @@ class FakeDatastore:
                 'category': 'static',
                 'accepts': '.*',
                 'rejects': '',
-                'realm': 'abc',
-                'repo': '/dev/null',
                 'version': '0',
             }),
             'not_documents': Service({
@@ -78,8 +68,6 @@ class FakeDatastore:
                 'category': 'static',
                 'accepts': '.*',
                 'rejects': 'document/*',
-                'realm': 'abc',
-                'repo': '/dev/null',
                 'version': '0',
             })
         }
