@@ -26,7 +26,6 @@ class FileDispatchServer(ServerBase):
                 self.dispatcher.dispatch_file(message)
             except Exception as error:
                 self.log.exception(error)
-                break
 
     def stop(self):
         self.dispatcher.file_queue.push(None)

@@ -168,7 +168,7 @@ class DispatchClient:
 
         # If the global table said that this was the last outstanding service,
         # send a message to the dispatchers.
-        if remaining == 0:
+        if remaining <= 0:
             self.file_queue.push(FileTask(dict(
                 sid=task.sid,
                 file_info=task.fileinfo,
@@ -183,7 +183,7 @@ class DispatchClient:
 
     def service_failed(self, task: ServiceTask, error: Error, error_key):
         self.log.debug(f"Service {task.service_name} failed with {error.response.status} error.")
-
+        remaining = -1
         # Mark the attempt to process the file over in the dispatch table
         process_table = DispatchHash(task.sid, self.redis)
         if error.response.status == "FAIL_RECOVERABLE":
@@ -193,7 +193,7 @@ class DispatchClient:
             # This is a NON_RECOVERABLE error, error will be saved and transmitted to the user
             self.errors.save(error_key, error)
 
-            process_table.fail_nonrecoverable(task.fileinfo.sha256, task.service_name, error_key)
+            remaining = process_table.fail_nonrecoverable(task.fileinfo.sha256, task.service_name, error_key)
 
             # Send the result key to any watching systems
             msg = {'status': 'FAIL', 'cache_key': error_key}
@@ -201,13 +201,13 @@ class DispatchClient:
                 NamedQueue(w).push(msg)
 
         # Send a message to prompt the re-issue of the task if needed
-        self.file_queue.push(FileTask(dict(
-            sid=task.sid,
-            file_info=task.fileinfo,
-            depth=task.depth,
-            max_files=task.max_files
-        )).as_primitives())
-
+        if remaining <= 0:
+            self.file_queue.push(FileTask(dict(
+                sid=task.sid,
+                file_info=task.fileinfo,
+                depth=task.depth,
+                max_files=task.max_files
+            )).as_primitives())
 
     def setup_watch_queue(self, sid):
         """

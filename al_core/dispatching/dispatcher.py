@@ -424,9 +424,9 @@ class Dispatcher:
                     max_files=task.max_files,
                 ))
 
+                dispatch_table.dispatch(file_hash, service_name)
                 queue = self.volatile_named_queue(service_queue_name(service_name))
                 queue.push(service_task.as_primitives())
-                dispatch_table.dispatch(file_hash, service_name)
 
         else:
             # There are no outstanding services, this file is done

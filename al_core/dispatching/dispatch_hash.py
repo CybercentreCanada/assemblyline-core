@@ -18,14 +18,17 @@ finished_tail = '-finished'
 
 finish_script = f"""
 local sid = ARGV[1]
-local key = ARGV[2]
-local result_key = ARGV[3]
+local file_hash = ARGV[2]
+local service = ARGV[3]
+local key = file_hash .. '-' .. service
+local result_key = ARGV[4]
 
 -- If the dispatch table has already been erased/task finished then don't create a new key.
 -- We don't want the dispatch table to be re-created this way, after the submission has actually been
 -- finalized.
 if redis.call('hdel', sid .. '{dispatch_tail}', key) then
     redis.call('hsetnx', sid .. '{finished_tail}', key, result_key)
+    return redis.call('hincrby', 'dispatch-hash-files-' .. sid, file_hash, -1)
 end
 return redis.call('hlen', sid .. '{dispatch_tail}')
 """
@@ -47,10 +50,10 @@ class DispatchHash:
         self.schedules = ExpiringHash(f'dispatch-hash-schedules-{sid}', host=self.client)
         # The set of files that are included in this submission, this set is used primarily for
         # enforcing max file per submission constraints
-        self._files = ExpiringSet(f'dispatch-hash-files-{sid}', host=self.client)
+        self._files = ExpiringHash(f'dispatch-hash-files-{sid}', host=self.client)
         # Errors that are related to a submission, but not the terminal errors of a service
         self._other_errors = ExpiringSet(f'dispatch-hash-errors-{sid}', host=self.client)
-        self._cached_files = set(self._files.members())
+        self._cached_files = set(self._files.keys())
         # TODO set these expire times from the global time limit for submissions
         retry_call(self.client.expire, self._dispatch_key, 60*60)
         retry_call(self.client.expire, self._finish_key, 60*60)
@@ -69,12 +72,11 @@ class DispatchHash:
             return False
 
         # Our local checks are unclear, check remotely
-        result = self._files.limited_add(file_hash, file_limit)
-
-        # If it was added, add it to the local cache so we don't need to check again
-        if result:
+        if self._files.limited_add(file_hash, 0, file_limit) is not None:
+            # If it was added, add it to the local cache so we don't need to check again
             self._cached_files.add(file_hash)
-        return result
+            return True
+        return False
 
     def add_error(self, error_key: str) -> bool:
         """Add an error to a submission.
@@ -87,7 +89,8 @@ class DispatchHash:
 
     def dispatch(self, file_hash: str, service: str):
         """Mark that a service has been dispatched for the given sha."""
-        retry_call(self.client.hset, self._dispatch_key, f"{file_hash}-{service}", time.time())
+        if retry_call(self.client.hset, self._dispatch_key, f"{file_hash}-{service}", time.time()):
+            self._files.increment(file_hash, 1)
 
     def dispatch_count(self):
         """How many tasks have been dispatched for this submission."""
@@ -109,13 +112,14 @@ class DispatchHash:
         if error_key:
             self._other_errors.add(error_key)
         retry_call(self.client.hdel, self._dispatch_key, f"{file_hash}-{service}")
+        self._files.increment(file_hash, -1)
 
     def fail_nonrecoverable(self, file_hash: str, service, error_key) -> int:
         """A service task has failed and should not be retried, entry the error as the result.
 
         Has exactly the same semantics as `finish` but for errors.
         """
-        return retry_call(self._finish, args=[self.sid, f"{file_hash}-{service}", json.dumps(['error', error_key, 0, False])])
+        return retry_call(self._finish, args=[self.sid, file_hash, service, json.dumps(['error', error_key, 0, False])])
 
     def finish(self, file_hash, service, result_key, score, drop=False) -> int:
         """
@@ -124,7 +128,7 @@ class DispatchHash:
          - Add the file to the finished list, with the given result key
          - return the number of items in the dispatched list
         """
-        return retry_call(self._finish, args=[self.sid, f"{file_hash}-{service}", json.dumps(['result', result_key, score, drop])])
+        return retry_call(self._finish, args=[self.sid, file_hash, service, json.dumps(['result', result_key, score, drop])])
 
     def finished_count(self) -> int:
         """How many tasks have been finished for this submission."""

@@ -36,6 +36,7 @@ class SubmissionDispatchServer(ServerBase):
                 elif 'sid' in message:
                     active_task = self.dispatcher.active_tasks.get(message['sid'])
                     if active_task is None:
+                        self.log.warning(f"[{message['sid']}] Dispatcher was nudged for inactive submission.")
                         continue
 
                     task = SubmissionTask(active_task)

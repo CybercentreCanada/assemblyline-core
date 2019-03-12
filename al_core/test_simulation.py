@@ -168,7 +168,6 @@ def core(request, es_connection, redis, replace_config):
         # Start the dispatcher
         FileDispatchServer(datastore=ds, redis=redis, redis_persist=redis),
         SubmissionDispatchServer(datastore=ds, redis=redis, redis_persist=redis),
-        WatcherServer(redis=redis),
     ]
 
     ingester_input_thread: IngesterInput = threads[0]
@@ -190,6 +189,7 @@ def core(request, es_connection, redis, replace_config):
         t.start()
 
     def stop_core():
+        [t.close() for t in threads]
         [t.stop() for t in threads]
         [t.raising_join() for t in threads]
     request.addfinalizer(stop_core)
@@ -263,6 +263,7 @@ def test_deduplication(core):
     second_task = notification_queue.pop(timeout=5)
 
     # One of the submission will get processed fully
+    assert first_task is not None
     first_task = IngestTask(first_task)
     first_submission: Submission = core.ds.submission.get(first_task.submission.sid)
     assert first_submission.state == 'completed'
@@ -309,6 +310,8 @@ def test_deduplication(core):
 
 
 def test_watcher_recovery(core):
+    watch = WatcherServer(redis=core.redis)
+    watch.start()
     # This time have the service server 'crash'
     sha, size = ready_body(core, {
         'pre': {'drop': 1}
@@ -338,6 +341,8 @@ def test_watcher_recovery(core):
     assert dropped_task and IngestTask(dropped_task)
     assert core.pre_service.drops[sha] == 1
     assert core.pre_service.hits[sha] == 2
+    watch.stop()
+    watch.join()
 
 
 def test_dropping_early(core):
