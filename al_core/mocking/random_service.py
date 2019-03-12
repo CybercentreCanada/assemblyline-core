@@ -6,6 +6,7 @@ import time
 from al_core.dispatching.client import DispatchClient
 from al_core.dispatching.dispatcher import service_queue_name
 from al_core.server_base import ServerBase
+from assemblyline.common.isotime import now_as_iso
 from assemblyline.odm.messages.task import Task as ServiceTask
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.file import File
@@ -20,7 +21,8 @@ class RandomService(ServerBase):
     Including service API, in the future probably include that in this test.
     """
     def __init__(self, datastore, filestore):
-        log_level = logging.DEBUG if forge.get_config().core.dispatcher.debug_logging else logging.INFO
+        self.config = forge.get_config()
+        log_level = logging.DEBUG if self.config.core.dispatcher.debug_logging else logging.INFO
         super().__init__("assemblyline.randomservice", log_level=log_level)
         self.datastore = datastore
         self.filestore = filestore
@@ -40,6 +42,8 @@ class RandomService(ServerBase):
             if not message:
                 continue
 
+            expiry_ts = now_as_iso(self.config.submission.dtl * 24 * 60 * 60)
+
             queue, msg = message
             task = ServiceTask(msg)
             self.log.info(f"\tQueue {queue} received a new task for sid {task.sid}.")
@@ -51,6 +55,7 @@ class RandomService(ServerBase):
                     result = random_model_obj(Result)
                 result.sha256 = task.fileinfo.sha256
                 result.response.service_name = task.service_name
+                result.expiry_ts = expiry_ts
                 result_key = result.build_key(hashlib.md5(task.service_config.encode("utf-8")).hexdigest())
 
                 result.response.extracted = result.response.extracted[task.depth+2:]
@@ -62,22 +67,27 @@ class RandomService(ServerBase):
                 for f in new_files:
                     if not self.datastore.file.get(f.sha256):
                         random_file = random_model_obj(File)
+                        random_file.expiry_ts = expiry_ts
                         random_file.sha256 = f.sha256
                         self.datastore.file.save(f.sha256, random_file)
                     if not self.filestore.exists(f.sha256):
                         self.filestore.save(f.sha256, f.sha256)
 
-                time.sleep(random.randint(0, 4))
+                time.sleep(random.randint(0, 2))
 
                 self.datastore.result.save(result_key, result)
                 self.dispatch_client.service_finished(task, result, result_key)
             else:
                 error = random_model_obj(Error)
+                error.expiry_ts = expiry_ts
                 error.sha256 = task.fileinfo.sha256
                 error.response.service_name = task.service_name
                 error.type = random.choice(["EXCEPTION", "SERVICE DOWN", "SERVICE BUSY"])
+
                 error_key = error.build_key(hashlib.md5(task.service_config.encode("utf-8")).hexdigest())
-                self.log.info(f"\t\tA {error.response.status}:{error.type} error was generated for this task: {error_key}")
+
+                self.log.info(f"\t\tA {error.response.status}:{error.type} "
+                              f"error was generated for this task: {error_key}")
 
                 self.dispatch_client.service_failed(task, error, error_key)
 
