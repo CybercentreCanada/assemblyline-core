@@ -593,21 +593,25 @@ class Ingester:
         resubmit_selected = determine_resubmit_selected(selected, resubmit_to)
         will_resubmit = resubmit_selected and should_resubmit(score)
         if will_resubmit:
-            task.extend_scan = 'submitted'
+            task.extended_scan = 'submitted'
             task.params.psid = None
 
         if self.is_alert(task, score):
-            self.log.info(f"[{task.ingest_id} :: {task.sha256}] Notifying alerter to generate an alert")
+            self.log.info(f"[{task.ingest_id} :: {task.sha256}] Notifying alerter "
+                          f"to {'update' if will_resubmit else 'create'} an alert")
             self.alert_queue.push(task.as_primitives())
 
         self.send_notification(task)
 
         if will_resubmit:
+            self.log.info(f"[{task.ingest_id} :: {task.sha256}] Resubmitted for extended analysis")
             task.params.psid = sid
-            task.resubmit_to = []
+            task.submission.sid = None
+            task.params.services.resubmit = []
             task.scan_key = None
-            task.selected = resubmit_selected
+            task.params.services.selected = resubmit_selected
 
+            # TODO: Check cache here...
             self.unique_queue.push(task.params.priority, task.as_primitives())
 
     def is_alert(self, task: IngestTask, score):
