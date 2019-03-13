@@ -53,9 +53,10 @@ class FileTask(odm.Model):
     max_files = odm.Integer()
 
 
-FILE_QUEUE = 'dispatch-file'
-SUBMISSION_QUEUE = 'dispatch-submission'
-DISPATCH_TASK_HASH = 'dispatch-active-tasks'
+FILE_QUEUE = 'dispatch-file-queue'
+SUBMISSION_QUEUE = 'dispatch-submission-queue'
+DISPATCH_TASK_HASH = 'dispatch-active-submissions'
+DISPATCH_RUNNING_TASK_HASH = 'dispatch-active-tasks'
 
 
 class Dispatcher:

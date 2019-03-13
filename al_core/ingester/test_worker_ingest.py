@@ -148,7 +148,7 @@ def test_ingest_groups_error(ingest_harness):
 def test_ingest_size_error(ingest_harness):
     datastore, ingester, in_queue = ingest_harness
     mm = ingester.ingester
-    mm._notify_drop = mock.MagicMock(side_effect=mm._notify_drop)
+    mm._notify_drop = mock.MagicMock()
 
     # Send a rather big file
     in_queue.push(make_message(files={'size': 10**10}))

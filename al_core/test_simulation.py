@@ -1,5 +1,9 @@
+"""
+A test of ingest+dispatch running in one process.
+
+Needs the datastore and filestore to be running, otherwise these test are stand alone.
+"""
 import uuid
-import random
 import json
 import hashlib
 from tempfile import NamedTemporaryFile
@@ -9,6 +13,7 @@ import fakeredis
 from unittest import mock
 from typing import List
 
+from al_core.mocking.datastore import MockCollection
 from assemblyline.common import forge, identify
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.helper import AssemblylineDatastore
@@ -16,6 +21,7 @@ from assemblyline.datastore.stores.es_store import ESStore
 from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.result import Result
+from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.messages.submission import Submission as SubmissionInput
 from assemblyline.remote.datatypes.counters import MetricCounter
@@ -36,7 +42,7 @@ from al_core.dispatching.run_submissions import SubmissionDispatchServer
 
 from al_core.server_base import ServerBase
 
-from al_core.mocking import RedisTime
+from al_core.mocking import RedisTime, MockDatastore
 from al_core.dispatching.test_scheduler import dummy_service
 
 
@@ -73,12 +79,10 @@ class MockService(ServerBase):
     def try_run(self):
         while self.running:
 
-            message = self.queue.pop(timeout=1)
-            if not message:
+            task = self.dispatch_client.request_work(self.service_name, timeout=1)
+            if not task:
                 continue
-            print(self.service_name, 'has received a job', message['sid'])
-
-            task = ServiceTask(message)
+            print(self.service_name, 'has received a job', task.sid)
 
             file = self.filestore.get(task.fileinfo.sha256)
 
@@ -93,10 +97,9 @@ class MockService(ServerBase):
                     continue
 
             if instructions.get('failure', False):
-                error = None
-                if 'error' in instructions:
-                    error = Error(instructions['error'])
-                self.dispatch_client.service_failed(task, error=error, error_key=uuid.uuid4().hex)
+                error = Error(instructions['error'])
+                error.sha256 = task.fileinfo.sha256
+                self.dispatch_client.service_failed(task.sid, error=error, error_key=uuid.uuid4().hex)
                 continue
 
             result_data = {
@@ -115,8 +118,7 @@ class MockService(ServerBase):
 
             result = Result(result_data)
             result_key = instructions.get('result_key', uuid.uuid4().hex)
-            self.datastore.result.save(result_key, result)
-            self.dispatch_client.service_finished(task, result, result_key)
+            self.dispatch_client.service_finished(task.sid, result_key, result)
 
 
 @pytest.fixture(scope='module')
@@ -151,7 +153,7 @@ def make_magic(*_, **__):
 @pytest.fixture(scope='module')
 @mock.patch('al_core.ingester.ingester.MetricCounter', new=make_magic)
 @mock.patch('al_core.dispatching.dispatcher.MetricCounter', new=make_magic)
-def core(request, es_connection, redis, replace_config):
+def core(request, redis, es_connection, replace_config):
     from assemblyline.common import log as al_log
     al_log.init_logging("simulation")
 
@@ -176,7 +178,7 @@ def core(request, es_connection, redis, replace_config):
     fields.ingest = ingester_input_thread
     fields.ingest_queue = ingester_input_thread.ingester.ingest_queue
 
-    ds.service.delete_matching('*')
+    ds.ds.service = MockCollection(Service)
     ds.service.save('pre', dummy_service('pre', 'EXTRACT'))
     threads.append(MockService('pre', ds, redis, filestore))
     fields.pre_service = threads[-1]
@@ -213,7 +215,7 @@ def ready_body(core, body=None):
         file.write(out)
         file.flush()
         fileinfo = identify.fileinfo(file.name)
-        core.ds.save_or_freshen_file(sha256.hexdigest(), fileinfo, now_as_iso(500), 'U')
+        core.ds.save_or_freshen_file(sha256.hexdigest(), fileinfo, now_as_iso(500), 'U', redis=core.redis)
 
     return sha256.hexdigest(), len(out)
 

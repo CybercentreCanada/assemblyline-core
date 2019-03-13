@@ -12,11 +12,13 @@ from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.error import Error
 from assemblyline.remote.datatypes import get_client, reply_queue_name
+from assemblyline.remote.datatypes.hash import ExpiringHash
+from assemblyline.remote.datatypes.lock import Lock
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 
 from al_core.dispatching.dispatcher import SubmissionTask, ServiceTask, FileTask, SUBMISSION_QUEUE, \
-    make_watcher_list_name, FILE_QUEUE, service_queue_name
+    make_watcher_list_name, FILE_QUEUE, service_queue_name, DISPATCH_RUNNING_TASK_HASH
 from al_core.dispatching.dispatch_hash import DispatchHash
 from al_core.dispatching.scheduler import Scheduler
 
@@ -40,6 +42,7 @@ class DispatchClient:
         self.errors = datastore.error
         self.files = datastore.file
         self.schedule_builder = Scheduler(self.ds, self.config)
+        self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
 
     def dispatch_submission(self, submission: Submission, completed_queue: str = None):
         """Insert a submission into the dispatching system.
@@ -92,11 +95,18 @@ class DispatchClient:
         return output
 
     def request_work(self, service_name, timeout=60, blocking=True) -> Union[ServiceTask, None]:
+        # Get work from the queue
         work_queue = NamedQueue(service_queue_name(service_name), host=self.redis)
         result = work_queue.pop(blocking=blocking, timeout=timeout)
-        if result:
-            return ServiceTask(result)
-        return None
+        if not result:
+            return None
+
+        # If we are actually returning a task, record it as running, shielding the dispatch
+        # internal properties from downstream changes
+        task = ServiceTask(result)
+        task_key = task.key()
+        self.running_tasks.set(task_key, result)
+        return task
 
     def _dispatching_error(self, task, process_table, error):
         error_key = error.build_key()
@@ -106,8 +116,25 @@ class DispatchClient:
             for w in self._get_watcher_list(task.sid).members():
                 NamedQueue(w).push(msg)
 
-    def service_finished(self, task: ServiceTask, result: Result, result_key):
+    def service_finished(self, sid: str, result_key, result: Result):
         """Notifies the dispatcher of service completion, and possible new files to dispatch."""
+        # Make sure the dispatcher knows we were working on this task
+        task_key = ServiceTask.make_key(sid=sid, service_name=result.response.service_name, sha=result.sha256)
+        task = self.running_tasks.pop(task_key)
+        if not task:
+            self.log.warning(f"[{sid} :: {result.response.service_name}] Service tried to finish the same task twice.")
+            return
+        task = ServiceTask(task)
+
+        # Save or freshen the result, the CONTENT of the result shouldn't change, but we need to keep the
+        # most distant expiry time to prevent pulling it out from under another submission too early
+        with Lock(f"lock-{result_key}", 5, self.redis):
+            old = self.ds.result.get(result_key)
+            if old:
+                result.expiry_ts = max(result.expiry_ts, old.expiry_ts)
+            self.ds.result.save(result_key, result)
+
+        # Let the logs know we have received a result for this task
         if result.drop_file:
             self.log.debug(f"Service {task.service_name} succeeded. "
                            f"Result will be stored in {result_key} but processing will stop after this service.")
@@ -185,7 +212,14 @@ class DispatchClient:
         for w in self._get_watcher_list(task.sid).members():
             NamedQueue(w).push(msg)
 
-    def service_failed(self, task: ServiceTask, error: Error, error_key):
+    def service_failed(self, sid: str, error_key: str, error: Error):
+        task_key = ServiceTask.make_key(sid=sid, service_name=error.response.service_name, sha=error.sha256)
+        task = self.running_tasks.pop(task_key)
+        if not task:
+            self.log.warning(f"[{sid} :: {error.response.service_name}] Service tried to finish the same task twice.")
+            return
+        task = ServiceTask(task)
+
         self.log.debug(f"Service {task.service_name} failed with {error.response.status} error.")
         remaining = -1
         # Mark the attempt to process the file over in the dispatch table

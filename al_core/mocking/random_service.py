@@ -46,6 +46,7 @@ class RandomService(ServerBase):
 
             queue, msg = message
             task = ServiceTask(msg)
+            self.dispatch_client.running_tasks.set(task.key(), task.as_primitives())
             self.log.info(f"\tQueue {queue} received a new task for sid {task.sid}.")
             action = random.randint(1, 10)
             if action >= 2:
@@ -75,8 +76,7 @@ class RandomService(ServerBase):
 
                 time.sleep(random.randint(0, 2))
 
-                self.datastore.result.save(result_key, result)
-                self.dispatch_client.service_finished(task, result, result_key)
+                self.dispatch_client.service_finished(task.sid, result_key, result)
             else:
                 error = random_model_obj(Error)
                 error.expiry_ts = expiry_ts
@@ -89,7 +89,7 @@ class RandomService(ServerBase):
                 self.log.info(f"\t\tA {error.response.status}:{error.type} "
                               f"error was generated for this task: {error_key}")
 
-                self.dispatch_client.service_failed(task, error, error_key)
+                self.dispatch_client.service_failed(task.sid, error_key, error)
 
 
 if __name__ == "__main__":

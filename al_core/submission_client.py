@@ -229,9 +229,6 @@ class SubmissionClient:
     #
     #             extracted_ok
     #
-    #         for
-    #         self.log.debug("Submission complete. Dispatching: %s", sub.sid)
-    #         self.dispatcher.dispatch_submission(sub, completed_queue=completed_queue)
     #     finally:
     #         # Just in case this method fails clean up local files
     #         if cleanup:
