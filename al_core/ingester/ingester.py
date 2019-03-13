@@ -397,7 +397,7 @@ class Ingester:
         if not raw:
             # Some other worker has already popped the scanning queue?
             self.log.warning(f"[{sub.metadata.get('ingest_id', 'unknown')} :: {sha256}] "
-                             f"Submission completed twice (score={score})")
+                             f"Submission completed twice")
 
             # TODO Why is all of this being done? How many times should a task be finalized?
             #      I don't think we need this any more, but I'm not 100% sure
@@ -432,13 +432,14 @@ class Ingester:
 
         with self.cache_lock:
             fs = self.cache[scan_key] = FileScore({
+                'expiry_ts': now(2 * 24 * 60 * 60),
                 'errors': errors,
                 'psid': psid,
                 'score': score,
                 'sid': sid,
                 'time': now(),
             })
-            self.datastore.filescore.save(scan_key, fs.as_primitives())
+            self.datastore.filescore.save(scan_key, fs)
 
         self.finalize(psid, sid, score, task)
 
@@ -581,7 +582,7 @@ class Ingester:
             self.retry_queue.push(now(_retry_delay), task.json())
 
     def finalize(self, psid, sid, score, task: IngestTask):
-        self.log.info(f"[{task.ingest_id} :: {task.sha256}] Completed. (score={score})")
+        self.log.info(f"[{task.ingest_id} :: {task.sha256}] Completed")
         if psid:
             task.params.psid = psid
         task.score = score
