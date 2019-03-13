@@ -27,15 +27,12 @@ from datetime import datetime, timedelta
 
 from assemblyline.common import forge
 from assemblyline.common import identify
-from assemblyline.common.classification import Classification
 from assemblyline.common.importing import load_module_by_path
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.str_utils import safe_str
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.messages.submission import Submission as SubmissionObject
-from assemblyline.odm.messages.task import Task
-from assemblyline.odm.models.result import Result
-from assemblyline.odm.models.submission import Submission
+from assemblyline.odm.models.submission import Submission, File
 from assemblyline.filestore import CorruptedFileStoreException, FileStore
 
 from al_core.dispatching.client import DispatchClient
@@ -100,12 +97,11 @@ class SubmissionClient:
                         msg = "File empty. Submission failed"
                         raise SubmissionException(msg)
 
-                    submission_obj.files.append({
+                    submission_obj.files.append(File({
                         'name': safe_str(os.path.basename(local_file)),
                         'sha256': file_hash,
-                    })
+                    }))
             else:
-                # TODO: loop submission_obj.files download and test their datastore values
                 for f in submission_obj.files:
                     temporary_path = None
                     try:
@@ -155,9 +151,10 @@ class SubmissionClient:
             if cleanup:
                 for path in local_files:
                     if path and os.path.exists(path):
+                        # noinspection PyBroadException
                         try:
                             os.unlink(path)
-                        except:
+                        except Exception:
                             self.log.error("Couldn't delete dangling file %s", path)
 
     def _ready_file(self, local_path: str, expiry, classification, cleanup, sha256=None) -> Tuple[str, int, dict]:
