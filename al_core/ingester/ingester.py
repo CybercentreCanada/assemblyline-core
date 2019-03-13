@@ -612,10 +612,7 @@ class Ingester:
             task.scan_key = None
             task.params.services.selected = resubmit_selected
 
-            # Check if our new task is a cache hit
-            _, previous, _, _ = self.check(task)
-            if not previous:
-                self.unique_queue.push(task.params.priority, task.as_primitives())
+            self.unique_queue.push(task.params.priority, task.as_primitives())
 
     def is_alert(self, task: IngestTask, score):
         if not task.params.generate_alert:
