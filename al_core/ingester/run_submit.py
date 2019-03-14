@@ -34,12 +34,13 @@ class IngesterSubmitter(ServerBase):
                 # Check if there is room for more submissions
                 length = ingester.scanning.length()
                 if length < 0 or ingester.config.core.dispatcher.max_inflight <= length:
-                    time.sleep(1)
+                    time.sleep(0.1)
                     continue
 
                 #
                 raw = ingester.unique_queue.pop()
                 if not raw:
+                    time.sleep(0.1)
                     continue
                 task = IngestTask(raw)
 
