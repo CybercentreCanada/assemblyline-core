@@ -72,7 +72,7 @@ class RandomService(ServerBase):
                         random_file.sha256 = f.sha256
                         self.datastore.file.save(f.sha256, random_file)
                     if not self.filestore.exists(f.sha256):
-                        self.filestore.save(f.sha256, f.sha256)
+                        self.filestore.put(f.sha256, f.sha256)
 
                 time.sleep(random.randint(0, 2))
 

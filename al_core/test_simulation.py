@@ -209,7 +209,7 @@ def ready_body(core, body=None):
     out = json.dumps(out).encode()
     sha256 = hashlib.sha256()
     sha256.update(out)
-    core.filestore.save(sha256.hexdigest(), out)
+    core.filestore.put(sha256.hexdigest(), out)
 
     with NamedTemporaryFile() as file:
         file.write(out)

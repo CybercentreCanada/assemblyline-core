@@ -85,7 +85,7 @@ class SubmissionClient:
                 for local_file in local_files:
                     # Upload/download, extract, analyze files
                     file_hash, size, new_metadata = self._ready_file(local_file, expiry, classification, cleanup)
-                    self.filestore.put(local_file, file_hash)
+                    self.filestore.upload(local_file, file_hash)
                     submission_obj.metadata.update(**new_metadata)
 
                     # Check that after we have resolved exactly what to pass on, that it
@@ -181,7 +181,7 @@ class SubmissionClient:
             if massaged_path:
                 local_path = massaged_path
                 sha256 = fileinfo['sha256']
-                self.filestore.put(local_path, sha256)
+                self.filestore.upload(local_path, sha256)
                 self.datastore.save_or_freshen_file(sha256, fileinfo, expiry, classification, redis=self.redis)
 
             return fileinfo['sha256'], fileinfo['size'], al_meta
@@ -212,7 +212,7 @@ class SubmissionClient:
     #             # Upload/download, extract, analyze files
     #             classification = extraction_info.classification
     #             file_hash, size, new_metadata = self._ready_file(local_file, expiry, classification, cleanup)
-    #             self.filestore.put(local_file, file_hash)
+    #             self.filestore.upload(local_file, file_hash)
     #
     #             # Check that after we have resolved exactly what to pass on, that it
     #             # remains a valid target for scanning
