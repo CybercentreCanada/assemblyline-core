@@ -71,13 +71,16 @@ class DispatchClient:
         # Download the entire status table from redis
         dispatch_hash = DispatchHash(sid, self.redis)
         all_service_status = dispatch_hash.all_results()
+        all_files = dispatch_hash.all_files()
+        self.log.info(f"[{sid}] Listing outstanding services {len(all_files)} files and {len(all_service_status)} entries found")
 
         output: Dict[str, int] = {}
 
-        for file_hash, status_values in all_service_status.items():
+        for file_hash in all_files:
             # The schedule might not be in the cache if the submission or file was just issued,
             # but it will be as soon as the file passes through the dispatcher
             schedule = dispatch_hash.schedules.get(file_hash)
+            status_values = all_service_status.get(file_hash, {})
 
             # Go through the schedule stage by stage so we can react to drops
             # either we have a result and we don't need to count the file (but might drop it)

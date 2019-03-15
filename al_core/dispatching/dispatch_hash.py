@@ -166,6 +166,9 @@ class DispatchHash:
         """Return the set of errors not part of the dispatch table itself."""
         return self._other_errors.members()
 
+    def all_files(self):
+        return self._files.keys()
+
     def delete(self):
         """Clear the tables from the redis server."""
         retry_call(self.client.delete, self._dispatch_key)
