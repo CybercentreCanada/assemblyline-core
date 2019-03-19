@@ -3,9 +3,11 @@ import time
 
 from al_core.server_base import ServerBase
 from assemblyline.common import forge
+from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.str_utils import safe_str
 
 from assemblyline.datastore import SearchException
+from assemblyline.odm.models.workflow import Workflow
 
 
 class WorkflowManager(ServerBase):
@@ -29,12 +31,14 @@ class WorkflowManager(ServerBase):
         while self.running:
             end_ts = self.get_last_reporting_ts(self.start_ts)
             if self.start_ts != end_ts:
-                workflow_queries = [{
+                workflow_queries = [Workflow({
                     'status': "TRIAGE",
                     'name': "Triage all with no status",
-                    'created_by': "SYSTEM",
-                    'query': "NOT status:*"
-                }]
+                    'creator': "SYSTEM",
+                    'edited_by': "SYSTEM",
+                    'query': "NOT status:*",
+                    'workflow_id': "DEFAULT"
+                })]
 
                 for item in self.datastore.workflow.stream_search("status:MALICIOUS"):
                     workflow_queries.append(item)
@@ -48,11 +52,11 @@ class WorkflowManager(ServerBase):
                 for item in self.datastore.workflow.stream_search('-status:["" TO *]'):
                     workflow_queries.append(item)
 
-                for aq in workflow_queries:
-                    self.log.info(f'Executing workflow filter: {aq["name"]}')
-                    labels = aq.get('label', [])
-                    status = aq.get('status', None)
-                    priority = aq.get('priority', None)
+                for workflow in workflow_queries:
+                    self.log.info(f'Executing workflow filter: {workflow.name}')
+                    labels = workflow.labels or []
+                    status = workflow.status or None
+                    priority = workflow.priority or None
 
                     if not status and not labels and not priority:
                         continue
@@ -75,35 +79,20 @@ class WorkflowManager(ServerBase):
                     fq.append("NOT ({exclusion})".format(exclusion=" AND ".join(fq_items)))
 
                     try:
-                        count = self.datastore.alert.update_by_query(aq['query'], operations, filters=fq)
-                        # for item in ds.stream_search('alert', aq['query'], fq=fq):
-                        #     count += 1
-                        #     item_status = item.get('status', None)
-                        #     if PRIORITY_LVL[status] <= PRIORITY_LVL[item_status]:
-                        #         if status not in [None, "", "TRIAGE"]:
-                        #             labels.append("CONFLICT.%s" % status)
-                        #         status = item_status
-                        #
-                        #     msg = {
-                        #         "label": labels,
-                        #         "priority": priority,
-                        #         "status": status,
-                        #         "event_id": item['_yz_rk']
-                        #     }
-                        #     worker_msg = {
-                        #         "action": "workflow",
-                        #         "search_item": msg,
-                        #         "original_msg": msg
-                        #     }
-                        #     action_queue_map[determine_worker_id(item['_yz_rk'])].push(QUEUE_PRIORITY, worker_msg)
+                        count = self.datastore.alert.update_by_query(workflow.query, operations, filters=fq)
 
                         if count:
                             self.log.info("{count} Alert(s) were affected by this filter.".format(count=count))
-                            if 'id' in aq:
-                                self.datastore.increment_workflow_counter(aq['id'], count)
+                            if workflow.workflow_id != "DEFAULT":
+                                operations = [
+                                    (self.datastore.alert.UPDATE_INC, 'hit_count', count),
+                                    (self.datastore.alert.UPDATE_SET, 'last_seen', now_as_iso()),
+                                ]
+                                self.datastore.workflow.update(workflow.id, operations)
+
                     except SearchException:
-                        self.log.warning(f"Invalid query '{safe_str(aq.get('query', ''))}' in workflow "
-                                         f"'{aq.get('name', 'unknown')}' by '{aq.get('created_by', 'unknown')}'")
+                        self.log.warning(f"Invalid query '{safe_str(workflow.query or '')}' in workflow "
+                                         f"'{workflow.name or 'unknown'}' by '{workflow.created_by or 'unknown'}'")
                         continue
 
             else:
