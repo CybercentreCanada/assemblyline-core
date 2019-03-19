@@ -16,7 +16,6 @@ class WorkflowManager(ServerBase):
 
         self.config = forge.get_config()
         self.datastore = forge.get_datastore(self.config)
-        self.filestore = forge.get_filestore(self.config)
         self.start_ts = f"{self.datastore.ds.now}/{self.datastore.ds.day}-1{self.datastore.ds.day}"
 
 
