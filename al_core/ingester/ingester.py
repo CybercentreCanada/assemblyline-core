@@ -32,7 +32,7 @@ from assemblyline.odm.models.submission import SubmissionParams
 from assemblyline.odm.models.alert import EXTENDED_SCAN_VALUES
 from assemblyline.odm.messages.submission import Submission
 
-from al_core.alerter.alerter import ALERT_QUEUE_NAME
+from al_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from al_core.submission_client import SubmissionClient
 
 
