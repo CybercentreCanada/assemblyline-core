@@ -423,6 +423,7 @@ class Dispatcher:
                     fileinfo=task.file_info,
                     depth=task.depth,
                     max_files=task.max_files,
+                    ttl=submission.params.ttl,
                 ))
 
                 dispatch_table.dispatch(file_hash, service_name)
