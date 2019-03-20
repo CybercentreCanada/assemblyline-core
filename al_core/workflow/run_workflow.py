@@ -21,8 +21,15 @@ class WorkflowManager(ServerBase):
 
     def get_last_reporting_ts(self, p_start_ts):
         self.log.info("Finding reporting timestamp for the last alert since {start_ts}...".format(start_ts=p_start_ts))
-        result = self.datastore.alert.search(f"reporting_ts:[{p_start_ts} TO *]",
-                                             sort='reporting_ts desc', rows=1, fl='reporting_ts', as_obj=False)
+        result = None
+        while result is None:
+            try:
+                result = self.datastore.alert.search(f"reporting_ts:[{p_start_ts} TO *]",
+                                                     sort='reporting_ts desc', rows=1, fl='reporting_ts', as_obj=False)
+            except SearchException as e:
+                self.log.warning(f"Failed to load last reported alert from the datastore, retrying... :: {e}")
+                continue
+
         items = result.get('items', [{}]) or [{}]
         return items[0].get("reporting_ts", p_start_ts)
 
@@ -39,17 +46,21 @@ class WorkflowManager(ServerBase):
                     'workflow_id': "DEFAULT"
                 })]
 
-                for item in self.datastore.workflow.stream_search("status:MALICIOUS"):
-                    workflow_queries.append(item)
+                try:
+                    for item in self.datastore.workflow.stream_search("status:MALICIOUS"):
+                        workflow_queries.append(item)
 
-                for item in self.datastore.workflow.stream_search("status:NON-MALICIOUS"):
-                    workflow_queries.append(item)
+                    for item in self.datastore.workflow.stream_search("status:NON-MALICIOUS"):
+                        workflow_queries.append(item)
 
-                for item in self.datastore.workflow.stream_search("status:ASSESS"):
-                    workflow_queries.append(item)
+                    for item in self.datastore.workflow.stream_search("status:ASSESS"):
+                        workflow_queries.append(item)
 
-                for item in self.datastore.workflow.stream_search('-status:["" TO *]'):
-                    workflow_queries.append(item)
+                    for item in self.datastore.workflow.stream_search('-status:["" TO *]'):
+                        workflow_queries.append(item)
+                except SearchException as e:
+                    self.log.warning(f"Failed to load workflows from the datastore, retrying... :: {e}")
+                    continue
 
                 for workflow in workflow_queries:
                     self.log.info(f'Executing workflow filter: {workflow.name}')
