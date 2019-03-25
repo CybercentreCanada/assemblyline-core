@@ -18,7 +18,7 @@ class Alerter(ServerBase):
         # Publish counters to the metrics sink.
         self.counter = AutoExportingCounters(
             name='alerter',
-            host=net.get_hostip(),
+            host=net.get_hostname(),
             export_interval_secs=5,
             channel=forge.get_metrics_sink(),
             auto_log=False,
