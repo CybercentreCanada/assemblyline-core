@@ -27,7 +27,7 @@ class RandomService(ServerBase):
         self.datastore = datastore
         self.filestore = filestore
 
-        self.queues = [NamedQueue(service_queue_name(name)) for name in datastore.service.keys()]
+        self.queues = [NamedQueue(service_queue_name(name)) for name in datastore.service_delta.keys()]
         self.dispatch_client = DispatchClient(datastore)
 
     def run(self):

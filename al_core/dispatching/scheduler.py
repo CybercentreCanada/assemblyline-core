@@ -117,7 +117,7 @@ class Scheduler:
         return self.config.services.stages.index(stage)
 
     def _get_services(self):
-        return self.datastore.service.multiget([x.id for x in self.datastore.service.stream_search('enabled:true', fl='id')])
+        return {x.name: x for x in self.datastore.list_all_services(full=True) if x.enabled}
 
     # def build_service_config(self, service_name, submission):
     #     """
