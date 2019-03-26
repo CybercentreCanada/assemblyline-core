@@ -438,7 +438,7 @@ class Dispatcher:
 
             # If there are no outstanding ANYTHING for this submission,
             # send a message to the submission dispatcher to finalize
-            self.log.debug(f"[{task.sid}] Finished processing file '{file_hash}'")
+            self.log.info(f"[{task.sid}] Finished processing file '{file_hash}'")
             self.files_complete_counter.increment()
             if dispatch_table.all_finished():
                 self.submission_queue.push({'sid': submission.sid})
