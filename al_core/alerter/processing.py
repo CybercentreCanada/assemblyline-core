@@ -35,7 +35,7 @@ def get_submission_record(counter, datastore, sid):
     srecord = datastore.submission.get(sid, as_obj=False)
 
     if not srecord:
-        counter.increment('alert.err_no_submission')
+        counter.increment('error')
         raise Exception("Couldn't find submission: %s" % sid)
 
     if srecord.get('state', 'unknown') != 'completed':
@@ -211,12 +211,12 @@ def save_alert(datastore, counter, logger, alert, psid):
     if psid:
         msg_type = "AlertUpdated"
         perform_alert_update(datastore, logger, alert)
-        counter.increment('alert.updated')
+        counter.increment('updated')
     else:
         msg_type = "AlertCreated"
         datastore.alert.save(alert['alert_id'], alert)
         logger.info(f"Alert {alert['alert_id']} has been created.")
-        counter.increment('alert.created')
+        counter.increment('created')
 
     msg = AlertMessage({
         "msg": alert,

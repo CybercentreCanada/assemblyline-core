@@ -98,7 +98,7 @@ class Dispatcher:
         self.active_tasks = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
 
         # Publish counters to the metrics sink.
-        self.files_complete_counter = MetricCounter('dispatch.files_complete', self.redis)
+        self.files_complete_counter = MetricCounter('files_completed', self.redis)
 
     def volatile_named_queue(self, name: str) -> NamedQueue:
         if name not in self._nonper_other_queues:

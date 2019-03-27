@@ -3,9 +3,9 @@ import concurrent.futures
 import time
 
 from al_core.server_base import ServerBase
-from assemblyline.common import forge, net
+from assemblyline.common import forge
+from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
-from assemblyline.remote.datatypes.exporting_counter import AutoExportingCounters
 
 config = forge.get_config()
 
@@ -17,14 +17,7 @@ class ExpiryManager(ServerBase):
         self.filestore = forge.get_filestore()
         self.cachestore = FileStore(*config.filestore.cache)
         self.expirable_collections = []
-        self.counter = AutoExportingCounters(
-            name='expiry',
-            host=net.get_hostname(),
-            export_interval_secs=5,
-            channel=forge.get_metrics_sink(),
-            auto_log=False,
-            auto_flush=True)
-        self.counter.start()
+        self.counter = MetricsFactory('expiry')
 
         self.fs_hashmap = {
             'file': self.filestore.delete,
@@ -65,7 +58,7 @@ class ExpiryManager(ServerBase):
 
                     # Proceed with deletion
                     collection.delete_matching(delete_query, workers=config.core.expiry.workers)
-                    self.counter.increment(f'expiry.{collection.name}', increment_by=number_to_delete)
+                    self.counter.increment(f'{collection.name}', increment_by=number_to_delete)
 
                     self.log.info(f"    Deleted {number_to_delete} items from the datastore...")
                 else:

@@ -1,9 +1,8 @@
 
 from al_core.server_base import ServerBase
 from assemblyline.common import forge
-from assemblyline.common import net
+from assemblyline.common.metrics import MetricsFactory
 from assemblyline.remote.datatypes import get_client
-from assemblyline.remote.datatypes.exporting_counter import AutoExportingCounters
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 
@@ -16,14 +15,7 @@ class Alerter(ServerBase):
         super().__init__('assemblyline.alerter')
         self.config = forge.get_config()
         # Publish counters to the metrics sink.
-        self.counter = AutoExportingCounters(
-            name='alerter',
-            host=net.get_hostname(),
-            export_interval_secs=5,
-            channel=forge.get_metrics_sink(),
-            auto_log=False,
-            auto_flush=True)
-        self.counter.start()
+        self.counter = MetricsFactory('alerter')
         self.datastore = forge.get_datastore(self.config)
         self.persistent_redis = get_client(
             db=self.config.core.redis.persistent.db,
@@ -46,7 +38,7 @@ class Alerter(ServerBase):
             if not alert:
                 continue
 
-            self.counter.increment('alert.received')
+            self.counter.increment('received')
             try:
                 self.process_alert_message(self.counter, self.datastore, self.log, alert)
             except Exception as ex:  # pylint: disable=W0703
