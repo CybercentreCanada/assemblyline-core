@@ -15,6 +15,7 @@ from assemblyline.common import forge, metrics
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
 METRICS_QUEUE = "assemblyline_metrics"
+STATUS_QUEUE = "status"
 
 def cleanup_metrics(input_dict):
     output_dict = {}
@@ -60,37 +61,50 @@ class LegacyMetricsServer(ServerBase):
 
         self.scheduler = BackgroundScheduler(daemon=True)
         self.metrics_queue = None
+        self.status_queue = None
         self.es = None
 
         self.counters_lock = Lock()
         self.counters = {}
+        self.rolling_window = {}
+        self.window_size = int(60 / self.config.core.metrics.export_interval)
+        if self.window_size != 60 / self.config.core.metrics.export_interval:
+            self.log.warning("Cannot calculate a proper window size for reporting heartbeats. "
+                             "Metrics reported during hearbeat will be wrong.")
 
     def try_run(self):
 
         self.metrics_queue = CommsQueue(METRICS_QUEUE)
+        self.status_queue = CommsQueue(STATUS_QUEUE)
         self.es = elasticsearch.Elasticsearch([{'host': self.elastic_ip, 'port': self.elastic_port}])
 
         self.scheduler.add_job(self._create_aggregated_metrics, 'interval', seconds=60)
-        # TODO: Add another job to dispatch heartbeats...
+        self.scheduler.add_job(self._export_hearbeats, 'interval', seconds=self.config.core.metrics.export_interval)
         self.scheduler.start()
 
         while self.running:
             for msg in self.metrics_queue.listen():
-                metrics_name = msg.pop('name', None)
-                metrics_type = msg.pop('type', None)
-
-                msg.pop('host', None)
+                m_name = msg.pop('name', None)
+                m_type = msg.pop('type', None)
+                m_host = msg.pop('host', None)
                 msg.pop('instance', None)
 
-                self.log.debug(f"Compiling metrics for component: {metrics_type}")
-                if not metrics_name or not metrics_type:
+                self.log.debug(f"Compiling metrics for component: {m_type}")
+                if not m_name or not m_type:
                     continue
 
+                w_key = (m_name, m_type, m_host)
+                if w_key not in self.rolling_window:
+                    self.rolling_window[w_key] = [Counter(msg)]
+                else:
+                    self.rolling_window[w_key].append(Counter(msg))
+
                 with self.counters_lock:
-                    if (metrics_name, metrics_type) not in self.counters:
-                        self.counters[(metrics_name, metrics_type)] = Counter(msg)
+                    c_key = (m_name, m_type)
+                    if c_key not in self.counters:
+                        self.counters[c_key] = Counter(msg)
                     else:
-                        self.counters[(metrics_name, metrics_type)] += Counter(msg)
+                        self.counters[c_key] += Counter(msg)
 
     def _create_aggregated_metrics(self):
         self.log.info("Copying counters.")
@@ -126,6 +140,12 @@ class LegacyMetricsServer(ServerBase):
 
         self.log.info("Metrics aggregated... Waiting for next run.")
 
+    def _export_hearbeats(self):
+        self.log.info("Reporting heartbeats")
+        # TODO: loop through self.rolling_window, cumulate matching metrics and .pop(0) an item of each list if len
+        #       is bigger the the window size so the metrics are always 60 seconds based.
+        #       Depending of which metrics type we're getting, generate the associate hearbeat which will be sent
+        #       throught the STATUS_QUEUE
 
 class HashMapMetricsServer(ServerBase):
     def __init__(self, config=None):
