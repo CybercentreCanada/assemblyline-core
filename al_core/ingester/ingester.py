@@ -14,13 +14,13 @@ from math import tanh
 from random import random
 from typing import Iterable
 
+from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
 from assemblyline.common.isotime import now, now_as_iso
 from assemblyline.common.importing import load_module_by_path
 from assemblyline.common import forge
 from assemblyline.odm.models.filescore import FileScore
-from assemblyline.remote.datatypes.counters import MetricCounter
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
@@ -194,23 +194,24 @@ class Ingester:
         # Classification engine
         self.ce = classification or forge.get_classification()
 
-        self.cache_miss_counter = MetricCounter('ingest.cache_miss', self.redis)
-        self.cache_expired_counter = MetricCounter('ingest.cache_expired', self.redis)
-        self.cache_stale_counter = MetricCounter('ingest.cache_stale', self.redis)
-        self.cache_local_hit_counter = MetricCounter('ingest.cache_hit_local', self.redis)
-        self.cache_hit_counter = MetricCounter('ingest.cache_hit', self.redis)
+        self.counter = MetricsFactory('ingester', redis=self.redis, config=self.config)
+        #self.cache_miss_counter = MetricCounter('ingest.cache_miss', self.redis)
+        #self.cache_expired_counter = MetricCounter('ingest.cache_expired', self.redis)
+        #self.cache_stale_counter = MetricCounter('ingest.cache_stale', self.redis)
+        #self.cache_local_hit_counter = MetricCounter('ingest.cache_hit_local', self.redis)
+        #self.cache_hit_counter = MetricCounter('ingest.cache_hit', self.redis)
 
-        self.submissions_completed_counter = MetricCounter('ingest.submissions_completed', self.redis)
-        self.submissions_ingested_counter = MetricCounter('ingest.submissions_ingested', self.redis)
-        self.files_completed_counter = MetricCounter('ingest.files_completed', self.redis)
-        self.bytes_completed_counter = MetricCounter('ingest.bytes_completed', self.redis)
-        self.bytes_ingested_counter = MetricCounter('ingest.bytes_ingested', self.redis)
-        self.ingest_timeout_counter = MetricCounter('ingest.timed_out', self.redis)
+        #self.submissions_completed_counter = MetricCounter('ingest.submissions_completed', self.redis)
+        #self.submissions_ingested_counter = MetricCounter('ingest.submissions_ingested', self.redis)
+        #self.files_completed_counter = MetricCounter('ingest.files_completed', self.redis)
+        #self.bytes_completed_counter = MetricCounter('ingest.bytes_completed', self.redis)
+        #self.bytes_ingested_counter = MetricCounter('ingest.bytes_ingested', self.redis)
+        #self.ingest_timeout_counter = MetricCounter('ingest.timed_out', self.redis)
 
-        self.skipped_counter = MetricCounter('ingest.skipped', self.redis)
-        self.whitelisted_counter = MetricCounter('ingest.whitelisted', self.redis)
-        self.duplicates_counter = MetricCounter('ingest.duplicates', self.redis)
-        self.error_counter = MetricCounter('ingest.error', self.redis)
+        #self.skipped_counter = MetricCounter('ingest.skipped', self.redis)
+        #self.whitelisted_counter = MetricCounter('ingest.whitelisted', self.redis)
+        #self.duplicates_counter = MetricCounter('ingest.duplicates', self.redis)
+        #self.error_counter = MetricCounter('ingest.error', self.redis)
 
         # State. The submissions in progress are stored in Redis in order to
         # persist this state and recover in case we crash.
@@ -259,8 +260,8 @@ class Ingester:
         max_file_size = self.config.submission.max_file_size
         param = task.params
 
-        self.bytes_ingested_counter.increment(task.file_size)
-        self.submissions_ingested_counter.increment()
+        self.counter.increment('bytes_ingested', increment_by=task.file_size)
+        self.counter.increment('submissions_ingested')
 
         if any(len(file.sha256) != 64 for file in task.submission.files):
             self.log.error(f"[{task.ingest_id} :: {task.sha256}] Invalid sha256, skipped")
@@ -278,7 +279,7 @@ class Ingester:
         if task.file_size > max_file_size and not task.params.ignore_size and not task.params.never_drop:
             task.failure = f"File too large ({task.file_size} > {max_file_size})"
             self._notify_drop(task)
-            self.skipped_counter.increment()
+            self.counter.increment('skipped')
             self.log.error(f"[{task.ingest_id} :: {task.sha256}] {task.failure}")
             return
 
@@ -312,7 +313,7 @@ class Ingester:
         # Do this after priority has been assigned.
         # (So we don't end up dropping the resubmission).
         if previous:
-            self.duplicates_counter.increment()
+            self.counter.increment('duplicates')
             self.finalize(pprevious, previous, score, task)
             return
 
@@ -332,17 +333,17 @@ class Ingester:
         with self.cache_lock:
             result = self.cache.get(key, None)
 
-        counter = self.cache_local_hit_counter
         if result:
+            self.counter.increment('cache_hit_local')
             self.log.info(f'[{task.ingest_id} :: {task.sha256}] Local cache hit')
         else:
-            counter = self.cache_hit_counter
+            self.counter.increment('cache_hit')
 
             result = self.datastore.filescore.get(key)
             if result:
                 self.log.info(f'[{task.ingest_id} :: {task.sha256}] Remote cache hit')
             else:
-                self.cache_miss_counter.increment()
+                self.counter.increment('cache_miss')
                 return None, False, None, key
 
             with self.cache_lock:
@@ -354,16 +355,14 @@ class Ingester:
 
         if self.expired(age, errors):
             self.log.info(f"[{task.ingest_id} :: {task.sha256}] Cache hit dropped, cache has expired")
-            self.cache_expired_counter.increment()
+            self.counter.increment('cache_expired')
             self.cache.pop(key, None)
             self.datastore.filescore.delete(key)
             return None, False, None, key
         elif self.stale(age, errors):
             self.log.info(f"[{task.ingest_id} :: {task.sha256}] Cache hit dropped, cache is stale")
-            self.cache_stale_counter.increment()
+            self.counter.increment('cache_stale')
             return None, False, result.score, key
-
-        counter.increment()
 
         return result.psid, result.sid, result.score, key
 
@@ -373,7 +372,8 @@ class Ingester:
         else:
             return delta >= self.config.core.ingester.stale_after_seconds
 
-    def stamp_filescore_key(self, task: IngestTask, sha256=None):
+    @staticmethod
+    def stamp_filescore_key(task: IngestTask, sha256=None):
         if not sha256:
             sha256 = task.submission.files[0].sha256
 
@@ -428,9 +428,9 @@ class Ingester:
 
         errors = sub.error_count
         file_count = sub.file_count
-        self.submissions_completed_counter.increment()
-        self.files_completed_counter.increment(file_count)
-        self.bytes_completed_counter.increment(task.file_size)
+        self.counter.increment('submissions_completed')
+        self.counter.increment('files_completed', increment_by=file_count)
+        self.counter.increment('bytes_completed', increment_by=task.file_size)
 
         with self.cache_lock:
             fs = self.cache[scan_key] = FileScore({
@@ -517,7 +517,7 @@ class Ingester:
 
         task.failure = 'Skipped'
         self._notify_drop(task)
-        self.skipped_counter.increment()
+        self.counter.increment('skipped')
         return True
 
     def _notify_drop(self, task: IngestTask):
@@ -548,8 +548,7 @@ class Ingester:
             task.failure = "Whitelisting due to reason %s (%s)" % (dotdump(safe_str(reason)), hit)
             self._notify_drop(task)
 
-            self.whitelisted_counter.increment()
-            MetricCounter('whitelist.' + reason, self.redis).increment()
+            self.counter.increment('whitelisted')
 
         return reason
 

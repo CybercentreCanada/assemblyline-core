@@ -2,6 +2,7 @@ import time
 import json
 from typing import List
 
+from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.service import Service
@@ -9,7 +10,6 @@ from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
 from assemblyline.remote.datatypes.set import ExpiringSet
-from assemblyline.remote.datatypes.counters import MetricCounter
 from assemblyline.common import isotime, forge
 
 from al_core.dispatching.scheduler import Scheduler
@@ -98,7 +98,7 @@ class Dispatcher:
         self.active_tasks = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
 
         # Publish counters to the metrics sink.
-        self.files_complete_counter = MetricCounter('files_completed', self.redis)
+        self.counter = MetricsFactory('dispatcher', redis=self.redis, config=self.config)
 
     def volatile_named_queue(self, name: str) -> NamedQueue:
         if name not in self._nonper_other_queues:
@@ -327,6 +327,7 @@ class Dispatcher:
         watcher_list.delete()
         self.timeout_watcher.clear(sid)
         self.active_tasks.pop(sid)
+        self.counter.increment('submissions_completed')
         self.log.info(f"[{sid}] Completed")
 
     def dispatch_file(self, task: FileTask):
@@ -439,7 +440,7 @@ class Dispatcher:
             # If there are no outstanding ANYTHING for this submission,
             # send a message to the submission dispatcher to finalize
             self.log.info(f"[{task.sid}] Finished processing file '{file_hash}'")
-            self.files_complete_counter.increment()
+            self.counter.increment('files_completed')
             if dispatch_table.all_finished():
                 self.submission_queue.push({'sid': submission.sid})
 
