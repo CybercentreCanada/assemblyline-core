@@ -145,7 +145,7 @@ class LegacyMetricsServer(ServerBase):
         # TODO: loop through self.rolling_window, cumulate matching metrics and .pop(0) an item of each list if len
         #       is bigger the the window size so the metrics are always 60 seconds based.
         #       Depending of which metrics type we're getting, generate the associate hearbeat which will be sent
-        #       throught the STATUS_QUEUE
+        #       throught the STATUS_QUEUE... Wait maybe this should be another process...
 
 class HashMapMetricsServer(ServerBase):
     def __init__(self, config=None):
