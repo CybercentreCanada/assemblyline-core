@@ -36,8 +36,8 @@ from al_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from al_core.submission_client import SubmissionClient
 
 
+INGEST_QUEUE_NAME = 'm-ingest'
 _completeq_name = 'm-complete'
-_ingestq_name = 'm-ingest'
 _dup_prefix = 'w-m-'
 _notification_queue_prefix = 'm-n-'
 _min_priority = 1
@@ -194,24 +194,8 @@ class Ingester:
         # Classification engine
         self.ce = classification or forge.get_classification()
 
+        # Metrics gathering factory
         self.counter = MetricsFactory('ingester', redis=self.redis, config=self.config)
-        #self.cache_miss_counter = MetricCounter('ingest.cache_miss', self.redis)
-        #self.cache_expired_counter = MetricCounter('ingest.cache_expired', self.redis)
-        #self.cache_stale_counter = MetricCounter('ingest.cache_stale', self.redis)
-        #self.cache_local_hit_counter = MetricCounter('ingest.cache_hit_local', self.redis)
-        #self.cache_hit_counter = MetricCounter('ingest.cache_hit', self.redis)
-
-        #self.submissions_completed_counter = MetricCounter('ingest.submissions_completed', self.redis)
-        #self.submissions_ingested_counter = MetricCounter('ingest.submissions_ingested', self.redis)
-        #self.files_completed_counter = MetricCounter('ingest.files_completed', self.redis)
-        #self.bytes_completed_counter = MetricCounter('ingest.bytes_completed', self.redis)
-        #self.bytes_ingested_counter = MetricCounter('ingest.bytes_ingested', self.redis)
-        #self.ingest_timeout_counter = MetricCounter('ingest.timed_out', self.redis)
-
-        #self.skipped_counter = MetricCounter('ingest.skipped', self.redis)
-        #self.whitelisted_counter = MetricCounter('ingest.whitelisted', self.redis)
-        #self.duplicates_counter = MetricCounter('ingest.duplicates', self.redis)
-        #self.error_counter = MetricCounter('ingest.error', self.redis)
 
         # State. The submissions in progress are stored in Redis in order to
         # persist this state and recover in case we crash.
@@ -224,7 +208,7 @@ class Ingester:
         # self.drop_queue = NamedQueue('m-drop', self.persistent_redis)
 
         # Input. An external process places submission requests on this queue.
-        self.ingest_queue = NamedQueue(_ingestq_name, self.persistent_redis)
+        self.ingest_queue = NamedQueue(INGEST_QUEUE_NAME, self.persistent_redis)
 
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
         self.traffic_queue = CommsQueue('submissions', self.redis)
