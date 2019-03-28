@@ -9,12 +9,15 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from collections import Counter
 from threading import Lock
 
+from al_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from al_core.dispatching.dispatcher import DISPATCH_TASK_HASH, SUBMISSION_QUEUE
 from al_core.ingester.ingester import drop_chance, INGEST_QUEUE_NAME
 from al_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common import forge, metrics
+from assemblyline.odm.messages.alerter_heartbeat import AlerterMessage
 from assemblyline.odm.messages.dispatcher_heartbeat import DispatcherMessage
+from assemblyline.odm.messages.expiry_heartbeat import ExpiryMessage
 from assemblyline.odm.messages.ingest_heartbeat import IngestMessage
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
@@ -139,7 +142,7 @@ class LegacyHeartbeatManager(ServerBase):
     def __init__(self, config=None):
         super().__init__('assemblyline.legacy_heartbeat_manager')
         self.config = config or forge.get_config()
-        constants = forge.get_constants(self.config)
+        self.datastore = forge.get_datastore(self.config)
 
         self.scheduler = BackgroundScheduler(daemon=True)
 
@@ -163,15 +166,25 @@ class LegacyHeartbeatManager(ServerBase):
         self.ingest_scanning = Hash('m-scanning-table', self.redis_persist)
         self.ingest_unique_queue = PriorityQueue('m-unique', self.redis_persist)
         self.ingest_queue = NamedQueue(INGEST_QUEUE_NAME, self.redis_persist)
+        self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.redis_persist)
 
+        constants = forge.get_constants(self.config)
         self.c_rng = constants.PRIORITY_RANGES['critical']
-        self.c_s_at = self.config.core.ingester.sampling_at['critical']
         self.h_rng = constants.PRIORITY_RANGES['high']
-        self.h_s_at = self.config.core.ingester.sampling_at['high']
         self.m_rng = constants.PRIORITY_RANGES['medium']
-        self.m_s_at = self.config.core.ingester.sampling_at['medium']
         self.l_rng = constants.PRIORITY_RANGES['low']
+        self.c_s_at = self.config.core.ingester.sampling_at['critical']
+        self.h_s_at = self.config.core.ingester.sampling_at['high']
+        self.m_s_at = self.config.core.ingester.sampling_at['medium']
         self.l_s_at = self.config.core.ingester.sampling_at['low']
+
+        self.to_expire = {k: 0 for k in metrics.EXPIRY_METRICS}
+        if self.config.core.expiry.batch_delete:
+            self.delete_query = f"expiry_ts:[* TO {self.datastore.ds.now}-{self.config.core.expiry.delay}" \
+                f"{self.datastore.ds.hour}/DAY]"
+        else:
+            self.delete_query = f"expiry_ts:[* TO {self.datastore.ds.now}-{self.config.core.expiry.delay}" \
+                f"{self.datastore.ds.hour}]"
 
         self.rolling_window = {}
         self.window_ttl = {}
@@ -182,8 +195,9 @@ class LegacyHeartbeatManager(ServerBase):
                              "Metrics reported during hearbeat will be wrong.")
 
     def try_run(self):
-
         self.scheduler.add_job(self._export_hearbeats, 'interval', seconds=self.config.core.metrics.export_interval)
+        self.scheduler.add_job(self._reload_expiry_queues, 'interval',
+                               seconds=self.config.core.metrics.export_interval * 4)
         self.scheduler.start()
 
         while self.running:
@@ -205,6 +219,11 @@ class LegacyHeartbeatManager(ServerBase):
 
                 self.window_ttl[w_key] = time.time() + self.ttl
 
+    def _reload_expiry_queues(self):
+        self.log.info("Refreshing expiry queues...")
+        for collection_name in metrics.EXPIRY_METRICS:
+            collection = getattr(self.datastore, collection_name)
+            self.to_expire[collection_name] = collection.search(self.delete_query, rows=0, fl='id')['total']
 
     def _export_hearbeats(self):
         self.log.info("Expiring unused counters...")
@@ -307,6 +326,38 @@ class LegacyHeartbeatManager(ServerBase):
                     self.log.info(f"Sent ingester heartbeat: {msg['msg']}")
                 except Exception:
                     self.log.exception("An exception occurred while generating IngestMessage")
+
+            elif agg_c_type == "alerter":
+                try:
+                    msg = {
+                        "sender": "legacy_heartbeat_manager",
+                        "msg": {
+                            "instances": metrics_data.pop('instances'),
+                            "metrics": metrics_data,
+                            "queues": {
+                                "alert": self.alert_queue.length()
+                            }
+                        }
+                    }
+                    self.status_queue.publish(AlerterMessage(msg).as_primitives())
+                    self.log.info(f"Sent alerter heartbeat: {msg['msg']}")
+                except Exception:
+                    self.log.exception("An exception occurred while generating AlerterMessage")
+
+            elif agg_c_type == "expiry":
+                try:
+                    msg = {
+                        "sender": "legacy_heartbeat_manager",
+                        "msg": {
+                            "instances": metrics_data.pop('instances'),
+                            "metrics": metrics_data,
+                            "queues": self.to_expire
+                        }
+                    }
+                    self.status_queue.publish(ExpiryMessage(msg).as_primitives())
+                    self.log.info(f"Sent expiry heartbeat: {msg['msg']}")
+                except Exception:
+                    self.log.exception("An exception occurred while generating ExpiryMessage")
 
             else:
                 self.log.info(f"HB: {agg_c_name} [{agg_c_type}] ==> {metrics_data}")
