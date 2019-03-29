@@ -20,6 +20,7 @@ from assemblyline.odm.messages.dispatcher_heartbeat import DispatcherMessage
 from assemblyline.odm.messages.expiry_heartbeat import ExpiryMessage
 from assemblyline.odm.messages.ingest_heartbeat import IngestMessage
 from assemblyline.odm.messages.service_heartbeat import ServiceMessage
+from assemblyline.odm.messages.service_timing_heartbeat import ServiceTimingMessage
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
@@ -258,7 +259,12 @@ class LegacyHeartbeatManager(ServerBase):
                     if key not in aggregated_counters:
                         aggregated_counters[key] = Counter()
 
-                    aggregated_counters[key]['instances'] += 1
+                    if c_type in metrics.TIMED_METRICS:
+                        aggregated_counters[key]['instances.t'] += 1
+                        aggregated_counters[key]['instances.c'] += 1
+                    else:
+                        aggregated_counters[key]['instances'] += 1
+
                     for c in counters_list:
                         aggregated_counters[key] += c
 
@@ -381,7 +387,20 @@ class LegacyHeartbeatManager(ServerBase):
                         self.log.exception("An exception occurred while generating ServiceMessage")
 
                 elif agg_c_type == "service_timing":
-                    pass
+                    metrics_data.pop('instances_count')
+                    try:
+                        msg = {
+                            "sender": "legacy_heartbeat_manager",
+                            "msg": {
+                                "instances": metrics_data.pop('instances'),
+                                "metrics": metrics_data,
+                                "service_name": agg_c_name
+                            }
+                        }
+                        self.status_queue.publish(ServiceTimingMessage(msg).as_primitives())
+                        self.log.info(f"Sent service timing heartbeat: {msg['msg']}")
+                    except Exception:
+                        self.log.exception("An exception occurred while generating ServiceTimingMessage")
 
                 else:
                     self.log.warning(f"Skipping unknown counter: {agg_c_name} [{agg_c_type}] ==> {metrics_data}")
