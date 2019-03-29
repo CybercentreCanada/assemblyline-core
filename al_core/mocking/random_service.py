@@ -7,6 +7,7 @@ from al_core.dispatching.client import DispatchClient
 from al_core.dispatching.dispatcher import service_queue_name
 from al_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm.messages.task import Task as ServiceTask
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.file import File
@@ -27,6 +28,10 @@ class RandomService(ServerBase):
         self.datastore = datastore
         self.filestore = filestore
 
+        self.counters = {n: MetricsFactory('service', name=n, config=self.config)
+                         for n in datastore.service_delta.keys()}
+        self.counters_timing = {n: MetricsFactory('service_timing', name=n, config=self.config)
+                                for n in datastore.service_delta.keys()}
         self.queues = [NamedQueue(service_queue_name(name)) for name in datastore.service_delta.keys()]
         self.dispatch_client = DispatchClient(datastore)
 
@@ -37,15 +42,28 @@ class RandomService(ServerBase):
             self.log.info(f"\t{q.name}")
 
         self.log.info("Waiting for messages...")
+        # TIMING
+        wait_start = time.time()
         while self.running:
             message = select(*self.queues, timeout=1)
             if not message:
                 continue
 
-            expiry_ts = now_as_iso(self.config.submission.dtl * 24 * 60 * 60)
+            # TIMING
+            start_time = time.time()
 
+            expiry_ts = now_as_iso(self.config.submission.dtl * 24 * 60 * 60)
             queue, msg = message
             task = ServiceTask(msg)
+
+            # TIMING (milliseconds precision)
+            self.counters_timing[task.service_name].increment_execution_time('idle', int((start_time-wait_start)*1000))
+
+            # METRICS
+            self.counters[task.service_name].increment('execute')
+            # METRICS (not caching here so always miss)
+            self.counters[task.service_name].increment('cache_miss')
+
             self.dispatch_client.running_tasks.set(task.key(), task.as_primitives())
             self.log.info(f"\tQueue {queue} received a new task for sid {task.sid}.")
             action = random.randint(1, 10)
@@ -77,6 +95,13 @@ class RandomService(ServerBase):
                 time.sleep(random.randint(0, 2))
 
                 self.dispatch_client.service_finished(task.sid, result_key, result)
+
+                # METRICS
+                if result.result.score > 0:
+                    self.counters[task.service_name].increment('scored')
+                else:
+                    self.counters[task.service_name].increment('not_scored')
+
             else:
                 error = random_model_obj(Error)
                 error.expiry_ts = expiry_ts
@@ -90,6 +115,17 @@ class RandomService(ServerBase):
                               f"error was generated for this task: {error_key}")
 
                 self.dispatch_client.service_failed(task.sid, error_key, error)
+
+                # METRICS
+                if error.response.status == "FAIL_RECOVERABLE":
+                    self.counters[task.service_name].increment('fail_recoverable')
+                else:
+                    self.counters[task.service_name].increment('fail_nonrecoverable')
+
+            # TIMING (milliseconds precision)
+            wait_start = time.time()
+            self.counters_timing[task.service_name].increment_execution_time('execution',
+                                                                             int((wait_start-start_time)*1000))
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ from collections import Counter
 from threading import Lock
 
 from al_core.alerter.run_alerter import ALERT_QUEUE_NAME
-from al_core.dispatching.dispatcher import DISPATCH_TASK_HASH, SUBMISSION_QUEUE
+from al_core.dispatching.dispatcher import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, service_queue_name
 from al_core.ingester.ingester import drop_chance, INGEST_QUEUE_NAME
 from al_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
@@ -19,6 +19,7 @@ from assemblyline.odm.messages.alerter_heartbeat import AlerterMessage
 from assemblyline.odm.messages.dispatcher_heartbeat import DispatcherMessage
 from assemblyline.odm.messages.expiry_heartbeat import ExpiryMessage
 from assemblyline.odm.messages.ingest_heartbeat import IngestMessage
+from assemblyline.odm.messages.service_heartbeat import ServiceMessage
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
@@ -220,145 +221,170 @@ class LegacyHeartbeatManager(ServerBase):
                 self.window_ttl[w_key] = time.time() + self.ttl
 
     def _reload_expiry_queues(self):
-        self.log.info("Refreshing expiry queues...")
-        for collection_name in metrics.EXPIRY_METRICS:
-            collection = getattr(self.datastore, collection_name)
-            self.to_expire[collection_name] = collection.search(self.delete_query, rows=0, fl='id')['total']
+        try:
+            self.log.info("Refreshing expiry queues...")
+            for collection_name in metrics.EXPIRY_METRICS:
+                collection = getattr(self.datastore, collection_name)
+                self.to_expire[collection_name] = collection.search(self.delete_query, rows=0, fl='id')['total']
+        except Exception:
+            self.log.exception("Unknown exception occurred while reloading expiry queues:")
 
     def _export_hearbeats(self):
-        self.log.info("Expiring unused counters...")
-        c_time = time.time()
-        for k in list(self.window_ttl.keys()):
-            if self.window_ttl.get(k, c_time) < c_time:
-                c_name, c_type, c_host = k
-                self.log.info(f"Counter {c_name} [{c_type}] for host {c_host} is expired")
-                del self.window_ttl[k]
-                del self.rolling_window[k]
+        try:
+            self.log.info("Expiring unused counters...")
+            c_time = time.time()
+            for k in list(self.window_ttl.keys()):
+                if self.window_ttl.get(k, c_time) < c_time:
+                    c_name, c_type, c_host = k
+                    self.log.info(f"Counter {c_name} [{c_type}] for host {c_host} is expired")
+                    del self.window_ttl[k]
+                    del self.rolling_window[k]
 
-        self.log.info("Copying counters ...")
-        window_copy = copy.deepcopy(self.rolling_window)
+            self.log.info("Copying counters ...")
+            window_copy = copy.deepcopy(self.rolling_window)
 
-        self.log.info("Aggregating heartbeat data...")
-        aggregated_counters = {}
-        for component_parts, counters_list in window_copy.items():
-            c_name, c_type, c_host = component_parts
+            self.log.info("Aggregating heartbeat data...")
+            aggregated_counters = {}
+            for component_parts, counters_list in window_copy.items():
+                c_name, c_type, c_host = component_parts
 
-            # Expiring data outside of the window
-            if len(counters_list) > self.window_size:
-                self.rolling_window[component_parts].pop(0)
-                counters_list = counters_list[1:]
+                # Expiring data outside of the window
+                if len(counters_list) > self.window_size:
+                    self.rolling_window[component_parts].pop(0)
+                    counters_list = counters_list[1:]
 
-            if c_type in metrics.METRIC_TYPES:
-                key = (c_name, c_type)
-                if key not in aggregated_counters:
-                    aggregated_counters[key] = Counter()
+                if c_type in metrics.METRIC_TYPES:
+                    key = (c_name, c_type)
+                    if key not in aggregated_counters:
+                        aggregated_counters[key] = Counter()
 
-                aggregated_counters[key]['instances'] += 1
-                for c in counters_list:
-                    aggregated_counters[key] += c
+                    aggregated_counters[key]['instances'] += 1
+                    for c in counters_list:
+                        aggregated_counters[key] += c
 
-            else:
-                self.log.warning(f"Skipping unknown component type: {c_type}")
+                else:
+                    self.log.warning(f"Skipping unknown component type: {c_type}")
 
-        self.log.info("Generating heartbeats...")
-        for aggregated_parts, counter in aggregated_counters.items():
-            agg_c_name, agg_c_type = aggregated_parts
-            allowed_fields = metrics.METRIC_TYPES[agg_c_type] + ['instances']
+            self.log.info("Generating heartbeats...")
+            for aggregated_parts, counter in aggregated_counters.items():
+                agg_c_name, agg_c_type = aggregated_parts
+                allowed_fields = metrics.METRIC_TYPES[agg_c_type] + ['instances']
 
-            if agg_c_type not in metrics.TIMED_METRICS:
-                metrics_data = {k: counter.get(k, 0) for k in allowed_fields}
-            else:
-                metrics_data = {k: counter.get(k + ".t", 0) / counter.get(k + ".c", 1) for k in allowed_fields}
-                metrics_data.update({k + "_count": counter.get(k + ".c", 0) for k in allowed_fields})
+                if agg_c_type not in metrics.TIMED_METRICS:
+                    metrics_data = {k: counter.get(k, 0) for k in allowed_fields}
+                else:
+                    metrics_data = {k: counter.get(k + ".t", 0) / counter.get(k + ".c", 1) for k in allowed_fields}
+                    metrics_data.update({k + "_count": counter.get(k + ".c", 0) for k in allowed_fields})
 
-            if agg_c_type == "dispatcher":
-                try:
-                    msg = {
-                        "sender": "legacy_heartbeat_manager",
-                        "msg": {
-                            "inflight": {
-                                "max": self.config.core.dispatcher.max_inflight,
-                                "outstanding": self.dispatch_active_hash.length()
-                            },
-                            "instances": metrics_data.pop('instances'),
-                            "metrics": metrics_data,
-                            "queues": {
-                                "ingest": self.dispatcher_submission_queue.length()
+                if agg_c_type == "dispatcher":
+                    try:
+                        msg = {
+                            "sender": "legacy_heartbeat_manager",
+                            "msg": {
+                                "inflight": {
+                                    "max": self.config.core.dispatcher.max_inflight,
+                                    "outstanding": self.dispatch_active_hash.length()
+                                },
+                                "instances": metrics_data.pop('instances'),
+                                "metrics": metrics_data,
+                                "queues": {
+                                    "ingest": self.dispatcher_submission_queue.length()
+                                }
                             }
                         }
-                    }
-                    self.status_queue.publish(DispatcherMessage(msg).as_primitives())
-                    self.log.info(f"Sent dispatcher heartbeat: {msg['msg']}")
-                except Exception:
-                    self.log.exception("An exception occurred while generating DispatcherMessage")
+                        self.status_queue.publish(DispatcherMessage(msg).as_primitives())
+                        self.log.info(f"Sent dispatcher heartbeat: {msg['msg']}")
+                    except Exception:
+                        self.log.exception("An exception occurred while generating DispatcherMessage")
 
-            elif agg_c_type == "ingester":
-                try:
-                    c_q_len = self.ingest_unique_queue.count(*self.c_rng)
-                    h_q_len = self.ingest_unique_queue.count(*self.h_rng)
-                    m_q_len = self.ingest_unique_queue.count(*self.m_rng)
-                    l_q_len = self.ingest_unique_queue.count(*self.l_rng)
+                elif agg_c_type == "ingester":
+                    try:
+                        c_q_len = self.ingest_unique_queue.count(*self.c_rng)
+                        h_q_len = self.ingest_unique_queue.count(*self.h_rng)
+                        m_q_len = self.ingest_unique_queue.count(*self.m_rng)
+                        l_q_len = self.ingest_unique_queue.count(*self.l_rng)
 
-                    msg = {
-                        "sender": "legacy_heartbeat_manager",
-                        "msg": {
-                            "instances": metrics_data.pop('instances'),
-                            "metrics": metrics_data,
-                            "processing": {
-                                "inflight": self.ingest_scanning.length()
-                            },
-                            "processing_chance": {
-                                "critical": 1 - drop_chance(c_q_len, self.c_s_at),
-                                "high": 1 - drop_chance(h_q_len, self.h_s_at),
-                                "low": 1 - drop_chance(l_q_len, self.l_s_at),
-                                "medium": 1 - drop_chance(m_q_len, self.m_s_at)
-                            },
-                            "queues": {
-                                "critical": c_q_len,
-                                "high": h_q_len,
-                                "ingest": self.ingest_queue.length(),
-                                "low": l_q_len,
-                                "medium": m_q_len
+                        msg = {
+                            "sender": "legacy_heartbeat_manager",
+                            "msg": {
+                                "instances": metrics_data.pop('instances'),
+                                "metrics": metrics_data,
+                                "processing": {
+                                    "inflight": self.ingest_scanning.length()
+                                },
+                                "processing_chance": {
+                                    "critical": 1 - drop_chance(c_q_len, self.c_s_at),
+                                    "high": 1 - drop_chance(h_q_len, self.h_s_at),
+                                    "low": 1 - drop_chance(l_q_len, self.l_s_at),
+                                    "medium": 1 - drop_chance(m_q_len, self.m_s_at)
+                                },
+                                "queues": {
+                                    "critical": c_q_len,
+                                    "high": h_q_len,
+                                    "ingest": self.ingest_queue.length(),
+                                    "low": l_q_len,
+                                    "medium": m_q_len
+                                }
                             }
                         }
-                    }
-                    self.status_queue.publish(IngestMessage(msg).as_primitives())
-                    self.log.info(f"Sent ingester heartbeat: {msg['msg']}")
-                except Exception:
-                    self.log.exception("An exception occurred while generating IngestMessage")
+                        self.status_queue.publish(IngestMessage(msg).as_primitives())
+                        self.log.info(f"Sent ingester heartbeat: {msg['msg']}")
+                    except Exception:
+                        self.log.exception("An exception occurred while generating IngestMessage")
 
-            elif agg_c_type == "alerter":
-                try:
-                    msg = {
-                        "sender": "legacy_heartbeat_manager",
-                        "msg": {
-                            "instances": metrics_data.pop('instances'),
-                            "metrics": metrics_data,
-                            "queues": {
-                                "alert": self.alert_queue.length()
+                elif agg_c_type == "alerter":
+                    try:
+                        msg = {
+                            "sender": "legacy_heartbeat_manager",
+                            "msg": {
+                                "instances": metrics_data.pop('instances'),
+                                "metrics": metrics_data,
+                                "queues": {
+                                    "alert": self.alert_queue.length()
+                                }
                             }
                         }
-                    }
-                    self.status_queue.publish(AlerterMessage(msg).as_primitives())
-                    self.log.info(f"Sent alerter heartbeat: {msg['msg']}")
-                except Exception:
-                    self.log.exception("An exception occurred while generating AlerterMessage")
+                        self.status_queue.publish(AlerterMessage(msg).as_primitives())
+                        self.log.info(f"Sent alerter heartbeat: {msg['msg']}")
+                    except Exception:
+                        self.log.exception("An exception occurred while generating AlerterMessage")
 
-            elif agg_c_type == "expiry":
-                try:
-                    msg = {
-                        "sender": "legacy_heartbeat_manager",
-                        "msg": {
-                            "instances": metrics_data.pop('instances'),
-                            "metrics": metrics_data,
-                            "queues": self.to_expire
+                elif agg_c_type == "expiry":
+                    try:
+                        msg = {
+                            "sender": "legacy_heartbeat_manager",
+                            "msg": {
+                                "instances": metrics_data.pop('instances'),
+                                "metrics": metrics_data,
+                                "queues": self.to_expire
+                            }
                         }
-                    }
-                    self.status_queue.publish(ExpiryMessage(msg).as_primitives())
-                    self.log.info(f"Sent expiry heartbeat: {msg['msg']}")
-                except Exception:
-                    self.log.exception("An exception occurred while generating ExpiryMessage")
+                        self.status_queue.publish(ExpiryMessage(msg).as_primitives())
+                        self.log.info(f"Sent expiry heartbeat: {msg['msg']}")
+                    except Exception:
+                        self.log.exception("An exception occurred while generating ExpiryMessage")
 
-            else:
-                self.log.info(f"HB: {agg_c_name} [{agg_c_type}] ==> {metrics_data}")
-                # TODO: generate HB message and post it through status_queue
+                elif agg_c_type == "service":
+                    try:
+                        msg = {
+                            "sender": "legacy_heartbeat_manager",
+                            "msg": {
+                                "instances": metrics_data.pop('instances'),
+                                "metrics": metrics_data,
+                                "queue": NamedQueue(service_queue_name(agg_c_name), host=self.redis).length(),
+                                "service_name": agg_c_name
+                            }
+                        }
+                        self.status_queue.publish(ServiceMessage(msg).as_primitives())
+                        self.log.info(f"Sent service heartbeat: {msg['msg']}")
+                    except Exception:
+                        self.log.exception("An exception occurred while generating ServiceMessage")
+
+                elif agg_c_type == "service_timing":
+                    pass
+
+                else:
+                    self.log.warning(f"Skipping unknown counter: {agg_c_name} [{agg_c_type}] ==> {metrics_data}")
+                    # TODO: generate HB message and post it through status_queue
+        except Exception:
+            self.log.exception("Unknown exception occurred during heartbeat creation:")
