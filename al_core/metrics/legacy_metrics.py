@@ -65,10 +65,9 @@ class LegacyMetricsServer(ServerBase):
         super().__init__('assemblyline.legacy_metrics_aggregator', shutdown_timeout=65)
         self.config = config or forge.get_config()
 
-        self.elastic_ip = self.config.core.metrics.elasticsearch.host
-        self.elastic_port = self.config.core.metrics.elasticsearch.port
+        self.elastic_hosts = self.config.core.metrics.elasticsearch.hosts
 
-        if not self.elastic_ip or not self.elastic_port:
+        if not self.elastic_hosts:
             self.log.error("No elasticsearch cluster defined to store metrics. All gathered stats will be ignored...")
             sys.exit(1)
 
@@ -81,7 +80,7 @@ class LegacyMetricsServer(ServerBase):
 
     def try_run(self):
         self.metrics_queue = CommsQueue(METRICS_QUEUE)
-        self.es = elasticsearch.Elasticsearch([{'host': self.elastic_ip, 'port': self.elastic_port}])
+        self.es = elasticsearch.Elasticsearch(hosts=self.elastic_hosts)
 
         self.scheduler.add_job(self._create_aggregated_metrics, 'interval', seconds=60)
         self.scheduler.start()
