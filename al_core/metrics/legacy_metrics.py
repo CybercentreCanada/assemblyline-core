@@ -64,7 +64,6 @@ class LegacyMetricsServer(ServerBase):
     def __init__(self, config=None):
         super().__init__('assemblyline.legacy_metrics_aggregator', shutdown_timeout=65)
         self.config = config or forge.get_config()
-
         self.elastic_hosts = self.config.core.metrics.elasticsearch.hosts
 
         if not self.elastic_hosts:
@@ -74,7 +73,6 @@ class LegacyMetricsServer(ServerBase):
         self.scheduler = BackgroundScheduler(daemon=True)
         self.metrics_queue = None
         self.es = None
-
         self.counters_lock = Lock()
         self.counters = {}
 
