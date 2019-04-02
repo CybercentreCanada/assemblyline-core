@@ -6,6 +6,7 @@ from al_core.ingester.ingester import INGEST_QUEUE_NAME
 from al_core.dispatching.dispatcher import service_queue_name
 from al_core.ingester.ingester import drop_chance
 from assemblyline.common import forge, metrics
+from assemblyline.datastore import SearchException
 from assemblyline.odm.messages.alerter_heartbeat import AlerterMessage
 from assemblyline.odm.messages.dispatcher_heartbeat import DispatcherMessage
 from assemblyline.odm.messages.expiry_heartbeat import ExpiryMessage
@@ -77,8 +78,11 @@ class HeartbeatManager(object):
         try:
             self.log.info("Refreshing expiry queues...")
             for collection_name in metrics.EXPIRY_METRICS:
-                collection = getattr(self.datastore, collection_name)
-                self.to_expire[collection_name] = collection.search(self.delete_query, rows=0, fl='id')['total']
+                try:
+                    collection = getattr(self.datastore, collection_name)
+                    self.to_expire[collection_name] = collection.search(self.delete_query, rows=0, fl='id')['total']
+                except SearchException:
+                    self.to_expire[collection_name] = 0
         except Exception:
             self.log.exception("Unknown exception occurred while reloading expiry queues:")
 
