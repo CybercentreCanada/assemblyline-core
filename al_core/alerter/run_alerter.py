@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+
+import elasticapm
 
 from al_core.server_base import ServerBase
 from assemblyline.common import forge
@@ -27,10 +30,20 @@ class Alerter(ServerBase):
         self.running = False
 
         self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.persistent_redis)
+        if self.config.core.metrics.apm_server.server_url is not None:
+            self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
+            elasticapm.instrument()
+            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
+                                                service_name="alerter")
+        else:
+            self.apm_client = None
 
     def close(self):
         if self.counter:
             self.counter.stop()
+
+        if self.apm_client:
+            elasticapm.uninstrument()
 
     def try_run(self):
         while self.running:
@@ -40,8 +53,21 @@ class Alerter(ServerBase):
 
             self.counter.increment('received')
             try:
-                self.process_alert_message(self.counter, self.datastore, self.log, alert)
+                # Start of process alert transaction
+                if self.apm_client:
+                    self.apm_client.begin_transaction('Process alert message')
+
+                alert_type = self.process_alert_message(self.counter, self.datastore, self.log, alert)
+
+                # End of process alert transaction (success)
+                if self.apm_client:
+                    self.apm_client.end_transaction(alert_type, 'success')
+
             except Exception as ex:  # pylint: disable=W0703
+                # End of process alert transaction (failure)
+                if self.apm_client:
+                    self.apm_client.end_transaction('unknown', 'failure')
+
                 retries = alert['alert_retries'] = alert.get('alert_retries', 0) + 1
                 if retries > MAX_RETRIES:
                     self.log.exception(f'Max retries exceeded for: {alert}')

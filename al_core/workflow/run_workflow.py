@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+
+import elasticapm
 import time
 
 from al_core.server_base import ServerBase
@@ -18,8 +20,23 @@ class WorkflowManager(ServerBase):
         self.datastore = forge.get_datastore(self.config)
         self.start_ts = f"{self.datastore.ds.now}/{self.datastore.ds.day}-1{self.datastore.ds.day}"
 
+        if self.config.core.metrics.apm_server.server_url is not None:
+            self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
+            elasticapm.instrument()
+            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
+                                                service_name="workflow")
+        else:
+            self.apm_client = None
+
+    def close(self):
+        if self.apm_client:
+            elasticapm.uninstrument()
 
     def get_last_reporting_ts(self, p_start_ts):
+        # Start of transaction
+        if self.apm_client:
+            self.apm_client.begin_transaction("Get last reporting timestamp")
+
         self.log.info("Finding reporting timestamp for the last alert since {start_ts}...".format(start_ts=p_start_ts))
         result = None
         while result is None:
@@ -31,12 +48,24 @@ class WorkflowManager(ServerBase):
                 continue
 
         items = result.get('items', [{}]) or [{}]
-        return items[0].get("reporting_ts", p_start_ts)
+
+        ret_val = items[0].get("reporting_ts", p_start_ts)
+
+        # End of transaction
+        if self.apm_client:
+            elasticapm.tag(start_ts=p_start_ts, reporting_ts=ret_val)
+            self.apm_client.end_transaction('get_last_reporting_ts', 'new_ts' if ret_val != p_start_ts else 'same_ts')
+
+        return ret_val
 
     def try_run(self):
         while self.running:
             end_ts = self.get_last_reporting_ts(self.start_ts)
             if self.start_ts != end_ts:
+                # Start of transaction
+                if self.apm_client:
+                    self.apm_client.begin_transaction("Load workflows")
+
                 workflow_queries = [Workflow({
                     'status': "TRIAGE",
                     'name': "Triage all with no status",
@@ -60,9 +89,28 @@ class WorkflowManager(ServerBase):
                         workflow_queries.append(item)
                 except SearchException as e:
                     self.log.warning(f"Failed to load workflows from the datastore, retrying... :: {e}")
+
+                    # End of transaction
+                    if self.apm_client:
+                        elasticapm.tag(number_of_workflows=len(workflow_queries))
+                        self.apm_client.end_transaction('loading_workflows', 'failure')
                     continue
 
+                # End of transaction
+                if self.apm_client:
+                    elasticapm.tag(number_of_workflows=len(workflow_queries))
+                    self.apm_client.end_transaction('loading_workflows', 'success')
+
                 for workflow in workflow_queries:
+                    # Start of transaction
+                    if self.apm_client:
+                        self.apm_client.begin_transaction("Execute workflows")
+                        elasticapm.tag(query=workflow.query,
+                                       labels=workflow.labels,
+                                       status=workflow.status,
+                                       priority=workflow.priority,
+                                       user=workflow.creator)
+
                     self.log.info(f'Executing workflow filter: {workflow.name}')
                     labels = workflow.labels or []
                     status = workflow.status or None
@@ -90,6 +138,8 @@ class WorkflowManager(ServerBase):
 
                     try:
                         count = self.datastore.alert.update_by_query(workflow.query, operations, filters=fq)
+                        if self.apm_client:
+                            elasticapm.tag(affected_alerts=count)
 
                         if count:
                             self.log.info("{count} Alert(s) were affected by this filter.".format(count=count))
@@ -103,7 +153,16 @@ class WorkflowManager(ServerBase):
                     except SearchException:
                         self.log.warning(f"Invalid query '{safe_str(workflow.query or '')}' in workflow "
                                          f"'{workflow.name or 'unknown'}' by '{workflow.created_by or 'unknown'}'")
+
+                        # End of transaction
+                        if self.apm_client:
+                            self.apm_client.end_transaction(workflow.name, 'failure')
+
                         continue
+
+                    # End of transaction
+                    if self.apm_client:
+                        self.apm_client.end_transaction(workflow.name, 'success')
 
             else:
                 self.log.info("Skipping all workflows since there where no new alerts in the specified time period.")

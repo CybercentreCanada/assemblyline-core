@@ -212,11 +212,13 @@ def save_alert(datastore, counter, logger, alert, psid):
         msg_type = "AlertUpdated"
         perform_alert_update(datastore, logger, alert)
         counter.increment('updated')
+        ret_val = 'update'
     else:
         msg_type = "AlertCreated"
         datastore.alert.save(alert['alert_id'], alert)
         logger.info(f"Alert {alert['alert_id']} has been created.")
         counter.increment('created')
+        ret_val = 'create'
 
     msg = AlertMessage({
         "msg": alert,
@@ -224,6 +226,7 @@ def save_alert(datastore, counter, logger, alert, psid):
         "sender": "alerter"
     })
     CommsQueue('alerts').publish(msg.as_primitives())
+    return ret_val
 
 
 # noinspection PyTypeChecker
@@ -307,4 +310,4 @@ def process_alert_message(counter, datastore, logger, alert_data):
     # Update alert with computed values
     alert = recursive_update(alert, alert_update_p2)
 
-    save_alert(datastore, counter, logger, alert, alert_data['submission']['params']['psid'])
+    return save_alert(datastore, counter, logger, alert, alert_data['submission']['params']['psid'])
