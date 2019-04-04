@@ -63,19 +63,23 @@ class ExpiryManager(ServerBase):
                 number_to_delete = collection.search(delete_query, rows=0, as_obj=False)['total']
 
                 if self.apm_client:
+                    elasticapm.tag(query=delete_query)
                     elasticapm.tag(number_to_delete=number_to_delete)
 
                 self.log.info(f"Processing collection: {collection.name}")
                 if number_to_delete != 0:
                     if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
-                        # Delete associated files
-                        with concurrent.futures.ThreadPoolExecutor(self.config.core.expiry.workers) as executor:
-                            res = {item['id']: executor.submit(self.fs_hashmap[collection.name], item['id'])
-                                   for item in collection.stream_search(delete_query, fl='id', as_obj=False)}
-                        for v in res.values():
-                            v.result()
-                        self.log.info(f'    Deleted associated files from the '
-                                      f'{"cachestore" if "cache" in collection.name else "filestore"}...')
+                        with elasticapm.capture_span(name=f'FILESTORE [ThreadPoolExecutor] :: delete()',
+                                                     tags={"num_files": number_to_delete,
+                                                           "query": delete_query}):
+                            # Delete associated files
+                            with concurrent.futures.ThreadPoolExecutor(self.config.core.expiry.workers) as executor:
+                                res = {item['id']: executor.submit(self.fs_hashmap[collection.name], item['id'])
+                                       for item in collection.stream_search(delete_query, fl='id', as_obj=False)}
+                            for v in res.values():
+                                v.result()
+                            self.log.info(f'    Deleted associated files from the '
+                                          f'{"cachestore" if "cache" in collection.name else "filestore"}...')
 
                     # Proceed with deletion
                     collection.delete_matching(delete_query, workers=self.config.core.expiry.workers)
