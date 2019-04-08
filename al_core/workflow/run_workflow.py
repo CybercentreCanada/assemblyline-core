@@ -93,7 +93,7 @@ class WorkflowManager(ServerBase):
                     # End of transaction
                     if self.apm_client:
                         elasticapm.tag(number_of_workflows=len(workflow_queries))
-                        self.apm_client.end_transaction('loading_workflows', 'failure')
+                        self.apm_client.end_transaction('loading_workflows', 'search_exception')
                     continue
 
                 # End of transaction
@@ -117,6 +117,9 @@ class WorkflowManager(ServerBase):
                     priority = workflow.priority or None
 
                     if not status and not labels and not priority:
+                        # End of transaction
+                        if self.apm_client:
+                            self.apm_client.end_transaction(workflow.name, 'no_action')
                         continue
 
                     fq = ["reporting_ts:[{start_ts} TO {end_ts}]".format(start_ts=self.start_ts, end_ts=end_ts)]
@@ -156,7 +159,7 @@ class WorkflowManager(ServerBase):
 
                         # End of transaction
                         if self.apm_client:
-                            self.apm_client.end_transaction(workflow.name, 'failure')
+                            self.apm_client.end_transaction(workflow.name, 'search_exception')
 
                         continue
 
