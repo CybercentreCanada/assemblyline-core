@@ -1,2 +1,2 @@
 assemblyline
-elastic-apm
+elastic-apm[flask]
