@@ -1,3 +1,5 @@
+
+import baseconv
 import uuid
 import pytest
 
@@ -26,7 +28,7 @@ def redis_connection():
 def test_watcher(redis_connection):
     redis_connection.time = RedisTime()
     redis = redis_connection
-    queue_name = uuid.uuid4().hex
+    queue_name = baseconv.base62.encode(uuid.uuid4().int)
     out_queue = NamedQueue(queue_name, redis)
     try:
         # Create a server and hijack its running flag and the current time in 'redis'

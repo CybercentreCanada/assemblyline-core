@@ -1,3 +1,5 @@
+
+import baseconv
 import uuid
 import time
 
@@ -9,7 +11,7 @@ import dispatch_hash
 def test_single(clean_redis):
     disp = dispatch_hash.DispatchHash('test-disptach-hash', clean_redis)
     try:
-        file_hash = uuid.uuid4().hex
+        file_hash = baseconv.base62.encode(uuid.uuid4().int)
         service = 'service_name'
         result_key = 'some-result'
 

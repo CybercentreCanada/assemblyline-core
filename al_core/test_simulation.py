@@ -3,6 +3,8 @@ A test of ingest+dispatch running in one process.
 
 Needs the datastore and filestore to be running, otherwise these test are stand alone.
 """
+
+import baseconv
 import uuid
 import json
 import hashlib
@@ -99,7 +101,8 @@ class MockService(ServerBase):
             if instructions.get('failure', False):
                 error = Error(instructions['error'])
                 error.sha256 = task.fileinfo.sha256
-                self.dispatch_client.service_failed(task.sid, error=error, error_key=uuid.uuid4().hex)
+                self.dispatch_client.service_failed(task.sid, error=error,
+                                                    error_key=baseconv.base62.encode(uuid.uuid4().int))
                 continue
 
             result_data = {
@@ -117,7 +120,7 @@ class MockService(ServerBase):
             result_data['response'].update(instructions.get('response', {}))
 
             result = Result(result_data)
-            result_key = instructions.get('result_key', uuid.uuid4().hex)
+            result_key = instructions.get('result_key', baseconv.base62.encode(uuid.uuid4().int))
             self.dispatch_client.service_finished(task.sid, result_key, result)
 
 
@@ -203,7 +206,7 @@ def core(request, redis, es_connection, replace_config):
 
 def ready_body(core, body=None):
     out = {
-        'salt': uuid.uuid4().hex,
+        'salt': baseconv.base62.encode(uuid.uuid4().int),
     }
     out.update(body or {})
     out = json.dumps(out).encode()
