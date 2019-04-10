@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 import time
-from threading import RLock
 
+import elasticapm
 import elasticsearch
 import sys
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from threading import RLock
 
 from al_core.metrics.heartbeat_manager import HeartbeatManager
 from al_core.server_base import ServerBase
@@ -17,9 +18,10 @@ from assemblyline.remote.datatypes.counters import MetricCounter
 
 
 class MetricCounterCache(object):
-    def __init__(self, redis, log):
+    def __init__(self, redis, log, apm_client, metrics_type):
+        config = forge.get_config()
         self.scheduler = BackgroundScheduler(daemon=True)
-        self.datastore = forge.get_datastore()
+        self.datastore = forge.get_datastore(config)
         self.metrics_counter_cache = {}
         self.redis = redis
         self.lock = RLock()
@@ -28,8 +30,15 @@ class MetricCounterCache(object):
         self.scheduler.add_job(self._update_metrics_counter_cache, 'interval', seconds=60)
         self.scheduler.start()
 
+        self.apm_client = apm_client
+        self.metrics_type = metrics_type
+
     def _update_metrics_counter_cache(self):
         self.log.info("Reloading metrics cache...")
+        # APM Transaction start
+        if self.apm_client:
+            self.apm_client.begin_transaction(self.metrics_type)
+
         try:
             service_names = list(self.datastore.service_delta.keys())
         except SearchException:
@@ -73,6 +82,10 @@ class MetricCounterCache(object):
 
             self.log.info("Done updating metrics cache.")
 
+        # APM Transaction end
+        if self.apm_client:
+            self.apm_client.end_transaction('update_metrics_cache', 'success')
+
     def get_metrics_counters(self):
         if not self.metrics_counter_cache:
             self._update_metrics_counter_cache()
@@ -81,6 +94,7 @@ class MetricCounterCache(object):
 
     def get_lock(self):
         return self.lock
+
 
 class HashMapMetricsServer(ServerBase):
     def __init__(self, config=None):
@@ -100,10 +114,24 @@ class HashMapMetricsServer(ServerBase):
             private=False,
         )
         self.es = elasticsearch.Elasticsearch(hosts=self.elastic_hosts)
-        self.mcc = MetricCounterCache(self.redis, self.log)
+
+        self.metrics_type = 'metrics'
+        if self.config.core.metrics.apm_server.server_url is not None:
+            self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
+            elasticapm.instrument()
+            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
+                                                service_name="metrics_aggregator")
+        else:
+            self.apm_client = None
+
+        self.mcc = MetricCounterCache(self.redis, self.log, self.apm_client, self.metrics_type)
 
     def try_run(self):
         while self.running:
+            # APM Transaction start
+            if self.apm_client:
+                self.apm_client.begin_transaction(self.metrics_type)
+
             start = time.time()
             timestamp = epoch_to_iso(start)
 
@@ -136,6 +164,11 @@ class HashMapMetricsServer(ServerBase):
             next_run = max(60 - (time.time()-start), 1)
 
             self.log.info(f"Metrics aggregated. Waiting for next run in {int(next_run)} seconds...")
+
+            # APM Transaction end
+            if self.apm_client:
+                self.apm_client.end_transaction('aggregate_metrics', 'success')
+
             time.sleep(next_run)
 
 
@@ -149,11 +182,26 @@ class HashMapHeartbeatManager(ServerBase):
             port=self.config.core.redis.nonpersistent.port,
             private=False,
         )
-        self.mcc = MetricCounterCache(self.redis, self.log)
+
         self.hm = HeartbeatManager("hashmap_heartbeat_manager", self.log, config=self.config, redis=self.redis)
+
+        self.metrics_type = 'heartbeat'
+        if self.config.core.metrics.apm_server.server_url is not None:
+            self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
+            elasticapm.instrument()
+            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
+                                                service_name="heartbeat_manager")
+        else:
+            self.apm_client = None
+
+        self.mcc = MetricCounterCache(self.redis, self.log, self.apm_client, self.metrics_type)
 
     def try_run(self):
         while self.running:
+            # APM Transaction start
+            if self.apm_client:
+                self.apm_client.begin_transaction(self.metrics_type)
+
             start = time.time()
 
             self.log.info("Generating heartbeats ...")
@@ -163,14 +211,20 @@ class HashMapHeartbeatManager(ServerBase):
                     minstances = 1
 
                     mtype, mname = counter_meta
-                    hb_metrics = {}
-                    hb_metrics.update({
-                        ct_name: ct.read()
-                        for ct_name, ct in counters.items()
-                    })
+                    with elasticapm.capture_span(name=f"{mtype}.{mname}", span_type="send_heartbeat"):
+                        hb_metrics = {}
+                        hb_metrics.update({
+                            ct_name: ct.read()
+                            for ct_name, ct in counters.items()
+                        })
 
-                    self.hm.send_heartbeat(mtype, mname, hb_metrics, minstances)
+                        self.hm.send_heartbeat(mtype, mname, hb_metrics, minstances)
 
             # Run exactly every "export_interval" seconds so we have to remove our execution time from our sleep
             next_run = max(self.config.core.metrics.export_interval - (time.time()-start), 1)
+
+            # APM Transaction end
+            if self.apm_client:
+                self.apm_client.end_transaction('send_heartbeats', 'success')
+
             time.sleep(next_run)

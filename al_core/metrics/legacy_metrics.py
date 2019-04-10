@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import time
 
+import elasticapm
 import elasticsearch
 import sys
 import copy
@@ -16,6 +17,7 @@ from assemblyline.common import forge, metrics
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
 METRICS_QUEUE = "assemblyline_metrics"
+
 
 def cleanup_metrics(input_dict):
     output_dict = {}
@@ -63,6 +65,14 @@ class LegacyMetricsServer(ServerBase):
         self.counters_lock = Lock()
         self.counters = {}
 
+        if self.config.core.metrics.apm_server.server_url is not None:
+            self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
+            elasticapm.instrument()
+            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
+                                                service_name="legacy_metrics_aggregator")
+        else:
+            self.apm_client = None
+
     def try_run(self):
         self.metrics_queue = CommsQueue(METRICS_QUEUE)
         self.es = elasticsearch.Elasticsearch(hosts=self.elastic_hosts)
@@ -72,6 +82,10 @@ class LegacyMetricsServer(ServerBase):
 
         while self.running:
             for msg in self.metrics_queue.listen():
+                # APM Transaction start
+                if self.apm_client:
+                    self.apm_client.begin_transaction('metrics')
+
                 m_name = msg.pop('name', None)
                 m_type = msg.pop('type', None)
                 msg.pop('host', None)
@@ -79,6 +93,10 @@ class LegacyMetricsServer(ServerBase):
 
                 self.log.debug(f"Received {m_type.upper()} metrics message")
                 if not m_name or not m_type:
+                    # APM Transaction end
+                    if self.apm_client:
+                        self.apm_client.end_transaction('process_message', 'invalid_message')
+
                     continue
 
                 with self.counters_lock:
@@ -88,8 +106,16 @@ class LegacyMetricsServer(ServerBase):
                     else:
                         self.counters[c_key] += Counter(msg)
 
+                # APM Transaction end
+                if self.apm_client:
+                    self.apm_client.end_transaction('process_message', 'success')
+
     def _create_aggregated_metrics(self):
         self.log.info("Copying counters ...")
+        # APM Transaction start
+        if self.apm_client:
+            self.apm_client.begin_transaction('metrics')
+
         with self.counters_lock:
             counter_copy = copy.deepcopy(self.counters)
             self.counters = {}
@@ -122,6 +148,10 @@ class LegacyMetricsServer(ServerBase):
 
         self.log.info("Metrics aggregated. Waiting for next run...")
 
+        # APM Transaction end
+        if self.apm_client:
+            self.apm_client.end_transaction('aggregate_metrics', 'success')
+
 
 # noinspection PyBroadException
 class LegacyHeartbeatManager(ServerBase):
@@ -140,12 +170,24 @@ class LegacyHeartbeatManager(ServerBase):
             self.log.warning("Cannot calculate a proper window size for reporting heartbeats. "
                              "Metrics reported during hearbeat will be wrong.")
 
+        if self.config.core.metrics.apm_server.server_url is not None:
+            self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
+            elasticapm.instrument()
+            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
+                                                service_name="legacy_heartbeat_manager")
+        else:
+            self.apm_client = None
+
     def try_run(self):
         self.scheduler.add_job(self._export_hearbeats, 'interval', seconds=self.config.core.metrics.export_interval)
         self.scheduler.start()
 
         while self.running:
             for msg in self.metrics_queue.listen():
+                # APM Transaction start
+                if self.apm_client:
+                    self.apm_client.begin_transaction('heartbeat')
+
                 m_name = msg.pop('name', None)
                 m_type = msg.pop('type', None)
                 m_host = msg.pop('host', None)
@@ -153,6 +195,10 @@ class LegacyHeartbeatManager(ServerBase):
 
                 self.log.debug(f"Received {m_type.upper()} metrics message")
                 if not m_name or not m_type:
+                    # APM Transaction end
+                    if self.apm_client:
+                        self.apm_client.end_transaction('process_message', 'invalid_message')
+
                     continue
 
                 w_key = (m_name, m_type, m_host)
@@ -163,9 +209,17 @@ class LegacyHeartbeatManager(ServerBase):
 
                 self.window_ttl[w_key] = time.time() + self.ttl
 
+                # APM Transaction end
+                if self.apm_client:
+                    self.apm_client.end_transaction('process_message', 'success')
+
     def _export_hearbeats(self):
         try:
             self.log.info("Expiring unused counters...")
+            # APM Transaction start
+            if self.apm_client:
+                self.apm_client.begin_transaction('heartbeat')
+
             c_time = time.time()
             for k in list(self.window_ttl.keys()):
                 if self.window_ttl.get(k, c_time) < c_time:
@@ -207,17 +261,22 @@ class LegacyHeartbeatManager(ServerBase):
             self.log.info("Generating heartbeats...")
             for aggregated_parts, counter in aggregated_counters.items():
                 agg_c_name, agg_c_type = aggregated_parts
-                allowed_fields = metrics.METRIC_TYPES[agg_c_type] + ['instances']
+                with elasticapm.capture_span(name=f"{agg_c_type}.{agg_c_name}", span_type="send_heartbeat"):
+                    allowed_fields = metrics.METRIC_TYPES[agg_c_type] + ['instances']
 
-                if agg_c_type not in metrics.TIMED_METRICS:
-                    metrics_data = {k: counter.get(k, 0) for k in allowed_fields}
-                else:
-                    metrics_data = {k: counter.get(k + ".t", 0) / counter.get(k + ".c", 1) for k in allowed_fields}
-                    metrics_data.update({k + "_count": counter.get(k + ".c", 0) for k in allowed_fields})
+                    if agg_c_type not in metrics.TIMED_METRICS:
+                        metrics_data = {k: counter.get(k, 0) for k in allowed_fields}
+                    else:
+                        metrics_data = {k: counter.get(k + ".t", 0) / counter.get(k + ".c", 1) for k in allowed_fields}
+                        metrics_data.update({k + "_count": counter.get(k + ".c", 0) for k in allowed_fields})
 
-                agg_c_instances = metrics_data.pop('instances')
-                metrics_data.pop('instances_count')
-                self.hm.send_heartbeat(agg_c_type, agg_c_name, metrics_data, agg_c_instances)
+                    agg_c_instances = metrics_data.pop('instances', 1)
+                    metrics_data.pop('instances_count', None)
+                    self.hm.send_heartbeat(agg_c_type, agg_c_name, metrics_data, agg_c_instances)
+
+            # APM Transaction end
+            if self.apm_client:
+                self.apm_client.end_transaction('send_heartbeats', 'success')
 
         except Exception:
             self.log.exception("Unknown exception occurred during heartbeat creation:")

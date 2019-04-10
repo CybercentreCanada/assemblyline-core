@@ -8,10 +8,9 @@ from assemblyline.common.metrics import MetricsFactory
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
-
-
 ALERT_QUEUE_NAME = 'm-alert'
 MAX_RETRIES = 10
+
 
 class Alerter(ServerBase):
     def __init__(self):
