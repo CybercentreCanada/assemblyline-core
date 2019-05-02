@@ -2,6 +2,7 @@
 import baseconv
 import uuid
 import pytest
+import redis.exceptions
 
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
@@ -19,7 +20,7 @@ def redis_connection():
         ret_val = c.ping()
         if ret_val:
             return c
-    except ConnectionError:
+    except redis.exceptions.ConnectionError:
         pass
 
     return pytest.skip("Connection to the Redis server failed. This test cannot be performed...")
