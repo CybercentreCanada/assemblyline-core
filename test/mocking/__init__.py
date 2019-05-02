@@ -3,7 +3,7 @@ import time
 import pytest
 import fakeredis
 
-from .datastore import MockDatastore
+from .datastore import MockDatastore, MockCollection
 
 
 class MockFactory:

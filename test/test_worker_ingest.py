@@ -1,19 +1,15 @@
-
-import json
 import pytest
 from unittest import mock
 import time
 
+from assemblyline.datastore.helper import AssemblylineDatastore
+from assemblyline.remote.datatypes.counters import MetricCounter
 
 from al_core.ingester.run_ingest import IngesterInput
 from al_core.ingester.ingester import IngestTask
-from assemblyline.remote.datatypes.counters import MetricCounter
 from al_core.submission_client import SubmissionClient
 
-from al_core.mocking.datastore import MockDatastore
-from assemblyline.datastore.helper import AssemblylineDatastore
-
-from al_core.mocking import clean_redis, TrueCountTimes
+from .mocking import MockDatastore, TrueCountTimes, clean_redis
 
 
 def make_message(message=None, files=None, params=None):

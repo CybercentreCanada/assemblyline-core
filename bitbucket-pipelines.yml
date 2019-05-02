@@ -3,27 +3,85 @@ image: python:3.6
 
 options:
   max-time: 10
+
 pipelines:
   default:
-    - step:
-        caches:
-          - pip
-        script:
-          - apt update
-          - apt install -y build-essential libffi-dev libfuzzy-dev python3-dev
-          - git clone git@bitbucket.org:cse-assemblyline/alv4.git /tmp/assemblyline/
-          - cd /tmp/assemblyline
-          - mkdir -p /etc/assemblyline/
-          - mkdir -p /var/cache/assemblyline/
-          - cp test/bitbucket/config.yml /etc/assemblyline
-          - pip install .
-          - pip install -r test/requirements.txt
-          - cd -
-          - pip install -r requirements.txt test-requirements.txt
-          - pytest -rsx -vv
-        services:
-          - redis
-          - elasticsearch
+    - parallel:
+      - step:
+          name: Build & Test 3.6
+          image: python:3.6
+          caches: [pip]
+          services: [redis, elasticsearch]
+          script: &build_test
+            - apt update
+            - apt install -y build-essential libffi-dev libfuzzy-dev python3-dev
+            - pip install assemblyline
+            - mkdir -p /etc/assemblyline/
+            - mkdir -p /var/cache/assemblyline/
+            - cp test/bitbucket/config.yml /etc/assemblyline
+            - pip install -e .
+            - pytest -rsx -vv
+      - step:
+          name: Build & Test 3.7
+          image: python:3.7
+          caches: [pip]
+          services: [redis, elasticsearch]
+          script: *build_test
+      - step:
+          name: Build & Test 3.8
+          image: python:3.8
+          caches: [pip]
+          services: [redis, elasticsearch]
+          script: *build_test
+
+  tags:
+    v*:
+      - step:
+          name: Build Package
+          image: python:3.6
+          script:
+            - pip install wheel
+            - python setup.py bdist_wheel --universal
+            - ls dist/
+          artifacts:
+            - dist/*
+      - parallel:
+        - step:
+            name: Test 3.6
+            image: python:3.6
+            script: &deploy_test
+              - rm -rf al_core setup.py
+              - apt update
+              - apt install -y build-essential libffi-dev libfuzzy-dev python3-dev
+              - pip install -f dist assemblyline-core
+              - pytest -rsx -vv
+        - step:
+            name: Test 3.7
+            image: python:3.7
+            script: *deploy_test
+        - step:
+            name: Test 3.8
+            image: python:3.8
+            script: *deploy_test
+      - step:
+          name: Deploy to Test PyPI
+          image: python:3.6
+          deployment: test
+          script:
+            - pip install twine
+            - python setup.py sdist
+            - ls dist
+            - twine upload --skip-existing --repository-url $TEST_REPOSITORY_URL dist/*
+      - step:
+          name: Deploy to PyPI
+          image: python:3.6
+          trigger: manual
+          deployment: production
+          script:
+            - pip install twine
+            - python setup.py sdist
+            - ls dist
+            - twine upload dist/*
 
 definitions:
   services:

@@ -6,7 +6,7 @@ import redis.exceptions
 
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
-from al_core.mocking import ToggleTrue, RedisTime
+from test.mocking import ToggleTrue, RedisTime
 
 from al_core.watcher import WatcherClient
 from al_core.watcher.run_watcher import WatcherServer

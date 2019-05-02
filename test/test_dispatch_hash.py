@@ -3,8 +3,8 @@ import baseconv
 import uuid
 import time
 
-from al_core.mocking import clean_redis
 from al_core.dispatching import dispatch_hash
+from .mocking import clean_redis
 
 
 def test_single(clean_redis):

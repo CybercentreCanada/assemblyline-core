@@ -16,7 +16,6 @@ import fakeredis
 from unittest import mock
 from typing import List
 
-from al_core.mocking.datastore import MockCollection
 from assemblyline.common import forge, identify
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.isotime import now_as_iso
@@ -31,8 +30,7 @@ from assemblyline.odm.messages.submission import Submission as SubmissionInput
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from al_core.dispatching.client import DispatchClient
-from al_core.dispatching.dispatcher import service_queue_name, ServiceTask
-from al_core.submission_client import SubmissionClient
+from al_core.dispatching.dispatcher import service_queue_name
 from al_core.ingester.ingester import IngestTask
 from al_core.watcher import WatcherServer
 
@@ -45,8 +43,9 @@ from al_core.dispatching.run_submissions import SubmissionDispatchServer
 
 from al_core.server_base import ServerBase
 
-from al_core.mocking import RedisTime, MockDatastore
-from al_core.dispatching.test_scheduler import dummy_service
+
+from .mocking import MockCollection, RedisTime
+from .test_scheduler import dummy_service
 
 
 @pytest.fixture(scope='module')
@@ -276,8 +275,8 @@ def test_deduplication(core):
         )).as_primitives())
 
     notification_queue = NamedQueue('1', core.redis)
-    first_task = notification_queue.pop(timeout=500)
-    second_task = notification_queue.pop(timeout=500)
+    first_task = notification_queue.pop(timeout=5)
+    second_task = notification_queue.pop(timeout=5)
 
     # One of the submission will get processed fully
     assert first_task is not None

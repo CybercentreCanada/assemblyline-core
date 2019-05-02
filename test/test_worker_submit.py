@@ -7,12 +7,12 @@ from assemblyline.odm.models.submission import SubmissionParams
 from assemblyline.odm.models.filescore import FileScore
 from assemblyline.remote.datatypes.counters import MetricCounter
 
-from .test_worker_ingest import AssemblylineDatastore, MockDatastore
 from al_core.ingester.run_submit import IngesterSubmitter
 from al_core.ingester.ingester import IngestTask, _dup_prefix
 from al_core.submission_client import SubmissionClient
 
-from al_core.mocking import clean_redis, TrueCountTimes
+from .test_worker_ingest import AssemblylineDatastore
+from .mocking import TrueCountTimes, MockDatastore, clean_redis
 
 
 @pytest.fixture

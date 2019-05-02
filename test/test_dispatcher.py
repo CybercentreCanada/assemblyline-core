@@ -1,18 +1,17 @@
 import logging
 from unittest import mock
-from easydict import EasyDict
 
 import assemblyline.odm.models.file
 import assemblyline.odm.models.submission
-from assemblyline.odm.models.result import Result
 from assemblyline.odm.randomizer import random_model_obj
 from assemblyline.odm import models
 from assemblyline.common.metrics import MetricsFactory
 
 from al_core.dispatching.scheduler import Scheduler as RealScheduler
 from al_core.dispatching.dispatcher import Dispatcher, DispatchHash, service_queue_name, FileTask, NamedQueue, SubmissionTask
-from al_core.mocking import MockDatastore, clean_redis
-from al_core.dispatching.test_scheduler import dummy_service
+
+from .mocking import MockDatastore, clean_redis
+from .test_scheduler import dummy_service
 
 
 

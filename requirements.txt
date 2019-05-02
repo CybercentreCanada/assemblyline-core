@@ -1,3 +1,7 @@
-python-baseconv
+# Used in non test files
 assemblyline
+python-baseconv
 elastic-apm[flask]
+
+# Only used in test files
+fakeredis[lua]
