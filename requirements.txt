@@ -5,3 +5,4 @@ elastic-apm[flask]
 
 # Only used in test files
 fakeredis[lua]
+pytest

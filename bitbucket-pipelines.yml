@@ -19,6 +19,7 @@ pipelines:
             - mkdir -p /etc/assemblyline/
             - mkdir -p /var/cache/assemblyline/
             - cp test/bitbucket/config.yml /etc/assemblyline
+            - pip install -r requirements.txt
             - pip install -e .
             - pytest -rsx -vv
       - step:
