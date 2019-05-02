@@ -147,14 +147,14 @@ class DispatchClient:
         # Store the result object and mark the service finished in the global table
         process_table = DispatchHash(task.sid, self.redis)
         remaining = process_table.finish(task.fileinfo.sha256, task.service_name, result_key,
-                                         result.result.score, result.drop_file)
+                                         result.result.score, result.classification, result.drop_file)
 
         # Send the extracted files to the dispatcher
         depth_limit = self.config.submission.max_extraction_depth
         new_depth = task.depth + 1
         if new_depth < depth_limit:
             for extracted_data in result.response.extracted:
-                if not process_table.add_file(extracted_data.sha256, task.max_files):
+                if not process_table.add_file(extracted_data.sha256, task.max_files, parent_hash=task.fileinfo.sha256):
                     self._dispatching_error(task, process_table, Error({
                         'expiry_ts': result.expiry_ts,
                         'response': {
@@ -162,6 +162,7 @@ class DispatchClient:
                                        f"{extracted_data.sha256} extracted by "
                                        f"{task.service_name} will be dropped",
                             'service_name': 'dispatcher',
+                            'service_tool_version': '0',
                             'service_version': '0',  # TODO what values actually make sense for service_*
                             'status': 'FAIL_NONRECOVERABLE'
                         },
@@ -193,6 +194,7 @@ class DispatchClient:
                         'message': f"{task.service_name} has extracted a file "
                                    f"{extracted_data.sha256} beyond the depth limits",
                         'service_name': 'dispatcher',
+                        'service_tool_version': '0',
                         'service_version': '0',  # TODO what values actually make sense for service_*
                         'status': 'FAIL_NONRECOVERABLE'
                     },

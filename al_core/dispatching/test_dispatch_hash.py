@@ -4,8 +4,7 @@ import uuid
 import time
 
 from al_core.mocking import clean_redis
-import dispatch_hash
-
+from al_core.dispatching import dispatch_hash
 
 
 def test_single(clean_redis):
@@ -42,12 +41,12 @@ def test_single(clean_redis):
         assert not disp.all_finished()
 
         # Success rather than failure
-        disp.finish(file_hash, service, result_key, 0)
+        disp.finish(file_hash, service, result_key, 0, "U")
         assert disp.dispatch_time(file_hash, service) == 0
         assert disp.dispatch_count() == 0
         assert disp.finished_count() == 1
         assert disp.all_finished()
-        assert disp.finished(file_hash, service) == dispatch_hash.DispatchRow('result', result_key, 0, False)
+        assert disp.finished(file_hash, service) == dispatch_hash.DispatchRow('result', result_key, 0, False, 'U')
         assert disp.all_finished()
 
     finally:

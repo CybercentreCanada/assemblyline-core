@@ -1,8 +1,6 @@
 import time
 
-
 import pytest
-import birdisle.redis
 import fakeredis
 
 from .datastore import MockDatastore

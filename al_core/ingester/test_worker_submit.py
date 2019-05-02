@@ -17,7 +17,7 @@ from al_core.mocking import clean_redis, TrueCountTimes
 
 @pytest.fixture
 @mock.patch('al_core.ingester.ingester.SubmissionClient', new=mock.MagicMock(spec=SubmissionClient))
-@mock.patch('al_core.ingester.ingester.MetricCounter', new=mock.MagicMock(spec=MetricCounter))
+@mock.patch('al_core.ingester.ingester.MetricsFactory', new=mock.MagicMock(spec=MetricCounter))
 def submit_harness(clean_redis):
     """Setup a test environment just file for the ingest tests"""
     datastore = AssemblylineDatastore(MockDatastore())

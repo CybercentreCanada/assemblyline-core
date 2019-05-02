@@ -7,6 +7,7 @@ Needs the datastore and filestore to be running, otherwise these test are stand 
 import baseconv
 import uuid
 import json
+import time
 import hashlib
 from tempfile import NamedTemporaryFile
 
@@ -17,6 +18,7 @@ from typing import List
 
 from al_core.mocking.datastore import MockCollection
 from assemblyline.common import forge, identify
+from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.datastore.stores.es_store import ESStore
@@ -26,7 +28,6 @@ from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.messages.submission import Submission as SubmissionInput
-from assemblyline.remote.datatypes.counters import MetricCounter
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from al_core.dispatching.client import DispatchClient
@@ -109,11 +110,13 @@ class MockService(ServerBase):
                 'classification': 'U',
                 'response': {
                     'service_version': '0',
+                    'service_tool_version': '0',
                     'service_name': self.service_name,
                 },
                 'result': {
                 },
-                'sha256': task.fileinfo.sha256
+                'sha256': task.fileinfo.sha256,
+                'expiry_ts': time.time() + 600
             }
 
             result_data.update(instructions.get('result', {}))
@@ -150,12 +153,12 @@ class CoreSession:
 
 
 def make_magic(*_, **__):
-    return mock.MagicMock(spec=MetricCounter)
+    return mock.MagicMock(spec=MetricsFactory)
 
 
 @pytest.fixture(scope='module')
-@mock.patch('al_core.ingester.ingester.MetricCounter', new=make_magic)
-@mock.patch('al_core.dispatching.dispatcher.MetricCounter', new=make_magic)
+@mock.patch('al_core.ingester.ingester.MetricsFactory', new=make_magic)
+@mock.patch('al_core.dispatching.dispatcher.MetricsFactory', new=make_magic)
 def core(request, redis, es_connection, replace_config):
     from assemblyline.common import log as al_log
     al_log.init_logging("simulation")
@@ -182,15 +185,21 @@ def core(request, redis, es_connection, replace_config):
     fields.ingest_queue = ingester_input_thread.ingester.ingest_queue
 
     ds.ds.service = MockCollection(Service)
-    ds.service.save('pre', dummy_service('pre', 'EXTRACT'))
+    ds.ds.service_delta = MockCollection(Service)
+    ds.service.save('pre_0', dummy_service('pre', 'EXTRACT'))
+    ds.service_delta.save('pre', dummy_service('pre', 'EXTRACT'))
+
     threads.append(MockService('pre', ds, redis, filestore))
     fields.pre_service = threads[-1]
-    ds.service.save('core-a', dummy_service('core-a', 'CORE'))
+    ds.service.save('core-a_0', dummy_service('core-a', 'CORE'))
+    ds.service_delta.save('core-a', dummy_service('core-a', 'CORE'))
     threads.append(MockService('core-a', ds, redis, filestore))
-    ds.service.save('core-b', dummy_service('core-b', 'CORE'))
+    ds.service.save('core-b_0', dummy_service('core-b', 'CORE'))
+    ds.service_delta.save('core-b', dummy_service('core-b', 'CORE'))
     threads.append(MockService('core-b', ds, redis, filestore))
-    ds.service.save('post', dummy_service('finish', 'POST'))
-    threads.append(MockService('post', ds, redis, filestore))
+    ds.service.save('finish_0', dummy_service('finish', 'POST'))
+    ds.service_delta.save('finish', dummy_service('finish', 'POST'))
+    threads.append(MockService('finish', ds, redis, filestore))
 
     for t in threads:
         t.daemon = True
@@ -267,8 +276,8 @@ def test_deduplication(core):
         )).as_primitives())
 
     notification_queue = NamedQueue('1', core.redis)
-    first_task = notification_queue.pop(timeout=5)
-    second_task = notification_queue.pop(timeout=5)
+    first_task = notification_queue.pop(timeout=500)
+    second_task = notification_queue.pop(timeout=500)
 
     # One of the submission will get processed fully
     assert first_task is not None
@@ -307,6 +316,7 @@ def test_deduplication(core):
 
     notification_queue = NamedQueue('2', core.redis)
     third_task = notification_queue.pop(timeout=5)
+    assert third_task
 
     # The third task should not be deduplicated by ingester, so will have a different submission
     third_task = IngestTask(third_task)
@@ -399,8 +409,10 @@ def test_service_error(core):
                     'message': 'words',
                     'status': 'FAIL_NONRECOVERABLE',
                     'service_name': 'core-a',
+                    'service_tool_version': 0,
                     'service_version': '0'
                 },
+                'expiry_ts': time.time() + 500
             },
             'failure': True,
         }
@@ -456,7 +468,9 @@ def test_extracted_file(core):
     )).as_primitives())
 
     notification_queue = NamedQueue('nq-text-extracted-file', core.redis)
-    task = IngestTask(notification_queue.pop(timeout=5))
+    task = notification_queue.pop(timeout=5)
+    assert task
+    task = IngestTask(task)
     sub = core.ds.submission.get(task.submission.sid)
     assert len(sub.files) == 1
     assert len(sub.results) == 8
@@ -567,16 +581,12 @@ def test_max_extracted_in_several(core):
 
 
 def test_caching(core: CoreSession):
-    misses = core.ingest.ingester.cache_miss_counter.increment
-    local_hits = core.ingest.ingester.cache_local_hit_counter.increment
-    remote_hits = core.ingest.ingester.cache_hit_counter.increment
+    counter = core.ingest.ingester.counter.increment
 
     sha, size = ready_body(core)
 
     def run_once():
-        misses.reset_mock()
-        local_hits.reset_mock()
-        remote_hits.reset_mock()
+        counter.reset_mock()
 
         core.ingest_queue.push(SubmissionInput(dict(
             metadata={},
@@ -610,20 +620,20 @@ def test_caching(core: CoreSession):
         return first_submission.sid
 
     sid1 = run_once()
-    misses.assert_called_once()
-    local_hits.assert_not_called()
-    remote_hits.assert_not_called()
+    assert (('cache_miss',), {}) in counter.call_args_list
+    assert (('cache_hit_local',), {}) not in counter.call_args_list
+    assert (('cache_hit',), {}) not in counter.call_args_list
 
     sid2 = run_once()
-    misses.assert_not_called()
-    local_hits.assert_called_once()
-    remote_hits.assert_not_called()
+    assert (('cache_miss',), {}) not in counter.call_args_list
+    assert (('cache_hit_local',), {}) in counter.call_args_list
+    assert (('cache_hit',), {}) not in counter.call_args_list
     assert sid1 == sid2
 
     core.ingest.ingester.cache = {}
 
     sid3 = run_once()
-    misses.assert_not_called()
-    local_hits.assert_not_called()
-    remote_hits.assert_called_once()
+    assert (('cache_miss',), {}) not in counter.call_args_list
+    assert (('cache_hit_local',), {}) not in counter.call_args_list
+    assert (('cache_hit',), {}) in counter.call_args_list
     assert sid1 == sid3

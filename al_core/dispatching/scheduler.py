@@ -118,14 +118,3 @@ class Scheduler:
 
     def _get_services(self):
         return {x.name: x for x in self.datastore.list_all_services(full=True) if x.enabled}
-
-    # def build_service_config(self, service_name, submission):
-    #     """
-    #     Determine the parameter mapping for a service.
-    #
-    #     Combine the default and submission specific service parameters to
-    #     produce the final configuration for this submission.
-    #     """
-    #     params = dict(self.services[service_name].params)
-    #     params.update(submission.params.service_spec.get(service_name, {}))
-    #     return params

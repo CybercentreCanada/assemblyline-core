@@ -34,35 +34,58 @@ return redis.call('hlen', sid .. '{dispatch_tail}')
 """
 
 
-class DispatchRow(collections.namedtuple('DispatchRow', ['bucket', 'key', 'score', 'drop'])):
+class DispatchRow(collections.namedtuple('DispatchRow', ['bucket', 'key', 'score', 'drop', 'classification'])):
     @property
     def is_error(self):
         return self.bucket == 'error'
 
 
 class DispatchHash:
-    def __init__(self, sid: str, client: Union[Redis, StrictRedis]):
+    def __init__(self, sid: str, client: Union[Redis, StrictRedis], fetch_results=False):
+        """
+
+        :param sid:
+        :param client:
+        :param fetch_results: Preload all the results on the redis server.
+        """
         self.client = client
         self.sid = sid
         self._dispatch_key = f'{sid}{dispatch_tail}'
         self._finish_key = f'{sid}{finished_tail}'
         self._finish = self.client.register_script(finish_script)
+
+        # cache the schedules calculated for the dispatcher, used to prevent rebuilding the
+        # schedule repeatedly, and for telling the UI what services are pending
         self.schedules = ExpiringHash(f'dispatch-hash-schedules-{sid}', host=self.client)
+
         # The set of files that are included in this submission, this set is used primarily for
         # enforcing max file per submission constraints
-        self._files = ExpiringHash(f'dispatch-hash-files-{sid}', host=self.client)
-        self._cached_files = set(self._files.keys())
+        self._outstanding_service_count = ExpiringHash(f'dispatch-hash-files-{sid}', host=self.client)
+        self._file_tree = ExpiringSet(f'dispatch-hash-parents-{sid}', host=self.client)
+
+        # Local caches for _files and finished table
+        self._cached_files = set(self._outstanding_service_count.keys())
+        self._cached_results = dict()
+        if fetch_results:
+            self._cached_results = self.all_results()
+
         # Errors that are related to a submission, but not the terminal errors of a service
         self._other_errors = ExpiringSet(f'dispatch-hash-errors-{sid}', host=self.client)
+
         # TODO set these expire times from the global time limit for submissions
         retry_call(self.client.expire, self._dispatch_key, 60*60)
         retry_call(self.client.expire, self._finish_key, 60*60)
 
-    def add_file(self, file_hash: str, file_limit) -> bool:
+    def add_file(self, file_hash: str, file_limit, parent_hash) -> bool:
         """Add a file to a submission.
 
         Returns: Whether the file could be added to the submission or has been rejected.
         """
+        if parent_hash:
+            self._file_tree.add(f'{file_hash}-{parent_hash}')
+        else:
+            self._file_tree.add(file_hash)
+
         # If it was already in the set, we don't need to check remotely
         if file_hash in self._cached_files:
             return True
@@ -75,7 +98,7 @@ class DispatchHash:
         # 0 => already exists, still want to return true
         # 1 => didn't exist before
         # None => over size limit, return false
-        if self._files.limited_add(file_hash, 0, file_limit) is not None:
+        if self._outstanding_service_count.limited_add(file_hash, 0, file_limit) is not None:
             # If it was added, add it to the local cache so we don't need to check again
             self._cached_files.add(file_hash)
             return True
@@ -93,7 +116,7 @@ class DispatchHash:
     def dispatch(self, file_hash: str, service: str):
         """Mark that a service has been dispatched for the given sha."""
         if retry_call(self.client.hset, self._dispatch_key, f"{file_hash}-{service}", time.time()):
-            self._files.increment(file_hash, 1)
+            self._outstanding_service_count.increment(file_hash, 1)
 
     def dispatch_count(self):
         """How many tasks have been dispatched for this submission."""
@@ -106,6 +129,19 @@ class DispatchHash:
             return 0
         return float(result)
 
+    def all_dispatches(self) -> Dict[str, Dict[str, float]]:
+        """Load the entire table of things that should currently be running."""
+        rows = retry_call(self.client.hgetall, self._dispatch_key)
+        output = {}
+        for key, timestamp in rows.items():
+            file_hash, service = key.split(b'-', maxsplit=1)
+            file_hash = file_hash.decode()
+            service = service.decode()
+            if file_hash not in output:
+                output[file_hash] = {}
+            output[file_hash][service] = float(timestamp)
+        return output
+
     def fail_recoverable(self, file_hash: str, service: str, error_key: str = None):
         """A service task has failed, but should be retried, clear that it has been dispatched.
 
@@ -115,23 +151,25 @@ class DispatchHash:
         if error_key:
             self._other_errors.add(error_key)
         retry_call(self.client.hdel, self._dispatch_key, f"{file_hash}-{service}")
-        self._files.increment(file_hash, -1)
+        self._outstanding_service_count.increment(file_hash, -1)
 
     def fail_nonrecoverable(self, file_hash: str, service, error_key) -> int:
         """A service task has failed and should not be retried, entry the error as the result.
 
         Has exactly the same semantics as `finish` but for errors.
         """
-        return retry_call(self._finish, args=[self.sid, file_hash, service, json.dumps(['error', error_key, 0, False])])
+        return retry_call(self._finish, args=[self.sid, file_hash, service,
+                                              json.dumps(['error', error_key, 0, False, ''])])
 
-    def finish(self, file_hash, service, result_key, score, drop=False) -> int:
+    def finish(self, file_hash, service, result_key, score, classification, drop=False) -> int:
         """
         As a single transaction:
          - Remove the service from the dispatched list
          - Add the file to the finished list, with the given result key
          - return the number of items in the dispatched list
         """
-        return retry_call(self._finish, args=[self.sid, file_hash, service, json.dumps(['result', result_key, score, drop])])
+        return retry_call(self._finish, args=[self.sid, file_hash, service,
+                                              json.dumps(['result', result_key, score, drop, str(classification)])])
 
     def finished_count(self) -> int:
         """How many tasks have been finished for this submission."""
@@ -139,6 +177,11 @@ class DispatchHash:
 
     def finished(self, file_hash, service) -> Union[DispatchRow, None]:
         """If a service has been finished, return the key of the result document."""
+        # Try the local cache
+        result = self._cached_results.get(file_hash, {}).get(service, None)
+        if result:
+            return result
+        # Try the server
         result = retry_call(self.client.hget, self._finish_key, f"{file_hash}-{service}")
         if result:
             return DispatchRow(*json.loads(result))
@@ -151,12 +194,14 @@ class DispatchHash:
     def all_results(self) -> Dict[str, Dict[str, DispatchRow]]:
         """Get all the records stored in the dispatch table.
 
-        :return: outpu[file_hash][service_name] -> DispatchRow
+        :return: output[file_hash][service_name] -> DispatchRow
         """
         rows = retry_call(self.client.hgetall, self._finish_key)
         output = {}
         for key, status in rows.items():
             file_hash, service = key.split(b'-', maxsplit=1)
+            file_hash = file_hash.decode()
+            service = service.decode()
             if file_hash not in output:
                 output[file_hash] = {}
             output[file_hash][service] = DispatchRow(*json.loads(status))
@@ -167,12 +212,31 @@ class DispatchHash:
         return self._other_errors.members()
 
     def all_files(self):
-        return self._files.keys()
+        return self._outstanding_service_count.keys()
+
+    def file_tree(self):
+        """Returns a mapping from file, to a list of files that are that file's parents.
+
+        A none value being in the list indicates that the file is one of the root files of the submission.
+        """
+        edges = self._file_tree.members()
+        output = {}
+        for string in edges:
+            if '-' in string:
+                child, parent = string.split('-')
+            else:
+                child, parent = string, None
+
+            if child not in output:
+                output[child] = []
+            output[child].append(parent)
+        return output
 
     def delete(self):
         """Clear the tables from the redis server."""
         retry_call(self.client.delete, self._dispatch_key)
         retry_call(self.client.delete, self._finish_key)
         self.schedules.delete()
-        self._files.delete()
+        self._outstanding_service_count.delete()
+        self._file_tree.delete()
         self._other_errors.delete()

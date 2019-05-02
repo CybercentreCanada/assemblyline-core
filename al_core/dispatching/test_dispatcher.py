@@ -7,13 +7,13 @@ import assemblyline.odm.models.submission
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.randomizer import random_model_obj
 from assemblyline.odm import models
-
+from assemblyline.common.metrics import MetricsFactory
 
 from al_core.dispatching.scheduler import Scheduler as RealScheduler
 from al_core.dispatching.dispatcher import Dispatcher, DispatchHash, service_queue_name, FileTask, NamedQueue, SubmissionTask
 from al_core.mocking import MockDatastore, clean_redis
 from al_core.dispatching.test_scheduler import dummy_service
-from assemblyline.remote.datatypes.counters import MetricCounter
+
 
 
 class Scheduler(RealScheduler):
@@ -40,7 +40,7 @@ class Scheduler(RealScheduler):
 
 
 @mock.patch('al_core.dispatching.dispatcher.Scheduler', Scheduler)
-@mock.patch('al_core.dispatching.dispatcher.MetricCounter', new=mock.MagicMock(spec=MetricCounter))
+@mock.patch('al_core.dispatching.dispatcher.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
 def test_dispatch_file(clean_redis):
 
     service_queue = lambda name: NamedQueue(service_queue_name(name), clean_redis)
@@ -96,7 +96,7 @@ def test_dispatch_file(clean_redis):
     # Mark extract as finished, wrench as failed
     print('==== fourth dispatch')
     [service_queue(name).delete() for name in disp.scheduler.services]
-    dh.finish(file_hash, 'extract', 'result-key', 0)
+    dh.finish(file_hash, 'extract', 'result-key', 0, 'U')
     dh.fail_nonrecoverable(file_hash, 'wrench', 'error-key')
 
     disp.dispatch_file(file_task)
@@ -112,7 +112,7 @@ def test_dispatch_file(clean_redis):
     [service_queue(name).delete() for name in disp.scheduler.services]
     dh.fail_nonrecoverable(file_hash, 'av-a', 'error-a')
     dh.fail_nonrecoverable(file_hash, 'av-b', 'error-b')
-    dh.finish(file_hash, 'frankenstrings', 'result-key', 0)
+    dh.finish(file_hash, 'frankenstrings', 'result-key', 0, 'U')
 
     disp.dispatch_file(file_task)
 
@@ -124,7 +124,7 @@ def test_dispatch_file(clean_redis):
     # Finish the xerox service and check if the submission completion got checked
     print('==== sixth dispatch')
     [service_queue(name).delete() for name in disp.scheduler.services]
-    dh.finish(file_hash, 'xerox', 'result-key', 0)
+    dh.finish(file_hash, 'xerox', 'result-key', 0, 'U')
 
     disp.dispatch_file(file_task)
 
@@ -132,10 +132,11 @@ def test_dispatch_file(clean_redis):
     assert len(disp.submission_queue) == 1
 
 
+@mock.patch('al_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
 @mock.patch('al_core.dispatching.dispatcher.Scheduler', Scheduler)
 def test_dispatch_submission(clean_redis):
     ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
-    file_hash = 'totally-a-legit-hash'
+    file_hash = 'totally_a_legit_hash'
 
     ds.file.save(file_hash, random_model_obj(models.file.File))
     ds.file.get(file_hash).sha256 = file_hash

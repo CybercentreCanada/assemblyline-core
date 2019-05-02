@@ -14,7 +14,7 @@ from al_core.watcher.run_watcher import WatcherServer
 @pytest.fixture
 def redis_connection():
     from assemblyline.remote.datatypes import get_client
-    c = get_client(None, None, None, False)
+    c = get_client(None, None, 8, False)
     try:
         ret_val = c.ping()
         if ret_val:

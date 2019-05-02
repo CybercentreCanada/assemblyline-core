@@ -28,10 +28,11 @@ class FakeDatastore:
     def stream_search(self, *args, **kwargs):
         return []
 
-    def multiget(self, *args, **kwargs):
+    def list_all_services(self, full=True):
         return {
             'extract': Service({
                 'name': 'extract',
+                'enabled': True,
                 'stage': 'pre',
                 'category': 'static',
                 'accepts': 'archive/.*',
@@ -40,6 +41,7 @@ class FakeDatastore:
             }),
             'AnAV': Service({
                 'name': 'AnAV',
+                'enabled': True,
                 'stage': 'core',
                 'category': 'av',
                 'accepts': '.*',
@@ -48,6 +50,7 @@ class FakeDatastore:
             }),
             'cuckoo': Service({
                 'name': 'cuckoo',
+                'enabled': True,
                 'stage': 'core',
                 'category': 'dynamic',
                 'accepts': 'document/.*|executable/.*',
@@ -56,6 +59,7 @@ class FakeDatastore:
             }),
             'polish': Service({
                 'name': 'polish',
+                'enabled': True,
                 'stage': 'post',
                 'category': 'static',
                 'accepts': '.*',
@@ -64,13 +68,14 @@ class FakeDatastore:
             }),
             'not_documents': Service({
                 'name': 'not_documents',
+                'enabled': True,
                 'stage': 'post',
                 'category': 'static',
                 'accepts': '.*',
                 'rejects': 'document/*',
                 'version': '0',
             })
-        }
+        }.values()
 
 
 def submission(selected, excluded):

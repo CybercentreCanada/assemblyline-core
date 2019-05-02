@@ -3,6 +3,7 @@ import json
 from typing import List
 
 from assemblyline.common.metrics import MetricsFactory
+from assemblyline.odm import ClassificationObject
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.service import Service
@@ -110,6 +111,9 @@ class Dispatcher:
         Find any files associated with a submission and dispatch them if they are
         not marked as in progress. If all files are finished, finalize the submission.
 
+        This version of dispatch submission doesn't verify each result, but assumes that
+        the dispatch table has been kept up to date by other components.
+
         Preconditions:
             - File exists in the filestore and file collection in the datastore
             - Submission is stored in the datastore
@@ -124,7 +128,7 @@ class Dispatcher:
             self.log.info(f"[{sid}] Received a pre-existing submission, check if it is complete")
 
         # Refresh the watch, this ensures that this function will be called again
-        # if something goes wrong with one of the files, and it never finishes.
+        # if something goes wrong with one of the files, and it never gets invoked by dispatch_file.
         self.timeout_watcher.touch(key=sid, timeout=self.config.core.dispatcher.timeout,
                                    queue=SUBMISSION_QUEUE, message={'sid': sid})
 
@@ -134,15 +138,27 @@ class Dispatcher:
             Hash('submissions-' + submission.params.submitter, self.redis_persist).add(sid, isotime.now_as_iso())
 
         # Open up the file/service table for this submission
-        dispatch_table = DispatchHash(submission.sid, self.redis)
+        dispatch_table = DispatchHash(submission.sid, self.redis, fetch_results=True)
+        prior_dispatches = dispatch_table.all_dispatches()
+        unchecked_hashes = [submission_file.sha256 for submission_file in submission.files]
+        unchecked_hashes = list(set(unchecked_hashes) | set(prior_dispatches.keys()))
+
+        # Load the file tree data as well
+        file_parents = dispatch_table.file_tree()
+
+        # Using the file tree we can recalculate the depth of any file
+        def file_depth(sha):
+            # A root file won't have any parents in the dict
+            if sha not in file_parents or None in file_parents[sha]:
+                return 0
+            return min(file_depth(parent) for parent in file_parents[sha]) + 1
 
         # Try to find all files, and extracted files
         max_files = len(submission.files) + submission.params.max_extracted
-        unchecked_files = []
-        for submission_file in submission.files:
-            file_data = self.files.get(submission_file.sha256)
+        unchecked_files = []  # Files that haven't been checked yet
+        for sha, file_data in self.files.multiget(unchecked_hashes).items():
             if not file_data:
-                self.log.error(f'[{sid}] Missing file for submission: {submission_file.sha256}.')
+                self.log.error(f'[{sid}] Missing file for submission: {sha}.')
                 continue
 
             unchecked_files.append(FileTask(dict(
@@ -156,13 +172,13 @@ class Dispatcher:
                     size=file_data.size,
                     type=file_data.type,
                 ),
-                depth=0,
+                depth=file_depth(sha),
                 max_files=max_files
             )))
 
+        # Files that have already been encountered, but may or may not have been processed yet
         encountered_files = {file.sha256 for file in submission.files}
-        pending_files = {}
-        file_parents = {}
+        pending_files = {}  # Files that have not yet been processed
 
         # Track information about the results as we hit them
         file_scores = {}
@@ -170,8 +186,7 @@ class Dispatcher:
 
         # For each file, we will look through all its results, any extracted files,
         # found should be added to the unchecked files if they haven't been encountered already
-        while unchecked_files:
-            file_task = unchecked_files.pop()
+        for file_task in unchecked_files:
             sha = file_task.file_info.sha256
             schedule = self.build_schedule(dispatch_table, submission, sha, file_task.file_info.type)
 
@@ -181,7 +196,7 @@ class Dispatcher:
                     service = self.scheduler.services.get(service_name)
 
                     # If the service is still marked as 'in progress'
-                    runtime = time.time() - dispatch_table.dispatch_time(sha, service_name)
+                    runtime = time.time() - prior_dispatches.get(sha, {}).get(service_name, 0)
                     if runtime < service.timeout:
                         pending_files[sha] = file_task
                         continue
@@ -194,69 +209,30 @@ class Dispatcher:
                         pending_files[sha] = file_task
                         continue
 
+                    if not submission.params.ignore_filtering and result_row.drop:
+                        schedule.clear()
+
                     # The process table is marked that a service has been abandoned due to errors
                     if result_row.is_error:
                         continue
 
-                    if not submission.params.ignore_filtering and result_row.drop:
-                        schedule.clear()
-
-                    # The result should exist then, get all the sub-files
-                    result = self.results.get(result_row.key)
-                    if not result:
-                        self.log.error(f"[{sid}] Missing result: {result_row.key}")
-                        continue
-
-                    for sub_file in result.response.extracted:
-                        file_parents[sub_file.sha256] = file_parents.get(sub_file.sha256, []) + [sha]
-
-                        if sub_file.sha256 in encountered_files:
-                            continue
-
-                        encountered_files.add(sub_file.sha256)
-                        file_data = self.datastore.file.get(sub_file.sha256)
-
-                        if not file_data:
-                            self.log.warning(f'[{sid}] Missing extracted file: {sub_file}')
-                            continue
-
-                        unchecked_files.append(FileTask(dict(
-                            sid=sid,
-                            file_info=dict(
-                                magic=file_data.magic,
-                                md5=file_data.md5,
-                                mime=file_data.mime,
-                                sha1=file_data.sha1,
-                                sha256=file_data.sha256,
-                                size=file_data.size,
-                                type=file_data.type,
-                            ),
-                            depth=-1,  # This will be set later
-                            max_files=max_files,
-                        )))
-
                     # Collect information about the result
-                    file_scores[sha] = file_scores.get(sha, 0) + result.result.score
-                    result_classifications.append(result.classification)
+                    file_scores[sha] = file_scores.get(sha, 0) + result_row.score
+                    result_classifications.append(result_row.classification)
 
-        # Using the file tree we can recalculate the depth of any file
-        def file_depth(sha):
+        # Using the file tree find the most shallow parent of the given file
+        def lowest_parent(sha):
             # A root file won't have any parents in the dict
-            if sha not in file_parents:
-                return 0
-            return min(file_depth(parent) for parent in file_parents[sha]) + 1
+            if sha not in file_parents or None in file_parents[sha]:
+                return None
+            return min((file_depth(parent), parent) for parent in file_parents[sha])[1]
 
-        # The errors for these excluded files should have been generated in the client when
-        # the result was first sent back to the dispatcher.
-
-        # Apply the depths, and filter out those over the limit
-        for file_task in pending_files.values():
-            file_task.depth = file_depth(file_task.file_info.sha256)
+        # Filter out things over the depth limit
         depth_limit = self.config.submission.max_extraction_depth
         pending_files = {sha: ft for sha, ft in pending_files.items() if ft.depth < depth_limit}
 
         # Filter out files based on the extraction limits
-        pending_files = {sha: ft for sha, ft in pending_files.items() if dispatch_table.add_file(sha, max_files)}
+        pending_files = {sha: ft for sha, ft in pending_files.items() if dispatch_table.add_file(sha, max_files, lowest_parent(sha))}
 
         # If there are pending files, then at least one service, on at least one
         # file isn't done yet, and hasn't been filtered by any of the previous few steps
@@ -269,6 +245,7 @@ class Dispatcher:
         else:
             max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
             self.finalize_submission(task, result_classifications, max_score, len(encountered_files))
+
 
     def finalize_submission(self, task: SubmissionTask, result_classifications, max_score, file_count):
         """All of the services for all of the files in this submission have finished or failed.
@@ -285,7 +262,7 @@ class Dispatcher:
         # Pull in the classifications of results/produced by services
         classification = submission.params.classification
         for c12n in result_classifications:
-            classification = classification.max(c12n)
+            classification = classification.max(ClassificationObject(classification.engine, c12n))
 
         # Pull down the dispatch table and clear it from redis
         dispatch_table = DispatchHash(submission.sid, self.redis)
@@ -363,12 +340,11 @@ class Dispatcher:
                                    queue=SUBMISSION_QUEUE, message={'sid': task.sid})
 
         # Open up the file/service table for this submission
-        dispatch_table = DispatchHash(task.sid, self.redis)
+        dispatch_table = DispatchHash(task.sid, self.redis, fetch_results=True)
 
         # Calculate the schedule for the file
         schedule = self.build_schedule(dispatch_table, submission, file_hash, task.file_info.type)
         started_stages = []
-        # TODO HMGET the entire schedule's results here rather than one at a time later
 
         # Go through each round of the schedule removing complete/failed services
         # Break when we find a stage that still needs processing

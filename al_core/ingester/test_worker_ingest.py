@@ -41,7 +41,7 @@ def make_message(message=None, files=None, params=None):
 
 @pytest.fixture
 @mock.patch('al_core.ingester.ingester.SubmissionClient', new=mock.MagicMock(spec=SubmissionClient))
-@mock.patch('al_core.ingester.ingester.MetricCounter', new=mock.MagicMock(spec=MetricCounter))
+@mock.patch('al_core.ingester.ingester.MetricsFactory', new=mock.MagicMock(spec=MetricCounter))
 def ingest_harness(clean_redis):
     """"Setup a test environment.
 
