@@ -1,6 +1,4 @@
 
-image: python:3.6
-
 options:
   max-time: 10
 
@@ -11,7 +9,9 @@ pipelines:
           name: Build & Test 3.6
           image: python:3.6
           caches: [pip]
-          services: [redis, elasticsearch]
+          services: &services
+            - redis
+            - elasticsearch
           script: &build_test
             - apt update
             - apt install -y build-essential libffi-dev libfuzzy-dev python3-dev
@@ -19,20 +19,20 @@ pipelines:
             - mkdir -p /etc/assemblyline/
             - mkdir -p /var/cache/assemblyline/
             - cp test/bitbucket/config.yml /etc/assemblyline
-            - pip install -r requirements.txt
+            - pip install -r test/requirements.txt
             - pip install -e .
             - pytest -rsx -vv
       - step:
           name: Build & Test 3.7
           image: python:3.7
           caches: [pip]
-          services: [redis, elasticsearch]
+          services: *services
           script: *build_test
       - step:
           name: Build & Test 3.8
           image: python:3.8-rc
           caches: [pip]
-          services: [redis, elasticsearch]
+          services: *services
           script: *build_test
 
   tags:
@@ -58,7 +58,7 @@ pipelines:
               - mkdir -p /etc/assemblyline/
               - mkdir -p /var/cache/assemblyline/
               - cp test/bitbucket/config.yml /etc/assemblyline
-              - pip install -r requirements.txt
+              - pip install -r test/requirements.txt
               - pytest -rsx -vv
         - step:
             name: Test 3.7

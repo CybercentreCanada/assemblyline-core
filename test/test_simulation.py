@@ -28,6 +28,7 @@ from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.messages.submission import Submission as SubmissionInput
 from assemblyline.remote.datatypes.queues.named import NamedQueue
+from assemblyline.common.testing import skip
 
 from al_core.dispatching.client import DispatchClient
 from al_core.dispatching.dispatcher import service_queue_name
@@ -59,7 +60,7 @@ def redis():
 def es_connection():
     document_store = ESStore(['127.0.0.1'])
     if not document_store.ping():
-        return pytest.skip("Connection to the Elasticsearch server failed. This test cannot be performed...")
+        return skip("Connection to the Elasticsearch server failed. This test cannot be performed...")
     return AssemblylineDatastore(document_store)
 
 
