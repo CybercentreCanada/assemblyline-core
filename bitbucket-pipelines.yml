@@ -50,6 +50,7 @@ pipelines:
         - step:
             name: Test 3.6
             image: python:3.6
+            services: *services
             script: &deploy_test
               - rm -rf al_core setup.py  # Make sure we are running on the package from the prior build
               - apt update
@@ -63,10 +64,12 @@ pipelines:
         - step:
             name: Test 3.7
             image: python:3.7
+            services: *services
             script: *deploy_test
         - step:
             name: Test 3.8
             image: python:3.8-rc
+            services: *services
             script: *deploy_test
       - step:
           name: Deploy to Test PyPI
