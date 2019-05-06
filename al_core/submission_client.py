@@ -99,6 +99,7 @@ class SubmissionClient:
 
                     submission_obj.files.append(File({
                         'name': safe_str(os.path.basename(local_file)),
+                        'size': size,
                         'sha256': file_hash,
                     }))
             else:
@@ -120,6 +121,10 @@ class SubmissionClient:
                         elif size == 0:
                             msg = "File empty. Submission failed"
                             raise SubmissionException(msg)
+
+                        if f.size is None:
+                            f.size = size
+
                     finally:
                         if temporary_path:
                             if os.path.exists(temporary_path):
