@@ -1,10 +1,8 @@
-FROM python:3.7
+FROM cccs/assemblyline:latest
 
 ARG version
 
-RUN mkdir -p /etc/assemblyline
-RUN mkdir -p /var/log/assemblyline
-RUN mkdir -p /var/cache/assemblyline
-
-RUN apt-get update && apt-get install -yy build-essential libffi-dev libfuzzy-dev
+# Switch to root to install dependancies
+USER root
 RUN pip install assemblyline_core==$version
+USER assemblyline
