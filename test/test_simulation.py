@@ -468,7 +468,7 @@ def test_extracted_file(core):
 
 
 def test_depth_limit(core):
-    # Make a nested set of files that goes deeper than the max depth
+    # Make a nested set of files that goes deeper than the max depth by one
     sha, size = ready_body(core)
     for _ in range(core.config.submission.max_extraction_depth + 1):
         sha, size = ready_extract(core, sha)
@@ -479,6 +479,7 @@ def test_depth_limit(core):
             services=dict(selected=''),
             submitter='user',
             groups=['user'],
+            # Make sure we can extract enough files that we will definitely hit the depth limit first
             max_extracted=core.config.submission.max_extraction_depth + 10
         ),
         notification=dict(
@@ -566,7 +567,7 @@ def test_max_extracted_in_several(core):
     sub: Submission = core.ds.submission.get(task.submission.sid)
     assert len(sub.files) == 1
     # We should only get results for each file up to the max depth
-    assert len(sub.results) == 4 * (1 + 3)
+    assert len(sub.results) == 4 * (1 + 3)  # 4 services, 1 original file, 3 extracted files
     assert len(sub.errors) == 3  # The number of children that errored out
 
 

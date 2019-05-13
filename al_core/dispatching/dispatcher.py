@@ -139,12 +139,11 @@ class Dispatcher:
 
         # Open up the file/service table for this submission
         dispatch_table = DispatchHash(submission.sid, self.redis, fetch_results=True)
-        prior_dispatches = dispatch_table.all_dispatches()
-        unchecked_hashes = [submission_file.sha256 for submission_file in submission.files]
-        unchecked_hashes = list(set(unchecked_hashes) | set(prior_dispatches.keys()))
+        file_parents = dispatch_table.file_tree()  # Load the file tree data as well
 
-        # Load the file tree data as well
-        file_parents = dispatch_table.file_tree()
+        # All the submission files, and all the file_tree files, to be sure we don't miss any incomplete children
+        unchecked_hashes = [submission_file.sha256 for submission_file in submission.files]
+        unchecked_hashes = list(set(unchecked_hashes) | set(file_parents.keys()))
 
         # Using the file tree we can recalculate the depth of any file
         def file_depth(sha):
@@ -153,7 +152,8 @@ class Dispatcher:
                 return 0
             return min(file_depth(parent) for parent in file_parents[sha]) + 1
 
-        # Try to find all files, and extracted files
+        # Try to find all files, and extracted files, and create task objects for them
+        # (we will need the file data anyway for checking the schedule later)
         max_files = len(submission.files) + submission.params.max_extracted
         unchecked_files = []  # Files that haven't been checked yet
         for sha, file_data in self.files.multiget(unchecked_hashes).items():
@@ -184,7 +184,9 @@ class Dispatcher:
         file_scores = {}
         result_classifications = []
 
-        # For each file, we will look through all its results, any extracted files,
+        # Load the current state of the dispatch table in one go rather than one at a time in the loop
+        prior_dispatches = dispatch_table.all_dispatches()
+
         # found should be added to the unchecked files if they haven't been encountered already
         for file_task in unchecked_files:
             sha = file_task.file_info.sha256

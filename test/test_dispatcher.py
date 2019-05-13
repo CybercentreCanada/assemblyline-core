@@ -169,3 +169,72 @@ def test_dispatch_submission(clean_redis):
     disp.dispatch_submission(task)
     assert ds.submission.get(submission.sid).state == 'completed'
     assert ds.submission.get(submission.sid).errors == ['error-code']*len(disp.scheduler.services)
+
+
+@mock.patch('al_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
+@mock.patch('al_core.dispatching.dispatcher.Scheduler', Scheduler)
+def test_dispatch_extracted(clean_redis):
+    # Setup the fake datastore
+    ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
+    file_hash = 'totally_a_legit_hash'
+    second_file_hash = 'totally_a_legit_hash2'
+
+    for fh in [file_hash, second_file_hash]:
+        ds.file.save(fh, random_model_obj(models.file.File))
+        ds.file.get(fh).sha256 = fh
+
+    # Inject the fake submission
+    submission = random_model_obj(models.submission.Submission)
+    submission.files.clear()
+    submission.files.append(dict(
+        name='./file',
+        sha256=file_hash
+    ))
+    submission.sid = 'first-submission'
+
+    # Launch the dispatcher
+    disp = Dispatcher(ds, logger=logging, redis=clean_redis, redis_persist=clean_redis)
+
+    # Launch the submission
+    task = SubmissionTask(dict(submission=submission))
+    disp.dispatch_submission(task)
+
+    # Check that the right values were sent to the
+    file_task = FileTask(disp.file_queue.pop(timeout=1))
+    assert file_task.sid == submission.sid
+    assert file_task.file_info.sha256 == file_hash
+    assert file_task.depth == 0
+    assert file_task.file_info.type == ds.file.get(file_hash).type
+
+    # Finish the services
+    dh = DispatchHash(submission.sid, clean_redis)
+    for service_name in disp.scheduler.services.keys():
+        dh.finish(file_hash, service_name, 'error-code', 0, 'U')
+
+    # But one of the services extracted a file
+    dh.add_file(second_file_hash, 10, file_hash)
+
+    # But meanwhile, dispatch_submission has been recalled on the submission
+    disp.dispatch_submission(task)
+
+    # It should see the missing file, and we should get a new file dispatch message for it
+    # to make sure it is getting processed properly, this should be at depth 1, the first layer of
+    # extracted files
+    file_task = disp.file_queue.pop(timeout=1)
+    assert file_task is not None
+    file_task = FileTask(file_task)
+    assert file_task.sid == submission.sid
+    assert file_task.file_info.sha256 == second_file_hash
+    assert file_task.depth == 1
+    assert file_task.file_info.type == ds.file.get(second_file_hash).type
+
+    # Finish the second file
+    for service_name in disp.scheduler.services.keys():
+        dh.finish(second_file_hash, service_name, 'error-code', 0, 'U')
+
+    # And now we should get the finished submission
+    disp.dispatch_submission(task)
+    submission = ds.submission.get(submission.sid)
+    assert submission.state == 'completed'
+    assert submission.errors == []
+    assert len(submission.results) == 2*len(disp.scheduler.services)
