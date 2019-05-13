@@ -2,7 +2,7 @@ import elasticapm
 import time
 
 from assemblyline.common import forge
-from assemblyline.remote.datatypes import get_client
+from assemblyline.remote.datatypes import get_client, retry_call
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import UniquePriorityQueue
 from assemblyline.remote.datatypes.hash import ExpiringHash
@@ -35,7 +35,7 @@ class WatcherServer(ServerBase):
 
     def try_run(self):
         while self.running:
-            seconds, _ = self.redis.time()
+            seconds, _ = retry_call(self.redis.time)
             messages = self.queue.dequeue_range(0, seconds)
             for key in messages:
                 # Start of transaction

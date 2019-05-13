@@ -11,6 +11,8 @@ This can be used for things like:
 
 from assemblyline.remote.datatypes.queues.priority import UniquePriorityQueue
 from assemblyline.remote.datatypes.hash import ExpiringHash
+from assemblyline.remote.datatypes import retry_call
+
 
 WATCHER_QUEUE = 'global-watcher-queue'
 WATCHER_HASH = 'global-watcher-hash'
@@ -27,7 +29,7 @@ class WatcherClient:
         if timeout >= MAX_TIMEOUT:
             raise ValueError(f"Can't set watcher timeouts over {MAX_TIMEOUT}")
         self.hash.set(key, {'queue': queue, 'message': message})
-        seconds, _ = self.redis.time()
+        seconds, _ = retry_call(self.redis.time)
         self.queue.push(int(seconds + timeout), key)
         assert self.hash.exists(key)
 
