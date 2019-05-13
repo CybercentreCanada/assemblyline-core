@@ -3,3 +3,7 @@ filestore:
     - file:///var/cache/assemblyline/
   storage:
     - file:///var/cache/assemblyline/
+core:
+  dispatcher:
+    timeout: 4  # Set the dispatch watcher timeout very short for testing
+    debug_logging: True

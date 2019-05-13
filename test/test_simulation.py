@@ -9,6 +9,7 @@ import uuid
 import json
 import time
 import hashlib
+import os
 from tempfile import NamedTemporaryFile
 
 import pytest
@@ -127,23 +128,6 @@ class MockService(ServerBase):
             self.dispatch_client.service_finished(task.sid, result_key, result)
 
 
-@pytest.fixture(scope='module')
-def replace_config(request):
-    old_get_config = forge._get_config
-
-    def replace():
-        forge._get_config = old_get_config
-    request.addfinalizer(replace)
-
-    def new_config(*_, **__):
-        config = old_get_config()
-        config.core.dispatcher.timeout = 4
-        config.core.dispatcher.debug_logging = True
-        config.submission.max_extraction_depth = 5
-        return config
-    forge._get_config = new_config
-
-
 class CoreSession:
     def __init__(self):
         self.ds: AssemblylineDatastore = None
@@ -159,14 +143,18 @@ def make_magic(*_, **__):
 @pytest.fixture(scope='module')
 @mock.patch('al_core.ingester.ingester.MetricsFactory', new=make_magic)
 @mock.patch('al_core.dispatching.dispatcher.MetricsFactory', new=make_magic)
-def core(request, redis, es_connection, replace_config):
+def core(request, redis, es_connection):
     from assemblyline.common import log as al_log
     al_log.init_logging("simulation")
 
     fields = CoreSession()
     fields.redis = redis
     fields.ds = ds = es_connection
-    fields.config = forge.get_config()
+
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    fields.config = forge.get_config(yml_config=os.path.join(dir_path, 'bitbucket', 'config.yml'))
+    forge.config_singletons[False, None] = fields.config
+
     threads = []
     fields.filestore = filestore = forge.get_filestore()
     threads: List[ServerBase] = [
@@ -265,7 +253,7 @@ def test_deduplication(core):
                 groups=['user'],
             ),
             notification=dict(
-                queue='1',
+                queue='output-queue-one',
                 threshold=0
             ),
             files=[dict(
@@ -275,7 +263,7 @@ def test_deduplication(core):
             )]
         )).as_primitives())
 
-    notification_queue = NamedQueue('1', core.redis)
+    notification_queue = NamedQueue('output-queue-one', core.redis)
     first_task = notification_queue.pop(timeout=5)
     second_task = notification_queue.pop(timeout=5)
 
@@ -330,37 +318,39 @@ def test_deduplication(core):
 def test_watcher_recovery(core):
     watch = WatcherServer(redis=core.redis)
     watch.start()
-    # This time have the service server 'crash'
-    sha, size = ready_body(core, {
-        'pre': {'drop': 1}
-    })
+    try:
+        # This time have the service server 'crash'
+        sha, size = ready_body(core, {
+            'pre': {'drop': 1}
+        })
 
-    core.ingest_queue.push(SubmissionInput(dict(
-        metadata={},
-        params=dict(
-            services=dict(selected=''),
-            submitter='user',
-            groups=['user'],
-            max_extracted=10000
-        ),
-        notification=dict(
-            queue='drop',
-            threshold=0
-        ),
-        files=[dict(
-            sha256=sha,
-            size=size,
-            name='abc123'
-        )]
-    )).as_primitives())
+        core.ingest_queue.push(SubmissionInput(dict(
+            metadata={},
+            params=dict(
+                services=dict(selected=''),
+                submitter='user',
+                groups=['user'],
+                max_extracted=10000
+            ),
+            notification=dict(
+                queue='watcher-recover',
+                threshold=0
+            ),
+            files=[dict(
+                sha256=sha,
+                size=size,
+                name='abc123'
+            )]
+        )).as_primitives())
 
-    notification_queue = NamedQueue('drop', core.redis)
-    dropped_task = notification_queue.pop(timeout=16)
-    assert dropped_task and IngestTask(dropped_task)
-    assert core.pre_service.drops[sha] == 1
-    assert core.pre_service.hits[sha] == 2
-    watch.stop()
-    watch.join()
+        notification_queue = NamedQueue('watcher-recover', core.redis)
+        dropped_task = notification_queue.pop(timeout=16)
+        assert dropped_task and IngestTask(dropped_task)
+        assert core.pre_service.drops[sha] == 1
+        assert core.pre_service.hits[sha] == 2
+    finally:
+        watch.stop()
+        watch.join()
 
 
 def test_dropping_early(core):
