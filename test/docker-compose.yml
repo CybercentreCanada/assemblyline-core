@@ -10,6 +10,15 @@ services:
     ports:
       - '9200:9200'
 
+  minio:
+    image: minio/minio
+    environment:
+      MINIO_ACCESS_KEY: al_storage_key
+      MINIO_SECRET_KEY: Ch@ngeTh!sPa33w0rd
+    ports:
+      - '9000:9000'
+    command: server /data
+
   redis:
     image: redis
     ports:
