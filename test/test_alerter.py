@@ -34,6 +34,7 @@ def purge_submission():
     for f in full_file_list:
         fs.delete(f)
 
+
 def create_errors_for_file(ds, f, services_done):
     e_list = []
     for _ in range(random.randint(0, 1)):
