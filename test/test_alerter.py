@@ -8,22 +8,34 @@ from al_core.ingester.ingester import IngestTask
 from assemblyline.common import forge
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.file import File
-from assemblyline.odm.models.result import Result
+from assemblyline.odm.models.result import Result, Tag
 from assemblyline.odm.models.submission import Submission
-from assemblyline.odm.randomizer import random_model_obj, SERVICES, get_random_phrase
+from assemblyline.odm.randomizer import random_model_obj, SERVICES, get_random_phrase, get_random_uid
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 
-NUM_SUBMISSIONS = 1
+NUM_SUBMISSIONS = 2
 config = forge.get_config()
 ds = forge.get_datastore(config)
 fs = forge.get_filestore(config)
 full_file_list = []
 all_submissions = []
+desired_tag_types = [
+    'THREAT_ACTOR',
+    'NET_IP',
+    'NET_DOMAIN_NAME',
+    'AV_VIRUS_NAME',
+    'IMPLANT_NAME',
+    'FILE_ATTRIBUTION',
+    'FILE_YARA_RULE',
+    'FILE_SUMMARY',
+    'EXPLOIT_NAME'
+]
 
 
-def purge_submission():
+def purge_data():
+    ds.alert.wipe()
     ds.error.wipe()
     ds.file.wipe()
     ds.result.wipe()
@@ -35,7 +47,7 @@ def purge_submission():
         fs.delete(f)
 
 
-def create_errors_for_file(ds, f, services_done):
+def create_errors_for_file(f, services_done):
     e_list = []
     for _ in range(random.randint(0, 1)):
         e = random_model_obj(Error)
@@ -55,7 +67,7 @@ def create_errors_for_file(ds, f, services_done):
     return e_list
 
 
-def create_results_for_file(ds, f, possible_childs=None):
+def create_results_for_file(f, possible_childs=None):
     r_list = []
     services_done = []
     for _ in range(random.randint(2, 5)):
@@ -85,12 +97,15 @@ def create_results_for_file(ds, f, possible_childs=None):
 
         r_key = r.build_key()
         r_list.append(r_key)
+        for t in r.result.tags:
+            if t.type not in desired_tag_types:
+                t.type = random.choice(desired_tag_types)
         ds.result.save(r_key, r)
 
     return r_list
 
 
-def create_submission(ds, fs):
+def create_submission():
     f_list = []
     r_list = []
     e_list = []
@@ -110,12 +125,12 @@ def create_submission(ds, fs):
         first_level_files.append(f_list.pop())
 
     for f in first_level_files:
-        r_list.extend(create_results_for_file(ds, f, possible_childs=f_list))
-        e_list.extend(create_errors_for_file(ds, f, [x.split('.')[1] for x in r_list if x.startswith(f)]))
+        r_list.extend(create_results_for_file(f, possible_childs=f_list))
+        e_list.extend(create_errors_for_file(f, [x.split('.')[1] for x in r_list if x.startswith(f)]))
 
     for f in f_list:
-        r_list.extend(create_results_for_file(ds, f))
-        e_list.extend(create_errors_for_file(ds, f, [x.split('.')[1] for x in r_list if x.startswith(f)]))
+        r_list.extend(create_results_for_file(f))
+        e_list.extend(create_errors_for_file(f, [x.split('.')[1] for x in r_list if x.startswith(f)]))
 
     s = random_model_obj(Submission)
 
@@ -133,6 +148,7 @@ def create_submission(ds, fs):
         fid += 1
 
     s.state = "completed"
+    s.params.psid = None
     ds.submission.save(s.sid, s)
 
     return s
@@ -141,18 +157,18 @@ def create_submission(ds, fs):
 @pytest.fixture(scope="module")
 def datastore(request):
     for _ in range(NUM_SUBMISSIONS):
-        all_submissions.append(create_submission(ds, fs))
+        all_submissions.append(create_submission())
 
     ds.error.commit()
     ds.file.commit()
     ds.result.commit()
     ds.submission.commit()
 
-    request.addfinalizer(purge_submission)
+    request.addfinalizer(purge_data)
     return ds
 
 
-def test_single(datastore):
+def test_create_single_alert(datastore):
     persistent_redis = get_client(
         db=config.core.redis.persistent.db,
         host=config.core.redis.persistent.host,
@@ -160,19 +176,101 @@ def test_single(datastore):
         private=False,
     )
     alert_queue = NamedQueue(ALERT_QUEUE_NAME, persistent_redis)
-
     alerter = Alerter()
-    alerter.start()
+
+    # Get a random submission
+    submission = random.choice(all_submissions)
+    all_submissions.remove(submission)
 
     # Generate a task for the submission
     ingest_msg = random_model_obj(IngestTask)
-    submission = random.choice(all_submissions)
     ingest_msg.submission.sid = submission.sid
     ingest_msg.submission.metadata = submission.metadata
     ingest_msg.submission.params = submission.params
     ingest_msg.submission.files = submission.files
 
     alert_queue.push(ingest_msg.as_primitives())
-    alerter.join(timeout=10)
-    alerter.stop()
+    msg = alerter.alert_queue.pop(timeout=1)
+    assert msg == ingest_msg.as_primitives()
 
+    alert_type = alerter.process_alert_message(alerter.counter, alerter.datastore, alerter.log, msg)
+    assert alert_type == 'create'
+    ds.alert.commit()
+
+    res = ds.alert.search("id:*", as_obj=False)
+    assert res['total'] == 1
+
+    alert = ds.alert.get(res['items'][0]['alert_id'])
+    assert alert.sid == submission.sid
+
+
+def test_update_single_alert(datastore):
+    persistent_redis = get_client(
+        db=config.core.redis.persistent.db,
+        host=config.core.redis.persistent.host,
+        port=config.core.redis.persistent.port,
+        private=False,
+    )
+    alert_queue = NamedQueue(ALERT_QUEUE_NAME, persistent_redis)
+    alerter = Alerter()
+
+    # Get a random submission
+    submission = random.choice(all_submissions)
+    all_submissions.remove(submission)
+
+    # Generate a task for the submission
+    ingest_msg = random_model_obj(IngestTask)
+    ingest_msg.submission.sid = submission.sid
+    ingest_msg.submission.metadata = submission.metadata
+    ingest_msg.submission.params = submission.params
+    ingest_msg.submission.files = submission.files
+
+    alert_queue.push(ingest_msg.as_primitives())
+    msg = alerter.alert_queue.pop(timeout=1)
+    assert msg == ingest_msg.as_primitives()
+
+    alert_type = alerter.process_alert_message(alerter.counter, alerter.datastore, alerter.log, msg)
+    assert alert_type == 'create'
+    ds.alert.commit()
+
+    original_alert = ds.alert.get(ds.alert.search(f"sid:{submission.sid}", fl="id", as_obj=False)['items'][0]['id'])
+    assert original_alert is not None
+
+    # Generate a children task
+    child_submission = Submission(submission.as_primitives())
+    child_submission.sid = get_random_uid()
+    child_submission.params.psid = submission.sid
+
+    # Alter the result of one of the services
+    r = ds.result.get(random.choice(child_submission.results))
+    for _ in range(random.randint(1, 3)):
+        t = random_model_obj(Tag)
+        t.type = random.choice(desired_tag_types)
+        r.result.tags.append(t)
+
+    ds.result.save(r.build_key(), r)
+    ds.result.commit()
+
+    ds.submission.save(child_submission.sid, child_submission)
+    ds.submission.commit()
+
+    child_ingest_msg = random_model_obj(IngestTask)
+    child_ingest_msg.submission.sid = child_submission.sid
+    child_ingest_msg.submission.metadata = child_submission.metadata
+    child_ingest_msg.submission.params = child_submission.params
+    child_ingest_msg.submission.files = child_submission.files
+    child_ingest_msg.submission.time = ingest_msg.submission.time
+
+    alert_queue.push(child_ingest_msg.as_primitives())
+    msg = alerter.alert_queue.pop(timeout=1)
+    assert msg == child_ingest_msg.as_primitives()
+
+    alert_type = alerter.process_alert_message(alerter.counter, alerter.datastore, alerter.log, msg)
+    assert alert_type == 'update'
+    ds.alert.commit()
+
+    updated_alert = ds.alert.get(ds.alert.search(f"sid:{child_submission.sid}",
+                                                 fl="id", as_obj=False)['items'][0]['id'])
+    assert updated_alert is not None
+
+    assert updated_alert != original_alert
