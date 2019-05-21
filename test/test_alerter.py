@@ -183,10 +183,7 @@ def test_create_single_alert(datastore):
     ingest_msg.submission.files = submission.files
 
     alert_queue.push(ingest_msg.as_primitives())
-    msg = alerter.alert_queue.pop(timeout=1)
-    assert msg == ingest_msg.as_primitives()
-
-    alert_type = alerter.process_alert_message(alerter.counter, alerter.datastore, alerter.log, msg)
+    alert_type = alerter.run_once()
     assert alert_type == 'create'
     ds.alert.commit()
 
@@ -219,10 +216,7 @@ def test_update_single_alert(datastore):
     ingest_msg.submission.files = submission.files
 
     alert_queue.push(ingest_msg.as_primitives())
-    msg = alerter.alert_queue.pop(timeout=1)
-    assert msg == ingest_msg.as_primitives()
-
-    alert_type = alerter.process_alert_message(alerter.counter, alerter.datastore, alerter.log, msg)
+    alert_type = alerter.run_once()
     assert alert_type == 'create'
     ds.alert.commit()
 
@@ -255,10 +249,7 @@ def test_update_single_alert(datastore):
     child_ingest_msg.submission.time = ingest_msg.submission.time
 
     alert_queue.push(child_ingest_msg.as_primitives())
-    msg = alerter.alert_queue.pop(timeout=1)
-    assert msg == child_ingest_msg.as_primitives()
-
-    alert_type = alerter.process_alert_message(alerter.counter, alerter.datastore, alerter.log, msg)
+    alert_type = alerter.run_once()
     assert alert_type == 'update'
     ds.alert.commit()
 

@@ -44,35 +44,40 @@ class Alerter(ServerBase):
         if self.apm_client:
             elasticapm.uninstrument()
 
+    def run_once(self):
+        alert = self.alert_queue.pop(timeout=1)
+        if not alert:
+            return
+
+        # Start of process alert transaction
+        if self.apm_client:
+            self.apm_client.begin_transaction('Process alert message')
+
+        self.counter.increment('received')
+        try:
+            alert_type = self.process_alert_message(self.counter, self.datastore, self.log, alert)
+
+            # End of process alert transaction (success)
+            if self.apm_client:
+                self.apm_client.end_transaction(alert_type, 'success')
+
+            return alert_type
+        except Exception as ex:  # pylint: disable=W0703
+            retries = alert['alert_retries'] = alert.get('alert_retries', 0) + 1
+            if retries > MAX_RETRIES:
+                self.log.exception(f'Max retries exceeded for: {alert}')
+            else:
+                self.alert_queue.push(alert)
+                if 'Submission not finalized' not in str(ex):
+                    self.log.exception(f'Unhandled exception processing: {alert}')
+
+            # End of process alert transaction (failure)
+            if self.apm_client:
+                self.apm_client.end_transaction('unknown', 'exception')
+
     def try_run(self):
         while self.running:
-            alert = self.alert_queue.pop(timeout=1)
-            if not alert:
-                continue
-            # Start of process alert transaction
-            if self.apm_client:
-                self.apm_client.begin_transaction('Process alert message')
-
-            self.counter.increment('received')
-            try:
-                alert_type = self.process_alert_message(self.counter, self.datastore, self.log, alert)
-
-                # End of process alert transaction (success)
-                if self.apm_client:
-                    self.apm_client.end_transaction(alert_type, 'success')
-
-            except Exception as ex:  # pylint: disable=W0703
-                retries = alert['alert_retries'] = alert.get('alert_retries', 0) + 1
-                if retries > MAX_RETRIES:
-                    self.log.exception(f'Max retries exceeded for: {alert}')
-                else:
-                    self.alert_queue.push(alert)
-                    if 'Submission not finalized' not in str(ex):
-                        self.log.exception(f'Unhandled exception processing: {alert}')
-
-                # End of process alert transaction (failure)
-                if self.apm_client:
-                    self.apm_client.end_transaction('unknown', 'exception')
+            self.run_once()
 
 
 if __name__ == "__main__":
