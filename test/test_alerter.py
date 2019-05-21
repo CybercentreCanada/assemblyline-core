@@ -18,8 +18,6 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 NUM_SUBMISSIONS = 2
 config = forge.get_config()
 ds = forge.get_datastore(config)
-fs = forge.get_filestore(config)
-full_file_list = []
 all_submissions = []
 desired_tag_types = [
     'THREAT_ACTOR',
@@ -42,9 +40,6 @@ def purge_data():
     ds.submission.wipe()
     ds.submission_tags.wipe()
     ds.submission_tree.wipe()
-
-    for f in full_file_list:
-        fs.delete(f)
 
 
 def create_errors_for_file(f, services_done):
@@ -117,9 +112,7 @@ def create_submission():
         sha256 = hashlib.sha256(byte_str).hexdigest()
         f.sha256 = sha256
         ds.file.save(sha256, f)
-        fs.put(sha256, byte_str)
         f_list.append(sha256)
-        full_file_list.append(sha256)
 
     for _ in range(random.randint(1, 2)):
         first_level_files.append(f_list.pop())

@@ -12,7 +12,6 @@ pipelines:
           services: &services
             - redis
             - elasticsearch
-            - minio
           script: &build_test
             - apt update
             - apt install -y build-essential libffi-dev libfuzzy-dev python3-dev
@@ -102,10 +101,3 @@ definitions:
     redis:
       image: redis
       memory: 256
-
-    minio:
-      image: sgaroncse/minio
-      memory: 256
-      environment:
-        MINIO_ACCESS_KEY: al_storage_key
-        MINIO_SECRET_KEY: Ch@ngeTh!sPa33w0rd
