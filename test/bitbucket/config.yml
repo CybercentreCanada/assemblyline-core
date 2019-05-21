@@ -1,9 +1,28 @@
+core:
+  alerter:
+    delay: 0
+  dispatcher:
+    timeout: 4  # Set the dispatch watcher timeout very short for testing
+    debug_logging: True
+  redis:
+    nonpersistent:
+      host: localhost
+    persistent:
+      host: localhost
+      port: 6379
+
+datastore:
+  elasticsearch:
+    nodes: [localhost]
+  hosts: [localhost]
+
 filestore:
   cache:
     - file:///var/cache/assemblyline/
   storage:
     - file:///var/cache/assemblyline/
-core:
-  dispatcher:
-    timeout: 4  # Set the dispatch watcher timeout very short for testing
-    debug_logging: True
+
+logging:
+  log_to_console: false
+  log_to_file: false
+  log_to_syslog: false

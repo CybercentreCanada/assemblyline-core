@@ -24,12 +24,14 @@ summary_tags = (
     "TECHNIQUE_OBFUSCATION", "THREAT_ACTOR",
 )
 
+
 def service_name_from_key(key):
     # noinspection PyBroadException
     try:
         return key.split('.')[1]
     except Exception:
         return ""
+
 
 def get_submission_record(counter, datastore, sid):
     srecord = datastore.submission.get(sid, as_obj=False)
@@ -126,6 +128,7 @@ def get_summary(datastore, srecord):
 
     return max_classification, summary
 
+
 def generate_alert_id(alert_data):
     parts = [
         alert_data['submission']['params']['psid'] or alert_data['submission']['sid'],
@@ -170,6 +173,7 @@ def parse_submission_record(counter, datastore, alert_data, logger):
         'max_classification': max_classification
     }
 
+
 AL_FIELDS = [
     'attrib',
     'av',
@@ -182,6 +186,8 @@ AL_FIELDS = [
     'summary',
     'yara',
 ]
+
+
 def perform_alert_update(datastore, logger, alert):
     alert_id = alert.get('alert_id')
 
@@ -289,7 +295,7 @@ def process_alert_message(counter, datastore, logger, alert_data):
             'score': alert_data['score']
         },
         'alert_id': generate_alert_id(alert_data),
-        'expiry_ts': now_as_iso(config.core.alerter.alert_ttl * 24 * 60 *60),
+        'expiry_ts': now_as_iso(config.core.alerter.alert_ttl * 24 * 60 * 60),
         'metadata': {safe_str(key): value for key, value in alert_data['submission']['metadata'].items()},
         'sid': alert_data['submission']['sid'],
         'ts': alert_data['submission']['time'],
