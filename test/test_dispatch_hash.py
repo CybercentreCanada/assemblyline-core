@@ -1,16 +1,17 @@
 
-import baseconv
-import uuid
 import time
 
+from assemblyline.common.uid import get_random_id
 from al_core.dispatching import dispatch_hash
+
+# noinspection PyUnresolvedReferences
 from .mocking import clean_redis
 
 
 def test_single(clean_redis):
     disp = dispatch_hash.DispatchHash('test-disptach-hash', clean_redis)
     try:
-        file_hash = baseconv.base62.encode(uuid.uuid4().int)
+        file_hash = get_random_id()
         service = 'service_name'
         result_key = 'some-result'
 

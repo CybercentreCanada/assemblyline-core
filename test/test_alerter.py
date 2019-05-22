@@ -6,11 +6,12 @@ import pytest
 from al_core.alerter.run_alerter import Alerter, ALERT_QUEUE_NAME
 from al_core.ingester.ingester import IngestTask
 from assemblyline.common import forge
+from assemblyline.common.uid import get_random_id
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.file import File
 from assemblyline.odm.models.result import Result, Tag
 from assemblyline.odm.models.submission import Submission
-from assemblyline.odm.randomizer import random_model_obj, SERVICES, get_random_phrase, get_random_uid
+from assemblyline.odm.randomizer import random_model_obj, SERVICES, get_random_phrase
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
@@ -185,12 +186,12 @@ def test_create_single_alert(datastore):
     alert_queue.push(ingest_msg.as_primitives())
     alert_type = alerter.run_once()
     assert alert_type == 'create'
-    ds.alert.commit()
+    datastore.alert.commit()
 
-    res = ds.alert.search("id:*", as_obj=False)
+    res = datastore.alert.search("id:*", as_obj=False)
     assert res['total'] == 1
 
-    alert = ds.alert.get(res['items'][0]['alert_id'])
+    alert = datastore.alert.get(res['items'][0]['alert_id'])
     assert alert.sid == submission.sid
 
 
@@ -218,28 +219,29 @@ def test_update_single_alert(datastore):
     alert_queue.push(ingest_msg.as_primitives())
     alert_type = alerter.run_once()
     assert alert_type == 'create'
-    ds.alert.commit()
+    datastore.alert.commit()
 
-    original_alert = ds.alert.get(ds.alert.search(f"sid:{submission.sid}", fl="id", as_obj=False)['items'][0]['id'])
+    original_alert = datastore.alert.get(datastore.alert.search(f"sid:{submission.sid}", fl="id",
+                                                                as_obj=False)['items'][0]['id'])
     assert original_alert is not None
 
     # Generate a children task
     child_submission = Submission(submission.as_primitives())
-    child_submission.sid = get_random_uid()
+    child_submission.sid = get_random_id()
     child_submission.params.psid = submission.sid
 
     # Alter the result of one of the services
-    r = ds.result.get(random.choice(child_submission.results))
+    r = datastore.result.get(random.choice(child_submission.results))
     for _ in range(random.randint(1, 3)):
         t = random_model_obj(Tag)
         t.type = random.choice(desired_tag_types)
         r.result.tags.append(t)
 
-    ds.result.save(r.build_key(), r)
-    ds.result.commit()
+    datastore.result.save(r.build_key(), r)
+    datastore.result.commit()
 
-    ds.submission.save(child_submission.sid, child_submission)
-    ds.submission.commit()
+    datastore.submission.save(child_submission.sid, child_submission)
+    datastore.submission.commit()
 
     child_ingest_msg = random_model_obj(IngestTask)
     child_ingest_msg.submission.sid = child_submission.sid
@@ -251,10 +253,10 @@ def test_update_single_alert(datastore):
     alert_queue.push(child_ingest_msg.as_primitives())
     alert_type = alerter.run_once()
     assert alert_type == 'update'
-    ds.alert.commit()
+    datastore.alert.commit()
 
-    updated_alert = ds.alert.get(ds.alert.search(f"sid:{child_submission.sid}",
-                                                 fl="id", as_obj=False)['items'][0]['id'])
+    updated_alert = datastore.alert.get(datastore.alert.search(f"sid:{child_submission.sid}",
+                                                               fl="id", as_obj=False)['items'][0]['id'])
     assert updated_alert is not None
 
     assert updated_alert != original_alert

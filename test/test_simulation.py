@@ -4,22 +4,22 @@ A test of ingest+dispatch running in one process.
 Needs the datastore and filestore to be running, otherwise these test are stand alone.
 """
 
-import baseconv
-import uuid
-import json
-import time
-import hashlib
-import os
-from tempfile import NamedTemporaryFile
-
-import pytest
 import fakeredis
+import hashlib
+import json
+import os
+import pytest
+import time
+
 from unittest import mock
+from tempfile import NamedTemporaryFile
 from typing import List
 
 from assemblyline.common import forge, identify
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.testing import skip
+from assemblyline.common.uid import get_random_id
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.datastore.stores.es_store import ESStore
 from assemblyline.odm.models.config import Config
@@ -29,22 +29,17 @@ from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.messages.submission import Submission as SubmissionInput
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.common.testing import skip
 
 from al_core.dispatching.client import DispatchClient
 from al_core.dispatching.dispatcher import service_queue_name
+from al_core.dispatching.run_files import FileDispatchServer
+from al_core.dispatching.run_submissions import SubmissionDispatchServer
 from al_core.ingester.ingester import IngestTask
-from al_core.watcher import WatcherServer
-
 from al_core.ingester.run_ingest import IngesterInput
 from al_core.ingester.run_internal import IngesterInternals
 from al_core.ingester.run_submit import IngesterSubmitter
-
-from al_core.dispatching.run_files import FileDispatchServer
-from al_core.dispatching.run_submissions import SubmissionDispatchServer
-
 from al_core.server_base import ServerBase
-
+from al_core.watcher import WatcherServer
 
 from .mocking import MockCollection, RedisTime
 from .test_scheduler import dummy_service
@@ -104,7 +99,7 @@ class MockService(ServerBase):
                 error = Error(instructions['error'])
                 error.sha256 = task.fileinfo.sha256
                 self.dispatch_client.service_failed(task.sid, error=error,
-                                                    error_key=baseconv.base62.encode(uuid.uuid4().int))
+                                                    error_key=get_random_id())
                 continue
 
             result_data = {
@@ -124,7 +119,7 @@ class MockService(ServerBase):
             result_data['response'].update(instructions.get('response', {}))
 
             result = Result(result_data)
-            result_key = instructions.get('result_key', baseconv.base62.encode(uuid.uuid4().int))
+            result_key = instructions.get('result_key', get_random_id())
             self.dispatch_client.service_finished(task.sid, result_key, result)
 
 
@@ -194,16 +189,16 @@ def core(request, redis, es_connection):
         t.start()
 
     def stop_core():
-        [t.close() for t in threads]
-        [t.stop() for t in threads]
-        [t.raising_join() for t in threads]
+        [tr.close() for tr in threads]
+        [tr.stop() for tr in threads]
+        [tr.raising_join() for tr in threads]
     request.addfinalizer(stop_core)
     return fields
 
 
 def ready_body(core, body=None):
     out = {
-        'salt': baseconv.base62.encode(uuid.uuid4().int),
+        'salt': get_random_id(),
     }
     out.update(body or {})
     out = json.dumps(out).encode()

@@ -1,16 +1,15 @@
 
-import baseconv
-import uuid
 import pytest
 import redis.exceptions
 
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.common.testing import skip
-
-from .mocking import ToggleTrue, RedisTime
+from assemblyline.common.uid import get_random_id
 
 from al_core.watcher import WatcherClient
 from al_core.watcher.run_watcher import WatcherServer
+
+from .mocking import ToggleTrue, RedisTime
 
 
 @pytest.fixture
@@ -29,22 +28,22 @@ def redis_connection():
 
 def test_watcher(redis_connection):
     redis_connection.time = RedisTime()
-    redis = redis_connection
-    queue_name = baseconv.base62.encode(uuid.uuid4().int)
-    out_queue = NamedQueue(queue_name, redis)
+    rds = redis_connection
+    queue_name = get_random_id()
+    out_queue = NamedQueue(queue_name, rds)
     try:
         # Create a server and hijack its running flag and the current time in 'redis'
-        client = WatcherClient(redis)
-        server = WatcherServer(redis)
+        client = WatcherClient(rds)
+        server = WatcherServer(rds)
         server.running = ToggleTrue()
-        redis.time.current = 0
+        rds.time.current = 0
         assert out_queue.length() == 0
 
         # Send a simple event to occur soon
         client.touch(10, 'one-second', queue_name, {'first': 'one'})
         server.try_run()
         assert out_queue.length() == 0  # Nothing yet
-        redis.time.current = 12  # Jump forward 12 seconds
+        rds.time.current = 12  # Jump forward 12 seconds
         server.try_run()
         assert out_queue.length() == 1
         assert out_queue.pop() == {'first': 'one'}
@@ -63,7 +62,7 @@ def test_watcher(redis_connection):
         assert out_queue.length() == 0  # Nothing yet
 
         for _ in range(15):
-            redis.time.current += 20
+            rds.time.current += 20
             server.try_run()
 
         assert out_queue.length() == 3
@@ -72,12 +71,12 @@ def test_watcher(redis_connection):
         assert out_queue.pop() == {'first': 'last'}
 
         # Send a simple event to occur soon, then stop it
-        redis.time.current = 0
+        rds.time.current = 0
         client.touch(10, 'one-second', queue_name, {'first': 'one'})
         server.try_run()
         assert out_queue.length() == 0  # Nothing yet
         client.clear('one-second')
-        redis.time.current = 12  # Jump forward 12 seconds
+        rds.time.current = 12  # Jump forward 12 seconds
         server.try_run()
         assert out_queue.length() == 0  # still nothing because it was cleared
 
