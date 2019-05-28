@@ -21,8 +21,9 @@ from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 
 STATUS_QUEUE = "status"
 
+
 # noinspection PyBroadException
-class HeartbeatManager(object):
+class HeartbeatFormatter(object):
     def __init__(self, sender, log, config=None, redis=None):
         self.sender = sender
         self.log = log

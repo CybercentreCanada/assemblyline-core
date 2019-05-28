@@ -10,7 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from collections import Counter
 from threading import Lock
 
-from al_core.metrics.heartbeat_manager import HeartbeatManager
+from al_core.metrics.heartbeat_formatter import HeartbeatFormatter
 from al_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common import forge, metrics
@@ -46,12 +46,12 @@ def cleanup_metrics(input_dict):
     return output_dict
 
 
-class LegacyMetricsServer(ServerBase):
+class MetricsServer(ServerBase):
     """
     There can only be one of these type of metrics server running because it runs of a pubsub queue.
     """
     def __init__(self, config=None):
-        super().__init__('assemblyline.legacy_metrics_aggregator', shutdown_timeout=65)
+        super().__init__('assemblyline.metrics_aggregator', shutdown_timeout=65)
         self.config = config or forge.get_config()
         self.elastic_hosts = self.config.core.metrics.elasticsearch.hosts
 
@@ -69,7 +69,7 @@ class LegacyMetricsServer(ServerBase):
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
             elasticapm.instrument()
             self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                service_name="legacy_metrics_aggregator")
+                                                service_name="metrics_aggregator")
         else:
             self.apm_client = None
 
@@ -142,7 +142,7 @@ class LegacyMetricsServer(ServerBase):
 
             self.log.info(output_metrics)
             try:
-                self.es.index(f"al_metrics_{component_type}-{index_time}", component_type, output_metrics)
+                self.es.index(f"al_metrics_{component_type}-{index_time}", output_metrics)
             except Exception as e:
                 self.log.exception(e)
 
@@ -154,13 +154,13 @@ class LegacyMetricsServer(ServerBase):
 
 
 # noinspection PyBroadException
-class LegacyHeartbeatManager(ServerBase):
+class HeartbeatManager(ServerBase):
     def __init__(self, config=None):
-        super().__init__('assemblyline.legacy_heartbeat_manager')
+        super().__init__('assemblyline.heartbeat_manager')
         self.config = config or forge.get_config()
         self.metrics_queue = CommsQueue(METRICS_QUEUE)
         self.scheduler = BackgroundScheduler(daemon=True)
-        self.hm = HeartbeatManager("legacy_heartbeat_manager", self.log, config=self.config)
+        self.hm = HeartbeatFormatter("heartbeat_manager", self.log, config=self.config)
 
         self.rolling_window = {}
         self.window_ttl = {}
@@ -174,7 +174,7 @@ class LegacyHeartbeatManager(ServerBase):
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
             elasticapm.instrument()
             self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                service_name="legacy_heartbeat_manager")
+                                                service_name="heartbeat_manager")
         else:
             self.apm_client = None
 
