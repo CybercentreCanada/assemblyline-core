@@ -23,8 +23,7 @@ class RandomService(ServerBase):
     """
     def __init__(self, datastore, filestore):
         self.config = forge.get_config()
-        log_level = logging.DEBUG if self.config.core.dispatcher.debug_logging else logging.INFO
-        super().__init__("assemblyline.randomservice", log_level=log_level)
+        super().__init__("assemblyline.randomservice")
         self.datastore = datastore
         self.filestore = filestore
 

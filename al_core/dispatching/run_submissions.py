@@ -12,8 +12,7 @@ from al_core.server_base import ServerBase
 
 class SubmissionDispatchServer(ServerBase):
     def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None):
-        log_level = logging.DEBUG if forge.get_config().core.dispatcher.debug_logging else logging.INFO
-        super().__init__('assemblyline.dispatcher.submissions', logger, log_level=log_level)
+        super().__init__('assemblyline.dispatcher.submissions', logger)
 
         config = forge.get_config()
         datastore = datastore or forge.get_datastore(config)

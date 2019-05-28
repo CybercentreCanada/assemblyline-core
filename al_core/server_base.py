@@ -20,9 +20,9 @@ class ServerBase(threading.Thread):
     This lets the main thread handle interrupts properly, even when the workload
     makes a blocking call that would normally stop this.
     """
-    def __init__(self, component_name, logger=None, log_level=logging.INFO, shutdown_timeout=SHUTDOWN_SECONDS_LIMIT):
+    def __init__(self, component_name, logger=None, shutdown_timeout=SHUTDOWN_SECONDS_LIMIT):
         super().__init__(name=component_name)
-        al_log.init_logging(component_name, log_level=log_level)
+        al_log.init_logging(component_name)
 
         self.running = None
         self.log = logger or logging.getLogger(component_name)
