@@ -3,7 +3,6 @@ core:
     delay: 0
   dispatcher:
     timeout: 4  # Set the dispatch watcher timeout very short for testing
-    debug_logging: True
   redis:
     nonpersistent:
       host: localhost
