@@ -21,6 +21,7 @@ from assemblyline.common.isotime import now, now_as_iso
 from assemblyline.common.importing import load_module_by_path
 from assemblyline.common import forge
 from assemblyline.odm.models.filescore import FileScore
+from assemblyline.odm.messages.ingest_heartbeat import Metrics
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
@@ -151,7 +152,8 @@ class IngestTask(odm.Model):
 class Ingester:
     """Internal interface to the ingestion queues."""
 
-    def __init__(self, datastore, logger, classification=None, redis=None, persistent_redis=None):
+    def __init__(self, datastore, logger, classification=None, redis=None, persistent_redis=None,
+                 metrics_name='ingester'):
         self.datastore = datastore
         self.log = logger
 
@@ -195,7 +197,8 @@ class Ingester:
         self.ce = classification or forge.get_classification()
 
         # Metrics gathering factory
-        self.counter = MetricsFactory('ingester', redis=self.redis, config=self.config)
+        self.counter = MetricsFactory(metrics_type='ingester', schema=Metrics, redis=self.redis,
+                                      config=self.config, name=metrics_name)
 
         # State. The submissions in progress are stored in Redis in order to
         # persist this state and recover in case we crash.

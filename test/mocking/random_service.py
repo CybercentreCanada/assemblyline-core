@@ -9,6 +9,8 @@ from al_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm.messages.task import Task as ServiceTask
+from assemblyline.odm.messages.service_heartbeat import Metrics
+from assemblyline.odm.messages.service_timing_heartbeat import Metrics as TimingMetrics
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.file import File
 from assemblyline.odm.models.result import Result
@@ -27,9 +29,9 @@ class RandomService(ServerBase):
         self.datastore = datastore
         self.filestore = filestore
 
-        self.counters = {n: MetricsFactory('service', name=n, config=self.config)
+        self.counters = {n: MetricsFactory('service', Metrics, name=n, config=self.config)
                          for n in datastore.service_delta.keys()}
-        self.counters_timing = {n: MetricsFactory('service_timing', name=n, config=self.config)
+        self.counters_timing = {n: MetricsFactory('service_timing', TimingMetrics, name=n, config=self.config)
                                 for n in datastore.service_delta.keys()}
         self.queues = [NamedQueue(service_queue_name(name)) for name in datastore.service_delta.keys()]
         self.dispatch_client = DispatchClient(datastore)

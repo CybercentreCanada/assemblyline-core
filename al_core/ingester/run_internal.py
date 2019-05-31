@@ -27,7 +27,7 @@ class IngesterInternals(ServerBase):
 
         # Initialize the ingester specific resources
         self.ingester = Ingester(datastore=datastore, classification=classification_engine, logger=self.log,
-                                 redis=redis, persistent_redis=persistent_redis)
+                                 redis=redis, persistent_redis=persistent_redis, metrics_name='ingester_internals')
 
         if config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {config.core.metrics.apm_server.server_url}")

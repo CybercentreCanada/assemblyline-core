@@ -1,6 +1,6 @@
 
 import elasticapm
-import logging
+import time
 
 from assemblyline.common import forge
 from al_core.dispatching.dispatcher import Dispatcher, FileTask
@@ -13,7 +13,8 @@ class FileDispatchServer(ServerBase):
         
         config = forge.get_config()
         datastore = datastore or forge.get_datastore(config)
-        self.dispatcher = Dispatcher(redis=redis, redis_persist=redis_persist, datastore=datastore, logger=self.log)
+        self.dispatcher = Dispatcher(redis=redis, redis_persist=redis_persist, datastore=datastore, logger=self.log,
+                                     counter_name='dispatcher_file')
         
         if config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {config.core.metrics.apm_server.server_url}")
@@ -29,10 +30,19 @@ class FileDispatchServer(ServerBase):
 
     def try_run(self):
         queue = self.dispatcher.file_queue
+        cpu_mark = time.process_time()
+        time_mark = time.time()
 
         while self.running:
             try:
+                self.dispatcher.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+                self.dispatcher.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
                 message = queue.pop(timeout=1)
+
+                cpu_mark = time.process_time()
+                time_mark = time.time()
+
                 if not message:
                     continue
                 

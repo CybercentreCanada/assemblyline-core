@@ -7,6 +7,7 @@ from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
+from assemblyline.odm.messages.alerter_heartbeat import Metrics
 
 ALERT_QUEUE_NAME = 'm-alert'
 MAX_RETRIES = 10
@@ -17,7 +18,7 @@ class Alerter(ServerBase):
         super().__init__('assemblyline.alerter')
         self.config = forge.get_config()
         # Publish counters to the metrics sink.
-        self.counter = MetricsFactory('alerter')
+        self.counter = MetricsFactory('alerter', Metrics)
         self.datastore = forge.get_datastore(self.config)
         self.persistent_redis = get_client(
             db=self.config.core.redis.persistent.db,

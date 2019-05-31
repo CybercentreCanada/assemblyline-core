@@ -117,25 +117,27 @@ class MetricsServer(ServerBase):
             self.apm_client.begin_transaction('metrics')
 
         with self.counters_lock:
-            counter_copy = copy.deepcopy(self.counters)
-            self.counters = {}
+            counter_copy, self.counters = self.counters, {}
 
         self.log.info("Aggregating metrics ...")
         timestamp = now_as_iso()
         for component, counts in counter_copy.items():
             component_name, component_type = component
-            output_metrics = {'name': component_name,
-                              'type': component_type}
-            if component_type in metrics.METRIC_TYPES and component_type not in metrics.TIMED_METRICS:
-                output_metrics.update({k: counts.get(k, 0) for k in metrics.METRIC_TYPES[component_type]})
-            elif component_type in metrics.METRIC_TYPES and component_type in metrics.TIMED_METRICS:
-                output_metrics.update({k: counts.get(k + ".t", 0) / counts.get(k + ".c", 1)
-                                       for k in metrics.METRIC_TYPES[component_type]})
-                output_metrics.update({k + "_count": counts.get(k + ".c", 0)
-                                       for k in metrics.METRIC_TYPES[component_type]})
-            else:
-                self.log.warning(f"Skipping unknown component type: {component_type}")
-                continue
+            output_metrics = {'name': component_name, 'type': component_type}
+
+            for key, value in counts.items():
+                # Skip counts, they will be paired with a time entry and we only want to count it once
+                if key.endswith('.c'):
+                    continue
+                # We have an entry that is a timer, should also have a .c count
+                elif key.endswith('.t'):
+                    name = key.rstrip('.t')
+                    output_metrics[name] = counts[key] / counts.get(name + ".c", 1)
+                    output_metrics[name + "_count"] = counts.get(name + ".c", 0)
+                # Plain old metric, no modifications needed
+                else:
+                    output_metrics[key] = value
+
             output_metrics['timestamp'] = timestamp
             output_metrics = cleanup_metrics(output_metrics)
             index_time = timestamp[:10].replace("-", ".")
@@ -241,34 +243,37 @@ class HeartbeatManager(ServerBase):
                     self.rolling_window[component_parts].pop(0)
                     counters_list = counters_list[1:]
 
-                if c_type in metrics.METRIC_TYPES:
-                    key = (c_name, c_type)
-                    if key not in aggregated_counters:
-                        aggregated_counters[key] = Counter()
+                key = (c_name, c_type)
+                if key not in aggregated_counters:
+                    aggregated_counters[key] = Counter()
 
-                    if c_type in metrics.TIMED_METRICS:
-                        aggregated_counters[key]['instances.t'] += 1
-                        aggregated_counters[key]['instances.c'] += 1
-                    else:
-                        aggregated_counters[key]['instances'] += 1
+                # if c_type in metrics.TIMED_METRICS:
+                #     aggregated_counters[key]['instances.t'] += 1
+                #     aggregated_counters[key]['instances.c'] += 1
+                # else:
+                aggregated_counters[key]['instances'] += 1
 
-                    for c in counters_list:
-                        aggregated_counters[key] += c
-
-                else:
-                    self.log.warning(f"Skipping unknown component type: {c_type}")
+                for c in counters_list:
+                    aggregated_counters[key].update(c)
 
             self.log.info("Generating heartbeats...")
             for aggregated_parts, counter in aggregated_counters.items():
                 agg_c_name, agg_c_type = aggregated_parts
                 with elasticapm.capture_span(name=f"{agg_c_type}.{agg_c_name}", span_type="send_heartbeat"):
-                    allowed_fields = metrics.METRIC_TYPES[agg_c_type] + ['instances']
 
-                    if agg_c_type not in metrics.TIMED_METRICS:
-                        metrics_data = {k: counter.get(k, 0) for k in allowed_fields}
-                    else:
-                        metrics_data = {k: counter.get(k + ".t", 0) / counter.get(k + ".c", 1) for k in allowed_fields}
-                        metrics_data.update({k + "_count": counter.get(k + ".c", 0) for k in allowed_fields})
+                    metrics_data = {}
+                    for key, value in counter.items():
+                        # Skip counts, they will be paired with a time entry and we only want to count it once
+                        if key.endswith('.c'):
+                            continue
+                        # We have an entry that is a timer, should also have a .c count
+                        elif key.endswith('.t'):
+                            name = key.rstrip('.t')
+                            metrics_data[name] = value / max(counter.get(name + ".c", 1), 1)
+                            metrics_data[name + "_count"] = counter.get(name + ".c", 0)
+                        # Plain old metric, no modifications needed
+                        else:
+                            metrics_data[key] = value
 
                     agg_c_instances = metrics_data.pop('instances', 1)
                     metrics_data.pop('instances_count', None)

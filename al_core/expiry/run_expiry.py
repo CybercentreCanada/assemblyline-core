@@ -8,6 +8,7 @@ from al_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
+from assemblyline.odm.messages.expiry_heartbeat import Metrics
 
 
 class ExpiryManager(ServerBase):
@@ -18,7 +19,7 @@ class ExpiryManager(ServerBase):
         self.filestore = forge.get_filestore(config=self.config)
         self.cachestore = FileStore(*self.config.filestore.cache)
         self.expirable_collections = []
-        self.counter = MetricsFactory('expiry')
+        self.counter = MetricsFactory('expiry', Metrics)
 
         self.fs_hashmap = {
             'file': self.filestore.delete,

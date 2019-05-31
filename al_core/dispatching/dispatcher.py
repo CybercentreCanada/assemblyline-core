@@ -4,6 +4,7 @@ from typing import List
 
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm import ClassificationObject
+from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.service import Service
@@ -62,7 +63,7 @@ DISPATCH_RUNNING_TASK_HASH = 'dispatch-active-tasks'
 
 class Dispatcher:
 
-    def __init__(self, datastore, redis, redis_persist, logger):
+    def __init__(self, datastore, redis, redis_persist, logger, counter_name='dispatcher'):
         # Load the datastore collections that we are going to be using
         self.datastore = datastore
         self.log = logger
@@ -99,7 +100,8 @@ class Dispatcher:
         self.active_tasks = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
 
         # Publish counters to the metrics sink.
-        self.counter = MetricsFactory('dispatcher', redis=self.redis, config=self.config)
+        self.counter = MetricsFactory(metrics_type='dispatcher', schema=Metrics, name=counter_name,
+                                      redis=self.redis, config=self.config)
 
     def volatile_named_queue(self, name: str) -> NamedQueue:
         if name not in self._nonper_other_queues:

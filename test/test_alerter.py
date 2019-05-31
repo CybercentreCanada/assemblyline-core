@@ -1,5 +1,6 @@
 import hashlib
 import random
+import uuid
 
 import pytest
 
@@ -169,8 +170,9 @@ def test_create_single_alert(datastore):
         port=config.core.redis.persistent.port,
         private=False,
     )
-    alert_queue = NamedQueue(ALERT_QUEUE_NAME, persistent_redis)
     alerter = Alerter()
+    # Swap our alerter onto a private queue so our test doesn't get intercepted
+    alerter.alert_queue = alert_queue = NamedQueue(uuid.uuid4().hex, persistent_redis)
 
     # Get a random submission
     submission = random.choice(all_submissions)
@@ -202,8 +204,9 @@ def test_update_single_alert(datastore):
         port=config.core.redis.persistent.port,
         private=False,
     )
-    alert_queue = NamedQueue(ALERT_QUEUE_NAME, persistent_redis)
     alerter = Alerter()
+    # Swap our alerter onto a private queue so our test doesn't get intercepted
+    alerter.alert_queue = alert_queue = NamedQueue(uuid.uuid4().hex, persistent_redis)
 
     # Get a random submission
     submission = random.choice(all_submissions)
