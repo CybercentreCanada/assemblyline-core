@@ -258,7 +258,7 @@ def test_deduplication(core):
             )]
         )).as_primitives())
 
-    notification_queue = NamedQueue('output-queue-one', core.redis)
+    notification_queue = NamedQueue('nq-output-queue-one', core.redis)
     first_task = notification_queue.pop(timeout=5)
     second_task = notification_queue.pop(timeout=5)
 
@@ -297,7 +297,7 @@ def test_deduplication(core):
         )]
     )).as_primitives())
 
-    notification_queue = NamedQueue('2', core.redis)
+    notification_queue = NamedQueue('nq-2', core.redis)
     third_task = notification_queue.pop(timeout=5)
     assert third_task
 
@@ -338,7 +338,7 @@ def test_watcher_recovery(core):
             )]
         )).as_primitives())
 
-        notification_queue = NamedQueue('watcher-recover', core.redis)
+        notification_queue = NamedQueue('nq-watcher-recover', core.redis)
         dropped_task = notification_queue.pop(timeout=16)
         assert dropped_task and IngestTask(dropped_task)
         assert core.pre_service.drops[sha] == 1
@@ -374,7 +374,7 @@ def test_dropping_early(core):
         )]
     )).as_primitives())
 
-    notification_queue = NamedQueue('drop', core.redis)
+    notification_queue = NamedQueue('nq-drop', core.redis)
     dropped_task = IngestTask(notification_queue.pop(timeout=5))
     sub = core.ds.submission.get(dropped_task.submission.sid)
     assert len(sub.files) == 1
@@ -412,7 +412,7 @@ def test_service_error(core):
             max_extracted=10000
         ),
         notification=dict(
-            queue='nq-error',
+            queue='error',
             threshold=0
         ),
         files=[dict(
@@ -442,7 +442,7 @@ def test_extracted_file(core):
             max_extracted=10000
         ),
         notification=dict(
-            queue='nq-text-extracted-file',
+            queue='text-extracted-file',
             threshold=0
         ),
         files=[dict(
@@ -478,7 +478,7 @@ def test_depth_limit(core):
             max_extracted=core.config.submission.max_extraction_depth + 10
         ),
         notification=dict(
-            queue='nq-test-depth-limit',
+            queue='test-depth-limit',
             threshold=0
         ),
         files=[dict(
@@ -511,7 +511,7 @@ def test_max_extracted_in_one(core):
             max_extracted=3
         ),
         notification=dict(
-            queue='nq-test-extracted-in-one',
+            queue='test-extracted-in-one',
             threshold=0
         ),
         files=[dict(
@@ -547,7 +547,7 @@ def test_max_extracted_in_several(core):
             max_extracted=3
         ),
         notification=dict(
-            queue='nq-test-extracted-in-several',
+            queue='test-extracted-in-several',
             threshold=0
         ),
         files=[dict(
@@ -592,7 +592,7 @@ def test_caching(core: CoreSession):
             )]
         )).as_primitives())
 
-        notification_queue = NamedQueue('1', core.redis)
+        notification_queue = NamedQueue('nq-1', core.redis)
         first_task = notification_queue.pop(timeout=5)
 
         # One of the submission will get processed fully

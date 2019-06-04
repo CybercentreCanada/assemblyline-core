@@ -135,5 +135,5 @@ def test_existing_score(submit_harness):
     # No tasks should be left in the queue
     assert mm.unique_queue.pop() is None
     # We should have received a notification about our task, since it was already 'done'
-    assert mm.notification_queues['our_queue'].length() == 1
+    assert mm.notification_queues['nq-our_queue'].length() == 1
 

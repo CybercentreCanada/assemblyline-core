@@ -462,10 +462,11 @@ class Ingester:
         if failure:
             logfunc("%s: %s", failure, str(task.json()))
 
-        note_queue = _notification_queue_prefix + task.submission.notification.queue
-        threshold = task.submission.notification.threshold
         if not task.submission.notification.queue:
             return
+
+        note_queue = _notification_queue_prefix + task.submission.notification.queue
+        threshold = task.submission.notification.threshold
 
         if threshold is not None and task.score is not None and task.score < threshold:
             return
