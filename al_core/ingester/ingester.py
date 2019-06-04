@@ -40,7 +40,7 @@ from al_core.submission_client import SubmissionClient
 INGEST_QUEUE_NAME = 'm-ingest'
 _completeq_name = 'm-complete'
 _dup_prefix = 'w-m-'
-_notification_queue_prefix = 'm-n-'
+_notification_queue_prefix = 'nq-'
 _min_priority = 1
 _max_retries = 10
 _retry_delay = 180
@@ -462,9 +462,9 @@ class Ingester:
         if failure:
             logfunc("%s: %s", failure, str(task.json()))
 
-        note_queue = task.submission.notification.queue
+        note_queue = _notification_queue_prefix + task.submission.notification.queue
         threshold = task.submission.notification.threshold
-        if not note_queue:
+        if not task.submission.notification.queue:
             return
 
         if threshold is not None and task.score is not None and task.score < threshold:
