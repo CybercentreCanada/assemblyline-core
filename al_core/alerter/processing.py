@@ -18,10 +18,10 @@ cache = TimeExpiredCache(CACHE_LEN, CACHE_EXPIRY_RATE)
 Classification = forge.get_classification()
 config = forge.get_config()
 summary_tags = (
-    "AV_VIRUS_NAME", "EXPLOIT_NAME",
-    "FILE_CONFIG", "FILE_OBFUSCATION", "FILE_SUMMARY",
-    "IMPLANT_FAMILY", "IMPLANT_NAME", "NET_DOMAIN_NAME", "NET_IP",
-    "TECHNIQUE_OBFUSCATION", "THREAT_ACTOR",
+    "av.virus_name", "attribution.exploit",
+    "file.config", "technique.obfuscation", "file.summary",
+    "attribution.family", "attribution.implant", "network.domain", "network.ip",
+    "technique.obfuscation", "attribution.actor",
 )
 
 
@@ -50,22 +50,21 @@ def get_summary(datastore, srecord):
     max_classification = srecord['classification']
 
     summary = {
-        'AV_VIRUS_NAME': set(),
-        'EXPLOIT_NAME': set(),
-        'FILE_ATTRIBUTION': set(),
-        'FILE_CONFIG': set(),
-        'FILE_OBFUSCATION': set(),
-        'FILE_SUMMARY': set(),
-        'FILE_YARA_RULE': set(),
-        'IMPLANT_FAMILY': set(),
-        'IMPLANT_NAME': set(),
-        'NET_DOMAIN_NAME_S': set(),
-        'NET_DOMAIN_NAME_D': set(),
-        'NET_IP_S': set(),
-        'NET_IP_D': set(),
-        'TECHNIQUE_CONFIG': set(),
-        'TECHNIQUE_OBFUSCATION': set(),
-        'THREAT_ACTOR': set()
+        'av.virus_name': set(),
+        'attribution.exploit': set(),
+        'attribution': set(),
+        'file.config': set(),
+        'technique.obfuscation': set(),
+        'file.summary': set(),
+        'file.rule.yara': set(),
+        'attribution.family': set(),
+        'attribution.implant': set(),
+        'network.domain.static': set(),
+        'network.domain.dynamic': set(),
+        'network.ip.static': set(),
+        'network.ip.dynamic': set(),
+        'technique.config': set(),
+        'attribution.actor': set()
     }
 
     for t in datastore.get_tag_list_from_keys(srecord.get('results', [])):
@@ -75,11 +74,11 @@ def get_summary(datastore, srecord):
 
         tag_context = t.get('context', None)
         tag_type = t['type']
-        if tag_type in ('NET_DOMAIN_NAME', 'NET_IP'):
+        if tag_type in ('network.domain', 'network.ip'):
             if tag_context is None:
-                tag_type += '_S'
+                tag_type += '.static'
             else:
-                tag_type += '_D'
+                tag_type += '.dynamic'
         elif tag_type not in summary:
             continue
 
@@ -89,20 +88,19 @@ def get_summary(datastore, srecord):
             continue
 
         sub_tag = {
-            'EXPLOIT_NAME': 'EXP',
-            'FILE_CONFIG': 'CFG',
-            'FILE_OBFUSCATION': 'OB',
-            'IMPLANT_FAMILY': 'IMP',
-            'IMPLANT_NAME': 'IMP',
-            'TECHNIQUE_CONFIG': 'CFG',
-            'TECHNIQUE_OBFUSCATION': 'OB',
-            'THREAT_ACTOR': 'TA',
+            'attribution.exploit': 'EXP',
+            'file.config': 'CFG',
+            'technique.obfuscation': 'OB',
+            'attribution.family': 'IMP',
+            'attribution.implant': 'IMP',
+            'technique.config': 'CFG',
+            'attribution.actor': 'TA',
         }.get(tag_type, None)
         if sub_tag:
-            tag_type = 'FILE_ATTRIBUTION'
+            tag_type = 'attribution'
             tag_value = "%s [%s]" % (tag_value, sub_tag)
 
-        if tag_type == 'AV_VIRUS_NAME':
+        if tag_type == 'av.virus_name':
             if tag_value in (
                 'Corrupted executable file',
                 'Encrypted container deleted',
@@ -110,7 +108,7 @@ def get_summary(datastore, srecord):
                 'Password-protected',
                 'Malformed container violation',
             ):
-                tag_type = 'FILE_SUMMARY'
+                tag_type = 'file.summary'
 
             else:
                 av_name = (tag_context or '').split('scanner:')
@@ -144,7 +142,7 @@ def parse_submission_record(counter, datastore, alert_data, logger):
     srecord = get_submission_record(counter, datastore, sid)
 
     max_classification, summary = get_summary(datastore, srecord)
-    summary_list = list(summary['FILE_SUMMARY'])
+    summary_list = list(summary['file.summary'])
 
     extended_scan = alert_data['extended_scan']
     if psid:
@@ -160,8 +158,8 @@ def parse_submission_record(counter, datastore, alert_data, logger):
         except Exception:  # pylint: disable=W0702
             logger.exception('Problem determining extended scan state:')
 
-    domains = summary['NET_DOMAIN_NAME_D'].union(summary['NET_DOMAIN_NAME_S'])
-    ips = summary['NET_IP_D'].union(summary['NET_IP_S'])
+    domains = summary['network.domain.dynamic'].union(summary['network.domain.static'])
+    ips = summary['network.ip.dynamic'].union(summary['network.ip.static'])
 
     return {
         'summary_list': summary_list,
@@ -247,17 +245,17 @@ def get_alert_update_parts(counter, datastore, alert_data, logger):
         alert_update_p1 = {
             'extended_scan': parsed_record['extended_scan'],
             'al': {
-                'attrib': list(parsed_record['summary']['FILE_ATTRIBUTION']),
-                'av': list(parsed_record['summary']['AV_VIRUS_NAME']),
+                'attrib': list(parsed_record['summary']['attribution']),
+                'av': list(parsed_record['summary']['av.virus_name']),
                 'domain': list(parsed_record['domains']),
-                'domain_dynamic': list(parsed_record['summary']['NET_DOMAIN_NAME_D']),
-                'domain_static': list(parsed_record['summary']['NET_DOMAIN_NAME_S']),
+                'domain_dynamic': list(parsed_record['summary']['network.domain.dynamic']),
+                'domain_static': list(parsed_record['summary']['network.domain.static']),
                 'ip': list(parsed_record['ips']),
-                'ip_dynamic': list(parsed_record['summary']['NET_IP_D']),
-                'ip_static': list(parsed_record['summary']['NET_IP_S']),
+                'ip_dynamic': list(parsed_record['summary']['network.ip.dynamic']),
+                'ip_static': list(parsed_record['summary']['network.ip.static']),
                 'request_end_time': parsed_record['srecord']['times']['completed'],
                 'summary': parsed_record['summary_list'],
-                'yara': list(parsed_record['summary']['FILE_YARA_RULE']),
+                'yara': list(parsed_record['summary']['file.rule.yara']),
             },
 
         }
