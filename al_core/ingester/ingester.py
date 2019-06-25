@@ -10,7 +10,6 @@ be created.
 """
 
 import threading
-from math import tanh
 from random import random
 from typing import Iterable
 
@@ -35,9 +34,8 @@ from assemblyline.odm.messages.submission import Submission
 
 from al_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from al_core.submission_client import SubmissionClient
+from .constants import INGEST_QUEUE_NAME, drop_chance
 
-
-INGEST_QUEUE_NAME = 'm-ingest'
 _completeq_name = 'm-complete'
 _dup_prefix = 'w-m-'
 _notification_queue_prefix = 'nq-'
@@ -45,10 +43,6 @@ _min_priority = 1
 _max_retries = 10
 _retry_delay = 180
 _max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
-
-
-def drop_chance(length, maximum):
-    return tanh(float(length - maximum) / maximum * 2.0)
 
 
 ###############################################################################

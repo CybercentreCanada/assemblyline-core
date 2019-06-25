@@ -1,4 +1,4 @@
-from .server import WatcherServer
+from al_core.watcher.server import WatcherServer
 
 if __name__ == "__main__":
     with WatcherServer() as watch:
