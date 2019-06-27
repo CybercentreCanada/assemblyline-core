@@ -8,16 +8,19 @@ from assemblyline.odm.randomizer import random_model_obj
 from al_core.dispatching.scheduler import Scheduler
 
 
-def dummy_service(name, stage, accepts='', rejects=''):
+def dummy_service(name, stage, category='static', accepts='', rejects=''):
     return Service({
         'name': name,
         'stage': stage,
-        'category': 'static',
+        'category': category,
         'accepts': accepts,
         'rejects': rejects,
         'version': '0',
         'enabled': True,
-        'timeout': 2
+        'timeout': 2,
+        'docker_config': {
+            'image': 'somefakedockerimage:latest'
+        }
     })
 
 
@@ -30,51 +33,40 @@ class FakeDatastore:
 
     def list_all_services(self, full=True):
         return {
-            'extract': Service({
-                'name': 'extract',
-                'enabled': True,
-                'stage': 'pre',
-                'category': 'static',
-                'accepts': 'archive/.*',
-                'rejects': '',
-                'version': '0',
-            }),
-            'AnAV': Service({
-                'name': 'AnAV',
-                'enabled': True,
-                'stage': 'core',
-                'category': 'av',
-                'accepts': '.*',
-                'rejects': '',
-                'version': '0',
-            }),
-            'cuckoo': Service({
-                'name': 'cuckoo',
-                'enabled': True,
-                'stage': 'core',
-                'category': 'dynamic',
-                'accepts': 'document/.*|executable/.*',
-                'rejects': '',
-                'version': '0',
-            }),
-            'polish': Service({
-                'name': 'polish',
-                'enabled': True,
-                'stage': 'post',
-                'category': 'static',
-                'accepts': '.*',
-                'rejects': '',
-                'version': '0',
-            }),
-            'not_documents': Service({
-                'name': 'not_documents',
-                'enabled': True,
-                'stage': 'post',
-                'category': 'static',
-                'accepts': '.*',
-                'rejects': 'document/*',
-                'version': '0',
-            })
+            'extract': dummy_service(
+                name='extract',
+                stage='pre',
+                accepts='archive/.*',
+                rejects='',
+            ),
+            'AnAV': dummy_service(
+                name='AnAV',
+                stage='core',
+                category='av',
+                accepts='.*',
+                rejects='',
+            ),
+            'cuckoo': dummy_service(
+                name='cuckoo',
+                stage='core',
+                category='dynamic',
+                accepts='document/.*|executable/.*',
+                rejects='',
+            ),
+            'polish': dummy_service(
+                name='polish',
+                stage='post',
+                category='static',
+                accepts='.*',
+                rejects='',
+            ),
+            'not_documents': dummy_service(
+                name='not_documents',
+                stage='post',
+                category='static',
+                accepts='.*',
+                rejects='document/*',
+            )
         }.values()
 
 
