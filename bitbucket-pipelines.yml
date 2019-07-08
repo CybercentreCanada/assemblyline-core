@@ -14,11 +14,18 @@ pipelines:
             - elasticsearch
           script: &build_test
             - apt update
-            - apt install -y build-essential libffi-dev libfuzzy-dev python3-dev
+            - apt install -y build-essential libffi-dev libfuzzy-dev python3-dev git
             - pip install assemblyline
             - mkdir -p /etc/assemblyline/
             - mkdir -p /var/cache/assemblyline/
             - cp test/bitbucket/config.yml /etc/assemblyline
+            # Install al common from source
+            - git clone git@bitbucket.org:cse-assemblyline/alv4.git ~/alv4
+            - cd ~/alv4 && pwd
+            - git checkout -B $BITBUCKET_BRANCH  # Try to match our current branch
+            - pip install -e .
+            - cd - && pwd
+            # Install and test al-core
             - pip install -r test/requirements.txt
             - pip install -e .
             - pytest -rsx -vv

@@ -1,10 +1,9 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from al_core.alerter.run_alerter import ALERT_QUEUE_NAME
-from al_core.dispatching.dispatcher import DISPATCH_TASK_HASH, SUBMISSION_QUEUE
-from al_core.ingester.ingester import INGEST_QUEUE_NAME
+from al_core.dispatching.dispatcher import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, FILE_QUEUE
+from al_core.ingester import INGEST_QUEUE_NAME, drop_chance
 from al_core.dispatching.dispatcher import service_queue_name
-from al_core.ingester.ingester import drop_chance
 from assemblyline.common import forge, metrics
 from assemblyline.datastore import SearchException
 from assemblyline.odm.messages.alerter_heartbeat import AlerterMessage
@@ -31,7 +30,6 @@ class HeartbeatFormatter(object):
         self.config = config or forge.get_config()
         self.datastore = forge.get_datastore(self.config)
 
-
         self.redis = redis or get_client(
             db=self.config.core.redis.nonpersistent.db,
             host=self.config.core.redis.nonpersistent.host,
@@ -47,6 +45,7 @@ class HeartbeatFormatter(object):
         self.status_queue = CommsQueue(STATUS_QUEUE, self.redis)
         self.dispatch_active_hash = Hash(DISPATCH_TASK_HASH, self.redis_persist)
         self.dispatcher_submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
+        self.dispatcher_file_queue = NamedQueue(FILE_QUEUE, self.redis)
         self.ingest_scanning = Hash('m-scanning-table', self.redis_persist)
         self.ingest_unique_queue = PriorityQueue('m-unique', self.redis_persist)
         self.ingest_queue = NamedQueue(INGEST_QUEUE_NAME, self.redis_persist)
@@ -100,8 +99,10 @@ class HeartbeatFormatter(object):
                         "instances": instances,
                         "metrics": m_data,
                         "queues": {
-                            "ingest": self.dispatcher_submission_queue.length()
-                        }
+                            "ingest": self.dispatcher_submission_queue.length(),
+                            "files": self.dispatcher_file_queue.length(),
+                        },
+                        "component": m_name,
                     }
                 }
                 self.status_queue.publish(DispatcherMessage(msg).as_primitives())
@@ -199,6 +200,7 @@ class HeartbeatFormatter(object):
                     "msg": {
                         "instances": instances,
                         "metrics": m_data,
+                        "queue": NamedQueue(service_queue_name(m_name), host=self.redis).length(),
                         "service_name": m_name
                     }
                 }

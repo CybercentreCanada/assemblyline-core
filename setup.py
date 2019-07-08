@@ -33,6 +33,7 @@ setup(
     install_requires=[
         'urllib3<1.25',
         'assemblyline',
+        'docker',
     ],
     package_data={
         '': ["*schema.xml", "*managed-schema", "*solrconfig.xml", "*classification.yml", "*.magic"]
