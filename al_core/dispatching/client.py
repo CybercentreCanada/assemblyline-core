@@ -4,7 +4,7 @@ An interface to the core system for the edge services.
 
 """
 import logging
-from typing import Dict, Union
+from typing import Dict, Union, Tuple
 
 from assemblyline.common import forge
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
@@ -97,19 +97,28 @@ class DispatchClient:
 
         return output
 
-    def request_work(self, service_name, timeout=60, blocking=True) -> Union[ServiceTask, None]:
+    def request_work(self, service_name, timeout=60, blocking=True) -> Tuple[Union[ServiceTask, None], bool]:
+        """Pull work from the service queue for the service in question.
+
+        :param service_name: Which service needs work.
+        :param timeout: How many seconds to block before returning if blocking is true.
+        :param blocking: Whether to wait for jobs to enter the queue, or if false, return immediately
+        :return: The job found, and a boolean value indicating if this is the first time this task has
+                 been returned by request_work.
+        """
         # Get work from the queue
         work_queue = NamedQueue(service_queue_name(service_name), host=self.redis)
         result = work_queue.pop(blocking=blocking, timeout=timeout)
         if not result:
-            return None
+            return None, False
 
         # If we are actually returning a task, record it as running, shielding the dispatch
-        # internal properties from downstream changes
+        # internal properties from downstream changes, if the task has already been marked
+        # we have already dispatched this job to the
         task = ServiceTask(result)
         task_key = task.key()
-        self.running_tasks.set(task_key, result)
-        return task
+        first = bool(self.running_tasks.set(task_key, result))
+        return task, first
 
     def _dispatching_error(self, task, process_table, error):
         error_key = error.build_key()
@@ -146,8 +155,11 @@ class DispatchClient:
 
         # Store the result object and mark the service finished in the global table
         process_table = DispatchHash(task.sid, self.redis)
-        remaining = process_table.finish(task.fileinfo.sha256, task.service_name, result_key,
-                                         result.result.score, result.classification, result.drop_file)
+        remaining, duplicate = process_table.finish(task.fileinfo.sha256, task.service_name, result_key,
+                                                    result.result.score, result.classification, result.drop_file)
+        if duplicate:
+            self.log.warning(f"[{sid} :: {result.response.service_name}] Service tried to finish the same task twice.")
+            return
 
         # Send the extracted files to the dispatcher
         depth_limit = self.config.submission.max_extraction_depth
@@ -236,7 +248,7 @@ class DispatchClient:
             # This is a NON_RECOVERABLE error, error will be saved and transmitted to the user
             self.errors.save(error_key, error)
 
-            remaining = process_table.fail_nonrecoverable(task.fileinfo.sha256, task.service_name, error_key)
+            remaining, _duplicate = process_table.fail_nonrecoverable(task.fileinfo.sha256, task.service_name, error_key)
 
             # Send the result key to any watching systems
             msg = {'status': 'FAIL', 'cache_key': error_key}

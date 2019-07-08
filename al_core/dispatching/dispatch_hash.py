@@ -5,7 +5,7 @@ and those that are already finished.
 import time
 import json
 import collections
-from typing import Union, List, Tuple, Dict
+from typing import Union, Dict, Tuple
 
 from redis import StrictRedis, Redis
 
@@ -25,12 +25,13 @@ local result_key = ARGV[4]
 
 -- If the dispatch table has already been erased/task finished then don't create a new key.
 -- We don't want the dispatch table to be re-created this way, after the submission has actually been
--- finalized.
+-- finalized. 
+-- Return the number of outstanding files, and if the result we just 'finished' was a duplication.
 if redis.call('hdel', sid .. '{dispatch_tail}', key) then
     redis.call('hsetnx', sid .. '{finished_tail}', key, result_key)
-    return redis.call('hincrby', 'dispatch-hash-files-' .. sid, file_hash, -1)
+    return {{redis.call('hincrby', 'dispatch-hash-files-' .. sid, file_hash, -1), 0}}
 end
-return redis.call('hlen', sid .. '{dispatch_tail}')
+return {{redis.call('hlen', sid .. '{dispatch_tail}'), 1}}
 """
 
 
@@ -153,7 +154,7 @@ class DispatchHash:
         retry_call(self.client.hdel, self._dispatch_key, f"{file_hash}-{service}")
         self._outstanding_service_count.increment(file_hash, -1)
 
-    def fail_nonrecoverable(self, file_hash: str, service, error_key) -> int:
+    def fail_nonrecoverable(self, file_hash: str, service, error_key) -> Tuple[int, bool]:
         """A service task has failed and should not be retried, entry the error as the result.
 
         Has exactly the same semantics as `finish` but for errors.
@@ -161,12 +162,12 @@ class DispatchHash:
         return retry_call(self._finish, args=[self.sid, file_hash, service,
                                               json.dumps(['error', error_key, 0, False, ''])])
 
-    def finish(self, file_hash, service, result_key, score, classification, drop=False) -> int:
+    def finish(self, file_hash, service, result_key, score, classification, drop=False) -> Tuple[int, bool]:
         """
         As a single transaction:
          - Remove the service from the dispatched list
          - Add the file to the finished list, with the given result key
-         - return the number of items in the dispatched list
+         - return the number of items in the dispatched list and if this was a duplicate call to finish
         """
         return retry_call(self._finish, args=[self.sid, file_hash, service,
                                               json.dumps(['result', result_key, score, drop, str(classification)])])
