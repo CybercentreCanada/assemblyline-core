@@ -4,11 +4,57 @@ Code for collecting metric data and feeding it into the orchestration framework.
 The task of this module is to take data available from heartbeats, and convert them
 into a uniform format that can be consumed by the scaling system.
 """
+import time
+from typing import Dict, List
+from collections import namedtuple
+
+Row = namedtuple('Row', ['timestamp', 'busy', 'throughput'])
 
 
+class Collection:
+    def __init__(self, period, ttl=None):
+        self.period = period
+        self.ttl = ttl or (period * 1.5)
+        # [service_name][host_name] = state
+        self.services: Dict[str, Dict[str, Row]] = {}
 
-# import math
-# import logging
+    def update(self, service, host, busy_seconds, throughput):
+        # Load the sequence of data points that
+        try:
+            hosts = self.services[service]
+        except KeyError:
+            hosts = self.services[service] = {}
+
+        # Add the new data
+        hosts[host] = Row(time.time(), busy_seconds, throughput)
+
+    def read(self, service):
+        now = time.time()
+
+        # Load the last messages from this service
+        try:
+            hosts = self.services[service]
+        except KeyError:
+            return None
+
+        # Flush out stale messages
+        expired = [_h for _h, _v in hosts.items() if now - _v.timestamp > self.ttl]
+        for host_name in expired:
+            hosts.pop(host_name, None)
+
+        # If flushing got rid of all of our messages our state is 'offline'
+        if not hosts:
+            return None
+
+        #
+        return {
+            'instances': len(hosts),
+            'duty_cycle': sum(_v.busy for _v in hosts.values())/(len(hosts) * self.period),
+        }
+
+
+# # import math
+# # import logging
 #
 # from pipeline_scaler.smoothing import FlowData
 # log = logging.getLogger(__name__)
@@ -45,6 +91,7 @@ into a uniform format that can be consumed by the scaling system.
 #     def update(self, data):
 #         # Include the new data in our averages
 #         delta = data['delta']
+
 #         self.data.update(data)
 #
 #         # Update the pressure to go up or down

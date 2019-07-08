@@ -7,22 +7,38 @@ import time
 import math
 import logging
 from typing import List
+from assemblyline.odm.models.service import DockerConfig
 
 
-logger = logging.getLogger('assemblyline.pipeline_scaler')
+logger = logging.getLogger('assemblyline.scaler')
 
 
 class ServiceProfile:
-    def __init__(self, name, ram, cpu, container_config, min_instances=0, max_instances=None, growth=600, shrink=None, backlog=500):
+    """Describe how to scale/start/stop a service."""
+    def __init__(self, name, ram, cpu, container_config: DockerConfig, min_instances=0, max_instances=None,
+                 growth=600, shrink=None, backlog=500, queue=None):
+        """
+        :param name: Name of the service to manage
+        :param ram: Memory limit in MB
+        :param cpu: CPU limit in cores
+        :param container_config: Instructions on how to start this service
+        :param min_instances: The minimum number of copies of this service keep running
+        :param max_instances: The maximum number of copies permitted to be running
+        :param growth: Delay before growing a service, unit-less, approximately seconds
+        :param shrink: Delay before shrinking a service, unit-less, approximately seconds, defaults to -growth
+        :param backlog: How long a queue backlog should be before it takes `growth` seconds to grow.
+        :param queue: Queue name for monitoring
+        """
         self.name = name
         self.ram = ram
         self.cpu = cpu
+        self.queue = queue
         self.container_config = container_config
-        self.target_duty_cycle = 0.8
+        self.target_duty_cycle = 0.9
 
         # How many instances we want, and can have
         self.min_instances = self._min_instances = max(0, int(min_instances))
-        self.max_instances = max(0, int(max_instances)) if max_instances else None
+        self._max_instances = max(0, int(max_instances)) if max_instances else float('inf')
         self.desired_instances = None
         self.running_instances = None
 
@@ -36,6 +52,12 @@ class ServiceProfile:
         self.backlog = int(backlog)
         self.last_update = 0
 
+    @property
+    def max_instances(self):
+        # Adjust the max_instances based on the number that is already running
+        # this keeps the scaler from running way ahead with its demands when resource caps are reached
+        return min(self._max_instances, self.running_instances + 2)
+
     def update(self, delta, instances, backlog, duty_cycle):
         self.last_update = time.time()
         self.running_instances = instances
@@ -43,15 +65,16 @@ class ServiceProfile:
         # Adjust min instances based on queue (if something has min_instances == 0, bump it up to 1 when
         # there is anything in the queue) this should have no effect for min_instances > 0
         self.min_instances = max(self._min_instances, int(bool(backlog)))
-        self.desired_instances = max(self.min_instances, self.desired_instances)
+        self.desired_instances = max(self.min_instances, min(self.max_instances, self.desired_instances))
+        # print(self.name, self.pressure)
 
         # Should we scale up because of backlog
         self.pressure += delta * math.sqrt(backlog/self.backlog)
-        # print(delta * math.sqrt(backlog / self.backlog), delta, backlog, self.backlog)
+        # print('queue', delta * math.sqrt(backlog / self.backlog), delta, backlog, self.backlog)
 
         # Should we scale down due to duty cycle? (are some of the workers idle)
         self.pressure -= delta * (self.target_duty_cycle - duty_cycle)
-        # print(-delta * (self.target_duty_cycle - duty_cycle), delta, self.target_duty_cycle, duty_cycle)
+        # print('duty', -delta * (self.target_duty_cycle - duty_cycle), delta, self.target_duty_cycle, duty_cycle)
 
         # Should we scale up/down because the input rate vs our expected rate
         # expected_max_throughput = data.per_unit_throughput / data.duty_cycle * self.desired_instances
@@ -60,6 +83,7 @@ class ServiceProfile:
         # Apply the friction, tendency to do nothing, tendency of the 'what to do' bar
         # to move to nothing over time when there is no strong up or down pressure
         leak = min(self.leak_rate * delta, abs(self.pressure))
+        # print('leak', leak)
         self.pressure = math.copysign(abs(self.pressure) - leak, self.pressure)
 
         # When we are already at the minimum number of instances, don't let negative values build up
@@ -70,7 +94,7 @@ class ServiceProfile:
         if self.pressure >= self.growth_threshold:
             if self.pressure >= 2*self.growth_threshold:
                 logger.warning(f"Unexpectedly fast growth pressure on {self.name}")
-            self.desired_instances = min(self.max_instances or float('inf'), self.desired_instances + 1)
+            self.desired_instances = min(self.max_instances, self.desired_instances + 1)
             self.pressure = 0
 
         if self.pressure <= self.shrink_threshold:
@@ -89,6 +113,8 @@ class ScalingGroup:
 
     def add_service(self, profile: ServiceProfile):
         profile.desired_instances = max(self.controller.get_target(profile.name), profile.min_instances)
+        profile.running_instances = profile.desired_instances
+        logger.debug(f'Starting service {profile.name} with a target of {profile.desired_instances}')
         profile.last_update = time.time()
         self.profiles[profile.name] = profile
         self.controller.add_profile(profile)

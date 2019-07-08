@@ -1,5 +1,5 @@
 
-from al_core.pipeline_scaler.scaler_server import ScalerServer
+from al_core.scaler.scaler_server import ScalerServer
 
 
 if __name__ == '__main__':
