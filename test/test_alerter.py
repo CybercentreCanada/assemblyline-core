@@ -120,7 +120,10 @@ def test_update_single_alert(datastore):
     child_submission.params.psid = submission.sid
 
     # Alter the result of one of the services
-    r = datastore.result.get(random.choice(child_submission.results))
+    r = None
+    while r is None:
+        r = datastore.result.get(random.choice(child_submission.results))
+
     for s in r.result.sections:
         old_tags = s.tags.as_primitives(strip_null=True)
         s.tags = Tagging(recursive_extend(old_tags, get_random_tags()))

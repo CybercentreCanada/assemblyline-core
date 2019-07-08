@@ -17,7 +17,8 @@ def dummy_service(name, stage, accepts='', rejects=''):
         'rejects': rejects,
         'version': '0',
         'enabled': True,
-        'timeout': 2
+        'timeout': 2,
+        'docker_config': {'image': name}
     })
 
 
@@ -38,6 +39,7 @@ class FakeDatastore:
                 'accepts': 'archive/.*',
                 'rejects': '',
                 'version': '0',
+                'docker_config': {'image': 'extract'}
             }),
             'AnAV': Service({
                 'name': 'AnAV',
@@ -47,6 +49,7 @@ class FakeDatastore:
                 'accepts': '.*',
                 'rejects': '',
                 'version': '0',
+                'docker_config': {'image': 'AnAV'}
             }),
             'cuckoo': Service({
                 'name': 'cuckoo',
@@ -56,6 +59,7 @@ class FakeDatastore:
                 'accepts': 'document/.*|executable/.*',
                 'rejects': '',
                 'version': '0',
+                'docker_config': {'image': 'cuckoo'}
             }),
             'polish': Service({
                 'name': 'polish',
@@ -65,6 +69,7 @@ class FakeDatastore:
                 'accepts': '.*',
                 'rejects': '',
                 'version': '0',
+                'docker_config': {'image': 'polish'}
             }),
             'not_documents': Service({
                 'name': 'not_documents',
@@ -74,6 +79,7 @@ class FakeDatastore:
                 'accepts': '.*',
                 'rejects': 'document/*',
                 'version': '0',
+                'docker_config': {'image': 'not_documents'}
             })
         }.values()
 

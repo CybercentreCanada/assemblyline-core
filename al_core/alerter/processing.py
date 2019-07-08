@@ -82,11 +82,6 @@ def get_summary(datastore, srecord):
         elif tag_type not in summary:
             continue
 
-        try:
-            max_classification = Classification.max_classification(t['classification'], max_classification)
-        except InvalidClassification:
-            continue
-
         sub_tag = {
             'attribution.exploit': 'EXP',
             'file.config': 'CFG',

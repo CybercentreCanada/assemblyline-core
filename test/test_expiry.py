@@ -24,6 +24,7 @@ def ds(request):
     for name, definition in datastore.ds.get_models().items():
         if hasattr(definition, 'expiry_ts'):
             collection = getattr(datastore, name)
+            collection.wipe()
             expiry_len = random.randint(MIN_OBJECTS, MAX_OBJECTS)
             for x in range(expiry_len):
                 obj = random_model_obj(collection.model_class)

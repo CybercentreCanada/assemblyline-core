@@ -34,6 +34,7 @@ def test_submit_simple(submit_harness):
         'submission': {
             'params': SubmissionParams({
                 'classification': 'U',
+                'description': 'file abc',
                 'services': {
                     'selected': [],
                     'excluded': [],
@@ -66,6 +67,7 @@ def test_submit_duplicate(submit_harness):
         'submission': {
             'params': SubmissionParams({
                 'classification': 'U',
+                'description': 'file abc',
                 'services': {
                     'selected': [],
                     'excluded': [],
@@ -109,6 +111,7 @@ def test_existing_score(submit_harness):
         'submission': {
             'params': SubmissionParams({
                 'classification': 'U',
+                'description': 'file abc',
                 'services': {
                     'selected': [],
                     'excluded': [],
