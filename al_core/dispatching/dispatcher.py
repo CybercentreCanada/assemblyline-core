@@ -2,11 +2,13 @@ import time
 import json
 from typing import List
 
+from assemblyline.common.exceptions import MultiKeyError
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm import ClassificationObject
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
+from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.service import Service
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
@@ -158,25 +160,42 @@ class Dispatcher:
         # (we will need the file data anyway for checking the schedule later)
         max_files = len(submission.files) + submission.params.max_extracted
         unchecked_files = []  # Files that haven't been checked yet
-        for sha, file_data in self.files.multiget(unchecked_hashes).items():
-            if not file_data:
-                self.log.error(f'[{sid}] Missing file for submission: {sha}.')
-                continue
+        try:
+            for sha, file_data in self.files.multiget(unchecked_hashes).items():
+                unchecked_files.append(FileTask(dict(
+                    sid=sid,
+                    file_info=dict(
+                        magic=file_data.magic,
+                        md5=file_data.md5,
+                        mime=file_data.mime,
+                        sha1=file_data.sha1,
+                        sha256=file_data.sha256,
+                        size=file_data.size,
+                        type=file_data.type,
+                    ),
+                    depth=file_depth(sha),
+                    max_files=max_files
+                )))
+        except MultiKeyError as missing:
+            errors = []
+            for file_sha in missing.keys:
+                error = Error(dict(
+                    expiry_ts=submission.expiry_ts,
+                    response=dict(
+                        message="Submission couldn't be completed due to missing file.",
+                        service_name="dispatcher",
+                        service_tool_version='4',
+                        service_version='4',
+                        status="FAIL_NONRECOVERABLE",
+                    ),
+                    sha256=file_sha,
+                    type='UNKNOWN'
+                ))
+                error_key = error.build_key(sid)
+                self.datastore.errors.save(error_key, error)
+                errors.append(error_key)
+            return self.cancel_submission(task, errors)
 
-            unchecked_files.append(FileTask(dict(
-                sid=sid,
-                file_info=dict(
-                    magic=file_data.magic,
-                    md5=file_data.md5,
-                    mime=file_data.mime,
-                    sha1=file_data.sha1,
-                    sha256=file_data.sha256,
-                    size=file_data.size,
-                    type=file_data.type,
-                ),
-                depth=file_depth(sha),
-                max_files=max_files
-            )))
 
         # Files that have already been encountered, but may or may not have been processed yet
         encountered_files = {file.sha256 for file in submission.files}
@@ -250,6 +269,48 @@ class Dispatcher:
             max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
             self.finalize_submission(task, result_classifications, max_score, len(encountered_files))
 
+    def _cleanup_submission(self, task: SubmissionTask):
+        """Clean up code that is the same for canceled and finished submissions"""
+        submission = task.submission
+        sid = submission.sid
+
+        if submission.params.quota_item and submission.params.submitter:
+            self.log.info(f"[{sid}] Submission no longer counts toward {submission.params.submitter.upper()} quota")
+            Hash('submissions-' + submission.params.submitter, self.redis_persist).pop(sid)
+
+        if task.completed_queue:
+            self.volatile_named_queue(task.completed_queue).push(submission.as_primitives())
+
+        # Send complete message to any watchers.
+        watcher_list = ExpiringSet(make_watcher_list_name(sid), host=self.redis)
+        for w in watcher_list.members():
+            NamedQueue(w).push(WatchQueueMessage({'status': 'STOP'}).as_primitives())
+
+        # Clear the timeout watcher
+        watcher_list.delete()
+        self.timeout_watcher.clear(sid)
+        self.active_tasks.pop(sid)
+
+        # Count the submission as 'complete' either way
+        self.counter.increment('submissions_completed')
+
+    def cancel_submission(self, task: SubmissionTask, errors):
+        """The submission is being abandoned, delete everything, write failed state."""
+        submission = task.submission
+        sid = submission.sid
+
+        # Pull down the dispatch table and clear it from redis
+        dispatch_table = DispatchHash(submission.sid, self.redis)
+        dispatch_table.delete()
+
+        submission.error_count = len(errors)
+        submission.errors = errors
+        submission.state = 'failed'
+        submission.times.completed = isotime.now_as_iso()
+        self.submissions.save(sid, submission)
+
+        self._cleanup_submission(task)
+        self.log.error(f"[{sid}] Failed")
 
     def finalize_submission(self, task: SubmissionTask, result_classifications, max_score, file_count):
         """All of the services for all of the files in this submission have finished or failed.
@@ -258,10 +319,6 @@ class Dispatcher:
         """
         submission = task.submission
         sid = submission.sid
-
-        if submission.params.quota_item and submission.params.submitter:
-            self.log.info(f"[{sid}] Submission no longer counts toward {submission.params.submitter.upper()} quota")
-            Hash('submissions-' + submission.params.submitter, self.redis_persist).pop(sid)
 
         # Pull in the classifications of results/produced by services
         classification = submission.params.classification
@@ -296,19 +353,7 @@ class Dispatcher:
         submission.times.completed = isotime.now_as_iso()
         self.submissions.save(sid, submission)
 
-        if task.completed_queue:
-            self.volatile_named_queue(task.completed_queue).push(submission.as_primitives())
-
-        # Send complete message to any watchers.
-        watcher_list = ExpiringSet(make_watcher_list_name(sid), host=self.redis)
-        for w in watcher_list.members():
-            NamedQueue(w).push(WatchQueueMessage({'status': 'STOP'}).as_primitives())
-
-        # Clear the timeout watcher
-        watcher_list.delete()
-        self.timeout_watcher.clear(sid)
-        self.active_tasks.pop(sid)
-        self.counter.increment('submissions_completed')
+        self._cleanup_submission(task)
         self.log.info(f"[{sid}] Completed")
 
     def dispatch_file(self, task: FileTask):
