@@ -6,7 +6,7 @@ These are:
  - Messages from THE OUTSIDE telling us to scan files.
 
 """
-
+import time
 import elasticapm
 
 from assemblyline.common import forge
@@ -42,6 +42,8 @@ class IngesterInput(ServerBase):
 
     def try_run(self, volatile=False):
         ingester = self.ingester
+        cpu_mark = time.process_time()
+        time_mark = time.time()
 
         # Move from ingest to unique and waiting queues.
         # While there are entries in the ingest queue we consume chunk_size
@@ -64,7 +66,14 @@ class IngesterInput(ServerBase):
                     elasticapm.tag(sid=sub.sid)
                     self.apm_client.end_transaction('ingest_complete', 'success')
 
+            ingester.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            ingester.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
             message = ingester.ingest_queue.pop(timeout=1)
+
+            cpu_mark = time.process_time()
+            time_mark = time.time()
+
             if not message:
                 continue
 

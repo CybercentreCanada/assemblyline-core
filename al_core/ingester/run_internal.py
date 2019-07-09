@@ -98,8 +98,14 @@ class IngesterInternals(ServerBase):
 
     def try_run(self):
         while self.running:
+            time_mark = time.time()
+            cpu_mark = time.process_time()
+
             retries_done = self.process_retries()
             timeouts_done = self.process_timeouts()
+
+            self.ingester.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.ingester.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
             if retries_done == 0 and timeouts_done == 0:
                 time.sleep(0.5)

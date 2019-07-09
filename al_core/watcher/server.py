@@ -35,8 +35,12 @@ class WatcherServer(ServerBase):
 
     def try_run(self):
         while self.running:
+            # Download all messages from the queue that have expired
             seconds, _ = retry_call(self.redis.time)
             messages = self.queue.dequeue_range(0, seconds)
+
+            # Try to pass on all the messages to their intended recipient, try not to let
+            # the failure of one message from preventing the others from going through
             for key in messages:
                 # Start of transaction
                 if self.apm_client:

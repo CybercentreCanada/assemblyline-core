@@ -41,19 +41,31 @@ class IngesterSubmitter(ServerBase):
     def try_run(self, volatile=False):
         ingester = self.ingester
         logger = self.log
+
+        time_mark, cpu_mark = time.time(), time.process_time()
+
         while self.running:
             # noinspection PyBroadException
             try:
+                ingester.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+                ingester.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
                 # Check if there is room for more submissions
                 length = ingester.scanning.length()
                 if length < 0 or ingester.config.core.dispatcher.max_inflight <= length:
                     time.sleep(0.1)
+                    time_mark, cpu_mark = time.time(), time.process_time()
                     continue
 
                 raw = ingester.unique_queue.pop()
                 if not raw:
                     time.sleep(0.1)
+                    time_mark, cpu_mark = time.time(), time.process_time()
                     continue
+
+                # Start timing 'busy' time, we reset this above after the sleeps so that the sleeps
+                # don't get counted as busy
+                time_mark, cpu_mark = time.time(), time.process_time()
 
                 # Start of ingest message
                 if self.apm_client:
