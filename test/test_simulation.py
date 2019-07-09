@@ -243,6 +243,7 @@ def test_deduplication(core):
         core.ingest_queue.push(SubmissionInput(dict(
             metadata={},
             params=dict(
+                description="file abc123",
                 services=dict(selected=''),
                 submitter='user',
                 groups=['user'],
@@ -281,6 +282,7 @@ def test_deduplication(core):
     core.ingest_queue.push(SubmissionInput(dict(
         metadata={},
         params=dict(
+            description="file abc123",
             services=dict(selected=''),
             submitter='user',
             groups=['user'],
@@ -322,6 +324,7 @@ def test_watcher_recovery(core):
         core.ingest_queue.push(SubmissionInput(dict(
             metadata={},
             params=dict(
+                description="file abc123",
                 services=dict(selected=''),
                 submitter='user',
                 groups=['user'],
@@ -358,6 +361,7 @@ def test_dropping_early(core):
     core.ingest_queue.push(SubmissionInput(dict(
         metadata={},
         params=dict(
+            description="file abc123",
             services=dict(selected=''),
             submitter='user',
             groups=['user'],
@@ -406,6 +410,7 @@ def test_service_error(core):
     core.ingest_queue.push(SubmissionInput(dict(
         metadata={},
         params=dict(
+            description="file abc123",
             services=dict(selected=''),
             submitter='user',
             groups=['user'],
@@ -436,6 +441,7 @@ def test_extracted_file(core):
     core.ingest_queue.push(SubmissionInput(dict(
         metadata={},
         params=dict(
+            description="file abc123",
             services=dict(selected=''),
             submitter='user',
             groups=['user'],
@@ -471,6 +477,7 @@ def test_depth_limit(core):
     core.ingest_queue.push(SubmissionInput(dict(
         metadata={},
         params=dict(
+            description="file abc123",
             services=dict(selected=''),
             submitter='user',
             groups=['user'],
@@ -505,6 +512,7 @@ def test_max_extracted_in_one(core):
     core.ingest_queue.push(SubmissionInput(dict(
         metadata={},
         params=dict(
+            description="file abc123",
             services=dict(selected=''),
             submitter='user',
             groups=['user'],
@@ -541,6 +549,7 @@ def test_max_extracted_in_several(core):
     core.ingest_queue.push(SubmissionInput(dict(
         metadata={},
         params=dict(
+            description="file abc123",
             services=dict(selected=''),
             submitter='user',
             groups=['user'],
@@ -577,6 +586,7 @@ def test_caching(core: CoreSession):
         core.ingest_queue.push(SubmissionInput(dict(
             metadata={},
             params=dict(
+                description="file abc123",
                 services=dict(selected=''),
                 submitter='user',
                 groups=['user'],

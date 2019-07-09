@@ -25,6 +25,7 @@ def make_message(message=None, files=None, params=None):
 
         # Information about who wants this file ingested
         params={
+            'description': 'file abc',
             'submitter': 'user',
             'groups': ['users'],
         }
