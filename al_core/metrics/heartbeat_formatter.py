@@ -4,6 +4,7 @@ from al_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from al_core.dispatching.dispatcher import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, FILE_QUEUE
 from al_core.ingester import INGEST_QUEUE_NAME, drop_chance
 from al_core.dispatching.dispatcher import service_queue_name
+from al_core.watcher.client import WATCHER_QUEUE
 from assemblyline.common import forge, metrics
 from assemblyline.datastore import SearchException
 from assemblyline.odm.messages.alerter_heartbeat import AlerterMessage
@@ -12,11 +13,12 @@ from assemblyline.odm.messages.expiry_heartbeat import ExpiryMessage
 from assemblyline.odm.messages.ingest_heartbeat import IngestMessage
 from assemblyline.odm.messages.service_heartbeat import ServiceMessage
 from assemblyline.odm.messages.service_timing_heartbeat import ServiceTimingMessage
+from assemblyline.odm.messages.watcher_heartbeat import WatcherMessage
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.remote.datatypes.queues.priority import PriorityQueue
+from assemblyline.remote.datatypes.queues.priority import PriorityQueue, UniquePriorityQueue
 
 STATUS_QUEUE = "status"
 
@@ -208,6 +210,21 @@ class HeartbeatFormatter(object):
                 self.log.info(f"Sent service timing heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating ServiceTimingMessage")
+
+        elif m_type == "watcher":
+            try:
+                msg = {
+                    "sender": self.sender,
+                    "msg": {
+                        "instances": instances,
+                        "metrics": m_data,
+                        "watching": UniquePriorityQueue(WATCHER_QUEUE, self.redis).length(),
+                    }
+                }
+                self.status_queue.publish(WatcherMessage(msg).as_primitives())
+                self.log.info(f"Sent watcher heartbeat: {msg['msg']}")
+            except Exception:
+                self.log.exception("An exception occurred while generating WatcherMessage")
 
         else:
             self.log.warning(f"Skipping unknown counter: {m_name} [{m_type}] ==> {m_data}")
