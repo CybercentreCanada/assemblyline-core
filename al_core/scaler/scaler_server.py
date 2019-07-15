@@ -8,11 +8,9 @@ import time
 import sched
 from pprint import pprint
 
-from al_core.dispatching.dispatcher import SUBMISSION_QUEUE, FILE_QUEUE, service_queue_name
+from al_core.dispatching.dispatcher import service_queue_name
 from al_core.metrics.metrics_server import METRICS_QUEUE
 from assemblyline.common import forge
-from assemblyline.odm.messages.dispatcher_heartbeat import DispatcherMessage
-from assemblyline.odm.messages.service_timing_heartbeat import ServiceTimingMessage
 from assemblyline.odm.models.service import DockerConfig
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
@@ -65,34 +63,9 @@ class ScalerServer(ServerBase):
         core_controller.global_mounts.append(['/opt/alv4/', '/opt/alv4/'])
 
         # Add the core components to the scaler
-        self.core.add_service(ServiceProfile(
-            name='dispatcher_files',
-            cpu=0, ram=0,
-            min_instances=1,
-            container_config=DockerConfig(dict(
-                image='sgaroncse/assemblyline_dev:4.0.5',
-                command='python3 /opt/alv4/alv4_core/al_core/dispatching/run_files.py',
-                network=['backend'],
-            )),
-            growth=60,
-            backlog=100,
-            queue=FILE_QUEUE
-        ))
-
-        self.core.add_service(ServiceProfile(
-            name='dispatcher_submissions',
-            cpu=0, ram=0,
-            min_instances=1,
-            container_config=DockerConfig(dict(
-                image='sgaroncse/assemblyline_dev:4.0.5',
-                command='python3 /opt/alv4/alv4_core/al_core/dispatching/run_submissions.py',
-                network=['backend'],
-            )),
-            growth=60,
-            backlog=100,
-            queue=SUBMISSION_QUEUE
-        ))
-
+        core_defaults = self.config.core.scaler.core_defaults
+        for name, parameters in self.config.core.scaler.core_configs.items():
+            self.core.add_service(ServiceProfile(name=name, **core_defaults.apply(parameters)))
 
     def try_run(self):
         # Do an initial call to the main methods, who will then be registered with the scheduler
@@ -121,18 +94,25 @@ class ScalerServer(ServerBase):
             # Check that all enabled services are enabled
             if service.enabled and name not in self.services.profiles:
                 self.log.info(f'Adding {service.name} to scaling')
+                default_settings = self.config.core.scaler.service_defaults
+
+                # Apply global options to the docker configuration
                 docker_config = service.docker_config
-                if not docker_config.network:
-                    docker_config.network.append('svc')  # TODO also move to config
-                if not docker_config.environment:
-                    docker_config.environment.append({'name': 'SERVICE_API_HOST', 'value': 'http://al_service_server:5003'})
+                set_keys = set(var.name for var in docker_config.environment)
+                for var in default_settings.environment:
+                    if var.name not in set_keys:
+                        docker_config.environment.append(var)
+                docker_config.network = list(set(default_settings.network + docker_config.network))
+
+                # Add the service to the list of services being scaled
                 self.services.add_service(ServiceProfile(
                     name=name,
                     ram=service.ram_mb,
                     cpu=service.cpu_cores,
-                    min_instances=0,   # TODO move to config
-                    growth=40,         #      also
-                    backlog=100,       #      also
+                    min_instances=default_settings.min_instances,
+                    growth=default_settings.growth,
+                    shrink=default_settings.shrink,
+                    backlog=default_settings.backlog,
                     max_instances=service.licence_count,
                     container_config=docker_config,
                     queue=service_queue_name(name)
@@ -177,7 +157,7 @@ class ScalerServer(ServerBase):
 
             # Things that don't provide information we need
             if message.get('name', '') in {'expiry', 'ingester_submitter', 'alerter', 'ingester_internals',
-                                           'ingester_input'}:
+                                           'ingester_input', 'watcher'}:
                 pass
 
             elif message.get('type', None) == 'service':
@@ -249,113 +229,4 @@ class ScalerServer(ServerBase):
                         # if time.time() - profile.last_update > 15:
                         print(f"its been a bit since we heard from {profile_name}")
                         profile.last_update = time.time()
-
-
-
-    # def get_heartbeat(self):
-    #     """A generator that makes a non blocking check on the status queue each time it is called."""
-    #     with self.status_queue as sq:
-    #         for message in sq.listen(blocking=False):
-    #             yield message
-    #
-    # def sync_heartbeats(self):
-    #     """Check if there are any pubsub messages we need."""
-    #     export_interval = self.config.core.metrics.export_interval
-    #     self.scheduler.enter(METRIC_SYNC_INTERVAL, 3, self.sync_heartbeats)
-    #     for message in self._metrics_loop:
-    #         # We will get none when we have cleared the buffer
-    #         if message is None:
-    #             break
-    #
-    #         # Things that don't need us to pay attention to them
-    #         if message.get('msg_type', '') in {'', 'ExpiryHeartbeat', 'ServiceHeartbeat'}:
-    #             continue
-    #
-    #         # Things that might need scaling, but don't have the tooling in place
-    #         if message['msg_type'] in {'AlerterHeartbeat', ''}:
-    #             continue
-    #
-    #         # Things that should be ready for scaling but not done right this second
-    #         # Both ingest and dispatcher need something telling me which role they have
-    #         if message['msg_type'] in {'IngestHeartbeat'}:
-    #             continue
-    #
-    #         if message['msg_type'] == 'DispatcherHeartbeat':
-    #             msg = DispatcherMessage(message).msg
-    #             if msg.component == 'dispatcher_submissions':
-    #                 delta = time.time() - self.core.profiles['dispatcher_submissions'].last_update
-    #                 busy_seconds = msg.metrics.busy_seconds * msg.metrics.busy_seconds_count
-    #                 self.core.profiles['dispatcher_submissions'].update(
-    #                     delta=min(delta, 2 * export_interval),
-    #                     instances=msg.instances,
-    #                     backlog=msg.queues.files,
-    #                     duty_cycle=(busy_seconds/msg.instances)/delta
-    #                 )
-    #
-    #             elif msg.component == 'dispatcher_files':
-    #                 delta = time.time() - self.core.profiles['dispatcher_files'].last_update
-    #                 busy_seconds = msg.metrics.busy_seconds * msg.metrics.busy_seconds_count
-    #                 print(busy_seconds, msg.metrics.busy_seconds, msg.metrics.busy_seconds_count)
-    #                 busy_fraction = (busy_seconds / msg.instances) / delta
-    #                 print(busy_fraction, busy_seconds, msg.instances, delta)
-    #                 self.core.profiles['dispatcher_files'].update(
-    #                     delta=min(delta, 2 * export_interval),
-    #                     instances=msg.instances,
-    #                     backlog=msg.queues.files,
-    #                     duty_cycle=busy_fraction,
-    #                 )
-    #
-    #             else:
-    #                 pprint(message)
-    #             continue
-    #
-    #         # We have a service message, write it into the right service profile
-    #         if message['msg_type'] == 'ServiceTimingHeartbeat':
-    #             msg = ServiceTimingMessage(message).msg
-    #             if msg.service_name not in self.services.profiles:
-    #                 continue
-    #             delta = time.time() - self.services.profiles[msg.service_name].last_update
-    #             busy_seconds = msg.metrics.execution * msg.metrics.execution_count
-    #             print(busy_seconds, msg.metrics.execution, msg.metrics.execution_count)
-    #             busy_fraction = (busy_seconds / msg.instances) / delta
-    #             print(busy_fraction, busy_seconds, msg.instances, delta)
-    #             print('service update', busy_fraction)
-    #             self.services.profiles[msg.service_name].update(
-    #                 delta=min(delta, 2 * export_interval),
-    #                 instances=msg.instances,
-    #                 backlog=msg.queue,
-    #                 duty_cycle=busy_fraction/60
-    #             )
-    #             continue
-    #
-    #         pprint(message)
-    #         exit()
-    #
-    #     # Check the set of services that might be sitting at zero instances, and if it is, we need to
-    #     # manually check if it is offline
-    #     for group in (self.core, self.services):
-    #         for profile_name, profile in group.profiles.items():
-    #             # Wait until we have missed two heartbeats before we take things into our own hands
-    #             if time.time() - profile.last_update > 2 * export_interval:
-    #                 # Check if we expect no messages, if so pull the queue length ourselves since there is no heartbeat
-    #                 if group.controller.get_target(profile_name) == 0:
-    #                     if profile.queue:
-    #                         self.log.info(f"{profile_name} down, pulling data directly")
-    #                         profile.update(
-    #                             delta=export_interval,
-    #                             instances=0,
-    #                             backlog=NamedQueue(profile.queue, self.redis).length(),
-    #                             duty_cycle=profile.target_duty_cycle
-    #                         )
-    #
-    #                 # In the case that there should actually be instances running, but we haven't gotten
-    #                 # any heartbeat messages we might be waiting for a container that can't start properly
-    #                 else:
-    #                     # TODO do something about it
-    #                     pass
-    #
-    #                     # TODO delete next couple lines, debugging code
-    #                     # if time.time() - profile.last_update > 15:
-    #                     print(f"its been a bit since we heard from {profile_name}")
-    #                     profile.last_update = time.time()
 
