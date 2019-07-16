@@ -170,14 +170,14 @@ def parse_submission_record(counter, datastore, alert_data, logger):
 AL_FIELDS = [
     'attrib',
     'av',
+    'behavior',
     'domain',
     'domain_dynamic',
     'domain_static',
     'ip',
     'ip_dynamic',
     'ip_static',
-    'summary',
-    'yara',
+    'yara'
 ]
 
 

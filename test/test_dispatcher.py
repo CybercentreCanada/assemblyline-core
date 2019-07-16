@@ -3,7 +3,7 @@ from unittest import mock
 
 import assemblyline.odm.models.file
 import assemblyline.odm.models.submission
-from assemblyline.odm.randomizer import random_model_obj
+from assemblyline.odm.randomizer import random_model_obj, get_random_hash
 from assemblyline.odm import models
 from assemblyline.common.metrics import MetricsFactory
 
@@ -45,7 +45,7 @@ def test_dispatch_file(clean_redis):
     service_queue = lambda name: NamedQueue(service_queue_name(name), clean_redis)
 
     ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file', 'filescore'])
-    file_hash = 'totally-a-legit-hash'
+    file_hash = get_random_hash(64)
     sub = random_model_obj(models.submission.Submission)
     sub.sid = sid = 'first-submission'
     sub.params.ignore_cache = False
@@ -58,7 +58,8 @@ def test_dispatch_file(clean_redis):
     # and the right service queues
     file_task = FileTask({
         'sid': 'first-submission',
-        'file_info': dict(sha256=file_hash, type='unknown', magic='a', md5='a', mime='a', sha1='a', size=10),
+        'file_info': dict(sha256=file_hash, type='unknown', magic='a', md5=get_random_hash(32),
+                          mime='a', sha1=get_random_hash(40), size=10),
         'depth': 0,
         'max_files': 5
     })
@@ -135,7 +136,7 @@ def test_dispatch_file(clean_redis):
 @mock.patch('al_core.dispatching.dispatcher.Scheduler', Scheduler)
 def test_dispatch_submission(clean_redis):
     ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
-    file_hash = 'totally_a_legit_hash'
+    file_hash = get_random_hash(64)
 
     ds.file.save(file_hash, random_model_obj(models.file.File))
     ds.file.get(file_hash).sha256 = file_hash
@@ -176,8 +177,8 @@ def test_dispatch_submission(clean_redis):
 def test_dispatch_extracted(clean_redis):
     # Setup the fake datastore
     ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
-    file_hash = 'totally_a_legit_hash'
-    second_file_hash = 'totally_a_legit_hash2'
+    file_hash = get_random_hash(64)
+    second_file_hash = get_random_hash(64)
 
     for fh in [file_hash, second_file_hash]:
         ds.file.save(fh, random_model_obj(models.file.File))
