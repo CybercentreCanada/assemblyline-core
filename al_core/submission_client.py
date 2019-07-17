@@ -23,7 +23,6 @@ import logging
 import tempfile
 import os
 from typing import Tuple, List
-from datetime import datetime, timedelta
 
 from assemblyline.common import forge
 from assemblyline.common import identify
@@ -135,7 +134,7 @@ class SubmissionClient:
                 classification=classification,
                 error_count=0,
                 errors=[],
-                expiry_ts=datetime.utcnow() + timedelta(days=submission_obj.params.ttl),
+                expiry_ts=now_as_iso(submission_obj.params.ttl * 24 * 60 * 60),
                 file_count=len(submission_obj.files),
                 files=submission_obj.files,
                 max_score=0,
