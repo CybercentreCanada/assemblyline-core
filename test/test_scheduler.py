@@ -8,7 +8,7 @@ from assemblyline.odm.randomizer import random_model_obj
 from al_core.dispatching.scheduler import Scheduler
 
 
-def dummy_service(name, stage, category='static', accepts='', rejects=''):
+def dummy_service(name, stage, category='static', accepts='', rejects=None):
     return Service({
         'name': name,
         'stage': stage,
@@ -37,28 +37,24 @@ class FakeDatastore:
                 name='extract',
                 stage='pre',
                 accepts='archive/.*',
-                rejects='',
             ),
             'AnAV': dummy_service(
                 name='AnAV',
                 stage='core',
                 category='av',
                 accepts='.*',
-                rejects='',
             ),
             'cuckoo': dummy_service(
                 name='cuckoo',
                 stage='core',
                 category='dynamic',
                 accepts='document/.*|executable/.*',
-                rejects='',
             ),
             'polish': dummy_service(
                 name='polish',
                 stage='post',
                 category='static',
                 accepts='.*',
-                rejects='',
             ),
             'not_documents': dummy_service(
                 name='not_documents',

@@ -42,7 +42,7 @@ def get_submission_tags_name(task):
 @odm.model()
 class SubmissionTask(odm.Model):
     submission: Submission = odm.Compound(Submission)
-    completed_queue = odm.Keyword(default_set=True)                     # Which queue to notify on completion
+    completed_queue = odm.Optional(odm.Keyword())                     # Which queue to notify on completion
 
 
 # TODO determine what parameters from the submission are actually used in task scheduling
