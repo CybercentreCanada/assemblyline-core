@@ -19,7 +19,7 @@ Classification = forge.get_classification()
 config = forge.get_config()
 summary_tags = (
     "av.virus_name", "attribution.exploit",
-    "file.config", "technique.obfuscation", "file.summary",
+    "file.config", "technique.obfuscation", "file.behavior",
     "attribution.family", "attribution.implant", "network.domain", "network.ip",
     "technique.obfuscation", "attribution.actor",
 )
@@ -55,7 +55,7 @@ def get_summary(datastore, srecord):
         'attribution': set(),
         'file.config': set(),
         'technique.obfuscation': set(),
-        'file.summary': set(),
+        'file.behavior': set(),
         'file.rule.yara': set(),
         'attribution.family': set(),
         'attribution.implant': set(),
@@ -103,7 +103,7 @@ def get_summary(datastore, srecord):
                 'Password-protected',
                 'Malformed container violation',
             ):
-                tag_type = 'file.summary'
+                tag_type = 'file.behavior'
 
             else:
                 av_name = (tag_context or '').split('scanner:')
@@ -137,7 +137,7 @@ def parse_submission_record(counter, datastore, alert_data, logger):
     srecord = get_submission_record(counter, datastore, sid)
 
     max_classification, summary = get_summary(datastore, srecord)
-    summary_list = list(summary['file.summary'])
+    behaviors = list(summary['file.behavior'])
 
     extended_scan = alert_data['extended_scan']
     if psid:
@@ -157,7 +157,7 @@ def parse_submission_record(counter, datastore, alert_data, logger):
     ips = summary['network.ip.dynamic'].union(summary['network.ip.static'])
 
     return {
-        'summary_list': summary_list,
+        'behaviors': behaviors,
         'extended_scan': extended_scan,
         'domains': domains,
         'ips': ips,
@@ -170,14 +170,14 @@ def parse_submission_record(counter, datastore, alert_data, logger):
 AL_FIELDS = [
     'attrib',
     'av',
+    'behavior',
     'domain',
     'domain_dynamic',
     'domain_static',
     'ip',
     'ip_dynamic',
     'ip_static',
-    'summary',
-    'yara',
+    'yara'
 ]
 
 
@@ -242,6 +242,7 @@ def get_alert_update_parts(counter, datastore, alert_data, logger):
             'al': {
                 'attrib': list(parsed_record['summary']['attribution']),
                 'av': list(parsed_record['summary']['av.virus_name']),
+                'behavior': parsed_record['behaviors'],
                 'domain': list(parsed_record['domains']),
                 'domain_dynamic': list(parsed_record['summary']['network.domain.dynamic']),
                 'domain_static': list(parsed_record['summary']['network.domain.static']),
@@ -249,7 +250,6 @@ def get_alert_update_parts(counter, datastore, alert_data, logger):
                 'ip_dynamic': list(parsed_record['summary']['network.ip.dynamic']),
                 'ip_static': list(parsed_record['summary']['network.ip.static']),
                 'request_end_time': parsed_record['srecord']['times']['completed'],
-                'summary': parsed_record['summary_list'],
                 'yara': list(parsed_record['summary']['file.rule.yara']),
             },
 
