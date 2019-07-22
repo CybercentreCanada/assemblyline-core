@@ -133,7 +133,7 @@ class IngestTask(odm.Model):
         return self.submission.files[0].sha256
 
     # Information about the ingestion itself, parameters irrelevant
-    scan_key = odm.Keyword(default_set=True)  # the filescore key
+    scan_key = odm.Optional(odm.Keyword())  # the filescore key
     retries = odm.Integer(default=0)
 
     # Fields added after a submission is complete for notification/bookkeeping processes
