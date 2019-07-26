@@ -4,12 +4,14 @@ An auto-scaling service specific to Assemblyline.
 TODO react to changes in memory/cpu limits
 """
 
+import os
 import time
 import sched
 from pprint import pprint
 
 from al_core.dispatching.dispatcher import service_queue_name
 from al_core.metrics.metrics_server import METRICS_QUEUE
+from al_core.scaler.controllers import KubernetesController
 from assemblyline.common import forge
 from assemblyline.odm.models.service import DockerConfig
 from assemblyline.remote.datatypes import get_client
@@ -28,6 +30,8 @@ SERVICE_SYNC_INTERVAL = 30
 SCALE_INTERVAL = 5
 METRIC_SYNC_INTERVAL = 0.1
 
+KUBERNETES_AL_CONFIG = os.environ.get('KUBERNETES_AL_CONFIG')
+
 
 class ScalerServer(ServerBase):
     def __init__(self, config=None, datastore=None, redis=None):
@@ -45,11 +49,39 @@ class ScalerServer(ServerBase):
         self.metrics_queue = CommsQueue(METRICS_QUEUE, self.redis)
         self._metrics_loop = self.get_metrics()
 
+        labels = {
+            'app': 'assemblyline',
+            'section': 'core',
+        }
+
         # TODO select the right controller by examining our environment
-        service_controller = DockerController(logger=self.log, label='alsvc',
-                                              cpu_overallocation=100, memory_overallocation=1.5)
-        core_controller = DockerController(logger=self.log, label='al',
-                                           cpu_overallocation=100, memory_overallocation=1)
+        if KUBERNETES_AL_CONFIG:
+            self.log.info("Loading Kubernetes cluster interface.")
+            service_controller = KubernetesController(logger=self.log, prefix=self.config.core.scaler.service_namespace,
+                                                      labels=labels)
+            core_controller = KubernetesController(logger=self.log, prefix=self.config.core.scaler.core_namespace,
+                                                   labels=labels)
+
+            # Mare sure core services get attached to the config
+            core_controller.config_mount(
+                name='al-config',
+                config_map=KUBERNETES_AL_CONFIG,
+                key='config',
+                file_name='config.yml',
+                target_path='/etc/assemblyline/'
+            )
+        else:
+            self.log.info("Loading Docker cluster interface.")
+            # TODO allocation parameters should be in config
+            service_controller = DockerController(logger=self.log, prefix=self.config.core.scaler.service_namespace,
+                                                  cpu_overallocation=100, memory_overallocation=1.5, labels=labels)
+            core_controller = DockerController(logger=self.log, prefix=self.config.core.scaler.core_namespace,
+                                               cpu_overallocation=100, memory_overallocation=1, labels=labels)
+
+            # TODO move these lines to config
+            core_controller.global_mounts.append(['/opt/alv4/alv4/dev/core/config/', '/etc/assemblyline/'])
+            core_controller.global_mounts.append(['/opt/alv4/', '/opt/alv4/'])
+
 
         self.services = ScalingGroup(service_controller)
         self.core = ScalingGroup(core_controller)
@@ -57,10 +89,6 @@ class ScalerServer(ServerBase):
         # Prepare a single threaded scheduler
         self.state = collection.Collection(period=self.config.core.metrics.export_interval)
         self.scheduler = sched.scheduler()
-
-        # TODO move everything below here to configuration
-        core_controller.global_mounts.append(['/opt/alv4/alv4/dev/core/config/', '/etc/assemblyline/'])
-        core_controller.global_mounts.append(['/opt/alv4/', '/opt/alv4/'])
 
         # Add the core components to the scaler
         core_defaults = self.config.core.scaler.core_defaults

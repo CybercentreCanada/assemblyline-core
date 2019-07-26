@@ -1,4 +1,12 @@
 import os
+from typing import Dict, Tuple, List
+
+try:
+    from kubernetes import client, config
+    from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
+        V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1KeyToPath, V1ConfigMapVolumeSource
+except ModuleNotFoundError:
+    pass
 
 from al_core.scaler.controllers.interface import ControllerInterface
 
@@ -27,8 +35,7 @@ def parse_memory(string):
 
 
 class KubernetesController(ControllerInterface):
-    def __init__(self):
-        from kubernetes import client, config
+    def __init__(self, logger, prefix='', labels=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster,
         try:
@@ -49,9 +56,29 @@ class KubernetesController(ControllerInterface):
             # Load again with our settings set
             config.load_kube_config(client_configuration=cfg)
 
+        self.prefix = prefix
+        self.logger = logger
+        self._labels = labels
+        self.b1api = client.AppsV1beta1Api()
         self.api = client.CoreV1Api()
         self.auto_cloud = False  #  TODO draw from config
         self.namespace = 'al'  # TODO draw from config
+        self.config_mounts: List[Tuple[V1Volume, V1VolumeMount]] = []
+
+    def config_mount(self, name, config_map, key, file_name, target_path):
+        volume = V1Volume()
+        volume.name = name
+        volume.config_map = V1ConfigMapVolumeSource()
+        volume.config_map.name = config_map
+        volume.config_map.items = [V1KeyToPath(key=key, path=file_name)]
+        volume.config_map.optional = False
+
+        mount = V1VolumeMount()
+        mount.name = name
+        mount.mount_path = target_path
+        mount.read_only = True
+
+        self.config_mounts.append((volume, mount))
 
     def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
@@ -121,17 +148,69 @@ class KubernetesController(ControllerInterface):
             memory += parse_memory(node.status.allocatable['memory'])
         return memory
 
+    def _create_labels(self, service_name) -> Dict[str, str]:
+        x = dict(self._labels)
+        x['component'] = service_name
+        return x
+
+    def _create_metadata(self, service_name):
+        meta = V1ObjectMeta()
+        meta.name = self.prefix + '-' + service_name
+        meta.labels = self._create_labels(service_name)
+        return meta
+
+    def _create_selector(self, service_name) -> Dict[str, str]:
+        return self._create_labels(service_name)
+
+    def _create_volumes(self, profile):
+        volumes, mounts = [], []
+        for _v, _m in self.config_mounts:
+            volumes.append(_v)
+            mounts.append(_m)
+        return volumes, mounts
+
+    def _create_containers(self, profile, mounts):
+        container = V1Container()
+        container.name = self.prefix + '-' + profile.name
+        container.image = profile.container_config.image
+        container.command = profile.container_config.command
+        container.env = [V1EnvVar(name=_e.name, value=_e.value) for _e in profile.container_config.environment]
+        container.image_pull_policy = 'Always'
+        container.volume_mounts = mounts
+        return [container]
+
+    def _create_deployment(self, profile, scale):
+        metadata = self._create_metadata(profile.name)
+        deployment = ExtensionsV1beta1Deployment()
+        deployment.api_version = "apps/v1"
+        deployment.kind = "Deployment"
+        deployment.metadata = metadata
+
+        spec = ExtensionsV1beta1DeploymentSpec()
+        spec.replicas = scale
+        spec.selector = self._create_selector(profile.name)
+
+        template = V1PodTemplateSpec()
+        template.metadata = metadata
+
+        pod = V1PodSpec()
+        pod.volumes, mounts = self._create_volumes(profile)
+        pod.containers = self._create_containers(profile, mounts)
+
+        template.spec = pod
+        spec.template = template
+        deployment.spec = spec
+        self.b1api.create_namespaced_deployment(namespace=self.namespace, body=deployment)
+
     def get_target(self, service_name):
         """Get the target for running instances of a service."""
-        raise NotImplementedError()
+        scale = self.b1api.read_namespaced_deployment_scale(self.prefix + service_name, namespace=self.namespace)
+        return scale.spec.replicas
 
     def set_target(self, service_name, target):
         """Set the target for running instances of a service."""
-        raise NotImplementedError()
+        name = self.prefix + '-' + service_name
+        scale = self.b1api.read_namespaced_deployment_scale(name=name, namespace=self.namespace)
+        scale.spec.replicas = target
+        self.b1api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
 
-
-ctl = KubernetesController()
-
-print(ctl.free_cpu())
-print(ctl.free_memory())
-exit()
