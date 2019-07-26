@@ -47,6 +47,7 @@ pipelines:
       - step:
           name: Build Package
           image: python:3.6
+          caches: [pip]
           script:
             - pip install wheel
             - python setup.py bdist_wheel
@@ -81,6 +82,7 @@ pipelines:
       - step:
           name: Deploy to Test PyPI
           image: python:3.6
+          caches: [pip]
           deployment: test
           script:
             - pip install twine
@@ -89,6 +91,7 @@ pipelines:
       - step:
           name: Deploy to PyPI
           image: python:3.6
+          caches: [pip]
           trigger: manual
           deployment: production
           script:
