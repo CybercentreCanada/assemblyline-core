@@ -1,11 +1,11 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from al_core.alerter.run_alerter import ALERT_QUEUE_NAME
-from al_core.dispatching.dispatcher import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, FILE_QUEUE
 from al_core.ingester import INGEST_QUEUE_NAME, drop_chance
 from al_core.dispatching.dispatcher import service_queue_name
 from al_core.watcher.client import WATCHER_QUEUE
 from assemblyline.common import forge, metrics
+from assemblyline.common.constants import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, FILE_QUEUE
 from assemblyline.datastore import SearchException
 from assemblyline.odm.messages.alerter_heartbeat import AlerterMessage
 from assemblyline.odm.messages.dispatcher_heartbeat import DispatcherMessage
