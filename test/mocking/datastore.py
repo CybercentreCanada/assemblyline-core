@@ -48,6 +48,12 @@ class MockCollection:
     def delete(self, key):
         self._docs.pop(key, None)
 
+    def commit(self):
+        pass
+
+    def __len__(self):
+        return len(self._docs)
+
 
 class MockDatastore:
     def __init__(self, collections=None):

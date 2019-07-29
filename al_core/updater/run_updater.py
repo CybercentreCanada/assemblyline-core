@@ -19,7 +19,7 @@ FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 
 
 class ServiceUpdater(ServerBase):
-    def __init__(self, persistent_redis=None, logger=None):
+    def __init__(self, persistent_redis=None, logger=None, datastore=None):
         super().__init__('assemblyline.service.updater', logger=logger)
 
         if not FILE_UPDATE_DIRECTORY:
@@ -28,19 +28,17 @@ class ServiceUpdater(ServerBase):
                               "set in the environment variable FILE_UPDATE_DIRECTORY. Setting "
                               "FILE_UPDATE_DIRECTORY directly may be done for testing.")
 
-        """The directory where we want working temporary directories to be created.
-
-        Building our temporary directories in the persistent update volume may
-        have some performance down sides, but may help us run into fewer docker FS overlay
-        cleanup issues. Try to flush it out every time we start. This service should
-        be a singleton anyway.
-        """
+        # The directory where we want working temporary directories to be created.
+        # Building our temporary directories in the persistent update volume may
+        # have some performance down sides, but may help us run into fewer docker FS overlay
+        # cleanup issues. Try to flush it out every time we start. This service should
+        # be a singleton anyway.
         self.temporary_directory = os.path.join(FILE_UPDATE_DIRECTORY, '.tmp')
         shutil.rmtree(self.temporary_directory, ignore_errors=True)
         os.mkdir(self.temporary_directory)
 
         self.config = forge.get_config()
-        self.datastore = forge.get_datastore()
+        self.datastore = datastore or forge.get_datastore()
         self.persistent_redis = persistent_redis or get_client(
             db=self.config.core.redis.persistent.db,
             host=self.config.core.redis.persistent.host,
@@ -100,11 +98,11 @@ class ServiceUpdater(ServerBase):
                 service = self.datastore.get_service_with_delta(service_name)
                 update_method = service.update_config.method
                 working_directory = tempfile.mkdtemp(dir=self.temporary_directory)
-                update_success = None
+                update_hash = None
 
                 try:
                     if update_method == 'URL':
-                        update_success = url_update(service.update_config.source, data['sha256'], working_directory)
+                        update_hash = url_update(service.update_config.source, data['sha256'], working_directory)
                     elif update_method == 'Dockerfile':
                         # TODO
                         pass
@@ -112,14 +110,14 @@ class ServiceUpdater(ServerBase):
                         # TODO
                         pass
 
-                    if update_success:
+                    if update_hash:
                         # FILE_UPDATE_DIRECTORY/{service_name} is the directory mounted to the service,
                         # the service sees multiple directories in that directory, each with a timestamp
                         destination_dir = os.path.join(FILE_UPDATE_DIRECTORY, service_name, service_name + '_' + now_as_iso())
                         shutil.move(working_directory, destination_dir)
 
                         # Update the sha256 to that of the new update file
-                        data['sha256'] = update_success
+                        data['sha256'] = update_hash
                 finally:
                     # Update the next service update check time
                     data['next_update'] = now_as_iso(service.update_config.update_interval_seconds)
