@@ -1,4 +1,7 @@
+import os
+import tempfile
 import sched
+import shutil
 import time
 
 from al_core.server_base import ServerBase
@@ -12,9 +15,29 @@ SERVICE_SYNC_INTERVAL = 30
 UPDATE_CHECK_INTERVAL = 5
 
 
+FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
+
+
 class ServiceUpdater(ServerBase):
     def __init__(self, persistent_redis=None, logger=None):
         super().__init__('assemblyline.service.updater', logger=logger)
+
+        if not FILE_UPDATE_DIRECTORY:
+           raise RuntimeError("The updater process must be run within the orchestration environment, "
+                              "the update volume must be mounted, and the path to the volume must be "
+                              "set in the environment variable FILE_UPDATE_DIRECTORY. Setting "
+                              "FILE_UPDATE_DIRECTORY directly may be done for testing.")
+
+        """The directory where we want working temporary directories to be created.
+
+        Building our temporary directories in the persistent update volume may
+        have some performance down sides, but may help us run into fewer docker FS overlay
+        cleanup issues. Try to flush it out every time we start. This service should
+        be a singleton anyway.
+        """
+        self.temporary_directory = os.path.join(FILE_UPDATE_DIRECTORY, '.tmp')
+        shutil.rmtree(self.temporary_directory, ignore_errors=True)
+        os.mkdir(self.temporary_directory)
 
         self.config = forge.get_config()
         self.datastore = forge.get_datastore()
@@ -29,6 +52,7 @@ class ServiceUpdater(ServerBase):
 
         # Prepare a single threaded scheduler
         self.scheduler = sched.scheduler()
+
 
     def sync_services(self):
         self.scheduler.enter(SERVICE_SYNC_INTERVAL, 0, self.sync_services)
@@ -46,7 +70,8 @@ class ServiceUpdater(ServerBase):
                 self.log.info(f"Service updates enabled for {service.name}")
                 self.services.add(
                     service.name,
-                    dict(
+                    dict(  # TODO should the first update actually be NOW, and the second one 'frequency' later? (and to be extra pedantic: isn't this the period, not the frequency of the function call?)
+                           #      we want new services/services that have been offline too long to have their update done right away, otherwise they may not even start
                         next_update=now_as_iso(service.update_config.frequency),
                         sha256='',
                     )
@@ -70,18 +95,32 @@ class ServiceUpdater(ServerBase):
 
             # Check if its time to check for new service update
             if data['next_update'] <= now_as_iso():
+                # TODO when this code is parallelized, everything from here down is part of what gets spun out
+
                 # Check for new update with service specified update method
                 service = self.datastore.get_service_with_delta(service_name)
                 update_method = service.update_config.source_type
+                working_diretory = tempfile.mkdtemp(dir=self.temporary_directory)
+                update_success = False
 
-                if update_method == 'URL':
-                    url_update(service.update_config.source_value, data['sha256'])
-                elif update_method == 'Dockerfile':
-                    # TODO
-                    pass
-                elif update_method == 'Function':
-                    # TODO
-                    pass
+                try:
+                    if update_method == 'URL':
+                        update_success = url_update(service.update_config.source_value, data['sha256'], working_diretory)
+                    elif update_method == 'Dockerfile':
+                        # TODO
+                        pass
+                    elif update_method == 'Function':
+                        # TODO
+                        pass
+
+                    if update_success:
+                        # FILE_UPDATE_DIRECTORY/{service_name} is the directory mounted to the service,
+                        # the service sees multiple directories in that directory, each with a timestamp
+                        destination_dir = os.path.join(FILE_UPDATE_DIRECTORY, service_name, service_name + '_' + now_as_iso())
+                        shutil.move(working_diretory, destination_dir)
+                finally:
+                    # If the working directory is still there for any reason erase it
+                    shutil.rmtree(working_diretory, ignore_errors=True)
 
 
 if __name__ == '__main__':
