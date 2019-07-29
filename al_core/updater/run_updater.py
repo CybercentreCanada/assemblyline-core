@@ -1,7 +1,7 @@
 import os
-import tempfile
 import sched
 import shutil
+import tempfile
 import time
 
 from al_core.server_base import ServerBase
@@ -70,9 +70,8 @@ class ServiceUpdater(ServerBase):
                 self.log.info(f"Service updates enabled for {service.name}")
                 self.services.add(
                     service.name,
-                    dict(  # TODO should the first update actually be NOW, and the second one 'frequency' later? (and to be extra pedantic: isn't this the period, not the frequency of the function call?)
-                           #      we want new services/services that have been offline too long to have their update done right away, otherwise they may not even start
-                        next_update=now_as_iso(service.update_config.frequency),
+                    dict(
+                        next_update=now_as_iso(),
                         sha256='',
                     )
                 )
@@ -99,13 +98,13 @@ class ServiceUpdater(ServerBase):
 
                 # Check for new update with service specified update method
                 service = self.datastore.get_service_with_delta(service_name)
-                update_method = service.update_config.source_type
-                working_diretory = tempfile.mkdtemp(dir=self.temporary_directory)
-                update_success = False
+                update_method = service.update_config.method
+                working_directory = tempfile.mkdtemp(dir=self.temporary_directory)
+                update_success = None
 
                 try:
                     if update_method == 'URL':
-                        update_success = url_update(service.update_config.source_value, data['sha256'], working_diretory)
+                        update_success = url_update(service.update_config.source, data['sha256'], working_directory)
                     elif update_method == 'Dockerfile':
                         # TODO
                         pass
@@ -117,10 +116,16 @@ class ServiceUpdater(ServerBase):
                         # FILE_UPDATE_DIRECTORY/{service_name} is the directory mounted to the service,
                         # the service sees multiple directories in that directory, each with a timestamp
                         destination_dir = os.path.join(FILE_UPDATE_DIRECTORY, service_name, service_name + '_' + now_as_iso())
-                        shutil.move(working_diretory, destination_dir)
+                        shutil.move(working_directory, destination_dir)
+
+                        # Update the sha256 to that of the new update file
+                        data['sha256'] = update_success
                 finally:
+                    # Update the next service update check time
+                    data['next_update'] = now_as_iso(service.update_config.update_interval_seconds)
+
                     # If the working directory is still there for any reason erase it
-                    shutil.rmtree(working_diretory, ignore_errors=True)
+                    shutil.rmtree(working_directory, ignore_errors=True)
 
 
 if __name__ == '__main__':

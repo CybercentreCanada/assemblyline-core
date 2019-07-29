@@ -1,4 +1,3 @@
-import os
 import shutil
 import tempfile
 
@@ -10,7 +9,7 @@ from assemblyline.common.isotime import now_as_iso
 http = urllib3.PoolManager()
 
 
-def url_update(url: str, sha256: str, output_directory: str) -> True:
+def url_update(url: str, last_sha256: str, output_directory: str) -> str:
     """Download a file as an update to a service.
 
     TODO Future enhancement: if we can keep the time when the file was most
@@ -18,7 +17,7 @@ def url_update(url: str, sha256: str, output_directory: str) -> True:
          to skip repeatedly downloading the same file.
 
     :param url: The url from which we want to download the new file.
-    :param sha256: hash of the previous update
+    :param last_sha256: hash of the previous update
     :param output_directory: Directory to write all of our update data.
     :return: True if the contents of output_directory should be taken as a new update.
              On a non-true return or exception raise, output_directory is destroyed.
@@ -30,7 +29,9 @@ def url_update(url: str, sha256: str, output_directory: str) -> True:
         shutil.copyfileobj(r, out_file)
 
     # Compare the SHA256 of the new update file and previous update file
-    if sha256 != get_sha256_for_file(temp_file):
-        os.rename(temp_file.name, dest)
-
-    temp_file.close()
+    new_sha256 = get_sha256_for_file(temp_file)
+    if last_sha256 != new_sha256:
+        temp_file.close()
+        return new_sha256
+    else:
+        temp_file.close()
