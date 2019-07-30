@@ -3,10 +3,10 @@ from .interface import ControllerInterface
 
 class DockerController(ControllerInterface):
     """A controller for *non* swarm mode docker."""
-    def __init__(self, logger, label='', cpu_overallocation=1, memory_overallocation=1):
+    def __init__(self, logger, prefix='', labels=None, cpu_overallocation=1, memory_overallocation=1):
         """
         :param logger: A logger to report status and debug information.
-        :param label: A label used to distinguish containers launched by this controller.
+        :param prefix: A prefix used to distinguish containers launched by this controller.
         :param cpu_overallocation: A multiplier on CPU usage. (2 means act like there are twice as many CPU present)
         :param memory_overallocation: A multiplier on memory usage. (2 means act like there is twice as much memory)
         """
@@ -15,7 +15,8 @@ class DockerController(ControllerInterface):
         self.client = docker.from_env()
         self.log = logger
         self.global_mounts = []
-        self._label = label
+        self._prefix = prefix
+        self._labels = labels
 
         # CPU and memory reserved for the host
         self._reserved_cpu = 0.3
@@ -39,13 +40,16 @@ class DockerController(ControllerInterface):
         container_name = self._name_container(service_name)
         prof = self._profiles[service_name]
         cfg = prof.container_config
+        labels = dict(self._labels)
+        labels.update({'component': service_name})
+        print(labels)
         self.client.containers.run(
             image=cfg.image,
             name=container_name,
             cpu_period=100000,
             cpu_quota=int(100000*prof.cpu),
             mem_limit=f'{prof.ram}m',
-            labels={'al_service': service_name, 'al_label': self._label},
+            labels=labels,
             restart_policy={'Name': 'always'},
             command=cfg.command,
             volumes={row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.global_mounts},
@@ -72,8 +76,8 @@ class DockerController(ControllerInterface):
         index = 0
         while True:
             name = f'{service_name}_{index}'
-            if self._label:
-                name = self._label + '_' + name
+            if self._prefix:
+                name = self._prefix + '_' + name
             if name not in used_names:
                 return name
             index += 1
@@ -108,7 +112,7 @@ class DockerController(ControllerInterface):
         docker is currently trying to keep running.
         """
         running = 0
-        for container in self.client.containers.list(filters={'label': f'al_service={service_name}'}):
+        for container in self.client.containers.list(filters={'label': f'component={service_name}'}):
             if container.status in {'restarting', 'running'}:
                 running += 1
             elif container.status in {'created', 'removing', 'paused', 'exited', 'dead'}:
@@ -128,7 +132,7 @@ class DockerController(ControllerInterface):
 
         if delta < 0:
             # Kill off delta instances of of the service
-            running = [container for container in self.client.containers.list(filters={'label': f'al_service={service_name}'})
+            running = [container for container in self.client.containers.list(filters={'label': f'component={service_name}'})
                        if container.status in {'restarting', 'running'}]
             running = running[0:-delta]
             for container in running:

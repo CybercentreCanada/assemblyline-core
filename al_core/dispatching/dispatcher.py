@@ -2,6 +2,7 @@ import time
 import json
 from typing import List
 
+from assemblyline.common.constants import SUBMISSION_QUEUE, FILE_QUEUE, DISPATCH_TASK_HASH
 from assemblyline.common.exceptions import MultiKeyError
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm import ClassificationObject
@@ -56,11 +57,6 @@ class FileTask(odm.Model):
     depth = odm.Integer()
     max_files = odm.Integer()
 
-
-FILE_QUEUE = 'dispatch-file-queue'
-SUBMISSION_QUEUE = 'dispatch-submission-queue'
-DISPATCH_TASK_HASH = 'dispatch-active-submissions'
-DISPATCH_RUNNING_TASK_HASH = 'dispatch-active-tasks'
 
 
 class Dispatcher:
@@ -150,11 +146,11 @@ class Dispatcher:
         unchecked_hashes = list(set(unchecked_hashes) | set(file_parents.keys()))
 
         # Using the file tree we can recalculate the depth of any file
-        def file_depth(sha):
+        def file_depth(_sha):
             # A root file won't have any parents in the dict
-            if sha not in file_parents or None in file_parents[sha]:
+            if _sha not in file_parents or None in file_parents[_sha]:
                 return 0
-            return min(file_depth(parent) for parent in file_parents[sha]) + 1
+            return min(file_depth(parent) for parent in file_parents[_sha]) + 1
 
         # Try to find all files, and extracted files, and create task objects for them
         # (we will need the file data anyway for checking the schedule later)
@@ -244,11 +240,11 @@ class Dispatcher:
                     result_classifications.append(result_row.classification)
 
         # Using the file tree find the most shallow parent of the given file
-        def lowest_parent(sha):
+        def lowest_parent(_sha):
             # A root file won't have any parents in the dict
-            if sha not in file_parents or None in file_parents[sha]:
+            if _sha not in file_parents or None in file_parents[_sha]:
                 return None
-            return min((file_depth(parent), parent) for parent in file_parents[sha])[1]
+            return min((file_depth(parent), parent) for parent in file_parents[_sha])[1]
 
         # Filter out things over the depth limit
         depth_limit = self.config.submission.max_extraction_depth

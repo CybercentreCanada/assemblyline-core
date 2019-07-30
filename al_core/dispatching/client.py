@@ -7,6 +7,7 @@ import logging
 from typing import Dict, Union, Tuple
 
 from assemblyline.common import forge
+from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, FILE_QUEUE, SUBMISSION_QUEUE
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import Submission
@@ -17,8 +18,8 @@ from assemblyline.remote.datatypes.lock import Lock
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 
-from al_core.dispatching.dispatcher import SubmissionTask, ServiceTask, FileTask, SUBMISSION_QUEUE, \
-    make_watcher_list_name, FILE_QUEUE, service_queue_name, DISPATCH_RUNNING_TASK_HASH
+from al_core.dispatching.dispatcher import SubmissionTask, ServiceTask, FileTask, \
+    make_watcher_list_name, service_queue_name
 from al_core.dispatching.dispatch_hash import DispatchHash
 from al_core.dispatching.scheduler import Scheduler
 
