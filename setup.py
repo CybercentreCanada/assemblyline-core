@@ -1,5 +1,6 @@
 
 import os
+
 from setuptools import setup, find_packages
 
 # For development and local builds use this version number, but for real builds replace it
@@ -29,7 +30,7 @@ setup(
         'Programming Language :: Python :: 3.7',
     ],
     keywords="assemblyline malware gc canada cse-cst cse cst cyber cccs",
-    packages=find_packages(),
+    packages=find_packages(exclude=['deployment/*', 'test/*']),
     install_requires=[
         'urllib3<1.25',
         'assemblyline',
