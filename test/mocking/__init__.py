@@ -39,7 +39,9 @@ class RedisTime:
 
 @pytest.fixture(scope='function')
 def clean_redis():
-    client = fakeredis.FakeStrictRedis()
+    if not hasattr(fakeredis.FakeConnection, 'health_check_interval'):
+        fakeredis.FakeConnection.health_check_interval = None
+    client = fakeredis.FakeRedis()
     client.time = RedisTime()
     return client
 
