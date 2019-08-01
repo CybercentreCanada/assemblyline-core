@@ -2,7 +2,6 @@
 A process that manages tracking and running update commands for the AL services.
 
 TODO:
-    - delete oldest update files when there are more than X
     - docker run updates
     - docker build updates
     - kubernetes interfaces
@@ -12,6 +11,7 @@ import os
 import sched
 import shutil
 import tempfile
+import json
 import time
 from threading import Thread
 from typing import Dict
@@ -34,6 +34,8 @@ FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
 # Where to find the update directory inside this container.
 FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 
+# How many past updates to keep for file based updates
+UPDATE_FOLDER_LIMIT = 5
 
 
 class DockerUpdateInterface:
@@ -134,7 +136,7 @@ class ServiceUpdater(ServerBase):
                     service.name,
                     dict(
                         next_update=now_as_iso(),
-                        last_update=now_as_iso(-10**10),
+                        previous_update=now_as_iso(-10**10),
                         sha256='',
                     )
                 )
@@ -178,8 +180,8 @@ class ServiceUpdater(ServerBase):
                 if update_method == 'run':
                     update_hash = self.do_file_update(
                         service=service,
-                        old_hash=update_data['sha256'],
-                        last_update=update_data['last_update']
+                        previous_hash=update_data['sha256'],
+                        previous_update=update_data['previous_update']
                     )
                 elif update_method == 'build':
                     update_hash = self.do_build_update()
@@ -187,7 +189,7 @@ class ServiceUpdater(ServerBase):
                 # If we have performed an update, write that data
                 if update_hash is not None and update_hash != update_data['sha256']:
                     update_data['sha256'] = update_hash
-                    update_data['last_update'] = now_as_iso()
+                    update_data['previous_update'] = now_as_iso()
                 else:
                     update_hash = None
 
@@ -200,22 +202,28 @@ class ServiceUpdater(ServerBase):
                 self.controller.restart(service_name=service_name, namespace=self.config.core.scaler.service_namespace)
 
         except BaseException:
-            self.log.exception("An error occurred while running an update.")
+            self.log.exception("An error occurred while running an update for: " + service_name)
 
     def do_build_update(self):
         raise NotImplementedError()
 
-    def do_file_update(self, service, old_hash, last_update):
+    def do_file_update(self, service, previous_hash, previous_update):
         input_directory = tempfile.mkdtemp(dir=self.temporary_directory)
         output_directory = tempfile.mkdtemp(dir=self.temporary_directory)
+        service_dir = os.path.join(FILE_UPDATE_DIRECTORY, service.name)
 
         try:
             # Write out the parameters we want to pass to the update container
             with open(os.path.join(input_directory, 'config.yaml'), 'w') as update_config:
-                update_config.write("ABC123")
+                json.dump(update_config, {
+                    'previous_update': previous_update,
+                    'previous_hash': previous_hash,
+                    'sources': service.update_config.sources.as_primative()
+                })
 
             # Run the update container
             self.controller.launch(
+                name=service.name,
                 docker_config=service.update_config.run_options,
                 mounts=[
                     {
@@ -229,9 +237,12 @@ class ServiceUpdater(ServerBase):
                         'dest_path': '/mount/output_directory'
                     },
                 ],
-                env={'UPDATE_CONFIGURATION_PATH': '/mount/input_directory/config.yaml'},
+                env={
+                    'UPDATE_CONFIGURATION_PATH': '/mount/input_directory/config.yaml',
+                    'UPDATE_OUTPUT_PATH': '/mount/output_directory/'
+                },
                 blocking=True,
-                namespace=self.config.core.scaler.core_namespace
+                namespace=self.config.core.scaler.core_namespace,
             )
 
             # Read out the results from the output container
@@ -241,18 +252,25 @@ class ServiceUpdater(ServerBase):
                 return None
 
             with open(results_meta_file) as rf:
-                results_meta = rf.read()
-
-            if results_meta:
-                pass
+                results_meta = json.load(rf)
+            update_hash = results_meta.get('hash', None)
 
             # Erase the results meta file
             os.unlink(results_meta_file)
 
             # FILE_UPDATE_DIRECTORY/{service_name} is the directory mounted to the service,
             # the service sees multiple directories in that directory, each with a timestamp
-            destination_dir = os.path.join(FILE_UPDATE_DIRECTORY, service.name, service.name + '_' + now_as_iso())
+            destination_dir = os.path.join(service_dir, service.name + '_' + now_as_iso())
             shutil.move(output_directory, destination_dir)
+
+            # Remove older update files, due to the naming scheme, older ones will sort first lexically
+            existing_folders = []
+            for folder_name in os.listdir(service_dir):
+                if os.path.isdir(folder_name) and folder_name.startswith(service.name):
+                    existing_folders.append(folder_name)
+            existing_folders.sort()
+            for extra_folder in existing_folders[:UPDATE_FOLDER_LIMIT]:
+                shutil.rmtree(os.path.join(service_dir, extra_folder), ignore_errors=True)
 
             return update_hash
         finally:
