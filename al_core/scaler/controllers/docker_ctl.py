@@ -1,4 +1,5 @@
-from .interface import ControllerInterface
+from assemblyline.odm.models.service import DockerConfig
+from .interface import ControllerInterface, ServiceControlError
 
 
 class DockerController(ControllerInterface):
@@ -42,7 +43,6 @@ class DockerController(ControllerInterface):
         cfg = prof.container_config
         labels = dict(self._labels)
         labels.update({'component': service_name})
-        print(labels)
         self.client.containers.run(
             image=cfg.image,
             name=container_name,
@@ -53,11 +53,11 @@ class DockerController(ControllerInterface):
             restart_policy={'Name': 'always'},
             command=cfg.command,
             volumes={row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.global_mounts},
-            # TODO This is the right network/URL for our dev compose, should come from config
             network=cfg.network[0],
             environment=[f'{_e.name}={_e.value}' for _e in cfg.environment],
             detach=True,
         )
+
         # TODO network needs to be adjusted
 
     def _name_container(self, service_name):
@@ -126,23 +126,26 @@ class DockerController(ControllerInterface):
 
         This is managed by killing extra containers at random, or launching new ones.
         """
-        running = self.get_target(service_name)
-        self.log.debug(f"New target for {service_name}: {running} -> {target}")
-        delta = target - running
+        try:
+            running = self.get_target(service_name)
+            self.log.debug(f"New target for {service_name}: {running} -> {target}")
+            delta = target - running
 
-        if delta < 0:
-            # Kill off delta instances of of the service
-            running = [container for container in self.client.containers.list(filters={'label': f'component={service_name}'})
-                       if container.status in {'restarting', 'running'}]
-            running = running[0:-delta]
-            for container in running:
-                container.kill()
+            if delta < 0:
+                # Kill off delta instances of of the service
+                running = [container for container in self.client.containers.list(filters={'label': f'component={service_name}'})
+                           if container.status in {'restarting', 'running'}]
+                running = running[0:-delta]
+                for container in running:
+                    container.kill()
 
-        if delta > 0:
-            # Start delta instances of the service
-            for _ in range(delta):
-                self._start(service_name)
+            if delta > 0:
+                # Start delta instances of the service
+                for _ in range(delta):
+                    self._start(service_name)
 
-        # Every time we change our container allocation do a little clean up to keep things fresh
-        self.client.containers.prune()
-        self.client.volumes.prune()
+            # Every time we change our container allocation do a little clean up to keep things fresh
+            self.client.containers.prune()
+            self.client.volumes.prune()
+        except Exception as error:
+            raise ServiceControlError(str(error), service_name)

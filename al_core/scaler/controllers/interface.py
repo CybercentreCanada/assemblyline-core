@@ -1,4 +1,11 @@
 
+
+class ServiceControlError(RuntimeError):
+    def __init__(self, message, service_name):
+        super().__init__(message)
+        self.service_name = service_name
+
+
 class ControllerInterface:
     def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
