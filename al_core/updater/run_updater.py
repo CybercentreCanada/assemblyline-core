@@ -5,7 +5,7 @@ TODO:
     - delete oldest update files when there are more than X
     - docker run updates
     - docker build updates
-    - restarting system components that need to detect updates
+    - kubernetes interfaces
 
 """
 import os
@@ -16,37 +16,58 @@ import time
 from threading import Thread
 from typing import Dict
 
+import docker
+
 from al_core.server_base import ServerBase
-from al_core.updater.url import url_update
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.odm.models.service import Service, DockerConfig
 
-SERVICE_SYNC_INTERVAL = 30
-UPDATE_CHECK_INTERVAL = 5
 
+SERVICE_SYNC_INTERVAL = 30  # How many seconds between checking for new services, or changes in service status
+UPDATE_CHECK_INTERVAL = 5   # How many seconds per check for outstanding updates
 
+# How to identify the update volume as a whole, in a way that the underlying container system recognizes.
 FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
+# Where to find the update directory inside this container.
 FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 
 
 
-
 class DockerUpdateInterface:
+    """Wrap docker interface for the commands used in the update process.
+
+    Volumes used for file updating on the docker interface are simply a host directory that gets
+    mounted at different depths and locations in each container.
+
+    FILE_UPDATE_VOLUME gives us the path of the directory on the host, so that we can mount
+    it properly on new containers we launch. FILE_UPDATE_DIRECTORY gives us the path
+    that it is mounted at in the update manager container.
+    """
     def __init__(self):
+        self.client = docker.from_env()
 
-        raise NotImplementedError()
-
-    def create_temporary(self, parent_volume, ):
-        raise NotImplementedError()
-
-    def launch(self, docker_config: DockerConfig, mounts, env, namespace, blocking):
-        raise NotImplementedError()
+    def launch(self, name, docker_config: DockerConfig, mounts, env, namespace, blocking):
+        self.client.containers.run(
+            image=docker_config.image,
+            name='update_' + name,
+            # cpu_period=100000,
+            # cpu_quota=int(100000*prof.cpu),
+            # mem_limit=f'{prof.ram}m',
+            restart_policy={'Name': 'never'},
+            command=docker_config.command,
+            volumes={os.path.join(row['volume'], row['source_path']): {'bind': row['dest_path'], 'mode': 'rw'}
+                     for row in mounts},
+            environment=[f'{_e.name}={_e.value}' for _e in docker_config.environment]
+                        + [f'{_e.name}={_e.value}' for _e in env],
+            detach=not blocking,
+        )
 
     def restart(self, service_name, namespace):
-        label = {'component': service_name}
+        for container in self.client.containers.list(filters={'label': f'component={service_name}'}):
+            container.kill()
 
 
 class KubernetesUpdateInterface:
@@ -88,6 +109,13 @@ class ServiceUpdater(ServerBase):
         # Prepare a single threaded scheduler
         self.scheduler = sched.scheduler()
 
+        #
+        if 'KUBERNETES_SERVICE_HOST' in os.environ:
+            self.controller = KubernetesUpdateInterface()
+        else:
+            self.controller = DockerUpdateInterface()
+
+
     def sync_services(self):
         self.scheduler.enter(SERVICE_SYNC_INTERVAL, 0, self.sync_services)
 
@@ -119,7 +147,7 @@ class ServiceUpdater(ServerBase):
         # Run as long as we need to
         while self.running:
             delay = self.scheduler.run(False)
-            time.sleep(min(delay, 0.02))
+            time.sleep(min(delay, 0.1))
 
 
     def update_services(self):
@@ -157,14 +185,19 @@ class ServiceUpdater(ServerBase):
                     update_hash = self.do_build_update()
 
                 # If we have performed an update, write that data
-                if update_hash is not None:
+                if update_hash is not None and update_hash != update_data['sha256']:
                     update_data['sha256'] = update_hash
                     update_data['last_update'] = now_as_iso()
+                else:
+                    update_hash = None
 
             finally:
                 # Update the next service update check time
                 update_data['next_update'] = now_as_iso(service.update_config.update_interval_seconds)
                 self.services.set(service_name, update_data)
+
+            if update_hash:
+                self.controller.restart(service_name=service_name, namespace=self.config.core.scaler.service_namespace)
 
         except BaseException:
             self.log.exception("An error occurred while running an update.")
@@ -202,7 +235,7 @@ class ServiceUpdater(ServerBase):
             )
 
             # Read out the results from the output container
-            results_meta_file = os.path.join(output_directory, 'update_summary.yaml')
+            results_meta_file = os.path.join(output_directory, 'response.yaml')
 
             if not os.path.exists(results_meta_file) or not os.path.isfile(results_meta_file):
                 return None
