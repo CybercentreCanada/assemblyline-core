@@ -4,9 +4,12 @@ This object encapsulates the
 """
 import re
 import logging
-from typing import Dict, List
 
+from typing import Dict, List, cast
+from assemblyline.datastore.helper import AssemblylineDatastore
+from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.service import Service
+
 from assemblyline.common.forge import CachedObject
 
 
@@ -25,10 +28,10 @@ from assemblyline.common.forge import CachedObject
 
 
 class Scheduler:
-    def __init__(self, datastore, config):
+    def __init__(self, datastore: AssemblylineDatastore, config: Config):
         self.datastore = datastore
         self.config = config
-        self.services: Dict[str, Service] = CachedObject(self._get_services)
+        self.services = cast(Dict[str, Service], CachedObject(self._get_services))
 
     @property
     def system_category(self):
@@ -75,7 +78,7 @@ class Scheduler:
         """Expands the names of service categories found in the list of services.
 
         Args:
-            services (list): List of service catagory or service names.
+            services (list): List of service category or service names.
         """
         if services is None:
             return []
@@ -101,7 +104,7 @@ class Scheduler:
             # If it isn't a category, its a service
             found_services.append(name)
 
-        # Use set to remove duplicates, set is more efficent in batches
+        # Use set to remove duplicates, set is more efficient in batches
         return list(set(found_services))
 
     def categories(self):
