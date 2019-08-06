@@ -162,7 +162,7 @@ class Ingester:
         # Create a config cache that will refresh config values periodically
         self.config = forge.CachedObject(forge.get_config)
 
-        # TODO Should any of these values be read dynamically
+        # Module path parameters are fixed at start time. Changing these involves a restart
         self.is_low_priority = load_module_by_path(self.config.core.ingester.is_low_priority)
         self.get_whitelist_verdict = load_module_by_path(self.config.core.ingester.get_whitelist_verdict)
         self.whitelist = load_module_by_path(self.config.core.ingester.whitelist)
