@@ -1,12 +1,10 @@
 import os
 from typing import Dict, Tuple, List
 
-try:
-    from kubernetes import client, config
-    from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
-        V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1KeyToPath, V1ConfigMapVolumeSource
-except ModuleNotFoundError:
-    pass
+from kubernetes import client, config
+from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
+    V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1KeyToPath, V1ConfigMapVolumeSource
+from kubernetes.client.rest import ApiException
 
 from al_core.scaler.controllers.interface import ControllerInterface
 
@@ -23,19 +21,19 @@ def parse_memory(string):
 
     # Try parsing a unit'd number then
     if string.endswith('Ki'):
-        bytes = float(string[:-2]) * 2**10
+        byte_count = float(string[:-2]) * 2**10
     elif string.endswith('Mi'):
-        bytes = float(string[:-2]) * 2**20
+        byte_count = float(string[:-2]) * 2**20
     elif string.endswith('Gi'):
-        bytes = float(string[:-2]) * 2**30
+        byte_count = float(string[:-2]) * 2**30
     else:
         raise ValueError(string)
 
-    return bytes/2**20
+    return byte_count/2**20
 
 
 class KubernetesController(ControllerInterface):
-    def __init__(self, logger, prefix='', labels=None):
+    def __init__(self, logger, namespace, prefix, labels=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster,
         try:
@@ -62,7 +60,7 @@ class KubernetesController(ControllerInterface):
         self.b1api = client.AppsV1beta1Api()
         self.api = client.CoreV1Api()
         self.auto_cloud = False  #  TODO draw from config
-        self.namespace = 'al'  # TODO draw from config
+        self.namespace = namespace
         self.config_mounts: List[Tuple[V1Volume, V1VolumeMount]] = []
 
     def config_mount(self, name, config_map, key, file_name, target_path):
@@ -157,10 +155,7 @@ class KubernetesController(ControllerInterface):
         return x
 
     def _create_metadata(self, service_name):
-        meta = V1ObjectMeta()
-        meta.name = self.prefix + '-' + service_name
-        meta.labels = self._create_labels(service_name)
-        return meta
+        return V1ObjectMeta(name=self.prefix + service_name, labels=self._create_labels(service_name))
 
     def _create_selector(self, service_name) -> Dict[str, str]:
         return self._create_labels(service_name)
@@ -173,46 +168,59 @@ class KubernetesController(ControllerInterface):
         return volumes, mounts
 
     def _create_containers(self, profile, mounts):
-        container = V1Container()
-        container.name = self.prefix + '-' + profile.name
-        container.image = profile.container_config.image
-        container.command = profile.container_config.command
-        container.env = [V1EnvVar(name=_e.name, value=_e.value) for _e in profile.container_config.environment]
-        container.image_pull_policy = 'Always'
-        container.volume_mounts = mounts
-        return [container]
+        return [V1Container(
+            name=self.prefix + profile.name,
+            image=profile.container_config.image,
+            command=profile.container_config.command,
+            env=[V1EnvVar(name=_e.name, value=_e.value) for _e in profile.container_config.environment],
+            image_pull_policy='Always',
+            volume_mounts=mounts,
+        )]
 
     def _create_deployment(self, profile, scale):
+        volumes, mounts = self._create_volumes(profile)
         metadata = self._create_metadata(profile.name)
-        deployment = ExtensionsV1beta1Deployment()
-        deployment.api_version = "apps/v1"
-        deployment.kind = "Deployment"
-        deployment.metadata = metadata
 
-        spec = ExtensionsV1beta1DeploymentSpec()
-        spec.replicas = scale
-        spec.selector = self._create_selector(profile.name)
+        pod = V1PodSpec(
+            volumes=self._create_volumes(profile),
+            containers=self._create_containers(profile, mounts),
+        )
 
-        template = V1PodTemplateSpec()
-        template.metadata = metadata
+        template = V1PodTemplateSpec(
+            metadata=metadata,
+            spec=pod,
+        )
 
-        pod = V1PodSpec()
-        pod.volumes, mounts = self._create_volumes(profile)
-        pod.containers = self._create_containers(profile, mounts)
+        spec = ExtensionsV1beta1DeploymentSpec(
+            replicas=scale,
+            selector=self._create_selector(profile.name),
+            template=template,
+        )
 
-        template.spec = pod
-        spec.template = template
-        deployment.spec = spec
+        deployment = ExtensionsV1beta1Deployment(
+            api_version="apps/v1",
+            kind="Deployment",
+            metadata=metadata,
+            spec=spec,
+        )
+
         self.b1api.create_namespaced_deployment(namespace=self.namespace, body=deployment)
 
     def get_target(self, service_name):
         """Get the target for running instances of a service."""
-        scale = self.b1api.read_namespaced_deployment_scale(self.prefix + service_name, namespace=self.namespace)
-        return scale.spec.replicas
+        try:
+            scale = self.b1api.read_namespaced_deployment_scale(self.prefix + service_name, namespace=self.namespace)
+            return scale.spec.replicas
+        except ApiException as error:
+            # If we get a 404 it means the resource doesn't exist, which we treat the same as
+            # scheduled to run zero instances since we create deployments on demand
+            if error.status == 404:
+                return 0
+            raise
 
     def set_target(self, service_name, target):
         """Set the target for running instances of a service."""
-        name = self.prefix + '-' + service_name
+        name = self.prefix + service_name
         scale = self.b1api.read_namespaced_deployment_scale(name=name, namespace=self.namespace)
         scale.spec.replicas = target
         self.b1api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
