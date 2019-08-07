@@ -83,7 +83,7 @@ class KubernetesController(ControllerInterface):
 
     def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
-        raise NotImplementedError()
+        self._create_deployment(profile, 0)
 
     def free_cpu(self):
         """Number of cores available for reservation."""
