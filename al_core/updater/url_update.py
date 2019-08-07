@@ -86,7 +86,7 @@ def url_update() -> None:
                     f.write(response.content)
 
                 # Append the SHA256 of the file to a list of downloaded files
-                files_sha256.append(get_sha256_for_file(file_path)
+                files_sha256.append(get_sha256_for_file(file_path))
         except requests.Timeout:
             # TODO: should we retry?
             pass
