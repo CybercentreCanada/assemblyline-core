@@ -7,11 +7,11 @@ TODO:
     - kubernetes interfaces
 
 """
+import json
 import os
 import sched
 import shutil
 import tempfile
-import json
 import time
 from threading import Thread
 from typing import Dict
@@ -21,10 +21,9 @@ import docker
 from al_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
+from assemblyline.odm.models.service import DockerConfig
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline.odm.models.service import Service, DockerConfig
-
 
 SERVICE_SYNC_INTERVAL = 30  # How many seconds between checking for new services, or changes in service status
 UPDATE_CHECK_INTERVAL = 5   # How many seconds per check for outstanding updates
@@ -218,7 +217,7 @@ class ServiceUpdater(ServerBase):
                 json.dump(update_config, {
                     'previous_update': previous_update,
                     'previous_hash': previous_hash,
-                    'sources': service.update_config.sources.as_primative()
+                    'sources': service.update_config.sources.as_primitives()
                 })
 
             # Run the update container
