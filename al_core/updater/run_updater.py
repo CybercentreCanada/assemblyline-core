@@ -2,12 +2,10 @@
 A process that manages tracking and running update commands for the AL services.
 
 TODO:
-    - docker run updates
     - docker build updates
     - kubernetes interfaces
 
 """
-import json
 import os
 import sched
 import shutil
@@ -29,7 +27,6 @@ from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.models.user import User
 from assemblyline.odm.models.user_settings import UserSettings
-from assemblyline.odm.models.service import DockerConfig
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.odm.models.service import DockerConfig
@@ -93,7 +90,6 @@ class DockerUpdateInterface:
             detach=not blocking,
         )
 
-
     def restart(self, service_name, namespace):
         for container in self.client.containers.list(filters={'label': f'component={service_name}'}):
             container.kill()
@@ -112,10 +108,10 @@ class ServiceUpdater(ServerBase):
         super().__init__('assemblyline.service.updater', logger=logger)
 
         if not FILE_UPDATE_DIRECTORY:
-           raise RuntimeError("The updater process must be run within the orchestration environment, "
-                              "the update volume must be mounted, and the path to the volume must be "
-                              "set in the environment variable FILE_UPDATE_DIRECTORY. Setting "
-                              "FILE_UPDATE_DIRECTORY directly may be done for testing.")
+            raise RuntimeError("The updater process must be run within the orchestration environment, "
+                               "the update volume must be mounted, and the path to the volume must be "
+                               "set in the environment variable FILE_UPDATE_DIRECTORY. Setting "
+                               "FILE_UPDATE_DIRECTORY directly may be done for testing.")
 
         # The directory where we want working temporary directories to be created.
         # Building our temporary directories in the persistent update volume may
@@ -146,7 +142,6 @@ class ServiceUpdater(ServerBase):
             self.controller = KubernetesUpdateInterface()
         else:
             self.controller = DockerUpdateInterface()
-
 
     def sync_services(self):
         """Download the service list and make sure our settings are up to date"""
@@ -183,7 +178,6 @@ class ServiceUpdater(ServerBase):
             delay = self.scheduler.run(False)
             time.sleep(min(delay, 0.1))
 
-
     def update_services(self):
         """Check if we need to update any services.
 
@@ -197,7 +191,10 @@ class ServiceUpdater(ServerBase):
         # Check if its time to try to update the service
         for service_name, data in self.services.items():
             if data['next_update'] <= now_as_iso() and service_name not in self.running_updates:
-                self.running_updates[service_name] = Thread(target=self.run_update, kwargs=dict(service_name=service_name))
+                self.running_updates[service_name] = Thread(
+                    target=self.run_update,
+                    kwargs=dict(service_name=service_name)
+                )
                 self.running_updates[service_name].start()
 
     def run_update(self, service_name):
@@ -338,6 +335,7 @@ class ServiceUpdater(ServerBase):
         self.datastore.user.save('admin', user_data)
         self.datastore.user_settings.save('admin', UserSettings())
         return uname
+
 
 if __name__ == '__main__':
     ServiceUpdater().serve_forever()
