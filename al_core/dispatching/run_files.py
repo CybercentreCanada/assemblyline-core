@@ -6,13 +6,16 @@ from assemblyline.common import forge
 from al_core.dispatching.dispatcher import Dispatcher, FileTask
 from al_core.server_base import ServerBase
 
+from assemblyline.datastore.helper import AssemblylineDatastore
+from assemblyline.odm.models.config import Config
+
 
 class FileDispatchServer(ServerBase):
     def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None):
         super().__init__('assemblyline.dispatcher.file', logger)
         
-        config = forge.get_config()
-        datastore = datastore or forge.get_datastore(config)
+        config: Config = forge.get_config()
+        datastore: AssemblylineDatastore = datastore or forge.get_datastore(config)
         self.dispatcher = Dispatcher(redis=redis, redis_persist=redis_persist, datastore=datastore, logger=self.log,
                                      counter_name='dispatcher_files')
         

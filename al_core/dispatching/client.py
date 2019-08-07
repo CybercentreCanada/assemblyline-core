@@ -19,9 +19,8 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 
 from al_core.dispatching.dispatcher import SubmissionTask, ServiceTask, FileTask, \
-    make_watcher_list_name, service_queue_name
+    make_watcher_list_name, service_queue_name, Scheduler
 from al_core.dispatching.dispatch_hash import DispatchHash
-from al_core.dispatching.scheduler import Scheduler
 
 
 class DispatchClient:
@@ -73,7 +72,8 @@ class DispatchClient:
         dispatch_hash = DispatchHash(sid, self.redis)
         all_service_status = dispatch_hash.all_results()
         all_files = dispatch_hash.all_files()
-        self.log.info(f"[{sid}] Listing outstanding services {len(all_files)} files and {len(all_service_status)} entries found")
+        self.log.info(f"[{sid}] Listing outstanding services {len(all_files)} files "
+                      f"and {len(all_service_status)} entries found")
 
         output: Dict[str, int] = {}
 

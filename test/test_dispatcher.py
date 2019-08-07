@@ -7,8 +7,8 @@ from assemblyline.odm.randomizer import random_model_obj, get_random_hash
 from assemblyline.odm import models
 from assemblyline.common.metrics import MetricsFactory
 
-from al_core.dispatching.scheduler import Scheduler as RealScheduler
-from al_core.dispatching.dispatcher import Dispatcher, DispatchHash, service_queue_name, FileTask, NamedQueue, SubmissionTask
+from al_core.dispatching.dispatcher import Dispatcher, DispatchHash, service_queue_name, FileTask, NamedQueue, \
+    SubmissionTask, Scheduler as RealScheduler
 
 from .mocking import MockDatastore, clean_redis
 from .test_scheduler import dummy_service
