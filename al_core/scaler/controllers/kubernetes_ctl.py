@@ -66,17 +66,20 @@ class KubernetesController(ControllerInterface):
         self.config_mounts: List[Tuple[V1Volume, V1VolumeMount]] = []
 
     def config_mount(self, name, config_map, key, file_name, target_path):
-        volume = V1Volume()
-        volume.name = name
-        volume.config_map = V1ConfigMapVolumeSource()
-        volume.config_map.name = config_map
-        volume.config_map.items = [V1KeyToPath(key=key, path=file_name)]
-        volume.config_map.optional = False
+        volume = V1Volume(
+            name='al-config',
+            config_map=V1ConfigMapVolumeSource(
+                name=config_map,
+                items=[V1KeyToPath(key=key, path=file_name)],
+                optional=False
+            ),
+        )
 
-        mount = V1VolumeMount()
-        mount.name = name
-        mount.mount_path = target_path
-        mount.read_only = True
+        mount = V1VolumeMount(
+            name=name,
+            mount_path=target_path,
+            read_only=True,
+        )
 
         self.config_mounts.append((volume, mount))
 
