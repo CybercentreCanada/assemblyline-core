@@ -207,6 +207,10 @@ class KubernetesController(ControllerInterface):
         )]
 
     def _create_deployment(self, profile, scale: int, updates=None):
+        for dep in self.b1api.list_namespaced_deployment(namespace=self.namespace).items:
+            if dep.metadata.name == self._deployment_name(profile.name):
+                return
+
         volumes, mounts = self._create_volumes(profile, updates=updates)
         metadata = self._create_metadata(profile.name)
 
@@ -237,7 +241,7 @@ class KubernetesController(ControllerInterface):
     def get_target(self, service_name):
         """Get the target for running instances of a service."""
         try:
-            scale = self.b1api.read_namespaced_deployment_scale(self.prefix + service_name, namespace=self.namespace)
+            scale = self.b1api.read_namespaced_deployment_scale(self._deployment_name(service_name), namespace=self.namespace)
             return scale.spec.replicas
         except ApiException as error:
             # If we get a 404 it means the resource doesn't exist, which we treat the same as
