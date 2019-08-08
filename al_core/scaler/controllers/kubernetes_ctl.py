@@ -238,11 +238,11 @@ class KubernetesController(ControllerInterface):
 
         self.b1api.create_namespaced_deployment(namespace=self.namespace, body=deployment)
 
-    def get_target(self, service_name):
+    def get_target(self, service_name: str) -> int:
         """Get the target for running instances of a service."""
         try:
             scale = self.b1api.read_namespaced_deployment_scale(self._deployment_name(service_name), namespace=self.namespace)
-            return scale.spec.replicas
+            return int(scale.spec.replicas or 0)
         except ApiException as error:
             # If we get a 404 it means the resource doesn't exist, which we treat the same as
             # scheduled to run zero instances since we create deployments on demand
@@ -250,7 +250,7 @@ class KubernetesController(ControllerInterface):
                 return 0
             raise
 
-    def set_target(self, service_name, target):
+    def set_target(self, service_name: str, target: int):
         """Set the target for running instances of a service."""
         name = self._deployment_name(service_name)
         scale = self.b1api.read_namespaced_deployment_scale(name=name, namespace=self.namespace)
