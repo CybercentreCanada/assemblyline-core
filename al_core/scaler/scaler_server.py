@@ -164,7 +164,7 @@ class ScalerServer(ServerBase):
                         max_instances=service.licence_count,
                         container_config=docker_config,
                         queue=service_queue_name(name)
-                    ))
+                    ), updates=service.update_config)
 
                 # Update RAM, CPU, licence requirements for running services
                 if service.enabled and name in self.services.profiles:

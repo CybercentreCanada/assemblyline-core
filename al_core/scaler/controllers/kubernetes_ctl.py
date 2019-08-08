@@ -3,10 +3,16 @@ from typing import Dict, Tuple, List
 
 from kubernetes import client, config
 from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
-    V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1KeyToPath, V1ConfigMapVolumeSource
+    V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1KeyToPath, V1ConfigMapVolumeSource, \
+    V1PersistentVolumeClaimVolumeSource
 from kubernetes.client.rest import ApiException
 
 from al_core.scaler.controllers.interface import ControllerInterface
+from assemblyline.odm.models.service import UpdateConfig
+
+
+# How to identify the update volume as a whole, in a way that the underlying container system recognizes.
+FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
 
 
 def parse_memory(string):
@@ -81,9 +87,9 @@ class KubernetesController(ControllerInterface):
 
         self.config_mounts.append((volume, mount))
 
-    def add_profile(self, profile):
+    def add_profile(self, profile, updates=None):
         """Tell the controller about a service profile it needs to manage."""
-        self._create_deployment(profile, 0)
+        self._create_deployment(profile, 0, updates=updates)
 
     def free_cpu(self):
         """Number of cores available for reservation."""
@@ -160,11 +166,31 @@ class KubernetesController(ControllerInterface):
     def _create_selector(self, service_name) -> Dict[str, str]:
         return self._create_labels(service_name)
 
-    def _create_volumes(self, profile):
+    def _create_volumes(self, profile, updates: UpdateConfig=None):
         volumes, mounts = [], []
+
+        # Attach the mount that provides the config file
         for _v, _m in self.config_mounts:
             volumes.append(_v)
             mounts.append(_m)
+
+        # Attach the mount that provides the update
+        if updates and updates.method == 'run':
+            volumes.append(V1Volume(
+                name='update-directory',
+                config_map=V1PersistentVolumeClaimVolumeSource(
+                    claim_name=FILE_UPDATE_VOLUME,
+                    read_only=True
+                ),
+            ))
+
+            mounts.append(V1VolumeMount(
+                name='update-directory',
+                mount_path='/mount/update-data/',
+                sub_path=profile.name,
+                read_only=True,
+            ))
+
         return volumes, mounts
 
     def _create_containers(self, profile, mounts):
@@ -177,12 +203,12 @@ class KubernetesController(ControllerInterface):
             volume_mounts=mounts,
         )]
 
-    def _create_deployment(self, profile, scale):
-        volumes, mounts = self._create_volumes(profile)
+    def _create_deployment(self, profile, scale, updates=None):
+        volumes, mounts = self._create_volumes(profile, updates=updates)
         metadata = self._create_metadata(profile.name)
 
         pod = V1PodSpec(
-            volumes=self._create_volumes(profile),
+            volumes=volumes,
             containers=self._create_containers(profile, mounts),
         )
 

@@ -14,7 +14,10 @@ logger = logging.getLogger('assemblyline.scaler')
 
 
 class ServiceProfile:
-    """Describe how to scale/start/stop a service."""
+    """A profile, describing a currently running service.
+
+    This includes how the service should be run, and conditions related to the scaling of the service.
+    """
     def __init__(self, name, ram, cpu, container_config: DockerConfig, min_instances=0, max_instances=None,
                  growth=600, shrink=None, backlog=500, queue=None):
         """
@@ -111,13 +114,13 @@ class ScalingGroup:
         self.controller = controller
         self.profiles = {}
 
-    def add_service(self, profile: ServiceProfile):
+    def add_service(self, profile: ServiceProfile, updates=None):
         profile.desired_instances = max(self.controller.get_target(profile.name), profile.min_instances)
         profile.running_instances = profile.desired_instances
         logger.debug(f'Starting service {profile.name} with a target of {profile.desired_instances}')
         profile.last_update = time.time()
         self.profiles[profile.name] = profile
-        self.controller.add_profile(profile)
+        self.controller.add_profile(profile, updates=updates)
 
     def update(self):
         # Figure out what services are expected to be running and how many
