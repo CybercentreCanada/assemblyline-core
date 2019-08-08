@@ -5,7 +5,7 @@ from assemblyline.odm.models.config import Config, DEFAULT_CONFIG
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.randomizer import random_model_obj
 
-from al_core.dispatching.scheduler import Scheduler
+from al_core.dispatching.dispatcher import Scheduler
 
 
 def dummy_service(name, stage, category='static', accepts='', rejects=None):

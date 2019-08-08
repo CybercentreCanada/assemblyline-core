@@ -36,6 +36,9 @@ setup(
         'assemblyline',
         'docker',
     ],
+    tests_require=[
+        'pytest',
+    ],
     package_data={
         '': ["*schema.xml", "*managed-schema", "*solrconfig.xml", "*classification.yml", "*.magic"]
     }

@@ -2,28 +2,35 @@
 A process that manages tracking and running update commands for the AL services.
 
 TODO:
-    - docker run updates
     - docker build updates
     - kubernetes interfaces
 
 """
-import json
 import os
 import sched
 import shutil
 import tempfile
+import random
+import string
+import json
 import time
+from contextlib import contextmanager
 from threading import Thread
 from typing import Dict
 
 import docker
+from passlib.hash import bcrypt
 
 from al_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
-from assemblyline.odm.models.service import DockerConfig
+from assemblyline.datastore.helper import AssemblylineDatastore
+from assemblyline.odm.models.user import User
+from assemblyline.odm.models.user_settings import UserSettings
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
+from assemblyline.odm.models.service import DockerConfig
+from assemblyline.common.security import get_random_password, get_password_hash
 
 SERVICE_SYNC_INTERVAL = 30  # How many seconds between checking for new services, or changes in service status
 UPDATE_CHECK_INTERVAL = 5   # How many seconds per check for outstanding updates
@@ -35,6 +42,22 @@ FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 
 # How many past updates to keep for file based updates
 UPDATE_FOLDER_LIMIT = 5
+
+
+@contextmanager
+def temporary_api_key(ds: AssemblylineDatastore, user_name: str, permissions=('R', 'W')):
+    """Creates a context where a temporary API key is available."""
+
+    name = ''.join(random.choices(string.ascii_letters, k=20))
+    random_pass = get_random_password(length=48)
+    ds.user.update(user_name, [
+        (ds.user.UPDATE_SET, f'apikeys.{name}', {"password": bcrypt.encrypt(random_pass), "acl": permissions})
+    ])
+
+    try:
+        yield f"{name}:{random_pass}"
+    finally:
+        ds.user.update(user_name, [(ds.user.UPDATE_DELETE, 'apikeys', name)])
 
 
 class DockerUpdateInterface:
@@ -50,7 +73,8 @@ class DockerUpdateInterface:
     def __init__(self):
         self.client = docker.from_env()
 
-    def launch(self, name, docker_config: DockerConfig, mounts, env, namespace, blocking):
+    def launch(self, name, docker_config: DockerConfig, mounts, env, namespace: str, blocking: bool = True):
+        """Run a container to completion."""
         self.client.containers.run(
             image=docker_config.image,
             name='update_' + name,
@@ -72,8 +96,11 @@ class DockerUpdateInterface:
 
 
 class KubernetesUpdateInterface:
-    pass
+    def launch(self, name, docker_config: DockerConfig, mounts, env, namespace: str, blocking: bool = True):
+        raise NotImplementedError()
 
+    def restart(self, service_name, namespace):
+        raise NotImplementedError()
 
 
 class ServiceUpdater(ServerBase):
@@ -81,10 +108,10 @@ class ServiceUpdater(ServerBase):
         super().__init__('assemblyline.service.updater', logger=logger)
 
         if not FILE_UPDATE_DIRECTORY:
-           raise RuntimeError("The updater process must be run within the orchestration environment, "
-                              "the update volume must be mounted, and the path to the volume must be "
-                              "set in the environment variable FILE_UPDATE_DIRECTORY. Setting "
-                              "FILE_UPDATE_DIRECTORY directly may be done for testing.")
+            raise RuntimeError("The updater process must be run within the orchestration environment, "
+                               "the update volume must be mounted, and the path to the volume must be "
+                               "set in the environment variable FILE_UPDATE_DIRECTORY. Setting "
+                               "FILE_UPDATE_DIRECTORY directly may be done for testing.")
 
         # The directory where we want working temporary directories to be created.
         # Building our temporary directories in the persistent update volume may
@@ -116,8 +143,8 @@ class ServiceUpdater(ServerBase):
         else:
             self.controller = DockerUpdateInterface()
 
-
     def sync_services(self):
+        """Download the service list and make sure our settings are up to date"""
         self.scheduler.enter(SERVICE_SYNC_INTERVAL, 0, self.sync_services)
 
         # Get all the service data
@@ -141,6 +168,7 @@ class ServiceUpdater(ServerBase):
                 )
 
     def try_run(self):
+        """Run the scheduler loop until told to stop."""
         # Do an initial call to the main methods, who will then be registered with the scheduler
         self.sync_services()
         self.update_services()
@@ -150,9 +178,11 @@ class ServiceUpdater(ServerBase):
             delay = self.scheduler.run(False)
             time.sleep(min(delay, 0.1))
 
-
     def update_services(self):
-        """Check if we need to update any services."""
+        """Check if we need to update any services.
+
+        Spin off a thread to actually perform any updates. Don't allow multiple threads per service.
+        """
         self.scheduler.enter(UPDATE_CHECK_INTERVAL, 0, self.update_services)
 
         # Check for finished update threads
@@ -161,7 +191,10 @@ class ServiceUpdater(ServerBase):
         # Check if its time to try to update the service
         for service_name, data in self.services.items():
             if data['next_update'] <= now_as_iso() and service_name not in self.running_updates:
-                self.running_updates[service_name] = Thread(target=self.run_update, kwargs=dict(service_name=service_name))
+                self.running_updates[service_name] = Thread(
+                    target=self.run_update,
+                    kwargs=dict(service_name=service_name)
+                )
                 self.running_updates[service_name].start()
 
     def run_update(self, service_name):
@@ -204,79 +237,104 @@ class ServiceUpdater(ServerBase):
             self.log.exception("An error occurred while running an update for: " + service_name)
 
     def do_build_update(self):
+        """Update a service by building a new container to run."""
         raise NotImplementedError()
 
     def do_file_update(self, service, previous_hash, previous_update):
+        """Update a service by running a container to get new files."""
         input_directory = tempfile.mkdtemp(dir=self.temporary_directory)
         output_directory = tempfile.mkdtemp(dir=self.temporary_directory)
         service_dir = os.path.join(FILE_UPDATE_DIRECTORY, service.name)
 
         try:
-            # Write out the parameters we want to pass to the update container
-            with open(os.path.join(input_directory, 'config.yaml'), 'w') as update_config:
-                json.dump(update_config, {
-                    'previous_update': previous_update,
-                    'previous_hash': previous_hash,
-                    'sources': service.update_config.sources.as_primitives()
-                })
+            username = self.ensure_service_account()
 
-            # Run the update container
-            self.controller.launch(
-                name=service.name,
-                docker_config=service.update_config.run_options,
-                mounts=[
-                    {
-                        'volume': FILE_UPDATE_VOLUME,
-                        'source_path': os.path.relpath(input_directory, FILE_UPDATE_DIRECTORY),
-                        'dest_path': '/mount/input_directory'
+            with temporary_api_key(self.datastore, username) as api_key:
+
+                # Write out the parameters we want to pass to the update container
+                with open(os.path.join(input_directory, 'config.yaml'), 'w') as update_config:
+                    json.dump(update_config, {
+                        'previous_update': previous_update,
+                        'previous_hash': previous_hash,
+                        'sources': service.update_config.sources.as_primatives(),
+                        'api_user': username,
+                        'api_key': api_key,
+                    })
+
+                # Run the update container
+                self.controller.launch(
+                    name=service.name,
+                    docker_config=service.update_config.run_options,
+                    mounts=[
+                        {
+                            'volume': FILE_UPDATE_VOLUME,
+                            'source_path': os.path.relpath(input_directory, FILE_UPDATE_DIRECTORY),
+                            'dest_path': '/mount/input_directory'
+                        },
+                        {
+                            'volume': FILE_UPDATE_VOLUME,
+                            'source_path': os.path.relpath(output_directory, FILE_UPDATE_DIRECTORY),
+                            'dest_path': '/mount/output_directory'
+                        },
+                    ],
+                    env={
+                        'UPDATE_CONFIGURATION_PATH': '/mount/input_directory/config.yaml',
+                        'UPDATE_OUTPUT_PATH': '/mount/output_directory/'
                     },
-                    {
-                        'volume': FILE_UPDATE_VOLUME,
-                        'source_path': os.path.relpath(output_directory, FILE_UPDATE_DIRECTORY),
-                        'dest_path': '/mount/output_directory'
-                    },
-                ],
-                env={
-                    'UPDATE_CONFIGURATION_PATH': '/mount/input_directory/config.yaml',
-                    'UPDATE_OUTPUT_PATH': '/mount/output_directory/'
-                },
-                blocking=True,
-                namespace=self.config.core.scaler.core_namespace,
-            )
+                    blocking=True,
+                    namespace=self.config.core.scaler.core_namespace,
+                )
 
-            # Read out the results from the output container
-            results_meta_file = os.path.join(output_directory, 'response.yaml')
+                # Read out the results from the output container
+                results_meta_file = os.path.join(output_directory, 'response.yaml')
 
-            if not os.path.exists(results_meta_file) or not os.path.isfile(results_meta_file):
-                return None
+                if not os.path.exists(results_meta_file) or not os.path.isfile(results_meta_file):
+                    return None
 
-            with open(results_meta_file) as rf:
-                results_meta = json.load(rf)
-            update_hash = results_meta.get('hash', None)
+                with open(results_meta_file) as rf:
+                    results_meta = json.load(rf)
+                update_hash = results_meta.get('hash', None)
 
-            # Erase the results meta file
-            os.unlink(results_meta_file)
+                # Erase the results meta file
+                os.unlink(results_meta_file)
 
-            # FILE_UPDATE_DIRECTORY/{service_name} is the directory mounted to the service,
-            # the service sees multiple directories in that directory, each with a timestamp
-            destination_dir = os.path.join(service_dir, service.name + '_' + now_as_iso())
-            shutil.move(output_directory, destination_dir)
+                # FILE_UPDATE_DIRECTORY/{service_name} is the directory mounted to the service,
+                # the service sees multiple directories in that directory, each with a timestamp
+                destination_dir = os.path.join(service_dir, service.name + '_' + now_as_iso())
+                shutil.move(output_directory, destination_dir)
 
-            # Remove older update files, due to the naming scheme, older ones will sort first lexically
-            existing_folders = []
-            for folder_name in os.listdir(service_dir):
-                if os.path.isdir(folder_name) and folder_name.startswith(service.name):
-                    existing_folders.append(folder_name)
-            existing_folders.sort()
-            for extra_folder in existing_folders[:UPDATE_FOLDER_LIMIT]:
-                shutil.rmtree(os.path.join(service_dir, extra_folder), ignore_errors=True)
+                # Remove older update files, due to the naming scheme, older ones will sort first lexically
+                existing_folders = []
+                for folder_name in os.listdir(service_dir):
+                    if os.path.isdir(folder_name) and folder_name.startswith(service.name):
+                        existing_folders.append(folder_name)
+                existing_folders.sort()
+                for extra_folder in existing_folders[:UPDATE_FOLDER_LIMIT]:
+                    shutil.rmtree(os.path.join(service_dir, extra_folder), ignore_errors=True)
 
-            return update_hash
+                return update_hash
         finally:
             # If the working directory is still there for any reason erase it
             shutil.rmtree(input_directory, ignore_errors=True)
             shutil.rmtree(output_directory, ignore_errors=True)
 
+    def ensure_service_account(self):
+        """Check that the update service account exists, if it doesn't, create it."""
+        uname = 'update_service_account'
+
+        if self.datastore.user.get_if_exists(uname):
+            return uname
+
+        user_data = User({
+            "agrees_with_tos": "NOW",
+            "classification": "RESTRICTED",
+            "name": "Update Account",
+            "password": get_password_hash(''.join(random.choices(string.ascii_letters, k=20))),
+            "uname": uname,
+        })
+        self.datastore.user.save('admin', user_data)
+        self.datastore.user_settings.save('admin', UserSettings())
+        return uname
 
 
 if __name__ == '__main__':
