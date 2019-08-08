@@ -69,6 +69,9 @@ class KubernetesController(ControllerInterface):
         self.namespace = namespace
         self.config_mounts: List[Tuple[V1Volume, V1VolumeMount]] = []
 
+    def _deployment_name(self, service_name):
+        return (self.prefix + service_name).replace('_', '-')
+
     def config_mount(self, name, config_map, key, file_name, target_path):
         volume = V1Volume(
             name='al-config',
@@ -161,7 +164,7 @@ class KubernetesController(ControllerInterface):
         return x
 
     def _create_metadata(self, service_name):
-        return V1ObjectMeta(name=self.prefix + service_name, labels=self._create_labels(service_name))
+        return V1ObjectMeta(name=self._deployment_name(service_name), labels=self._create_labels(service_name))
 
     def _create_selector(self, service_name) -> V1LabelSelector:
         return V1LabelSelector(match_labels=self._create_labels(service_name))
@@ -195,7 +198,7 @@ class KubernetesController(ControllerInterface):
 
     def _create_containers(self, profile, mounts):
         return [V1Container(
-            name=self.prefix + profile.name,
+            name=self._deployment_name(profile.name),
             image=profile.container_config.image,
             command=profile.container_config.command,
             env=[V1EnvVar(name=_e.name, value=_e.value) for _e in profile.container_config.environment],
@@ -245,7 +248,7 @@ class KubernetesController(ControllerInterface):
 
     def set_target(self, service_name, target):
         """Set the target for running instances of a service."""
-        name = self.prefix + service_name
+        name = self._deployment_name(service_name)
         scale = self.b1api.read_namespaced_deployment_scale(name=name, namespace=self.namespace)
         scale.spec.replicas = target
         self.b1api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
