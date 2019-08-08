@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 
 import concurrent.futures
-import elasticapm
 import time
+
+import elasticapm
 
 from al_core.server_base import ServerBase
 from assemblyline.common import forge
@@ -68,8 +69,8 @@ class ExpiryManager(ServerBase):
             if number_to_delete != 0:
                 if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
                     with elasticapm.capture_span(name=f'FILESTORE [ThreadPoolExecutor] :: delete()',
-                                                 tags={"num_files": number_to_delete,
-                                                       "query": delete_query}):
+                                                 labels={"num_files": number_to_delete,
+                                                         "query": delete_query}):
                         # Delete associated files
                         with concurrent.futures.ThreadPoolExecutor(self.config.core.expiry.workers) as executor:
                             res = {item['id']: executor.submit(self.fs_hashmap[collection.name], item['id'])
