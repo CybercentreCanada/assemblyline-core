@@ -4,7 +4,7 @@ from typing import Dict, Tuple, List
 from kubernetes import client, config
 from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1KeyToPath, V1ConfigMapVolumeSource, \
-    V1PersistentVolumeClaimVolumeSource
+    V1PersistentVolumeClaimVolumeSource, V1LabelSelector
 from kubernetes.client.rest import ApiException
 
 from al_core.scaler.controllers.interface import ControllerInterface
@@ -163,8 +163,8 @@ class KubernetesController(ControllerInterface):
     def _create_metadata(self, service_name):
         return V1ObjectMeta(name=self.prefix + service_name, labels=self._create_labels(service_name))
 
-    def _create_selector(self, service_name) -> Dict[str, str]:
-        return self._create_labels(service_name)
+    def _create_selector(self, service_name) -> V1LabelSelector:
+        return V1LabelSelector(match_labels=self._create_labels(service_name))
 
     def _create_volumes(self, profile, updates: UpdateConfig=None):
         volumes, mounts = [], []
@@ -203,7 +203,7 @@ class KubernetesController(ControllerInterface):
             volume_mounts=mounts,
         )]
 
-    def _create_deployment(self, profile, scale, updates=None):
+    def _create_deployment(self, profile, scale: int, updates=None):
         volumes, mounts = self._create_volumes(profile, updates=updates)
         metadata = self._create_metadata(profile.name)
 
@@ -218,13 +218,12 @@ class KubernetesController(ControllerInterface):
         )
 
         spec = ExtensionsV1beta1DeploymentSpec(
-            replicas=scale,
+            replicas=int(scale),
             selector=self._create_selector(profile.name),
             template=template,
         )
 
         deployment = ExtensionsV1beta1Deployment(
-            api_version="apps/v1",
             kind="Deployment",
             metadata=metadata,
             spec=spec,
