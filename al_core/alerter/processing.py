@@ -251,8 +251,7 @@ def get_alert_update_parts(counter, datastore, alert_data, logger):
                 'ip_static': list(parsed_record['summary']['network.ip.static']),
                 'request_end_time': parsed_record['srecord']['times']['completed'],
                 'yara': list(parsed_record['summary']['file.rule.yara']),
-            },
-
+            }
         }
         alert_update_p2 = {
             'classification': parsed_record['max_classification'],
@@ -262,6 +261,10 @@ def get_alert_update_parts(counter, datastore, alert_data, logger):
                 'sha256': file_record['sha256'],
                 'size': file_record['size'],
                 'type': file_record['type']
+            },
+            'verdict': {
+                "malicious": parsed_record['srecord']['verdcit']['malicious'],
+                "non_malicious": parsed_record['srecord']['verdcit']['non_malicious']
             }
         }
         cache.add(alert_data['submission']['sid'], (alert_update_p1, alert_update_p2))
