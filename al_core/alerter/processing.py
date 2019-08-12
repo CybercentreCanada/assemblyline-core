@@ -263,8 +263,8 @@ def get_alert_update_parts(counter, datastore, alert_data, logger):
                 'type': file_record['type']
             },
             'verdict': {
-                "malicious": parsed_record['srecord']['verdcit']['malicious'],
-                "non_malicious": parsed_record['srecord']['verdcit']['non_malicious']
+                "malicious": parsed_record['srecord']['verdict']['malicious'],
+                "non_malicious": parsed_record['srecord']['verdict']['non_malicious']
             }
         }
         cache.add(alert_data['submission']['sid'], (alert_update_p1, alert_update_p2))
