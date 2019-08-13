@@ -38,6 +38,18 @@ def parse_memory(string):
     return byte_count/2**20
 
 
+def parse_cpu(string):
+    try:
+        return float(string)
+    except ValueError:
+        pass
+
+    if string.endswith('m'):
+        return float(string[:-1])/1000.0
+
+    raise ValueError('Un-parsable CPU string: ' + string)
+
+
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace, prefix, labels=None):
         # Try loading a kubernetes connection from either the fact that we are running
@@ -97,7 +109,7 @@ class KubernetesController(ControllerInterface):
     def free_cpu(self):
         """Number of cores available for reservation."""
         # Try to get the limit from the namespace
-        max_cpu = float('inf')
+        max_cpu = parse_cpu('inf')
         used = 0
         found = False
         for limit in self.api.list_namespaced_resource_quota(namespace=self.namespace).items:
@@ -107,10 +119,10 @@ class KubernetesController(ControllerInterface):
 
             found = True  # At least one limit has been found
             if 'limits.cpu' in limit.status.hard:
-                max_cpu = min(max_cpu, float(limit.status.hard['limits.cpu']))
+                max_cpu = min(max_cpu, parse_cpu(limit.status.hard['limits.cpu']))
 
             if 'limits.cpu' in limit.status.used:
-                used = max(used, float(limit.status.used['limits.cpu']))
+                used = max(used, parse_cpu(limit.status.used['limits.cpu']))
 
         if found:
             return max_cpu - used
@@ -118,12 +130,12 @@ class KubernetesController(ControllerInterface):
         # If the limit isn't set by the user, and we are on a cloud with auto-scaling
         # we don't have a real memory limit
         if self.auto_cloud:
-            return float('inf')
+            return parse_cpu('inf')
 
         # Try to get the limit by looking at the host list
         cpu = 0
         for node in self.api.list_node().items:
-            cpu += float(node.status.allocatable['cpu'])
+            cpu += parse_cpu(node.status.allocatable['cpu'])
         return cpu
 
     def free_memory(self):
