@@ -72,7 +72,7 @@ class KubernetesController(ControllerInterface):
             # Load again with our settings set
             config.load_kube_config(client_configuration=cfg)
 
-        self.prefix = prefix
+        self.prefix = prefix.lower()
         self.logger = logger
         self._labels = labels
         self.b1api = client.AppsV1beta1Api()
@@ -82,7 +82,7 @@ class KubernetesController(ControllerInterface):
         self.config_mounts: List[Tuple[V1Volume, V1VolumeMount]] = []
 
     def _deployment_name(self, service_name):
-        return (self.prefix + service_name).replace('_', '-')
+        return (self.prefix + service_name.lower()).replace('_', '-')
 
     def config_mount(self, name, config_map, key, file_name, target_path):
         volume = V1Volume(
