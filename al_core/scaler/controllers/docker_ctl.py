@@ -32,7 +32,7 @@ class DockerController(ControllerInterface):
         # We aren't checking for swarm nodes
         assert not self._info['Swarm']['NodeID']
 
-    def add_profile(self, profile):
+    def add_profile(self, profile, updates=None):
         """Tell the controller about a service profile it needs to manage."""
         self._profiles[profile.name] = profile
 
