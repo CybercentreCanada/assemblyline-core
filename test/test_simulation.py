@@ -30,16 +30,16 @@ from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.messages.submission import Submission as SubmissionInput
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
-from al_core.dispatching.client import DispatchClient
-from al_core.dispatching.dispatcher import service_queue_name
-from al_core.dispatching.run_files import FileDispatchServer
-from al_core.dispatching.run_submissions import SubmissionDispatchServer
-from al_core.ingester.ingester import IngestTask
-from al_core.ingester.run_ingest import IngesterInput
-from al_core.ingester.run_internal import IngesterInternals
-from al_core.ingester.run_submit import IngesterSubmitter
-from al_core.server_base import ServerBase
-from al_core.watcher import WatcherServer
+from assemblyline_core.dispatching.client import DispatchClient
+from assemblyline_core.dispatching.dispatcher import service_queue_name
+from assemblyline_core.dispatching.run_files import FileDispatchServer
+from assemblyline_core.dispatching.run_submissions import SubmissionDispatchServer
+from assemblyline_core.ingester.ingester import IngestTask
+from assemblyline_core.ingester.run_ingest import IngesterInput
+from assemblyline_core.ingester.run_internal import IngesterInternals
+from assemblyline_core.ingester.run_submit import IngesterSubmitter
+from assemblyline_core.server_base import ServerBase
+from assemblyline_core.watcher import WatcherServer
 
 from .mocking import MockCollection, RedisTime
 from .test_scheduler import dummy_service
@@ -136,8 +136,8 @@ def make_magic(*_, **__):
 
 
 @pytest.fixture(scope='module')
-@mock.patch('al_core.ingester.ingester.MetricsFactory', new=make_magic)
-@mock.patch('al_core.dispatching.dispatcher.MetricsFactory', new=make_magic)
+@mock.patch('assemblyline_core.ingester.ingester.MetricsFactory', new=make_magic)
+@mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', new=make_magic)
 def core(request, redis, es_connection):
     from assemblyline.common import log as al_log
     al_log.init_logging("simulation")

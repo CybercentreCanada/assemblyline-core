@@ -2,7 +2,7 @@
 import time
 
 from assemblyline.common.uid import get_random_id
-from al_core.dispatching import dispatch_hash
+from assemblyline_core.dispatching import dispatch_hash
 
 # noinspection PyUnresolvedReferences
 from .mocking import clean_redis

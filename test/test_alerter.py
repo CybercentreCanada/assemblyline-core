@@ -4,8 +4,8 @@ import uuid
 
 import pytest
 
-from al_core.alerter.run_alerter import Alerter
-from al_core.ingester.ingester import IngestTask
+from assemblyline_core.alerter.run_alerter import Alerter
+from assemblyline_core.ingester.ingester import IngestTask
 from assemblyline.common import forge
 from assemblyline.common.uid import get_random_id
 from assemblyline.odm.models.submission import Submission

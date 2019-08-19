@@ -7,17 +7,17 @@ from assemblyline.odm.models.submission import SubmissionParams
 from assemblyline.odm.models.filescore import FileScore
 from assemblyline.common.metrics import MetricsFactory
 
-from al_core.ingester.run_submit import IngesterSubmitter
-from al_core.ingester.ingester import IngestTask, _dup_prefix
-from al_core.submission_client import SubmissionClient
+from assemblyline_core.ingester.run_submit import IngesterSubmitter
+from assemblyline_core.ingester.ingester import IngestTask, _dup_prefix
+from assemblyline_core.submission_client import SubmissionClient
 
 from .test_worker_ingest import AssemblylineDatastore
 from .mocking import TrueCountTimes, MockDatastore, clean_redis
 
 
 @pytest.fixture
-@mock.patch('al_core.ingester.ingester.SubmissionClient', new=mock.MagicMock(spec=SubmissionClient))
-@mock.patch('al_core.ingester.ingester.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
+@mock.patch('assemblyline_core.ingester.ingester.SubmissionClient', new=mock.MagicMock(spec=SubmissionClient))
+@mock.patch('assemblyline_core.ingester.ingester.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
 def submit_harness(clean_redis):
     """Setup a test environment just file for the ingest tests"""
     datastore = AssemblylineDatastore(MockDatastore())

@@ -2,7 +2,7 @@
 import pytest
 import random
 
-from al_core.expiry.run_expiry import ExpiryManager
+from assemblyline_core.expiry.run_expiry import ExpiryManager
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.odm.randomizer import random_model_obj

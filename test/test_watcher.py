@@ -6,8 +6,8 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.common.testing import skip
 from assemblyline.common.uid import get_random_id
 
-from al_core.watcher import WatcherClient
-from al_core.watcher.run_watcher import WatcherServer
+from assemblyline_core.watcher import WatcherClient
+from assemblyline_core.watcher.run_watcher import WatcherServer
 
 from .mocking import ToggleTrue, RedisTime
 

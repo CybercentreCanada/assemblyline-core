@@ -3,9 +3,9 @@ import logging
 import random
 import time
 
-from al_core.dispatching.client import DispatchClient
-from al_core.dispatching.dispatcher import service_queue_name
-from al_core.server_base import ServerBase
+from assemblyline_core.dispatching.client import DispatchClient
+from assemblyline_core.dispatching.dispatcher import service_queue_name
+from assemblyline_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm.messages.task import Task as ServiceTask

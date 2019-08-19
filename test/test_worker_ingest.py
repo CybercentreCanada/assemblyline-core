@@ -5,9 +5,9 @@ import time
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.common.metrics import MetricsFactory
 
-from al_core.ingester.run_ingest import IngesterInput
-from al_core.ingester.ingester import IngestTask
-from al_core.submission_client import SubmissionClient
+from assemblyline_core.ingester.run_ingest import IngesterInput
+from assemblyline_core.ingester.ingester import IngestTask
+from assemblyline_core.submission_client import SubmissionClient
 
 from .mocking import MockDatastore, TrueCountTimes, clean_redis
 
@@ -37,8 +37,8 @@ def make_message(message=None, files=None, params=None):
 
 
 @pytest.fixture
-@mock.patch('al_core.ingester.ingester.SubmissionClient', new=mock.MagicMock(spec=SubmissionClient))
-@mock.patch('al_core.ingester.ingester.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
+@mock.patch('assemblyline_core.ingester.ingester.SubmissionClient', new=mock.MagicMock(spec=SubmissionClient))
+@mock.patch('assemblyline_core.ingester.ingester.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
 def ingest_harness(clean_redis):
     """"Setup a test environment.
 

@@ -4,7 +4,7 @@ import redis
 import tempfile
 import pytest
 
-from al_core.updater import run_updater
+from assemblyline_core.updater import run_updater
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.models.service import UpdateConfig

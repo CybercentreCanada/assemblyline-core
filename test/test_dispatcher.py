@@ -7,7 +7,7 @@ from assemblyline.odm.randomizer import random_model_obj, get_random_hash
 from assemblyline.odm import models
 from assemblyline.common.metrics import MetricsFactory
 
-from al_core.dispatching.dispatcher import Dispatcher, DispatchHash, service_queue_name, FileTask, NamedQueue, \
+from assemblyline_core.dispatching.dispatcher import Dispatcher, DispatchHash, service_queue_name, FileTask, NamedQueue, \
     SubmissionTask, Scheduler as RealScheduler
 
 from .mocking import MockDatastore, clean_redis
@@ -38,8 +38,8 @@ class Scheduler(RealScheduler):
         }
 
 
-@mock.patch('al_core.dispatching.dispatcher.Scheduler', Scheduler)
-@mock.patch('al_core.dispatching.dispatcher.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
+@mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', Scheduler)
+@mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
 def test_dispatch_file(clean_redis):
 
     service_queue = lambda name: NamedQueue(service_queue_name(name), clean_redis)
@@ -132,8 +132,8 @@ def test_dispatch_file(clean_redis):
     assert len(disp.submission_queue) == 1
 
 
-@mock.patch('al_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
-@mock.patch('al_core.dispatching.dispatcher.Scheduler', Scheduler)
+@mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
+@mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', Scheduler)
 def test_dispatch_submission(clean_redis):
     ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
     file_hash = get_random_hash(64)
@@ -172,8 +172,8 @@ def test_dispatch_submission(clean_redis):
     assert ds.submission.get(submission.sid).errors == ['error-code']*len(disp.scheduler.services)
 
 
-@mock.patch('al_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
-@mock.patch('al_core.dispatching.dispatcher.Scheduler', Scheduler)
+@mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
+@mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', Scheduler)
 def test_dispatch_extracted(clean_redis):
     # Setup the fake datastore
     ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
