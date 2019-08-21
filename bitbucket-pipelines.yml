@@ -6,8 +6,8 @@ pipelines:
   default:
     - parallel:
       - step:
-          name: Build & Test 3.6
-          image: python:3.6
+          name: Build & Test 3.7
+          image: python:3.7
           caches: [pip]
           services: &services
             - redis
@@ -29,12 +29,6 @@ pipelines:
             - pip install -r test/requirements.txt
             - pip install -e .
             - pytest -rsx -vv
-      - step:
-          name: Build & Test 3.7
-          image: python:3.7
-          caches: [pip]
-          services: *services
-          script: *build_test
 #      - step:
 #          name: Build & Test 3.8
 #          image: python:3.8-rc
@@ -46,7 +40,7 @@ pipelines:
     v*:
       - step:
           name: Build Package
-          image: python:3.6
+          image: python:3.7
           caches: [pip]
           script:
             - pip install wheel
@@ -56,8 +50,8 @@ pipelines:
             - dist/*
       - parallel:
         - step:
-            name: Test 3.6
-            image: python:3.6
+            name: Test 3.7
+            image: python:3.7
             services: *services
             script: &deploy_test
               - rm -rf assemblyline_core setup.py  # Make sure we are running on the package from the prior build
@@ -69,11 +63,6 @@ pipelines:
               - cp test/bitbucket/config.yml /etc/assemblyline
               - pip install -r test/requirements.txt
               - pytest -rsx -vv
-        - step:
-            name: Test 3.7
-            image: python:3.7
-            services: *services
-            script: *deploy_test
 #        - step:
 #            name: Test 3.8
 #            image: python:3.8-rc
@@ -81,7 +70,7 @@ pipelines:
 #            script: *deploy_test
       - step:
           name: Deploy to Test PyPI
-          image: python:3.6
+          image: python:3.7
           caches: [pip]
           deployment: test
           script:
@@ -90,7 +79,7 @@ pipelines:
             - twine upload --skip-existing --repository-url $TEST_REPOSITORY_URL dist/*
       - step:
           name: Deploy to PyPI
-          image: python:3.6
+          image: python:3.7
           caches: [pip]
           trigger: manual
           deployment: production
@@ -100,7 +89,7 @@ pipelines:
             - twine upload --skip-existing dist/*
       - step:
           name: Deploy to Docker Hub
-          image: python:3.6
+          image: python:3.7
           trigger: manual
           services: [docker]
           deployment: container
