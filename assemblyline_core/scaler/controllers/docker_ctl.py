@@ -1,3 +1,7 @@
+from typing import Dict
+
+from assemblyline_core.scaler.scaling import ServiceProfile
+
 from assemblyline.odm.models.service import DockerConfig
 from .interface import ControllerInterface, ServiceControlError
 
@@ -24,7 +28,7 @@ class DockerController(ControllerInterface):
         self._reserved_mem = 500
         self.cpu_overallocation = cpu_overallocation
         self.memory_overallocation = memory_overallocation
-        self._profiles = {}
+        self._profiles: Dict[str, ServiceProfile] = {}
 
         # Prefetch some info that shouldn't change while we are running
         self._info = self.client.info()
@@ -47,8 +51,8 @@ class DockerController(ControllerInterface):
             image=cfg.image,
             name=container_name,
             cpu_period=100000,
-            cpu_quota=int(100000*prof.cpu),
-            mem_limit=f'{prof.ram}m',
+            cpu_quota=int(100000*prof.container_config.cpu_cores),
+            mem_limit=f'{prof.container_config.ram_mb}m',
             labels=labels,
             restart_policy={'Name': 'always'},
             command=cfg.command,

@@ -14,7 +14,6 @@ from assemblyline_core.metrics.metrics_server import METRICS_QUEUE
 from assemblyline_core.scaler.controllers import KubernetesController
 from assemblyline_core.scaler.controllers.interface import ServiceControlError
 from assemblyline.common import forge
-from assemblyline.odm.models.service import DockerConfig
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
@@ -155,15 +154,14 @@ class ScalerServer(ServerBase):
                     # Add the service to the list of services being scaled
                     self.services.add_service(ServiceProfile(
                         name=name,
-                        ram=service.ram_mb,
-                        cpu=service.cpu_cores,
                         min_instances=default_settings.min_instances,
                         growth=default_settings.growth,
                         shrink=default_settings.shrink,
                         backlog=default_settings.backlog,
                         max_instances=service.licence_count,
                         container_config=docker_config,
-                        queue=service_queue_name(name)
+                        queue=service_queue_name(name),
+                        shutdown_seconds=service.timeout + 30,  # Give service an extra 30 seconds to upload results
                     ), updates=service.update_config)
 
                 # Update RAM, CPU, licence requirements for running services

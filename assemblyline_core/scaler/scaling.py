@@ -18,12 +18,10 @@ class ServiceProfile:
 
     This includes how the service should be run, and conditions related to the scaling of the service.
     """
-    def __init__(self, name, ram, cpu, container_config: DockerConfig, min_instances=0, max_instances=None,
-                 growth=600, shrink=None, backlog=500, queue=None):
+    def __init__(self, name, container_config: DockerConfig, min_instances=0, max_instances=None,
+                 growth=600, shrink=None, backlog=500, queue=None, shutdown_seconds=30):
         """
         :param name: Name of the service to manage
-        :param ram: Memory limit in MB
-        :param cpu: CPU limit in cores
         :param container_config: Instructions on how to start this service
         :param min_instances: The minimum number of copies of this service keep running
         :param max_instances: The maximum number of copies permitted to be running
@@ -33,11 +31,10 @@ class ServiceProfile:
         :param queue: Queue name for monitoring
         """
         self.name = name
-        self.ram = ram
-        self.cpu = cpu
         self.queue = queue
         self.container_config = container_config
         self.target_duty_cycle = 0.9
+        self.shutdown_seconds = shutdown_seconds
 
         # How many instances we want, and can have
         self.min_instances = self._min_instances = max(0, int(min_instances))
@@ -129,7 +126,8 @@ class ScalingGroup:
 
         for name, profile in self.profiles.items():
             logger.debug(f'{name}')
-            logger.debug(f'Instances \t{profile.min_instances} < {profile.desired_instances} | {targets[name]} < {profile.max_instances}')
+            logger.debug(f'Instances \t{profile.min_instances} < {profile.desired_instances} | '
+                         f'{targets[name]} < {profile.max_instances}')
             logger.debug(f'Pressure \t{profile.shrink_threshold} < {profile.pressure} < {profile.growth_threshold}')
 
         #
@@ -137,7 +135,8 @@ class ScalingGroup:
         #
         for name, profile in self.profiles.items():
             if targets[name] > profile.desired_instances:
-                logger.debug(f"{name} wants less resources changing allocation {targets[name]} -> {profile.desired_instances}")
+                logger.debug(f"{name} wants less resources changing allocation "
+                             f"{targets[name]} -> {profile.desired_instances}")
                 self.controller.set_target(name, profile.desired_instances)
                 targets[name] = profile.desired_instances
 
@@ -177,8 +176,8 @@ class ScalingGroup:
                 profiles.sort(key=lambda _p: self.controller.get_target(_p.name))
 
             # Add one for the profile at the bottom
-            free_memory -= profiles[0].ram
-            free_cpu -= profiles[0].cpu
+            free_memory -= profiles[0].container_config.ram_mb
+            free_cpu -= profiles[0].container_config.cpu_cores
             targets[profiles[0].name] += 1
 
             # profiles = [_p for _p in profiles if _p.desired_instances > targets[_p.name]]

@@ -4,7 +4,7 @@ from typing import Dict, Tuple, List
 from kubernetes import client, config
 from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1KeyToPath, V1ConfigMapVolumeSource, \
-    V1PersistentVolumeClaimVolumeSource, V1LabelSelector
+    V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements
 from kubernetes.client.rest import ApiException
 
 from assemblyline_core.scaler.controllers.interface import ControllerInterface
@@ -82,7 +82,7 @@ class KubernetesController(ControllerInterface):
         self.config_mounts: List[Tuple[V1Volume, V1VolumeMount]] = []
 
     def _deployment_name(self, service_name):
-        return (self.prefix + service_name.lower()).replace('_', '-')
+        return (self.prefix + service_name).lower().replace('_', '-')
 
     def config_mount(self, name, config_map, key, file_name, target_path):
         volume = V1Volume(
@@ -216,6 +216,10 @@ class KubernetesController(ControllerInterface):
             env=[V1EnvVar(name=_e.name, value=_e.value) for _e in profile.container_config.environment],
             image_pull_policy='Always',
             volume_mounts=mounts,
+            resources=V1ResourceRequirements(
+                limits={'cpu': profile.container_config.cpu_cores, 'memory': f'{profile.container_config.ram_mb}Mi'},
+                requests={'cpu': profile.container_config.cpu_cores, 'memory': f'{profile.container_config.ram_mb}Mi'},
+            ),
         )]
 
     def _create_deployment(self, profile, scale: int, updates=None):
@@ -229,6 +233,8 @@ class KubernetesController(ControllerInterface):
         pod = V1PodSpec(
             volumes=volumes,
             containers=self._create_containers(profile, mounts),
+            priority_class_name='al-service-priority',
+            termination_grace_period_seconds=profile.shutdown_seconds
         )
 
         template = V1PodTemplateSpec(
