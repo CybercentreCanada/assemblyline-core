@@ -51,7 +51,7 @@ def parse_cpu(string):
 
 
 class KubernetesController(ControllerInterface):
-    def __init__(self, logger, namespace, prefix, labels=None):
+    def __init__(self, logger, namespace, prefix, priority, labels=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster,
         try:
@@ -73,6 +73,7 @@ class KubernetesController(ControllerInterface):
             config.load_kube_config(client_configuration=cfg)
 
         self.prefix = prefix.lower()
+        self.priority = priority
         self.logger = logger
         self._labels = labels
         self.b1api = client.AppsV1beta1Api()
@@ -233,7 +234,7 @@ class KubernetesController(ControllerInterface):
         pod = V1PodSpec(
             volumes=volumes,
             containers=self._create_containers(profile, mounts),
-            priority_class_name='al-service-priority',
+            priority_class_name=self.priority,
             termination_grace_period_seconds=profile.shutdown_seconds
         )
 

@@ -72,9 +72,10 @@ class ScalerServer(ServerBase):
         if KUBERNETES_AL_CONFIG:
             self.log.info("Loading Kubernetes cluster interface.")
             service_controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=service_labels,
-                                                      namespace=self.config.core.scaler.service_namespace)
+                                                      namespace=self.config.core.scaler.service_namespace,
+                                                      priority='al-service-priority')
             core_controller = KubernetesController(logger=self.log, namespace=self.config.core.scaler.core_namespace,
-                                                   labels=core_labels, prefix='')
+                                                   labels=core_labels, prefix='', priority='al-core-priority')
 
             # Mare sure core services get attached to the config
             core_controller.config_mount(
