@@ -6,7 +6,7 @@ calls to the controller objects.
 import time
 import math
 import logging
-from typing import List
+from typing import List, Dict
 from assemblyline.odm.models.service import DockerConfig
 
 
@@ -109,7 +109,7 @@ class ScalingGroup:
 
     def __init__(self, controller):
         self.controller = controller
-        self.profiles = {}
+        self.profiles: Dict[str, ServiceProfile] = {}
 
     def add_service(self, profile: ServiceProfile, updates=None):
         profile.desired_instances = max(self.controller.get_target(profile.name), profile.min_instances)
