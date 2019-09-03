@@ -81,7 +81,6 @@ pipelines:
           name: Deploy to PyPI
           image: python:3.7
           caches: [pip]
-          trigger: manual
           deployment: production
           script:
             - pip install twine
@@ -90,7 +89,6 @@ pipelines:
       - step:
           name: Deploy to Docker Hub
           image: python:3.7
-          trigger: manual
           services: [docker]
           deployment: container
           script:
