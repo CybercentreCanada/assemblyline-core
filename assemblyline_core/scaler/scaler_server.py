@@ -306,11 +306,6 @@ class ScalerServer(ServerBase):
                     (self.datastore.service_delta.UPDATE_SET, 'enabled', False)
                 ])
 
-                        # TODO delete next couple lines, debugging code
-                        # if time.time() - profile.last_update > 15:
-                        print(f"its been a bit since we heard from {profile_name}")
-                        profile.last_update = time.time()
-
     def expire_errors(self):
         self.scheduler.enter(ERROR_EXPIRY_INTERVAL, 0, self.expire_errors)
         self.error_count = {name: err - 1 for name, err in self.error_count.items() if err > 1}
