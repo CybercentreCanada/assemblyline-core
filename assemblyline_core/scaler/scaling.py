@@ -53,6 +53,14 @@ class ServiceProfile:
         self.last_update = 0
 
     @property
+    def cpu(self):
+        return self.container_config.cpu_cores
+
+    @property
+    def ram(self):
+        return self.container_config.ram_mb
+
+    @property
     def max_instances(self):
         # Adjust the max_instances based on the number that is already running
         # this keeps the scaler from running way ahead with its demands when resource caps are reached
@@ -160,7 +168,7 @@ class ScalingGroup:
         free_memory = self.controller.free_memory()
 
         #
-        def trim(prof):
+        def trim(prof: List[ServiceProfile]):
             prof = [_p for _p in prof if _p.desired_instances > targets[_p.name]]
             drop = [_p for _p in prof if _p.cpu > free_cpu or _p.ram > free_memory]
             if drop:

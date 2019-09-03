@@ -294,13 +294,17 @@ class ScalerServer(ServerBase):
                                 duty_cycle=profile.target_duty_cycle
                             )
 
-                    # In the case that there should actually be instances running, but we haven't gotten
-                    # any heartbeat messages we might be waiting for a container that can't start properly
-                    else:
-                    # elif time.time() - profile.last_update > profile.timeout:
+        for profile_name, profile in self.services.profiles.items():
+            # In the case that there should actually be instances running, but we haven't gotten
+            # any heartbeat messages we might be waiting for a container that can't start properly
+            if time.time() - profile.last_update > profile.shutdown_seconds:
+                self.log.error(f"Starting service {profile_name} has timed out "
+                               f"({time.time() - profile.last_update} > {profile.shutdown_seconds} seconds)")
 
-                        # TODO do something about it
-                        pass
+                # Disable the the service
+                self.datastore.service_delta.update([
+                    (self.datastore.service_delta.UPDATE_SET, 'enabled', False)
+                ])
 
                         # TODO delete next couple lines, debugging code
                         # if time.time() - profile.last_update > 15:
