@@ -302,7 +302,7 @@ class ScalerServer(ServerBase):
                                f"({time.time() - profile.last_update} > {profile.shutdown_seconds} seconds)")
 
                 # Disable the the service
-                self.datastore.service_delta.update([
+                self.datastore.service_delta.update(profile_name, [
                     (self.datastore.service_delta.UPDATE_SET, 'enabled', False)
                 ])
 
