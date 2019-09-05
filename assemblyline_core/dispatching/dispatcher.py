@@ -159,6 +159,38 @@ class Scheduler:
         return {x.name: x for x in self.datastore.list_all_services(full=True) if x.enabled}
 
 
+def depths_from_tree(file_tree: Dict[str, List[str]]) -> Dict[str, int]:
+    file_children: Dict[str, List[str]] = {}
+    depths: Dict[str, int] = {}
+    remaining_files = set()
+
+    for child, parents in file_tree.items():
+        remaining_files.add(child)
+        for parent in parents:
+            if parent:
+                remaining_files.add(parent)
+                file_children[parent] = file_children.get(parent, []) + [child]
+            else:
+                depths[child] = 0
+
+    next_round = dict(file_children)
+    change = True
+    while next_round and change:
+        file_children = next_round
+        next_round = dict()
+        change = False
+
+        for parent, children in file_children.items():
+            if parent in depths:
+                change = True
+                for child in children:
+                    depths[child] = min(depths[parent] + 1, depths.get(child, float('inf')))
+            else:
+                next_round[parent] = children
+
+    return depths
+
+
 class Dispatcher:
 
     def __init__(self, datastore, redis, redis_persist, logger, counter_name='dispatcher'):
@@ -246,11 +278,8 @@ class Dispatcher:
         unchecked_hashes = list(set(unchecked_hashes) | set(file_parents.keys()))
 
         # Using the file tree we can recalculate the depth of any file
-        def file_depth(_sha):
-            # A root file won't have any parents in the dict
-            if _sha not in file_parents or None in file_parents[_sha]:
-                return 0
-            return min(file_depth(parent) for parent in file_parents[_sha]) + 1
+        depth_limit = self.config.submission.max_extraction_depth
+        file_depth = depths_from_tree(file_parents)
 
         # Try to find all files, and extracted files, and create task objects for them
         # (we will need the file data anyway for checking the schedule later)
@@ -269,7 +298,7 @@ class Dispatcher:
                         size=file_data.size,
                         type=file_data.type,
                     ),
-                    depth=file_depth(sha),
+                    depth=file_depth.get(sha, 0),
                     max_files=max_files
                 )))
         except MultiKeyError as missing:
@@ -343,10 +372,9 @@ class Dispatcher:
             # A root file won't have any parents in the dict
             if _sha not in file_parents or None in file_parents[_sha]:
                 return None
-            return min((file_depth(parent), parent) for parent in file_parents[_sha])[1]
+            return min((file_depth.get(parent, depth_limit), parent) for parent in file_parents[_sha])[1]
 
         # Filter out things over the depth limit
-        depth_limit = self.config.submission.max_extraction_depth
         pending_files = {sha: ft for sha, ft in pending_files.items() if ft.depth < depth_limit}
 
         # Filter out files based on the extraction limits

@@ -8,11 +8,28 @@ from assemblyline.odm import models
 from assemblyline.common.metrics import MetricsFactory
 
 from assemblyline_core.dispatching.dispatcher import Dispatcher, DispatchHash, service_queue_name, FileTask, NamedQueue, \
-    SubmissionTask, Scheduler as RealScheduler
+    SubmissionTask, depths_from_tree, Scheduler as RealScheduler
 
 from .mocking import MockDatastore, clean_redis
 from .test_scheduler import dummy_service
 
+
+def test_depth_calculation():
+    tree = {
+        'a': [None, 'c'],  # Root node, also gets extracted by c
+        'b': ['a'],  # Second layer, extracted by the root
+        'c': ['b'],  # Third layer, extracted by b
+        'd': ['b', 'a'],  # Second layer, extracted by root, but also its peer b,
+                          # but being a child of root should trump that
+        'x': ['y'],  # orphan files, shouldn't stop the results from being calculated, though they shouldn't exist
+    }
+    depths = depths_from_tree(tree)
+    assert depths['a'] == 0
+    assert depths['b'] == 1
+    assert depths['d'] == 1
+    assert depths['c'] == 2
+    assert 'x' not in depths
+    assert 'y' not in depths
 
 
 class Scheduler(RealScheduler):
