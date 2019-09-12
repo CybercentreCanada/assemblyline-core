@@ -30,6 +30,8 @@ class ServerBase(threading.Thread):
         self._exception = None
         self._traceback = None
         self._shutdown_timeout = shutdown_timeout
+        self._old_sigint = None
+        self._old_sigterm = None
 
     def __enter__(self):
         self.log.info(f"Initialized")
@@ -51,9 +53,13 @@ class ServerBase(threading.Thread):
     def close(self):
         pass
 
-    def interrupt_handler(self, _signum, _stack_frame):
+    def interrupt_handler(self, signum, stack_frame):
         self.log.info(f"Instance caught signal. Coming down...")
         self.stop()
+        if signum == signal.SIGINT and self._old_sigint:
+            self._old_sigint(signum, stack_frame)
+        if signum == signal.SIGTERM and self._old_sigterm:
+            self._old_sigterm(signum, stack_frame)
 
     def raising_join(self):
         self.join()
@@ -77,8 +83,8 @@ class ServerBase(threading.Thread):
         self.running = True
         super().start()
         self.log.info(f"Started")
-        signal.signal(signal.SIGINT, self.interrupt_handler)
-        signal.signal(signal.SIGTERM, self.interrupt_handler)
+        self._old_sigint = signal.signal(signal.SIGINT, self.interrupt_handler)
+        self._old_sigterm = signal.signal(signal.SIGTERM, self.interrupt_handler)
 
     def stop(self):
         """Ask nicely for the server to stop.
