@@ -13,9 +13,14 @@ Row = namedtuple('Row', ['timestamp', 'busy', 'throughput'])
 
 class Collection:
     def __init__(self, period, ttl=None):
-        self.period = period
-        self.ttl = ttl or (period * 1.5)
-        # [service_name][host_name] = state
+        """
+        A buffer for metrics data from multiple instances of multiple services.
+
+        :param period: Expected seconds between updates
+        :param ttl: Seconds before a message is dropped from the buffer
+        """
+        self.period: float = period
+        self.ttl: float = ttl or (period * 1.5)
         self.services: Dict[str, Dict[str, Row]] = {}
 
     def update(self, service, host, busy_seconds, throughput):

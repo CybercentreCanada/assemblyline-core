@@ -8,7 +8,7 @@ from .interface import ControllerInterface, ServiceControlError
 
 class DockerController(ControllerInterface):
     """A controller for *non* swarm mode docker."""
-    def __init__(self, logger, prefix='', labels=None, cpu_overallocation=1, memory_overallocation=1):
+    def __init__(self, logger, prefix='', labels=None, cpu_overallocation=1, memory_overallocation=1, network='default'):
         """
         :param logger: A logger to report status and debug information.
         :param prefix: A prefix used to distinguish containers launched by this controller.
@@ -22,6 +22,7 @@ class DockerController(ControllerInterface):
         self.global_mounts = []
         self._prefix = prefix
         self._labels = labels
+        self.network = network
 
         # CPU and memory reserved for the host
         self._reserved_cpu = 0.3
@@ -57,12 +58,10 @@ class DockerController(ControllerInterface):
             restart_policy={'Name': 'always'},
             command=cfg.command,
             volumes={row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.global_mounts},
-            network=cfg.network[0],
+            network=self.network,
             environment=[f'{_e.name}={_e.value}' for _e in cfg.environment],
             detach=True,
         )
-
-        # TODO network needs to be adjusted
 
     def _name_container(self, service_name):
         """Find an unused name for a container.
@@ -149,7 +148,7 @@ class DockerController(ControllerInterface):
                     self._start(service_name)
 
             # Every time we change our container allocation do a little clean up to keep things fresh
-            self.client.containers.prune()
-            self.client.volumes.prune()
+            # self.client.containers.prune()
+            # self.client.volumes.prune()
         except Exception as error:
             raise ServiceControlError(str(error), service_name)

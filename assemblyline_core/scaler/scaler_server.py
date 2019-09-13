@@ -88,18 +88,17 @@ class ScalerServer(ServerBase):
             )
         else:
             self.log.info("Loading Docker cluster interface.")
-            # TODO allocation parameters should be in config
+            # TODO allocation parameters should be read from config
             service_controller = DockerController(logger=self.log, prefix=self.config.core.scaler.service_namespace,
                                                   cpu_overallocation=100, memory_overallocation=1.5,
-                                                  labels=service_labels)
+                                                  labels=service_labels, network='svc')
             core_controller = DockerController(logger=self.log, prefix=self.config.core.scaler.core_namespace,
                                                cpu_overallocation=100, memory_overallocation=1,
-                                               labels=core_labels)
+                                               labels=core_labels, network='backend')
 
             # TODO move these lines to config
             core_controller.global_mounts.append(['/opt/alv4/alv4/dev/core/config/', '/etc/assemblyline/'])
             core_controller.global_mounts.append(['/opt/alv4/', '/opt/alv4/'])
-
 
         self.services = ScalingGroup(service_controller)
         self.core = ScalingGroup(core_controller)
@@ -152,7 +151,6 @@ class ScalerServer(ServerBase):
                     for var in default_settings.environment:
                         if var.name not in set_keys:
                             docker_config.environment.append(var)
-                    docker_config.network = list(set(default_settings.network + docker_config.network))
 
                     # Add the service to the list of services being scaled
                     self.services.add_service(ServiceProfile(
