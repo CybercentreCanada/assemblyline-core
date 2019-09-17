@@ -34,7 +34,7 @@ def test_watcher(redis_connection):
     try:
         # Create a server and hijack its running flag and the current time in 'redis'
         client = WatcherClient(rds)
-        server = WatcherServer(rds)
+        server = WatcherServer(rds, rds)
         server.running = ToggleTrue()
         rds.time.current = 0
         assert out_queue.length() == 0
@@ -82,3 +82,5 @@ def test_watcher(redis_connection):
 
     finally:
         out_queue.delete()
+
+

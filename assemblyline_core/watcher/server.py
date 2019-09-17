@@ -1,6 +1,12 @@
 import elasticapm
 import time
 
+from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE
+
+from assemblyline.odm.messages.task import Task
+
+from assemblyline_core.dispatching.dispatch_hash import DispatchHash
+
 from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm.messages.watcher_heartbeat import Metrics
@@ -8,13 +14,14 @@ from assemblyline.remote.datatypes import get_client, retry_call
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import UniquePriorityQueue
 from assemblyline.remote.datatypes.hash import ExpiringHash
+from assemblyline_core.dispatching.dispatcher import service_queue_name
 
 from assemblyline_core.server_base import ServerBase
-from assemblyline_core.watcher.client import WATCHER_HASH, WATCHER_QUEUE, MAX_TIMEOUT
+from assemblyline_core.watcher.client import WATCHER_HASH, WATCHER_QUEUE, MAX_TIMEOUT, WatcherAction
 
 
 class WatcherServer(ServerBase):
-    def __init__(self, redis=None):
+    def __init__(self, redis=None, redis_persist=None):
         super().__init__('assemblyline.watcher')
         config = forge.get_config()
 
@@ -24,8 +31,23 @@ class WatcherServer(ServerBase):
             port=config.core.redis.nonpersistent.port,
             private=False,
         )
-        self.hash = ExpiringHash(name=WATCHER_HASH, ttl=MAX_TIMEOUT, host=redis)
-        self.queue = UniquePriorityQueue(WATCHER_QUEUE, redis)
+
+        self.redis_persist = redis_persist or get_client(
+            db=config.core.redis.persistent.db,
+            host=config.core.redis.persistent.host,
+            port=config.core.redis.persistent.port,
+            private=False,
+        )
+
+        # Watcher structures
+        self.hash = ExpiringHash(name=WATCHER_HASH, ttl=MAX_TIMEOUT, host=self.redis_persist)
+        self.queue = UniquePriorityQueue(WATCHER_QUEUE, self.redis_persist)
+
+        # Task management structures
+        self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
+        self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
+
+        # Metrics tracking
         self.counter = MetricsFactory(metrics_type='watcher', schema=Metrics, name='watcher',
                                       redis=self.redis, config=config)
 
@@ -59,10 +81,13 @@ class WatcherServer(ServerBase):
                 message = self.hash.pop(key)
                 if message:
                     try:
-                        queue = NamedQueue(message['queue'], self.redis)
-                        queue.push(message['message'])
-                        self.counter.increment('expired')
+                        if message['action'] == WatcherAction.TimeoutTask:
+                            self.cancel_service_task(message['task_key'], message['worker'])
+                        else:
+                            queue = NamedQueue(message['queue'], self.redis)
+                            queue.push(message['message'])
 
+                        self.counter.increment('expired')
                         # End of transaction (success)
                         if apm_client:
                             apm_client.end_transaction('watch_message', 'success')
@@ -84,4 +109,29 @@ class WatcherServer(ServerBase):
 
             if not messages:
                 time.sleep(0.1)
+
+    def cancel_service_task(self, task_key, worker):
+        # We believe a service task has timed out, try and read it from running tasks
+        # If we can't find the task in running tasks, it finished JUST before timing out, let it go
+        task = self.running_tasks.pop(task_key)
+        if not task:
+            return
+
+        # We can confirm that the task is ours now, even if the worker finished, the result will be ignored
+        task = Task(task)
+        self.log.debug(f"[{task.sid}] Service {task.service_name} timed out on {task.fileinfo.sha256}.")
+
+        # Mark the previous attempt as invalid and redispatch it
+        dispatch_table = DispatchHash(task.sid, self.redis)
+        dispatch_table.fail_recoverable(task.fileinfo.sha256, task.service_name)
+        dispatch_table.dispatch(task.fileinfo.sha256, task.service_name)
+        NamedQueue(service_queue_name(task.service_name), self.redis).push(task.as_primitives())
+
+        # We push the task of killing the container off on the scaler, which already has root access
+        # the scaler can also double check that the service name and container id match, to be sure
+        # we aren't accidentally killing the wrong container
+        self.scaler_timeout_queue.push({
+            'service': task.service_name,
+            'container': worker
+        })
 
