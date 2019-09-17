@@ -380,27 +380,6 @@ class Ingester:
             # Some other worker has already popped the scanning queue?
             self.log.warning(f"[{sub.metadata.get('ingest_id', 'unknown')} :: {sha256}] "
                              f"Submission completed twice")
-
-            # TODO Why is all of this being done? How many times should a task be finalized?
-            #      I don't think we need this any more, but I'm not 100% sure
-            # Not a result we care about. We are notified for every
-            # submission that completes. Some submissions will not be ours.
-            # if sub.metadata:
-            #     stype = sub.metadata.get('type', None)
-            #
-            #     if not stype:
-            #         return scan_key
-            #
-            #     if sub.params.description.startswith(self.config.core.ingester):
-            #         raw = {
-            #             'metadata': sub.metadata,
-            #             'overrides': sub.params.get_hashing_keys(),
-            #             'sha256': sha256,
-            #             'type': stype,
-            #         }
-            #         raw['overrides']['service_spec'] = sub.params.service_spec
-            #
-            #         self.finalize(psid, sid, score, raw)
             return scan_key
 
         task = IngestTask(raw)

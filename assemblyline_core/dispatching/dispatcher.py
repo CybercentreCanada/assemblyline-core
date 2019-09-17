@@ -4,9 +4,8 @@ import time
 from typing import Dict, List, cast
 
 import assemblyline_core.watcher
-from assemblyline import odm
 from assemblyline.common import isotime, forge
-from assemblyline.common.constants import SUBMISSION_QUEUE, FILE_QUEUE, DISPATCH_TASK_HASH
+from assemblyline.common.constants import SUBMISSION_QUEUE, FILE_QUEUE, DISPATCH_TASK_HASH, DISPATCH_RUNNING_TASK_HASH
 from assemblyline.common.exceptions import MultiKeyError
 from assemblyline.common.forge import CachedObject
 from assemblyline.common.metrics import MetricsFactory
@@ -15,16 +14,17 @@ from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm import ClassificationObject
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
-from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.service import Service
-from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline_core.dispatching.dispatch_hash import DispatchHash
+from assemblyline import odm
+from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
+from assemblyline.odm.models.submission import Submission
 
 
 def service_queue_name(service: str) -> str:
@@ -36,16 +36,17 @@ def make_watcher_list_name(sid):
     return 'dispatch-watcher-list-' + sid
 
 
+
 @odm.model()
 class SubmissionTask(odm.Model):
-    """The internal representation of a submission used by the dispatcher."""
+    """Dispatcher internal model for submissions"""
     submission: Submission = odm.Compound(Submission)
     completed_queue = odm.Optional(odm.Keyword())                     # Which queue to notify on completion
 
 
 @odm.model()
 class FileTask(odm.Model):
-    """The message sent to the services to describe a task that needs to be done."""
+    """Dispatcher internal model for tracking each file in a submission."""
     sid = odm.Keyword()
     parent_hash = odm.Optional(odm.Keyword())
     file_info: FileInfo = odm.Compound(FileInfo)
@@ -227,7 +228,8 @@ class Dispatcher:
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
         self.file_queue = NamedQueue(FILE_QUEUE, self.redis)
         self._nonper_other_queues = {}
-        self.active_tasks = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
+        self.active_submissions = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
+        self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
 
         # Publish counters to the metrics sink.
         self.counter = MetricsFactory(metrics_type='dispatcher', schema=Metrics, name=counter_name,
@@ -253,9 +255,9 @@ class Dispatcher:
         submission = task.submission
         sid = submission.sid
 
-        if not self.active_tasks.exists(sid):
+        if not self.active_submissions.exists(sid):
             self.log.info(f"[{sid}] New submission received")
-            self.active_tasks.add(sid, task.as_primitives())
+            self.active_submissions.add(sid, task.as_primitives())
         else:
             self.log.info(f"[{sid}] Received a pre-existing submission, check if it is complete")
 
@@ -326,10 +328,10 @@ class Dispatcher:
         pending_files = {}  # Files that have not yet been processed
 
         # Track information about the results as we hit them
-        file_scores = {}
+        file_scores: Dict[str, int] = {}
         result_classifications = []
 
-        # Load the current state of the dispatch table in one go rather than one at a time in the loop
+        # # Load the current state of the dispatch table in one go rather than one at a time in the loop
         prior_dispatches = dispatch_table.all_dispatches()
 
         # found should be added to the unchecked files if they haven't been encountered already
@@ -386,10 +388,10 @@ class Dispatcher:
         # poke those files
         if pending_files:
             self.log.debug(f"[{sid}] Dispatching {len(pending_files)} files: {list(pending_files.keys())}")
-
             for file_task in pending_files.values():
                 self.file_queue.push(file_task.as_primitives())
         else:
+            self.log.debug(f"[{sid}] Finalizing submission.")
             max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
             self.finalize_submission(task, result_classifications, max_score, len(encountered_files))
 
@@ -413,10 +415,13 @@ class Dispatcher:
         # Clear the timeout watcher
         watcher_list.delete()
         self.timeout_watcher.clear(sid)
-        self.active_tasks.pop(sid)
+        self.active_submissions.pop(sid)
 
         # Count the submission as 'complete' either way
         self.counter.increment('submissions_completed')
+
+    def task_timeout(self, task: ServiceTask):
+        raise NotImplementedError()
 
     def cancel_submission(self, task: SubmissionTask, errors):
         """The submission is being abandoned, delete everything, write failed state."""
@@ -499,7 +504,7 @@ class Dispatcher:
         """
         # Read the message content
         file_hash = task.file_info.sha256
-        active_task = self.active_tasks.get(task.sid)
+        active_task = self.active_submissions.get(task.sid)
 
         if active_task is None:
             self.log.warning(f"[{task.sid}] Untracked submission is being processed")
@@ -554,18 +559,9 @@ class Dispatcher:
             self.log.info(f"[{task.sid}] File {file_hash} sent to services : {', '.join(list(outstanding.keys()))}")
 
             for service_name, service in outstanding.items():
-                # Check if this submission has already dispatched this service, and hasn't timed out yet
-                # NOTE: This isn't for checking if a service has failed due to time out or generating
-                #       related errors. This is a DISPATCHING timer, to be sure that we don't send the
-                #       same submission+file+service to the service queues too often. This is part of what
-                #       makes repeated dispatching of a submission or file largely idempotent.
-                queued_time = time.time() - dispatch_table.dispatch_time(file_hash, service_name)
-                if queued_time < service.timeout:
-                    continue
-
-                config = self.build_service_config(service, submission)
 
                 # Build the actual service dispatch message
+                config = self.build_service_config(service, submission)
                 service_task = ServiceTask(dict(
                     sid=task.sid,
                     service_name=service_name,
@@ -576,7 +572,6 @@ class Dispatcher:
                     ttl=submission.params.ttl,
                     ignore_cache=submission.params.ignore_cache,
                 ))
-
                 dispatch_table.dispatch(file_hash, service_name)
                 queue = self.volatile_named_queue(service_queue_name(service_name))
                 queue.push(service_task.as_primitives())

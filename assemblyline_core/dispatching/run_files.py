@@ -53,6 +53,10 @@ class FileDispatchServer(ServerBase):
                 if self.apm_client:
                     self.apm_client.begin_transaction('Process dispatcher message')
 
+                if 'service_timeout' in message:
+                    self.dispatcher.service_timeout()
+                    continue
+
                 message = FileTask(message)
                 if self.apm_client:
                     elasticapm.tag(sid=message.sid)

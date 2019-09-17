@@ -68,7 +68,7 @@ def test_dispatch_file(clean_redis):
     sub.params.ignore_cache = False
 
     disp = Dispatcher(ds, clean_redis, clean_redis, logging)
-    disp.active_tasks.add(sid, SubmissionTask(dict(submission=sub)).as_primitives())
+    disp.active_submissions.add(sid, SubmissionTask(dict(submission=sub)).as_primitives())
     dh = DispatchHash(sid=sid, client=clean_redis)
     print('==== first dispatch')
     # Submit a problem, and check that it gets added to the dispatch hash
@@ -87,14 +87,14 @@ def test_dispatch_file(clean_redis):
     assert service_queue('extract').length() == 1
     assert len(service_queue('wrench')) == 1
 
-    # Making the same call again should have no effect
+    # Making the same call again will queue it up again
     print('==== second dispatch')
     disp.dispatch_file(file_task)
 
     assert dh.dispatch_time(file_hash, 'extract') > 0
     assert dh.dispatch_time(file_hash, 'wrench') > 0
-    assert len(service_queue('extract')) == 1
-    assert len(service_queue('wrench')) == 1
+    assert len(service_queue('extract')) == 2
+    assert len(service_queue('wrench')) == 2
     # assert len(mq) == 4
 
     # Push back the timestamp in the dispatch hash to simulate a timeout,

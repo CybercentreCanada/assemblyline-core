@@ -152,3 +152,8 @@ class DockerController(ControllerInterface):
             # self.client.volumes.prune()
         except Exception as error:
             raise ServiceControlError(str(error), service_name)
+
+    def stop_container(self, service_name, container_id):
+        container = self.client.containers.get(container_id)
+        if container.labels.get('component') == service_name:
+            container.kill()

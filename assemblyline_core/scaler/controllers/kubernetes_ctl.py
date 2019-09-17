@@ -276,3 +276,9 @@ class KubernetesController(ControllerInterface):
         scale.spec.replicas = target
         self.b1api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
 
+    def stop_container(self, service_name, container_id):
+        pods = self.api.list_namespaced_pod(namespace=self.namespace, label_selector=f'component={service_name}')
+        for pod in pods.items:
+            if pod.metadata.name == container_id:
+                self.api.delete_namespaced_pod(name=container_id, namespace=self.namespace)
+                return

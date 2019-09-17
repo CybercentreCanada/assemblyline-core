@@ -9,6 +9,7 @@ import time
 import sched
 from pprint import pprint
 
+from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE
 from assemblyline.odm.models.service import Service
 from assemblyline_core.dispatching.dispatcher import service_queue_name
 from assemblyline_core.metrics.metrics_server import METRICS_QUEUE
@@ -29,6 +30,7 @@ from . import collection
 # How often (in seconds) to download new service data, try to scale managed services,
 # and download more metrics data respectively
 SERVICE_SYNC_INTERVAL = 30
+PROCESS_TIMEOUT_INTERVAL = 30
 SCALE_INTERVAL = 5
 METRIC_SYNC_INTERVAL = 0.1
 
@@ -43,7 +45,7 @@ KUBERNETES_AL_CONFIG = os.environ.get('KUBERNETES_AL_CONFIG')
 
 
 class ScalerServer(ServerBase):
-    def __init__(self, config=None, datastore=None, redis=None):
+    def __init__(self, config=None, datastore=None, redis=None, redis_persist=None):
         super().__init__('assemblyline.scaler')
         # Connect to the assemblyline system
         self.config = config or forge.get_config()
@@ -54,8 +56,15 @@ class ScalerServer(ServerBase):
             port=self.config.core.redis.nonpersistent.port,
             private=False,
         )
+        self.redis_persist = redis_persist or get_client(
+            db=self.config.core.redis.persistent.db,
+            host=self.config.core.redis.persistent.host,
+            port=self.config.core.redis.persistent.port,
+            private=False,
+        )
         self.status_queue = CommsQueue(STATUS_QUEUE, self.redis)
         self.metrics_queue = CommsQueue(METRICS_QUEUE, self.redis)
+        self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
         self._metrics_loop = self.get_metrics()
         self.error_count = {}
 
@@ -118,6 +127,7 @@ class ScalerServer(ServerBase):
         self.sync_metrics()
         self.update_scaling()
         self.expire_errors()
+        self.process_timeouts()
 
         # Run as long as we need to
         while self.running:
@@ -131,7 +141,6 @@ class ScalerServer(ServerBase):
             service: Service = service
             # noinspection PyBroadException
             try:
-                # name = 'alsvc_' + service.name.lower()
                 name = service.name
 
                 # Stop any running disabled services
@@ -307,3 +316,13 @@ class ScalerServer(ServerBase):
     def expire_errors(self):
         self.scheduler.enter(ERROR_EXPIRY_INTERVAL, 0, self.expire_errors)
         self.error_count = {name: err - 1 for name, err in self.error_count.items() if err > 1}
+
+    def process_timeouts(self):
+        self.scheduler.enter(PROCESS_TIMEOUT_INTERVAL, 0, self.process_timeouts)
+        for message in self.scaler_timeout_queue.pop(blocking=False):
+            if not message:
+                break
+            try:
+                self.services.controller.stop_container(message['service'], message['container'])
+            except Exception:
+                self.log.exception("Exception trying to stop timed out service container.")

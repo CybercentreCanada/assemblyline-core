@@ -59,10 +59,11 @@ class DispatchHash:
         # schedule repeatedly, and for telling the UI what services are pending
         self.schedules = ExpiringHash(f'dispatch-hash-schedules-{sid}', host=self.client)
 
-        # The set of files that are included in this submission, this set is used primarily for
-        # enforcing max file per submission constraints
+        # How many services are outstanding for each file in the submission
         self._outstanding_service_count = ExpiringHash(f'dispatch-hash-files-{sid}', host=self.client)
+        # Track which files have been extracted by what, in order to rebuild the file tree later
         self._file_tree = ExpiringSet(f'dispatch-hash-parents-{sid}', host=self.client)
+        self._attempts = ExpiringHash(f'dispatch-hash-attempts-{sid}', host=self.client)
 
         # Local caches for _files and finished table
         self._cached_files = set(self._outstanding_service_count.keys())
@@ -241,3 +242,4 @@ class DispatchHash:
         self._outstanding_service_count.delete()
         self._file_tree.delete()
         self._other_errors.delete()
+        self._attempts.delete()

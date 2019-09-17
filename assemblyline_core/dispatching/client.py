@@ -3,8 +3,16 @@ An interface to the core system for the edge services.
 
 
 """
+import json
+
+import hashlib
 import logging
-from typing import Dict, Union, Tuple
+import time
+from typing import Dict, Union, Tuple, Optional
+
+from assemblyline_core import watcher
+
+from assemblyline.common.isotime import now, now_as_iso
 
 from assemblyline.common import forge
 from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, FILE_QUEUE, SUBMISSION_QUEUE
@@ -18,13 +26,13 @@ from assemblyline.remote.datatypes.lock import Lock
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 
-from assemblyline_core.dispatching.dispatcher import SubmissionTask, ServiceTask, FileTask, \
-    make_watcher_list_name, service_queue_name, Scheduler
+from assemblyline_core.dispatching.dispatcher import SubmissionTask, FileTask, \
+    make_watcher_list_name, service_queue_name, Scheduler, ServiceTask
 from assemblyline_core.dispatching.dispatch_hash import DispatchHash
 
 
 class DispatchClient:
-    def __init__(self, datastore=None, redis=None, logger=None):
+    def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None):
         self.config = forge.get_config()
 
         self.redis = redis or get_client(
@@ -33,6 +41,7 @@ class DispatchClient:
             port=self.config.core.redis.nonpersistent.port,
             private=False,
         )
+        self.timeout_watcher = watcher.WatcherClient(redis_persist)
 
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
         self.file_queue = NamedQueue(FILE_QUEUE, self.redis)
@@ -98,28 +107,62 @@ class DispatchClient:
 
         return output
 
-    def request_work(self, service_name, timeout=60, blocking=True) -> Tuple[Union[ServiceTask, None], bool]:
+    def request_work(self, worker_id, service_name, timeout: float = 60, blocking=True) -> Optional[ServiceTask]:
         """Pull work from the service queue for the service in question.
 
+        :param worker_id:
         :param service_name: Which service needs work.
         :param timeout: How many seconds to block before returning if blocking is true.
         :param blocking: Whether to wait for jobs to enter the queue, or if false, return immediately
         :return: The job found, and a boolean value indicating if this is the first time this task has
                  been returned by request_work.
         """
+        # For when we recursively retry on bad task dequeue-ing
+        if timeout <= 0:
+            return None
+        start = time.time()
+
         # Get work from the queue
         work_queue = NamedQueue(service_queue_name(service_name), host=self.redis)
-        result = work_queue.pop(blocking=blocking, timeout=timeout)
+        result = work_queue.pop(blocking=blocking, timeout=int(timeout))
         if not result:
-            return None, False
-
-        # If we are actually returning a task, record it as running, shielding the dispatch
-        # internal properties from downstream changes, if the task has already been marked
-        # we have already dispatched this job to the
+            return None
         task = ServiceTask(result)
-        task_key = task.key()
-        first = bool(self.running_tasks.set(task_key, result))
-        return task, first
+
+        # Get the service information
+        service_data = self.schedule_builder.services[task.service_name]
+
+        # If someone is supposed to be working on this task right now, we won't be able to add it
+        if self.running_tasks.add(task.key(), task.as_primitives()):
+
+            # Check if this task has reached the retry limit
+            attempt_record = ExpiringHash(f'dispatch-hash-attempts-{task.sid}', host=self.redis)
+            attempt_record.increment(task.key())
+            if attempt_record.get(task.key()) > 3:
+                error = Error(dict(
+                    created='NOW',
+                    expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60),
+                    response=dict(
+                        message='The number of retries has passed the limit for this service.',
+                        service_name=task.service_name,
+                        service_version=' ',
+                        status='FAIL_NONRECOVERABLE',
+                    ),
+                    sha256=task.fileinfo.sha256,
+                    type="TASK PRE-EMPTED",
+                ))
+                service_tool_version_hash = ''
+                task_config_hash = hashlib.md5((json.dumps(sorted(task.service_config)).encode('utf-8'))).hexdigest()
+                conf_key = hashlib.md5((str(service_tool_version_hash + task_config_hash).encode('utf-8'))).hexdigest()
+                error_key = error.build_key(conf_key)
+                self.service_failed(task.sid, error_key, error)
+                return self.request_work(worker_id, service_name, blocking=blocking,
+                                         timeout=timeout - (time.time() - start))
+
+            self.timeout_watcher.touch_task(timeout=int(service_data.timeout), key=f'{task.sid}-{task.key()}',
+                                            worker=worker_id, task_key=task.key())
+            return task
+        return self.request_work(worker_id, service_name, blocking=blocking, timeout=timeout-(time.time()-start))
 
     def _dispatching_error(self, task, process_table, error):
         error_key = error.build_key()
@@ -138,6 +181,7 @@ class DispatchClient:
             self.log.warning(f"[{sid} :: {result.response.service_name}] Service tried to finish the same task twice.")
             return
         task = ServiceTask(task)
+        self.timeout_watcher.clear(f'{task.sid}-{task.key()}')
 
         # Save or freshen the result, the CONTENT of the result shouldn't change, but we need to keep the
         # most distant expiry time to prevent pulling it out from under another submission too early
@@ -237,6 +281,7 @@ class DispatchClient:
             self.log.warning(f"[{sid} :: {error.response.service_name}] Service tried to finish the same task twice.")
             return
         task = ServiceTask(task)
+        self.timeout_watcher.clear(f'{task.sid}-{task.key()}')
 
         self.log.debug(f"Service {task.service_name} failed with {error.response.status} error.")
         remaining = -1

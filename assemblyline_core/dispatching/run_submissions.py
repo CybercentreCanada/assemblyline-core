@@ -61,7 +61,7 @@ class SubmissionDispatchServer(ServerBase):
                         
                 # This is just as sid nudge, this submission should already be running
                 elif 'sid' in message:
-                    active_task = self.dispatcher.active_tasks.get(message['sid'])
+                    active_task = self.dispatcher.active_submissions.get(message['sid'])
                     if self.apm_client:
                         elasticapm.tag(sid=message['sid'])
                     if active_task is None:
