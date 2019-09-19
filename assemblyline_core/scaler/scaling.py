@@ -39,14 +39,14 @@ class ServiceProfile:
         # How many instances we want, and can have
         self.min_instances = self._min_instances = max(0, int(min_instances))
         self._max_instances = max(0, int(max_instances)) if max_instances else float('inf')
-        self.desired_instances = None
-        self.running_instances = None
+        self.desired_instances: int = 0
+        self.running_instances: int = 0
 
         # Information tracking when we want to grow/shrink
-        self.pressure = 0
+        self.pressure: float = 0
         self.growth_threshold = abs(float(growth))
         self.shrink_threshold = -self.growth_threshold if shrink is None else -abs(float(shrink))
-        self.leak_rate = 0.1
+        self.leak_rate: float = 0.1
 
         # How long does a backlog need to be before we are concerned
         self.backlog = int(backlog)

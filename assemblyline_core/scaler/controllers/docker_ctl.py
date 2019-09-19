@@ -148,12 +148,23 @@ class DockerController(ControllerInterface):
                     self._start(service_name)
 
             # Every time we change our container allocation do a little clean up to keep things fresh
-            # self.client.containers.prune()
-            # self.client.volumes.prune()
+            self.client.containers.prune()
+            self.client.volumes.prune()
         except Exception as error:
             raise ServiceControlError(str(error), service_name)
 
     def stop_container(self, service_name, container_id):
-        container = self.client.containers.get(container_id)
-        if container.labels.get('component') == service_name:
+        import docker.errors
+        container = None
+        try:
+            # First try the given container id in case its actually correct
+            container = self.client.containers.get(container_id)
+        except docker.errors.NotFound:
+            for possible_container in self.client.containers.list(filters={'label': f'component={service_name}'}):
+                if possible_container.id.startswith(container_id) or possible_container.name == container_id:
+                    container = possible_container
+                    break
+
+        if container and container.labels.get('component') == service_name and container.status == 'running':
             container.kill()
+

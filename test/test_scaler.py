@@ -1,3 +1,6 @@
+from assemblyline_core.scaler.scaling import ServiceProfile
+
+from assemblyline.odm.models.service import DockerConfig
 from pytest import approx
 from unittest.mock import Mock, patch
 from assemblyline_core.scaler.collection import Collection
@@ -41,3 +44,11 @@ def test_collection():
     assert collection.read('service-a') is None
     assert collection.read('service-b')['instances'] == 1
     assert collection.read('service-b')['duty_cycle'] == approx(0.5)
+
+
+def test_default_bucket_rates():
+    service = ServiceProfile('service', DockerConfig(dict(image='redis')))
+    before = service.pressure
+    service.update(5, 1, 1, 1)
+    print(service.pressure, before)
+    assert service.pressure > before

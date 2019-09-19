@@ -9,7 +9,9 @@ import time
 import sched
 from pprint import pprint
 
-from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE
+from assemblyline.remote.datatypes.hash import ExpiringHash
+
+from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.odm.models.service import Service
 from assemblyline_core.dispatching.dispatcher import service_queue_name
 from assemblyline_core.metrics.metrics_server import METRICS_QUEUE
@@ -56,6 +58,7 @@ class ScalerServer(ServerBase):
             port=self.config.core.redis.nonpersistent.port,
             private=False,
         )
+
         self.redis_persist = redis_persist or get_client(
             db=self.config.core.redis.persistent.db,
             host=self.config.core.redis.persistent.host,
@@ -67,6 +70,7 @@ class ScalerServer(ServerBase):
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
         self._metrics_loop = self.get_metrics()
         self.error_count = {}
+        self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=None)
 
         core_labels = {
             'app': 'assemblyline',
@@ -237,22 +241,6 @@ class ScalerServer(ServerBase):
             if message is None:
                 break
 
-            # Things that don't provide information we need
-            if message.get('name', '') in {'expiry', 'ingester_submitter', 'alerter', 'ingester_internals',
-                                           'ingester_input', 'watcher'}:
-                pass
-
-            elif message.get('type', None) == 'service':
-                pass
-
-            elif message.get('type', None) == 'service_timing':
-                self.state.update(
-                    service=message['name'],
-                    host=message['host'],
-                    busy_seconds=message['execution.t'],
-                    throughput=0
-                )
-
             elif message.get('name', None) == 'dispatcher_submissions':
                 self.state.update(
                     service=message['name'],
@@ -269,13 +257,15 @@ class ScalerServer(ServerBase):
                     throughput=message['files_completed']
                 )
 
-            else:
-                pprint(message)
-
-        export_interval = self.config.core.metrics.export_interval
+        # Pull service metrics from redis
+        service_data = self.status_table.items()
+        for host, (service, state) in service_data.items():
+            self.state.update(service=service, host=host, throughput=0,
+                              busy_seconds=METRIC_SYNC_INTERVAL if state == ServiceStatus.Running else 0)
 
         # Check the set of services that might be sitting at zero instances, and if it is, we need to
         # manually check if it is offline
+        export_interval = self.config.core.metrics.export_interval
         for group in (self.core, self.services):
             for profile_name, profile in group.profiles.items():
                 # Pull out statistics from the metrics regularization
@@ -293,7 +283,6 @@ class ScalerServer(ServerBase):
                     # Check if we expect no messages, if so pull the queue length ourselves since there is no heartbeat
                     if group.controller.get_target(profile_name) == 0:
                         if profile.queue:
-                            self.log.info(f"{profile_name} down, pulling data directly")
                             profile.update(
                                 delta=export_interval,
                                 instances=0,
@@ -301,17 +290,19 @@ class ScalerServer(ServerBase):
                                 duty_cycle=profile.target_duty_cycle
                             )
 
-        for profile_name, profile in self.services.profiles.items():
-            # In the case that there should actually be instances running, but we haven't gotten
-            # any heartbeat messages we might be waiting for a container that can't start properly
-            if time.time() - profile.last_update > profile.shutdown_seconds:
-                self.log.error(f"Starting service {profile_name} has timed out "
-                               f"({time.time() - profile.last_update} > {profile.shutdown_seconds} seconds)")
-
-                # Disable the the service
-                self.datastore.service_delta.update(profile_name, [
-                    (self.datastore.service_delta.UPDATE_SET, 'enabled', False)
-                ])
+        # TODO maybe find another way of implementing this that is less aggressive
+        # for profile_name, profile in self.services.profiles.items():
+        #     # In the case that there should actually be instances running, but we haven't gotten
+        #     # any heartbeat messages we might be waiting for a container that can't start properly
+        #     if self.services.controller.get_target(profile_name) > 0:
+        #         if time.time() - profile.last_update > profile.shutdown_seconds:
+        #             self.log.error(f"Starting service {profile_name} has timed out "
+        #                            f"({time.time() - profile.last_update} > {profile.shutdown_seconds} seconds)")
+        #
+        #             # Disable the the service
+        #             self.datastore.service_delta.update(profile_name, [
+        #                 (self.datastore.service_delta.UPDATE_SET, 'enabled', False)
+        #             ])
 
     def expire_errors(self):
         self.scheduler.enter(ERROR_EXPIRY_INTERVAL, 0, self.expire_errors)
@@ -319,10 +310,12 @@ class ScalerServer(ServerBase):
 
     def process_timeouts(self):
         self.scheduler.enter(PROCESS_TIMEOUT_INTERVAL, 0, self.process_timeouts)
-        for message in self.scaler_timeout_queue.pop(blocking=False):
+        while True:
+            message = self.scaler_timeout_queue.pop(blocking=False)
             if not message:
                 break
             try:
+                self.log.info(f"Killing service container: {message['container']} running: {message['service']}")
                 self.services.controller.stop_container(message['service'], message['container'])
             except Exception:
-                self.log.exception("Exception trying to stop timed out service container.")
+                self.log.exception(f"Exception trying to stop timed out service container: {message}")
