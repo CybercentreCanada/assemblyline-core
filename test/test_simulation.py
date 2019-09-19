@@ -39,7 +39,7 @@ from assemblyline_core.ingester.run_ingest import IngesterInput
 from assemblyline_core.ingester.run_internal import IngesterInternals
 from assemblyline_core.ingester.run_submit import IngesterSubmitter
 from assemblyline_core.server_base import ServerBase
-from assemblyline_core.watcher import WatcherServer
+from assemblyline_core.watcher.server import WatcherServer
 
 from .mocking import MockCollection, RedisTime
 from .test_scheduler import dummy_service
