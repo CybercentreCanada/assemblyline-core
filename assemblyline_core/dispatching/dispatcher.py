@@ -25,6 +25,7 @@ from assemblyline_core.dispatching.dispatch_hash import DispatchHash
 from assemblyline import odm
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.submission import Submission
+from assemblyline_core.watcher.client import WatcherClient
 
 
 def service_queue_name(service: str) -> str:
@@ -223,7 +224,7 @@ class Dispatcher:
             port=self.config.core.redis.persistent.port,
             private=False,
         )
-        self.timeout_watcher = assemblyline_core.watcher.WatcherClient(self.redis_persist)
+        self.timeout_watcher = WatcherClient(self.redis_persist)
 
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
         self.file_queue = NamedQueue(FILE_QUEUE, self.redis)
@@ -483,7 +484,7 @@ class Dispatcher:
         self.submissions.save(sid, submission)
 
         self._cleanup_submission(task)
-        self.log.info(f"[{sid}] Completed")
+        self.log.info(f"[{sid}] Completed; files: {file_count} results: {len(results)} errors: {len(errors)} score: {max_score}")
 
     def dispatch_file(self, task: FileTask):
         """ Handle a message describing a file to be processed.

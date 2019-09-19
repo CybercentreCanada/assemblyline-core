@@ -29,6 +29,7 @@ from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline_core.dispatching.dispatcher import SubmissionTask, FileTask, \
     make_watcher_list_name, service_queue_name, Scheduler, ServiceTask
 from assemblyline_core.dispatching.dispatch_hash import DispatchHash
+from assemblyline_core.watcher.client import WatcherClient
 
 
 class DispatchClient:
@@ -41,7 +42,7 @@ class DispatchClient:
             port=self.config.core.redis.nonpersistent.port,
             private=False,
         )
-        self.timeout_watcher = watcher.WatcherClient(redis_persist)
+        self.timeout_watcher = WatcherClient(redis_persist)
 
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
         self.file_queue = NamedQueue(FILE_QUEUE, self.redis)
@@ -143,7 +144,7 @@ class DispatchClient:
                     created='NOW',
                     expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60),
                     response=dict(
-                        message='The number of retries has passed the limit for this service.',
+                        message=f'The number of retries has passed the limit.',
                         service_name=task.service_name,
                         service_version=' ',
                         status='FAIL_NONRECOVERABLE',

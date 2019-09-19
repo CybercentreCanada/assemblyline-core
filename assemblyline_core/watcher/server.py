@@ -119,7 +119,7 @@ class WatcherServer(ServerBase):
 
         # We can confirm that the task is ours now, even if the worker finished, the result will be ignored
         task = Task(task)
-        self.log.debug(f"[{task.sid}] Service {task.service_name} timed out on {task.fileinfo.sha256}.")
+        self.log.info(f"[{task.sid}] Service {task.service_name} timed out on {task.fileinfo.sha256}.")
 
         # Mark the previous attempt as invalid and redispatch it
         dispatch_table = DispatchHash(task.sid, self.redis)
