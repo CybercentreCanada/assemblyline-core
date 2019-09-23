@@ -26,7 +26,7 @@ from typing import Tuple, List
 
 from assemblyline.common import forge
 from assemblyline.common import identify
-from assemblyline.common.importing import load_module_by_path
+from assemblyline.common.codec import decode_file
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.str_utils import safe_str
 from assemblyline.datastore.helper import AssemblylineDatastore
@@ -166,7 +166,7 @@ class SubmissionClient:
 
         After this method finished the file will ONLY exist on the filestore, not locally.
         """
-        massaged_path = None
+        extracted_path = None
         try:
             # Analyze the file and make sure the file table is up to date
             fileinfo = identify.fileinfo(local_path)
@@ -179,11 +179,10 @@ class SubmissionClient:
             # Check if there is an integrated decode process for this file
             # eg. files that are packaged, and the contained file (not the package
             # that local_path points to) should be passed into the system.
-            decode_file = load_module_by_path(self.config.submission.decode_file)
-            massaged_path, _, fileinfo, al_meta = decode_file(local_path, fileinfo)
+            extracted_path, fileinfo, al_meta = decode_file(local_path, fileinfo)
 
-            if massaged_path:
-                local_path = massaged_path
+            if extracted_path:
+                local_path = extracted_path
                 sha256 = fileinfo['sha256']
                 self.filestore.upload(local_path, sha256)
                 self.datastore.save_or_freshen_file(sha256, fileinfo, expiry, classification, redis=self.redis)
@@ -192,9 +191,9 @@ class SubmissionClient:
 
         finally:
             # If we extracted anything delete it
-            if massaged_path:
-                if os.path.exists(massaged_path):
-                    os.unlink(massaged_path)
+            if extracted_path:
+                if os.path.exists(extracted_path):
+                    os.unlink(extracted_path)
 
             # If we DIDN'T download anything, still delete it
             if local_path and cleanup:
