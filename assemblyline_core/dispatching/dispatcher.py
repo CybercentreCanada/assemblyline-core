@@ -306,7 +306,7 @@ class Dispatcher:
                 error_key = error.build_key(sid)
                 self.datastore.error.save(error_key, error)
                 errors.append(error_key)
-            return self.cancel_submission(task, errors)
+            return self.cancel_submission(task, errors, file_parents)
 
         # Files that have already been encountered, but may or may not have been processed yet
         encountered_files = {file.sha256 for file in submission.files}
@@ -378,12 +378,17 @@ class Dispatcher:
         else:
             self.log.debug(f"[{sid}] Finalizing submission.")
             max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
-            self.finalize_submission(task, result_classifications, max_score, len(encountered_files))
+            self.finalize_submission(task, result_classifications, max_score, file_scores.keys())
 
-    def _cleanup_submission(self, task: SubmissionTask):
+    def _cleanup_submission(self, task: SubmissionTask, file_list: List[str]):
         """Clean up code that is the same for canceled and finished submissions"""
         submission = task.submission
         sid = submission.sid
+
+        # Erase the temporary data which may have accumulated during processing
+        for file_hash in file_list:
+            hash_name = get_temporary_submission_data_name(sid, file_hash=file_hash)
+            ExpiringHash(hash_name, host=self.redis).delete()
 
         if submission.params.quota_item and submission.params.submitter:
             self.log.info(f"[{sid}] Submission no longer counts toward {submission.params.submitter.upper()} quota")
@@ -408,7 +413,7 @@ class Dispatcher:
     def task_timeout(self, task: ServiceTask):
         raise NotImplementedError()
 
-    def cancel_submission(self, task: SubmissionTask, errors):
+    def cancel_submission(self, task: SubmissionTask, errors, file_list):
         """The submission is being abandoned, delete everything, write failed state."""
         submission = task.submission
         sid = submission.sid
@@ -423,10 +428,10 @@ class Dispatcher:
         submission.times.completed = isotime.now_as_iso()
         self.submissions.save(sid, submission)
 
-        self._cleanup_submission(task)
+        self._cleanup_submission(task, file_list)
         self.log.error(f"[{sid}] Failed")
 
-    def finalize_submission(self, task: SubmissionTask, result_classifications, max_score, file_count):
+    def finalize_submission(self, task: SubmissionTask, result_classifications, max_score, file_list):
         """All of the services for all of the files in this submission have finished or failed.
 
         Update the records in the datastore, and flush the working data from redis.
@@ -460,15 +465,16 @@ class Dispatcher:
         submission.classification = classification
         submission.error_count = len(errors)
         submission.errors = errors
-        submission.file_count = file_count
+        submission.file_count = len(file_list)
         submission.results = results
         submission.max_score = max_score
         submission.state = 'completed'
         submission.times.completed = isotime.now_as_iso()
         self.submissions.save(sid, submission)
 
-        self._cleanup_submission(task)
-        self.log.info(f"[{sid}] Completed; files: {file_count} results: {len(results)} errors: {len(errors)} score: {max_score}")
+        self._cleanup_submission(task, file_list)
+        self.log.info(f"[{sid}] Completed; files: {len(file_list)} results: {len(results)} "
+                      f"errors: {len(errors)} score: {max_score}")
 
     def dispatch_file(self, task: FileTask):
         """ Handle a message describing a file to be processed.
@@ -504,6 +510,12 @@ class Dispatcher:
 
         # Open up the file/service table for this submission
         dispatch_table = DispatchHash(task.sid, self.redis, fetch_results=True)
+
+        # Load things that we will need to fill out the
+        file_tags = ExpiringSet(task.get_tag_set_name(), host=self.redis)
+        file_tags_data = file_tags.members()
+        temporary_submission_data = ExpiringHash(task.get_temporary_submission_data_name(), host=self.redis)
+        temporary_data = [dict(type=row[0], value=row[1]) for row in temporary_submission_data.items()]
 
         # Calculate the schedule for the file
         schedule = self.build_schedule(dispatch_table, submission, file_hash, task.file_info.type)
@@ -556,6 +568,8 @@ class Dispatcher:
                     max_files=task.max_files,
                     ttl=submission.params.ttl,
                     ignore_cache=submission.params.ignore_cache,
+                    tags=file_tags_data,
+                    temporary_submission_data=temporary_data
                 ))
                 dispatch_table.dispatch(file_hash, service_name)
                 queue = self.volatile_named_queue(service_queue_name(service_name))
@@ -563,9 +577,8 @@ class Dispatcher:
 
         else:
             # There are no outstanding services, this file is done
-            # Erase tags
-            ExpiringSet(task.get_tag_set_name(), host=self.redis).delete()
-            ExpiringHash(task.get_submission_tags_name(), host=self.redis).delete()
+            # clean up the tags
+            file_tags.delete()
 
             # If there are no outstanding ANYTHING for this submission,
             # send a message to the submission dispatcher to finalize

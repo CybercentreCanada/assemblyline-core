@@ -175,7 +175,7 @@ class DispatchClient:
             for w in self._get_watcher_list(task.sid).members():
                 NamedQueue(w).push(msg)
 
-    def service_finished(self, sid: str, result_key: str, result: Result):
+    def service_finished(self, sid: str, result_key: str, result: Result, temporary_data: Dict[str, str]=None):
         """Notifies the dispatcher of service completion, and possible new files to dispatch."""
         # Make sure the dispatcher knows we were working on this task
         task_key = ServiceTask.make_key(sid=sid, service_name=result.response.service_name, sha=result.sha256)
@@ -209,12 +209,33 @@ class DispatchClient:
             self.log.warning(f"[{sid} :: {result.response.service_name}] Service tried to finish the same task twice.")
             return
 
+        # Push the result tags into redis
+        new_tags = []
+        for section in result.result.sections:
+            new_tags.extend(tag_dict_to_list(section.tags.as_primiatives()))
+        if new_tags:
+            tag_set = ExpiringSet(get_tag_set_name(sid=task.sid, file_hash=task.fileinfo.sha256), host=self.redis)
+            tag_set.add(*new_tags)
+
+        # Update the temporary data table for this file
+        temp_data_hash = ExpiringHash(get_temporary_submission_data_name(sid=task.sid, file_hash=task.fileinfo.sha256), host=self.redis)
+        for key, value in temporary_data or {}:
+            temp_data_hash.set(key, value)
+
         # Send the extracted files to the dispatcher
         depth_limit = self.config.submission.max_extraction_depth
         new_depth = task.depth + 1
         if new_depth < depth_limit:
+            # Prepare the temporary data from the parent to build the temporary data table for
+            # these newly extract files
+            parent_data = dict(temp_data_hash.items())
+
             for extracted_data in result.response.extracted:
                 if not process_table.add_file(extracted_data.sha256, task.max_files, parent_hash=task.fileinfo.sha256):
+                    if parent_data:
+                        child_hash_name = get_temporary_submission_data_name(task.sid, extracted_data.sha256)
+                        ExpiringHash(child_hash_name, host=self.redis).multi_set(parent_data)
+
                     self._dispatching_error(task, process_table, Error({
                         'expiry_ts': result.expiry_ts,
                         'response': {
