@@ -10,12 +10,15 @@ import logging
 import time
 from typing import Dict, Union, Tuple, Optional
 
+from assemblyline.common.tagging import tag_dict_to_list
+
 from assemblyline_core import watcher
 
 from assemblyline.common.isotime import now, now_as_iso
 
 from assemblyline.common import forge
-from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, FILE_QUEUE, SUBMISSION_QUEUE
+from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, FILE_QUEUE, SUBMISSION_QUEUE, \
+    make_watcher_list_name, service_queue_name, get_temporary_submission_data_name, get_tag_set_name
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import Submission
@@ -26,8 +29,7 @@ from assemblyline.remote.datatypes.lock import Lock
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 
-from assemblyline_core.dispatching.dispatcher import SubmissionTask, FileTask, \
-    make_watcher_list_name, service_queue_name, Scheduler, ServiceTask
+from assemblyline_core.dispatching.dispatcher import SubmissionTask, FileTask, Scheduler, ServiceTask
 from assemblyline_core.dispatching.dispatch_hash import DispatchHash
 from assemblyline_core.watcher.client import WatcherClient
 

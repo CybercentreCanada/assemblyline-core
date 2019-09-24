@@ -3,9 +3,9 @@ import re
 import time
 from typing import Dict, List, cast
 
-import assemblyline_core.watcher
 from assemblyline.common import isotime, forge
-from assemblyline.common.constants import SUBMISSION_QUEUE, FILE_QUEUE, DISPATCH_TASK_HASH, DISPATCH_RUNNING_TASK_HASH
+from assemblyline.common.constants import SUBMISSION_QUEUE, FILE_QUEUE, DISPATCH_TASK_HASH, DISPATCH_RUNNING_TASK_HASH, \
+    service_queue_name, get_temporary_submission_data_name, get_tag_set_name, make_watcher_list_name
 from assemblyline.common.exceptions import MultiKeyError
 from assemblyline.common.forge import CachedObject
 from assemblyline.common.metrics import MetricsFactory
@@ -28,16 +28,6 @@ from assemblyline.odm.models.submission import Submission
 from assemblyline_core.watcher.client import WatcherClient
 
 
-def service_queue_name(service: str) -> str:
-    """Take the name of a service, and provide the queue name to send tasks to that service."""
-    return 'service-queue-' + service
-
-
-def make_watcher_list_name(sid):
-    return 'dispatch-watcher-list-' + sid
-
-
-
 @odm.model()
 class SubmissionTask(odm.Model):
     """Dispatcher internal model for submissions"""
@@ -55,18 +45,12 @@ class FileTask(odm.Model):
     max_files = odm.Integer()
 
     def get_tag_set_name(self) -> str:
-        """Get the name of a redis set where the task tags are collected.
+        """Get the name of a redis set where the task tags are collected."""
+        return get_tag_set_name(self.sid, self.file_info.sha256)
 
-        TODO are these tag sets actually built and used?
-        """
-        return '/'.join((self.sid, self.file_info.sha256, 'tags'))
-
-    def get_submission_tags_name(self) -> str:
-        """Get the name of a redis hash where tags for a submission are collected.
-
-        TODO are these tag sets actually built and used?
-        """
-        return "st/%s/%s" % (self.parent_hash, self.file_info.sha256)
+    def get_temporary_submission_data_name(self) -> str:
+        """Get the name of a redis hash where tags for a submission are collected."""
+        return get_temporary_submission_data_name(self.sid, self.file_info.sha256)
 
 
 class Scheduler:

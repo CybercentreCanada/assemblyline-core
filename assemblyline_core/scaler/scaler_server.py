@@ -11,9 +11,8 @@ from pprint import pprint
 
 from assemblyline.remote.datatypes.hash import ExpiringHash
 
-from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
+from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus, service_queue_name
 from assemblyline.odm.models.service import Service
-from assemblyline_core.dispatching.dispatcher import service_queue_name
 from assemblyline_core.metrics.metrics_server import METRICS_QUEUE
 from assemblyline_core.scaler.controllers import KubernetesController
 from assemblyline_core.scaler.controllers.interface import ServiceControlError

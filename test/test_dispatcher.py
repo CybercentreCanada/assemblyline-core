@@ -3,11 +3,12 @@ from unittest import mock
 
 import assemblyline.odm.models.file
 import assemblyline.odm.models.submission
+from assemblyline.common.constants import service_queue_name
 from assemblyline.odm.randomizer import random_model_obj, get_random_hash
 from assemblyline.odm import models
 from assemblyline.common.metrics import MetricsFactory
 
-from assemblyline_core.dispatching.dispatcher import Dispatcher, DispatchHash, service_queue_name, FileTask, NamedQueue, \
+from assemblyline_core.dispatching.dispatcher import Dispatcher, DispatchHash, FileTask, NamedQueue, \
     SubmissionTask, depths_from_tree, Scheduler as RealScheduler
 
 from .mocking import MockDatastore, clean_redis

@@ -1,7 +1,7 @@
 import elasticapm
 import time
 
-from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE
+from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, service_queue_name
 
 from assemblyline.odm.messages.task import Task
 
@@ -14,7 +14,6 @@ from assemblyline.remote.datatypes import get_client, retry_call
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import UniquePriorityQueue
 from assemblyline.remote.datatypes.hash import ExpiringHash
-from assemblyline_core.dispatching.dispatcher import service_queue_name
 
 from assemblyline_core.server_base import ServerBase
 from assemblyline_core.watcher.client import WATCHER_HASH, WATCHER_QUEUE, MAX_TIMEOUT, WatcherAction
