@@ -8,7 +8,7 @@ import json
 import hashlib
 import logging
 import time
-from typing import Dict, Union, Tuple, Optional
+from typing import Dict, Union, Tuple, Optional, Any
 
 from assemblyline.common.tagging import tag_dict_to_list
 
@@ -175,7 +175,7 @@ class DispatchClient:
             for w in self._get_watcher_list(task.sid).members():
                 NamedQueue(w).push(msg)
 
-    def service_finished(self, sid: str, result_key: str, result: Result, temporary_data: Dict[str, str]=None):
+    def service_finished(self, sid: str, result_key: str, result: Result, temporary_data: Optional[Dict[str, Any]] = None):
         """Notifies the dispatcher of service completion, and possible new files to dispatch."""
         # Make sure the dispatcher knows we were working on this task
         task_key = ServiceTask.make_key(sid=sid, service_name=result.response.service_name, sha=result.sha256)
