@@ -331,9 +331,10 @@ class ServiceUpdater(ServerBase):
             "name": "Update Account",
             "password": get_password_hash(''.join(random.choices(string.ascii_letters, k=20))),
             "uname": uname,
+            "type": ["signature_importer"]
         })
-        self.datastore.user.save('admin', user_data)
-        self.datastore.user_settings.save('admin', UserSettings())
+        self.datastore.user.save(uname, user_data)
+        self.datastore.user_settings.save(uname, UserSettings())
         return uname
 
 
