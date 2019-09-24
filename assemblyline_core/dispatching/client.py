@@ -212,7 +212,7 @@ class DispatchClient:
         # Push the result tags into redis
         new_tags = []
         for section in result.result.sections:
-            new_tags.extend(tag_dict_to_list(section.tags.as_primiatives()))
+            new_tags.extend(tag_dict_to_list(section.tags.as_primitives()))
         if new_tags:
             tag_set = ExpiringSet(get_tag_set_name(sid=task.sid, file_hash=task.fileinfo.sha256), host=self.redis)
             tag_set.add(*new_tags)
