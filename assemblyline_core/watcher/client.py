@@ -45,7 +45,6 @@ class WatcherClient:
         self.hash.set(key, {'action': WatcherAction.Message, 'queue': queue, 'message': message})
         seconds, _ = retry_call(self.redis.time)
         self.queue.push(int(seconds + timeout), key)
-        assert self.hash.exists(key)
 
     def touch_task(self, timeout: int, key: str, worker: str, task_key: str):
         if timeout >= MAX_TIMEOUT:
@@ -53,7 +52,6 @@ class WatcherClient:
         self.hash.set(key, {'action': WatcherAction.TimeoutTask, 'worker': worker, 'task_key': task_key})
         seconds, _ = retry_call(self.redis.time)
         self.queue.push(int(seconds + timeout), key)
-        assert self.hash.exists(key)
 
     def clear(self, key: str):
         self.queue.remove(key)
