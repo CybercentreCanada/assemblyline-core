@@ -69,7 +69,7 @@ class ScalerServer(ServerBase):
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
         self._metrics_loop = self.get_metrics()
         self.error_count = {}
-        self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=None)
+        self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
 
         core_labels = {
             'app': 'assemblyline',
@@ -258,9 +258,10 @@ class ScalerServer(ServerBase):
 
         # Pull service metrics from redis
         service_data = self.status_table.items()
-        for host, (service, state) in service_data.items():
-            self.state.update(service=service, host=host, throughput=0,
-                              busy_seconds=METRIC_SYNC_INTERVAL if state == ServiceStatus.Running else 0)
+        for host, (service, state, time_limit) in service_data.items():
+            if time.time() < time_limit:
+                self.state.update(service=service, host=host, throughput=0,
+                                  busy_seconds=METRIC_SYNC_INTERVAL if state == ServiceStatus.Running else 0)
 
         # Check the set of services that might be sitting at zero instances, and if it is, we need to
         # manually check if it is offline
