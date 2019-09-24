@@ -515,7 +515,7 @@ class Dispatcher:
         file_tags = ExpiringSet(task.get_tag_set_name(), host=self.redis)
         file_tags_data = file_tags.members()
         temporary_submission_data = ExpiringHash(task.get_temporary_submission_data_name(), host=self.redis)
-        temporary_data = [dict(type=row[0], value=row[1]) for row in temporary_submission_data.items()]
+        temporary_data = [dict(name=row[0], value=row[1]) for row in temporary_submission_data.items()]
 
         # Calculate the schedule for the file
         schedule = self.build_schedule(dispatch_table, submission, file_hash, task.file_info.type)
