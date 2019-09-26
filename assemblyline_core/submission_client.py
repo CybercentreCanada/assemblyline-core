@@ -171,6 +171,9 @@ class SubmissionClient:
             # Analyze the file and make sure the file table is up to date
             fileinfo = identify.fileinfo(local_path)
 
+            if fileinfo['size'] == 0:
+                raise SubmissionException("File empty. Submission failed")
+
             if sha256 is not None and fileinfo['sha256'] != sha256:
                 raise CorruptedFileStoreException('SHA256 mismatch between received '
                                                   'and calculated sha256. %s != %s' % (sha256, fileinfo['sha256']))
