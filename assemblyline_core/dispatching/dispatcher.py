@@ -328,6 +328,8 @@ class Dispatcher:
                 stage = schedule.pop(0)
                 for service_name in stage:
                     service = self.scheduler.services.get(service_name)
+                    if not service:
+                        continue
 
                     # If the service is still marked as 'in progress'
                     runtime = time.time() - prior_dispatches.get(sha, {}).get(service_name, 0)
@@ -532,6 +534,8 @@ class Dispatcher:
 
             for service_name in stage:
                 service = self.scheduler.services.get(service_name)
+                if not service:
+                    continue
 
                 # Load the results, if there are no results, then the service must be dispatched later
                 finished = dispatch_table.finished(file_hash, service_name)
