@@ -256,7 +256,7 @@ class ServiceUpdater(ServerBase):
                     json.dump(update_config, {
                         'previous_update': previous_update,
                         'previous_hash': previous_hash,
-                        'sources': service.update_config.sources.as_primatives(),
+                        'sources': service.update_config.sources.as_primitives(),
                         'api_user': username,
                         'api_key': api_key,
                     })
