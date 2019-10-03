@@ -143,8 +143,8 @@ class ScalingGroup:
         #
         for name, profile in self.profiles.items():
             if targets[name] > profile.desired_instances:
-                logger.debug(f"{name} wants less resources changing allocation "
-                             f"{targets[name]} -> {profile.desired_instances}")
+                logger.info(f"{name} wants less resources changing allocation "
+                            f"{targets[name]} -> {profile.desired_instances}")
                 self.controller.set_target(name, profile.desired_instances)
                 targets[name] = profile.desired_instances
 
@@ -154,7 +154,7 @@ class ScalingGroup:
         #
         for name, profile in self.profiles.items():
             if targets[name] < profile.min_instances:
-                logger.debug(f"{name} isn't meeting minimum allocation {targets[name]} -> {profile.min_instances}")
+                logger.info(f"{name} isn't meeting minimum allocation {targets[name]} -> {profile.min_instances}")
                 self.controller.set_target(name, profile.min_instances)
                 targets[name] = profile.min_instances
 
@@ -194,5 +194,7 @@ class ScalingGroup:
 
         # Apply those adjustments we have made back to the controller
         for name, value in targets.items():
-            if value != self.controller.get_target(name):
+            old = self.controller.get_target(name)
+            if value != old:
+                logger.info(f"Scaling service {name}: {old} -> {value}")
                 self.controller.set_target(name, value)

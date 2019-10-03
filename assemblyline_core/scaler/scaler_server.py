@@ -281,10 +281,14 @@ class ScalerServer(ServerBase):
                     # Check if we expect no messages, if so pull the queue length ourselves since there is no heartbeat
                     if group.controller.get_target(profile_name) == 0:
                         if profile.queue:
+                            queue_length = NamedQueue(profile.queue, self.redis).length()
+                            if queue_length > 0:
+                                self.log.info(f"Service at zero instances has messages: "
+                                              f"{profile.name} ({queue_length} in queue)")
                             profile.update(
                                 delta=export_interval,
                                 instances=0,
-                                backlog=NamedQueue(profile.queue, self.redis).length(),
+                                backlog=queue_length,
                                 duty_cycle=profile.target_duty_cycle
                             )
 
