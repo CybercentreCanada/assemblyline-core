@@ -21,7 +21,6 @@ class Alerter(ServerBase):
         self.counter = MetricsFactory('alerter', Metrics)
         self.datastore = forge.get_datastore(self.config)
         self.persistent_redis = get_client(
-            db=self.config.core.redis.persistent.db,
             host=self.config.core.redis.persistent.host,
             port=self.config.core.redis.persistent.port,
             private=False,

@@ -39,7 +39,6 @@ class DispatchClient:
         self.config = forge.get_config()
 
         self.redis = redis or get_client(
-            db=self.config.core.redis.nonpersistent.db,
             host=self.config.core.redis.nonpersistent.host,
             port=self.config.core.redis.nonpersistent.port,
             private=False,

@@ -31,7 +31,6 @@ class WatcherClient:
         config = forge.get_config()
 
         self.redis = redis_persist or get_client(
-            db=config.core.redis.persistent.db,
             host=config.core.redis.persistent.host,
             port=config.core.redis.persistent.port,
             private=False,

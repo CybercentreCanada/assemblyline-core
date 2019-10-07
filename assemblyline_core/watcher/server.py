@@ -25,14 +25,12 @@ class WatcherServer(ServerBase):
         config = forge.get_config()
 
         self.redis = redis or get_client(
-            db=config.core.redis.nonpersistent.db,
             host=config.core.redis.nonpersistent.host,
             port=config.core.redis.nonpersistent.port,
             private=False,
         )
 
         self.redis_persist = redis_persist or get_client(
-            db=config.core.redis.persistent.db,
             host=config.core.redis.persistent.host,
             port=config.core.redis.persistent.port,
             private=False,

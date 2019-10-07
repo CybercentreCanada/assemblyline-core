@@ -175,13 +175,11 @@ class Ingester:
 
         # Connect to the redis servers
         self.redis = redis or get_client(
-            db=self.config.core.redis.nonpersistent.db,
             host=self.config.core.redis.nonpersistent.host,
             port=self.config.core.redis.nonpersistent.port,
             private=False,
         )
         self.persistent_redis = persistent_redis or get_client(
-            db=self.config.core.redis.persistent.db,
             host=self.config.core.redis.persistent.host,
             port=self.config.core.redis.persistent.port,
             private=False,

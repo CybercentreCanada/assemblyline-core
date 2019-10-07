@@ -125,7 +125,6 @@ class ServiceUpdater(ServerBase):
         self.config = forge.get_config()
         self.datastore = datastore or forge.get_datastore()
         self.persistent_redis = persistent_redis or get_client(
-            db=self.config.core.redis.persistent.db,
             host=self.config.core.redis.persistent.host,
             port=self.config.core.redis.persistent.port,
             private=False,
