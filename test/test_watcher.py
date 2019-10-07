@@ -15,7 +15,7 @@ from .mocking import ToggleTrue, RedisTime
 @pytest.fixture
 def redis_connection():
     from assemblyline.remote.datatypes import get_client
-    c = get_client(None, None, 8, False)
+    c = get_client(None, None, False)
     try:
         ret_val = c.ping()
         if ret_val:
