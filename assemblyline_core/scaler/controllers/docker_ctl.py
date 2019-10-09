@@ -168,3 +168,6 @@ class DockerController(ControllerInterface):
         if container and container.labels.get('component') == service_name and container.status == 'running':
             container.kill()
 
+    def restart(self, service: ServiceProfile, updates=None):
+        for container in self.client.containers.list(filters={'label': f'component={service.name}'}):
+            container.kill()

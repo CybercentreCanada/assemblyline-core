@@ -12,6 +12,8 @@ from assemblyline.odm.models.service import UpdateConfig
 
 
 # How to identify the update volume as a whole, in a way that the underlying container system recognizes.
+from assemblyline_core.scaler.scaling import ServiceProfile
+
 FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
 
 
@@ -282,3 +284,7 @@ class KubernetesController(ControllerInterface):
             if pod.metadata.name == container_id:
                 self.api.delete_namespaced_pod(name=container_id, namespace=self.namespace)
                 return
+
+    def restart(self, service: ServiceProfile, updates):
+        self.b1api.delete_namespaced_deployment(name=self._deployment_name(service.name), namespace=self.namespace)
+        self.add_profile(service, updates=updates)

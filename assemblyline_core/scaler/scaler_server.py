@@ -178,13 +178,9 @@ class ScalerServer(ServerBase):
                 # Update RAM, CPU, licence requirements for running services
                 if service.enabled and name in self.services.profiles:
                     profile = self.services.profiles[name]
-                    if profile.container_config.cpu_cores != service.docker_config.cpu_cores:
-                        self.services.controller.set_cpu_limit(name, service.docker_config.cpu_cores)
-                        profile.container_config.cpu_cores = service.docker_config.cpu_cores
-
-                    if profile.container_config.ram_mb != service.docker_config.ram_mb:
-                        self.services.controller.set_memory_limit(name, service.docker_config.ram_mb)
-                        profile.container_config.ram_mb = service.docker_config.ram_mb
+                    if profile.container_config != service.docker_config:
+                        profile.container_config = service.docker_config
+                        self.services.controller.restart(profile, updates=service.update_config)
 
                     if service.licence_count == 0:
                         profile._max_instances = float('inf')
