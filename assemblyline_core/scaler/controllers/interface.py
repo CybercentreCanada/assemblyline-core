@@ -1,3 +1,7 @@
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from assemblyline_core.scaler.scaling import ServiceProfile
 
 
 class ServiceControlError(RuntimeError):
@@ -27,3 +31,5 @@ class ControllerInterface:
         """Set the target for running instances of a service."""
         raise NotImplementedError()
 
+    def restart(self, service: ServiceProfile, updates):
+        raise NotImplementedError()
