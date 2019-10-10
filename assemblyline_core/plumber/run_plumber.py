@@ -32,13 +32,11 @@ class Plumber(ServerBase):
         super().__init__('plumber', logger, shutdown_timeout)
         self.config = config or forge.get_config()
         self.redis = redis or get_client(
-            db=self.config.core.redis.nonpersistent.db,
             host=self.config.core.redis.nonpersistent.host,
             port=self.config.core.redis.nonpersistent.port,
             private=False,
         )
         self.redis_persist = redis_persist or get_client(
-            db=self.config.core.redis.persistent.db,
             host=self.config.core.redis.persistent.host,
             port=self.config.core.redis.persistent.port,
             private=False,
