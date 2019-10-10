@@ -225,7 +225,7 @@ class KubernetesController(ControllerInterface):
             ),
         )]
 
-    def _create_deployment(self, profile, scale: int, updates=None):
+    def _create_deployment(self, profile, scale: int, updates=None, replace=False):
         for dep in self.b1api.list_namespaced_deployment(namespace=self.namespace).items:
             if dep.metadata.name == self._deployment_name(profile.name):
                 return
@@ -257,7 +257,10 @@ class KubernetesController(ControllerInterface):
             spec=spec,
         )
 
-        self.b1api.create_namespaced_deployment(namespace=self.namespace, body=deployment)
+        if replace:
+            self.b1api.replace_namespaced_deployment(namespace=self.namespace, body=deployment, name=metadata.name)
+        else:
+            self.b1api.create_namespaced_deployment(namespace=self.namespace, body=deployment)
 
     def get_target(self, service_name: str) -> int:
         """Get the target for running instances of a service."""
@@ -286,5 +289,4 @@ class KubernetesController(ControllerInterface):
                 return
 
     def restart(self, service: ServiceProfile, updates):
-        self.b1api.delete_namespaced_deployment(name=self._deployment_name(service.name), namespace=self.namespace)
-        self.add_profile(service, updates=updates)
+        self._create_deployment(service, self.get_target(service.name), updates=updates, replace=True)

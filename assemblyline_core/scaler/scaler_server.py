@@ -179,6 +179,7 @@ class ScalerServer(ServerBase):
                 if service.enabled and name in self.services.profiles:
                     profile = self.services.profiles[name]
                     if profile.container_config != service.docker_config:
+                        self.log.info(f"Updating deployment information for {name}")
                         profile.container_config = service.docker_config
                         self.services.controller.restart(profile, updates=service.update_config)
 
