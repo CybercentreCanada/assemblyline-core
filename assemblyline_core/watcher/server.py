@@ -41,7 +41,7 @@ class WatcherServer(ServerBase):
         self.queue = UniquePriorityQueue(WATCHER_QUEUE, self.redis_persist)
 
         # Task management structures
-        self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
+        self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)  # TODO, move to persistant?
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
 
         # Metrics tracking

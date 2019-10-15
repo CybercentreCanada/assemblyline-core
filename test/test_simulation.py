@@ -52,14 +52,6 @@ def redis():
     return client
 
 
-@pytest.fixture(scope='module')
-def es_connection():
-    document_store = ESStore(['127.0.0.1'])
-    if not document_store.ping():
-        return skip("Connection to the Elasticsearch server failed. This test cannot be performed...")
-    return AssemblylineDatastore(document_store)
-
-
 class MockService(ServerBase):
     """Replaces everything past the dispatcher.
 
@@ -68,10 +60,10 @@ class MockService(ServerBase):
     def __init__(self, name, datastore, redis, filestore):
         super().__init__('assemblyline.service.'+name)
         self.service_name = name
+        self.datastore = datastore or forge.get_datastore()
+        self.filestore = filestore
         self.queue = NamedQueue(service_queue_name(name), redis)
         self.dispatch_client = DispatchClient(datastore, redis)
-        self.datastore = datastore
-        self.filestore = filestore
         self.hits = dict()
         self.drops = dict()
 
@@ -137,13 +129,13 @@ def make_magic(*_, **__):
 @pytest.fixture(scope='module')
 @mock.patch('assemblyline_core.ingester.ingester.MetricsFactory', new=make_magic)
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', new=make_magic)
-def core(request, redis, es_connection):
+def core(request, redis):
     from assemblyline.common import log as al_log
     al_log.init_logging("simulation")
 
     fields = CoreSession()
     fields.redis = redis
-    fields.ds = ds = es_connection
+    fields.ds = ds = forge.get_datastore()
 
     dir_path = os.path.dirname(os.path.realpath(__file__))
     fields.config = forge.get_config(yml_config=os.path.join(dir_path, 'bitbucket', 'config.yml'))
@@ -315,7 +307,7 @@ def test_watcher_recovery(core):
     watch = WatcherServer(redis=core.redis)
     watch.start()
     try:
-        # This time have the service server 'crash'
+        # This time have the service 'crash'
         sha, size = ready_body(core, {
             'pre': {'drop': 1}
         })
@@ -342,9 +334,56 @@ def test_watcher_recovery(core):
 
         notification_queue = NamedQueue('nq-watcher-recover', core.redis)
         dropped_task = notification_queue.pop(timeout=16)
-        assert dropped_task and IngestTask(dropped_task)
+        assert dropped_task
+        dropped_task = IngestTask(dropped_task)
+        sub = core.ds.submission.get(dropped_task.submission.sid)
+        assert len(sub.errors) == 0
+        assert len(sub.results) == 4
         assert core.pre_service.drops[sha] == 1
         assert core.pre_service.hits[sha] == 2
+    finally:
+        watch.stop()
+        watch.join()
+
+
+def test_service_retry_limit(core):
+    watch = WatcherServer(redis=core.redis)
+    watch.start()
+    try:
+        # This time have the service 'crash'
+        sha, size = ready_body(core, {
+            'pre': {'drop': 3}
+        })
+
+        core.ingest_queue.push(SubmissionInput(dict(
+            metadata={},
+            params=dict(
+                description="file abc123",
+                services=dict(selected=''),
+                submitter='user',
+                groups=['user'],
+                max_extracted=10000
+            ),
+            notification=dict(
+                queue='watcher-recover',
+                threshold=0
+            ),
+            files=[dict(
+                sha256=sha,
+                size=size,
+                name='abc123'
+            )]
+        )).as_primitives())
+
+        notification_queue = NamedQueue('nq-watcher-recover', core.redis)
+        dropped_task = notification_queue.pop(timeout=16)
+        assert dropped_task
+        dropped_task = IngestTask(dropped_task)
+        sub = core.ds.submission.get(dropped_task.submission.sid)
+        assert len(sub.errors) == 1
+        assert len(sub.results) == 3
+        assert core.pre_service.drops[sha] == 3
+        assert core.pre_service.hits[sha] == 3
     finally:
         watch.stop()
         watch.join()

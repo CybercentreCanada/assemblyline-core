@@ -39,6 +39,13 @@ class DispatchClient:
             port=self.config.core.redis.nonpersistent.port,
             private=False,
         )
+
+        redis_persist = redis_persist or get_client(
+            host=self.config.core.redis.persistent.host,
+            port=self.config.core.redis.persistent.port,
+            private=False,
+        )
+
         self.timeout_watcher = WatcherClient(redis_persist)
 
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
@@ -117,6 +124,7 @@ class DispatchClient:
         """
         # For when we recursively retry on bad task dequeue-ing
         if timeout <= 0:
+            self.log.info(f"{worker_id}:{service_name}: no task returned: timeout")
             return None
         start = time.time()
 
@@ -124,6 +132,7 @@ class DispatchClient:
         work_queue = NamedQueue(service_queue_name(service_name), host=self.redis)
         result = work_queue.pop(blocking=blocking, timeout=int(timeout))
         if not result:
+            self.log.info(f"{worker_id}:{service_name}: no task returned: empty message")
             return None
         task = ServiceTask(result)
 
@@ -132,11 +141,16 @@ class DispatchClient:
 
         # If someone is supposed to be working on this task right now, we won't be able to add it
         if self.running_tasks.add(task.key(), task.as_primitives()):
+            self.log.info(f"{worker_id}:{service_name}: task found {task.sid}:{task.fileinfo.sha256}")
 
             # Check if this task has reached the retry limit
             attempt_record = ExpiringHash(f'dispatch-hash-attempts-{task.sid}', host=self.redis)
-            attempt_record.increment(task.key())
-            if attempt_record.get(task.key()) > 3:
+            total_attempts = attempt_record.increment(task.key())
+            self.log.info(f"{worker_id}:{service_name}: task  {task.sid}:{task.fileinfo.sha256} "
+                          f"attempt {total_attempts}/3")
+            if total_attempts > 3:
+                self.log.warning(f"{worker_id}:{service_name}: marking task  {task.sid}:{task.fileinfo.sha256} "
+                                 f"failed: TASK PREEMPTED")
                 error = Error(dict(
                     created='NOW',
                     expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60),
