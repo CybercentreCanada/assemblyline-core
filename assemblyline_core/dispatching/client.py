@@ -10,6 +10,10 @@ import logging
 import time
 from typing import Dict, Optional, Any
 
+from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
+
+from assemblyline.odm.messages.service_heartbeat import Metrics
+
 from assemblyline.common import forge
 from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, FILE_QUEUE, SUBMISSION_QUEUE, \
     make_watcher_list_name, service_queue_name, get_temporary_submission_data_name, get_tag_set_name
@@ -168,6 +172,8 @@ class DispatchClient:
                 conf_key = hashlib.md5((str(service_tool_version_hash + task_config_hash).encode('utf-8'))).hexdigest()
                 error_key = error.build_key(conf_key)
                 self.service_failed(task.sid, error_key, error)
+                export_metrics_once(service_name, Metrics, dict(fail_nonrecoverable=1,
+                                    host=worker_id, counter_type='service'))
                 return self.request_work(worker_id, service_name, blocking=blocking,
                                          timeout=timeout - (time.time() - start))
 
