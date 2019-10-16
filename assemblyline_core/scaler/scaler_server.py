@@ -5,10 +5,14 @@ TODO react to changes in memory/cpu limits
 """
 
 import os
+import platform
 import time
 import sched
 from pprint import pprint
 
+from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
+
+from assemblyline.odm.messages.scaler_heartbeat import Status, Metrics
 from assemblyline.remote.datatypes.hash import ExpiringHash
 
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus, service_queue_name
@@ -34,6 +38,7 @@ SERVICE_SYNC_INTERVAL = 30
 PROCESS_TIMEOUT_INTERVAL = 30
 SCALE_INTERVAL = 5
 METRIC_SYNC_INTERVAL = 0.1
+METRIC_EXPORT_INTERVAL = 60
 
 # How many times to let a service generate an error in this module before we disable it.
 # This is only for analysis services, core services we keep retrying forever
@@ -43,6 +48,8 @@ ERROR_EXPIRY_INTERVAL = 60*60  # how long we wait before we forgive an error. (s
 # An environment variable that should be set when we are started with kubernetes, tells us how to attach
 # the global Assemblyline config to new things that we launch.
 KUBERNETES_AL_CONFIG = os.environ.get('KUBERNETES_AL_CONFIG')
+
+HOSTNAME = os.getenv('HOSTNAME', platform.node())
 
 
 class ScalerServer(ServerBase):
@@ -129,6 +136,7 @@ class ScalerServer(ServerBase):
         self.update_scaling()
         self.expire_errors()
         self.process_timeouts()
+        self.export_metrics()
 
         # Run as long as we need to
         while self.running:
@@ -318,3 +326,26 @@ class ScalerServer(ServerBase):
                 self.services.controller.stop_container(message['service'], message['container'])
             except Exception:
                 self.log.exception(f"Exception trying to stop timed out service container: {message}")
+
+    def export_metrics(self):
+        self.scheduler.enter(METRIC_EXPORT_INTERVAL, 0, self.export_metrics)
+        for service_name, profile in self.services.profiles.items():
+            metrics = {
+                'running': profile.running_instances,
+                'target': profile.desired_instances,
+                'minimum': profile.min_instances,
+                'maximum': profile.instance_limit,
+                'dynamic_maximum': profile.max_instances,
+                'queue': profile.queue,
+                'pressure': profile.pressure
+            }
+            export_metrics_once('scaler-'+service_name, Status, metrics, host=HOSTNAME, counter_type='scaler-status',
+                                config=self.config, redis=self.redis)
+
+        metrics = {
+            'memory_free': self.services.controller.free_memory(),
+            'cpu_free': self.services.controller.free_cpu()
+        }
+
+        export_metrics_once('scaler', Metrics, metrics, host=HOSTNAME,
+                            counter_type='scaler', config=self.config, redis=self.redis)
