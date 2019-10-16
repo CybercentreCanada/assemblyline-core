@@ -336,7 +336,7 @@ class ScalerServer(ServerBase):
                 'minimum': profile.min_instances,
                 'maximum': profile.instance_limit,
                 'dynamic_maximum': profile.max_instances,
-                'queue': profile.queue,
+                'queue': NamedQueue(profile.queue, self.redis).length(),
                 'pressure': profile.pressure
             }
             export_metrics_once('scaler-'+service_name, Status, metrics, host=HOSTNAME, counter_type='scaler-status',
