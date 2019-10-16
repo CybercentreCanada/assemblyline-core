@@ -1,8 +1,10 @@
 import hashlib
-import logging
 import random
 import time
 
+from assemblyline.common.constants import SERVICE_STATE_HASH, ServiceStatus
+from assemblyline.common.uid import get_random_id
+from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.dispatching.dispatcher import service_queue_name
 from assemblyline_core.server_base import ServerBase
@@ -10,7 +12,6 @@ from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm.messages.task import Task as ServiceTask
 from assemblyline.odm.messages.service_heartbeat import Metrics
-from assemblyline.odm.messages.service_timing_heartbeat import Metrics as TimingMetrics
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.file import File
 from assemblyline.odm.models.result import Result
@@ -28,11 +29,11 @@ class RandomService(ServerBase):
         super().__init__("assemblyline.randomservice")
         self.datastore = datastore
         self.filestore = filestore
+        self.client_id = get_random_id()
+        self.service_state_hash = ExpiringHash(SERVICE_STATE_HASH, ttl=30 * 60)
 
         self.counters = {n: MetricsFactory('service', Metrics, name=n, config=self.config)
                          for n in datastore.service_delta.keys()}
-        self.counters_timing = {n: MetricsFactory('service_timing', TimingMetrics, name=n, config=self.config)
-                                for n in datastore.service_delta.keys()}
         self.queues = [NamedQueue(service_queue_name(name)) for name in datastore.service_delta.keys()]
         self.dispatch_client = DispatchClient(datastore)
 
@@ -43,22 +44,24 @@ class RandomService(ServerBase):
             self.log.info(f"\t{q.name}")
 
         self.log.info("Waiting for messages...")
-        # TIMING
-        wait_start = time.time()
         while self.running:
+            # Reset Idle flags
+            for s in self.datastore.list_all_services(as_obj=False):
+                if s['enabled']:
+                    self.service_state_hash.set(f"{self.client_id}_{s['name']}",
+                                                (s['name'], ServiceStatus.Idle, time.time() + 30 + 5))
+
             message = select(*self.queues, timeout=1)
             if not message:
                 continue
-
-            # TIMING
-            start_time = time.time()
 
             expiry_ts = now_as_iso(self.config.submission.dtl * 24 * 60 * 60)
             queue, msg = message
             task = ServiceTask(msg)
 
-            # TIMING (milliseconds precision)
-            self.counters_timing[task.service_name].increment_execution_time('idle', int((start_time-wait_start)*1000))
+            # Set service busy flag
+            self.service_state_hash.set(f"{self.client_id}_{task.service_name}",
+                                        (task.service_name, ServiceStatus.Running, time.time() + 30 + 5))
 
             # METRICS
             self.counters[task.service_name].increment('execute')
@@ -122,11 +125,6 @@ class RandomService(ServerBase):
                     self.counters[task.service_name].increment('fail_recoverable')
                 else:
                     self.counters[task.service_name].increment('fail_nonrecoverable')
-
-            # TIMING (milliseconds precision)
-            wait_start = time.time()
-            self.counters_timing[task.service_name].increment_execution_time('execution',
-                                                                             int((wait_start-start_time)*1000))
 
 
 if __name__ == "__main__":

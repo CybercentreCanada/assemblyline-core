@@ -1,25 +1,43 @@
+import time
+
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from assemblyline_core.ingester import INGEST_QUEUE_NAME, drop_chance
 from assemblyline_core.watcher.client import WATCHER_QUEUE
 from assemblyline.common import forge, metrics
-from assemblyline.common.constants import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, FILE_QUEUE, service_queue_name
+from assemblyline.common.constants import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, FILE_QUEUE, service_queue_name, \
+    SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.datastore import SearchException
 from assemblyline.odm.messages.alerter_heartbeat import AlerterMessage
 from assemblyline.odm.messages.dispatcher_heartbeat import DispatcherMessage
 from assemblyline.odm.messages.expiry_heartbeat import ExpiryMessage
 from assemblyline.odm.messages.ingest_heartbeat import IngestMessage
 from assemblyline.odm.messages.service_heartbeat import ServiceMessage
-from assemblyline.odm.messages.service_timing_heartbeat import ServiceTimingMessage
 from assemblyline.odm.messages.watcher_heartbeat import WatcherMessage
 from assemblyline.remote.datatypes import get_client
-from assemblyline.remote.datatypes.hash import Hash
+from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue, UniquePriorityQueue
 
 STATUS_QUEUE = "status"
+
+
+def get_working_and_idle(redis, current_service):
+    status_table = ExpiringHash(SERVICE_STATE_HASH, host=redis, ttl=30 * 60)
+    service_data = status_table.items()
+
+    busy = []
+    idle = []
+    for host, (service, state, time_limit) in service_data.items():
+        if service == current_service:
+            if time.time() < time_limit:
+                if state == ServiceStatus.Running:
+                    busy.append(host)
+                else:
+                    idle.append(host)
+    return busy, idle
 
 
 # noinspection PyBroadException
@@ -178,11 +196,16 @@ class HeartbeatFormatter(object):
 
         elif m_type == "service":
             try:
+                busy, idle = get_working_and_idle(self.redis, m_name)
                 msg = {
                     "sender": self.sender,
                     "msg": {
-                        "instances": instances,
+                        "instances": len(busy) + len(idle),
                         "metrics": m_data,
+                        "activity": {
+                            'busy': len(busy),
+                            'idle': len(idle)
+                        },
                         "queue": NamedQueue(service_queue_name(m_name), host=self.redis).length(),
                         "service_name": m_name
                     }
@@ -191,22 +214,6 @@ class HeartbeatFormatter(object):
                 self.log.info(f"Sent service heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating ServiceMessage")
-
-        elif m_type == "service_timing":
-            try:
-                msg = {
-                    "sender": self.sender,
-                    "msg": {
-                        "instances": instances,
-                        "metrics": m_data,
-                        "queue": NamedQueue(service_queue_name(m_name), host=self.redis).length(),
-                        "service_name": m_name
-                    }
-                }
-                self.status_queue.publish(ServiceTimingMessage(msg).as_primitives())
-                self.log.info(f"Sent service timing heartbeat: {msg['msg']}")
-            except Exception:
-                self.log.exception("An exception occurred while generating ServiceTimingMessage")
 
         elif m_type == "watcher":
             try:

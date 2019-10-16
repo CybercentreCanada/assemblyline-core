@@ -13,7 +13,7 @@ from threading import Lock
 from assemblyline_core.metrics.heartbeat_formatter import HeartbeatFormatter
 from assemblyline_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
-from assemblyline.common import forge, metrics
+from assemblyline.common import forge
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
 METRICS_QUEUE = "assemblyline_metrics"
@@ -160,6 +160,7 @@ class HeartbeatManager(ServerBase):
     def __init__(self, config=None):
         super().__init__('assemblyline.heartbeat_manager')
         self.config = config or forge.get_config()
+        self.datastore = forge.get_datastore()
         self.metrics_queue = CommsQueue(METRICS_QUEUE)
         self.scheduler = BackgroundScheduler(daemon=True)
         self.hm = HeartbeatFormatter("heartbeat_manager", self.log, config=self.config)
@@ -233,8 +234,23 @@ class HeartbeatManager(ServerBase):
             self.log.info("Copying counters ...")
             window_copy = copy.deepcopy(self.rolling_window)
 
-            self.log.info("Aggregating heartbeat data...")
+            self.log.info("Compiling service list...")
             aggregated_counters = {}
+            for service in [s['name'] for s in self.datastore.list_all_services(as_obj=False) if s['enabled']]:
+                data = {
+                    'cache_hit': 0,
+                    'cache_miss': 0,
+                    'cache_skipped': 0,
+                    'execute': 0,
+                    'fail_recoverable': 0,
+                    'fail_nonrecoverable': 0,
+                    'scored': 0,
+                    'not_scored': 0,
+                    'instances': 0
+                }
+                aggregated_counters[(service, 'service')] = Counter(data)
+
+            self.log.info("Aggregating heartbeat data...")
             for component_parts, counters_list in window_copy.items():
                 c_name, c_type, c_host = component_parts
 
