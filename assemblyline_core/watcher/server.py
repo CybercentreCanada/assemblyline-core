@@ -136,5 +136,6 @@ class WatcherServer(ServerBase):
         })
 
         # Report to the metrics system that a recoverable error has occurred for that service
-        export_metrics_once(task.service_name, ServiceMetrics, dict(fail_recoverable=1,
-                                                                    host=worker, counter_type='service'))
+        export_metrics_once(task.service_name, ServiceMetrics, dict(fail_recoverable=1),
+                            host=worker, counter_type='service')
+

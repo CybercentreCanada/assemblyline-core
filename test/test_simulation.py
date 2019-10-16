@@ -21,7 +21,6 @@ from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.testing import skip
 from assemblyline.common.uid import get_random_id
 from assemblyline.datastore.helper import AssemblylineDatastore
-from assemblyline.datastore.stores.es_store import ESStore
 from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.result import Result
@@ -60,10 +59,10 @@ class MockService(ServerBase):
     def __init__(self, name, datastore, redis, filestore):
         super().__init__('assemblyline.service.'+name)
         self.service_name = name
-        self.datastore = datastore or forge.get_datastore()
+        self.datastore = datastore
         self.filestore = filestore
         self.queue = NamedQueue(service_queue_name(name), redis)
-        self.dispatch_client = DispatchClient(datastore, redis)
+        self.dispatch_client = DispatchClient(self.datastore, redis)
         self.hits = dict()
         self.drops = dict()
 
@@ -417,7 +416,8 @@ def test_dropping_early(core):
     )).as_primitives())
 
     notification_queue = NamedQueue('nq-drop', core.redis)
-    dropped_task = IngestTask(notification_queue.pop(timeout=5))
+    dropped_task = notification_queue.pop(timeout=5)
+    dropped_task = IngestTask(dropped_task)
     sub = core.ds.submission.get(dropped_task.submission.sid)
     assert len(sub.files) == 1
     assert len(sub.results) == 1

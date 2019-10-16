@@ -172,8 +172,8 @@ class DispatchClient:
                 conf_key = hashlib.md5((str(service_tool_version_hash + task_config_hash).encode('utf-8'))).hexdigest()
                 error_key = error.build_key(conf_key)
                 self.service_failed(task.sid, error_key, error)
-                export_metrics_once(service_name, Metrics, dict(fail_nonrecoverable=1,
-                                    host=worker_id, counter_type='service'))
+                export_metrics_once(service_name, Metrics, dict(fail_nonrecoverable=1),
+                                    host=worker_id, counter_type='service')
                 return self.request_work(worker_id, service_name, blocking=blocking,
                                          timeout=timeout - (time.time() - start))
 
