@@ -1,6 +1,8 @@
 import elasticapm
 import time
 
+from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
+
 from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, service_queue_name
 
 from assemblyline.odm.messages.task import Task
@@ -10,6 +12,7 @@ from assemblyline_core.dispatching.dispatch_hash import DispatchHash
 from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm.messages.watcher_heartbeat import Metrics
+from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
 from assemblyline.remote.datatypes import get_client, retry_call
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import UniquePriorityQueue
@@ -132,3 +135,6 @@ class WatcherServer(ServerBase):
             'container': worker
         })
 
+        # Report to the metrics system that a recoverable error has occurred for that service
+        export_metrics_once(task.service_name, ServiceMetrics, dict(fail_recoverable=1,
+                                                                    host=worker, counter_type='service'))

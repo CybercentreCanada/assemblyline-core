@@ -61,6 +61,12 @@ class ServiceProfile:
         return self.container_config.ram_mb
 
     @property
+    def instance_limit(self):
+        if self._max_instances == float('inf'):
+            return 0
+        return self._max_instances
+
+    @property
     def max_instances(self):
         # Adjust the max_instances based on the number that is already running
         # this keeps the scaler from running way ahead with its demands when resource caps are reached
