@@ -52,7 +52,7 @@ class IngesterSubmitter(ServerBase):
 
                 # Check if there is room for more submissions
                 length = ingester.scanning.length()
-                if length < 0 or ingester.config.core.dispatcher.max_inflight <= length:
+                if length >= ingester.config.core.ingester.max_inflight:
                     time.sleep(0.1)
                     time_mark, cpu_mark = time.time(), time.process_time()
                     continue
