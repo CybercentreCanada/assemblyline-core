@@ -205,7 +205,6 @@ class DispatchClient:
             self.log.warning(f"[{sid} :: {result.response.service_name}] Service tried to finish the same task twice.")
             return
         task = ServiceTask(task)
-        self.timeout_watcher.clear(f'{task.sid}-{task.key()}')
 
         # Save or freshen the result, the CONTENT of the result shouldn't change, but we need to keep the
         # most distant expiry time to prevent pulling it out from under another submission too early
@@ -226,6 +225,7 @@ class DispatchClient:
         process_table = DispatchHash(task.sid, self.redis)
         remaining, duplicate = process_table.finish(task.fileinfo.sha256, task.service_name, result_key,
                                                     result.result.score, result.classification, result.drop_file)
+        self.timeout_watcher.clear(f'{task.sid}-{task.key()}')
         if duplicate:
             self.log.warning(f"[{sid} :: {result.response.service_name}] Service tried to finish the same task twice.")
             return
@@ -326,7 +326,6 @@ class DispatchClient:
             self.log.warning(f"[{sid} :: {error.response.service_name}] Service tried to finish the same task twice.")
             return
         task = ServiceTask(task)
-        self.timeout_watcher.clear(f'{task.sid}-{task.key()}')
 
         self.log.debug(f"Service {task.service_name} failed with {error.response.status} error.")
         remaining = -1
@@ -345,6 +344,7 @@ class DispatchClient:
             msg = {'status': 'FAIL', 'cache_key': error_key}
             for w in self._get_watcher_list(task.sid).members():
                 NamedQueue(w).push(msg)
+        self.timeout_watcher.clear(f'{task.sid}-{task.key()}')
 
         # Send a message to prompt the re-issue of the task if needed
         if remaining <= 0:
