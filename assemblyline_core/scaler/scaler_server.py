@@ -76,12 +76,7 @@ class ScalerServer(ServerBase):
         self.error_count = {}
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
 
-        core_labels = {
-            'app': 'assemblyline',
-            'section': 'core',
-        }
-
-        service_labels = {
+        labels = {
             'app': 'assemblyline',
             'section': 'service',
         }
@@ -89,45 +84,21 @@ class ScalerServer(ServerBase):
         # TODO select the right controller by examining our environment
         if KUBERNETES_AL_CONFIG:
             self.log.info("Loading Kubernetes cluster interface.")
-            service_controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=service_labels,
-                                                      namespace=self.config.core.scaler.service_namespace,
-                                                      priority='al-service-priority')
-            core_controller = KubernetesController(logger=self.log, namespace=self.config.core.scaler.core_namespace,
-                                                   labels=core_labels, prefix='', priority='al-core-priority')
-
-            # Mare sure core services get attached to the config
-            core_controller.config_mount(
-                name='al-config',
-                config_map=KUBERNETES_AL_CONFIG,
-                key='config',
-                file_name='config.yml',
-                target_path='/etc/assemblyline/'
-            )
+            self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
+                                                   namespace=self.config.core.scaler.service_namespace,
+                                                   priority='al-service-priority')
         else:
             self.log.info("Loading Docker cluster interface.")
             # TODO allocation parameters should be read from config
-            service_controller = DockerController(logger=self.log, prefix=self.config.core.scaler.service_namespace,
-                                                  cpu_overallocation=100, memory_overallocation=1.5,
-                                                  labels=service_labels, network='svc')
-            core_controller = DockerController(logger=self.log, prefix=self.config.core.scaler.core_namespace,
-                                               cpu_overallocation=100, memory_overallocation=1,
-                                               labels=core_labels, network='backend')
+            self.controller = DockerController(logger=self.log, prefix=self.config.core.scaler.service_namespace,
+                                               cpu_overallocation=100, memory_overallocation=1.5,
+                                               labels=labels, network='svc')
 
-            # TODO move these lines to config
-            core_controller.global_mounts.append(['/opt/alv4/alv4/dev/core/config/', '/etc/assemblyline/'])
-            core_controller.global_mounts.append(['/opt/alv4/', '/opt/alv4/'])
-
-        self.services = ScalingGroup(service_controller)
-        self.core = ScalingGroup(core_controller)
+        self.services = ScalingGroup(self.controller)
 
         # Prepare a single threaded scheduler
         self.state = collection.Collection(period=self.config.core.metrics.export_interval)
         self.scheduler = sched.scheduler()
-
-        # Add the core components to the scaler
-        core_defaults = self.config.core.scaler.core_defaults
-        for name, parameters in self.config.core.scaler.core_configs.items():
-            self.core.add_service(ServiceProfile(name=name, **core_defaults.apply(parameters)))
 
     def try_run(self):
         # Do an initial call to the main methods, who will then be registered with the scheduler
@@ -153,10 +124,10 @@ class ScalerServer(ServerBase):
                 name = service.name
 
                 # Stop any running disabled services
-                if not service.enabled and (name in self.services.profiles or self.services.controller.get_target(name) > 0):
+                if not service.enabled and (name in self.services.profiles or self.controller.get_target(name) > 0):
                     self.log.info(f'Removing {service.name} from scaling')
                     self.services.profiles.pop(name)
-                    self.services.controller.set_target(name, 0)
+                    self.controller.set_target(name, 0)
 
                 # Check that all enabled services are enabled
                 if service.enabled and name not in self.services.profiles:
@@ -185,11 +156,18 @@ class ScalerServer(ServerBase):
 
                 # Update RAM, CPU, licence requirements for running services
                 if service.enabled and name in self.services.profiles:
+                    default_settings = self.config.core.scaler.service_defaults
                     profile = self.services.profiles[name]
+                    docker_config = service.docker_config
+                    set_keys = set(var.name for var in docker_config.environment)
+                    for var in default_settings.environment:
+                        if var.name not in set_keys:
+                            docker_config.environment.append(var)
+
                     if profile.container_config != service.docker_config:
                         self.log.info(f"Updating deployment information for {name}")
                         profile.container_config = service.docker_config
-                        self.services.controller.restart(profile, updates=service.update_config)
+                        self.controller.restart(profile, updates=service.update_config)
 
                     if service.licence_count == 0:
                         profile._max_instances = float('inf')
@@ -202,12 +180,6 @@ class ScalerServer(ServerBase):
     def update_scaling(self):
         """Check if we need to scale any services up or down."""
         self.scheduler.enter(SCALE_INTERVAL, 0, self.update_scaling)
-        # noinspection PyBroadException
-        try:
-            self.core.update()
-        except:
-            self.log.exception("Error in core processes.")
-
         try:
             self.services.update()
         except ServiceControlError as error:
@@ -269,33 +241,32 @@ class ScalerServer(ServerBase):
         # Check the set of services that might be sitting at zero instances, and if it is, we need to
         # manually check if it is offline
         export_interval = self.config.core.metrics.export_interval
-        for group in (self.core, self.services):
-            for profile_name, profile in group.profiles.items():
-                # Pull out statistics from the metrics regularization
-                update = self.state.read(profile_name)
-                if update:
-                    delta = time.time() - profile.last_update
-                    profile.update(
-                        delta=delta,
-                        backlog=NamedQueue(profile.queue, self.redis).length(),
-                        **update
-                    )
+        for profile_name, profile in self.services.profiles.items():
+            # Pull out statistics from the metrics regularization
+            update = self.state.read(profile_name)
+            if update:
+                delta = time.time() - profile.last_update
+                profile.update(
+                    delta=delta,
+                    backlog=NamedQueue(profile.queue, self.redis).length(),
+                    **update
+                )
 
-                # Wait until we have missed two heartbeats before we take things into our own hands
-                if time.time() - profile.last_update > 2 * export_interval:
-                    # Check if we expect no messages, if so pull the queue length ourselves since there is no heartbeat
-                    if group.controller.get_target(profile_name) == 0:
-                        if profile.queue:
-                            queue_length = NamedQueue(profile.queue, self.redis).length()
-                            if queue_length > 0:
-                                self.log.info(f"Service at zero instances has messages: "
-                                              f"{profile.name} ({queue_length} in queue)")
-                            profile.update(
-                                delta=export_interval,
-                                instances=0,
-                                backlog=queue_length,
-                                duty_cycle=profile.target_duty_cycle
-                            )
+            # Wait until we have missed two heartbeats before we take things into our own hands
+            if time.time() - profile.last_update > 2 * export_interval:
+                # Check if we expect no messages, if so pull the queue length ourselves since there is no heartbeat
+                if self.controller.get_target(profile_name) == 0:
+                    if profile.queue:
+                        queue_length = NamedQueue(profile.queue, self.redis).length()
+                        if queue_length > 0:
+                            self.log.info(f"Service at zero instances has messages: "
+                                          f"{profile.name} ({queue_length} in queue)")
+                        profile.update(
+                            delta=export_interval,
+                            instances=0,
+                            backlog=queue_length,
+                            duty_cycle=profile.target_duty_cycle
+                        )
 
         # TODO maybe find another way of implementing this that is less aggressive
         # for profile_name, profile in self.services.profiles.items():
@@ -323,7 +294,7 @@ class ScalerServer(ServerBase):
                 break
             try:
                 self.log.info(f"Killing service container: {message['container']} running: {message['service']}")
-                self.services.controller.stop_container(message['service'], message['container'])
+                self.controller.stop_container(message['service'], message['container'])
             except Exception:
                 self.log.exception(f"Exception trying to stop timed out service container: {message}")
 
@@ -343,8 +314,8 @@ class ScalerServer(ServerBase):
                                 config=self.config, redis=self.redis)
 
         metrics = {
-            'memory_free': self.services.controller.free_memory(),
-            'cpu_free': self.services.controller.free_cpu()
+            'memory_free': self.controller.free_memory(),
+            'cpu_free': self.controller.free_cpu()
         }
 
         export_metrics_once('scaler', Metrics, metrics, host=HOSTNAME,
