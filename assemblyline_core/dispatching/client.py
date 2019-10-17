@@ -145,7 +145,13 @@ class DispatchClient:
 
         # If someone is supposed to be working on this task right now, we won't be able to add it
         if self.running_tasks.add(task.key(), task.as_primitives()):
-            self.log.info(f"{worker_id}:{service_name}: task found {task.sid}:{task.fileinfo.sha256}")
+            self.log.info(f"{worker_id}:{service_name}: task found {task.sid}:{task.fileinfo.sha256} ")
+
+            process_table = DispatchHash(task.sid, self.redis)
+            if process_table.finished(file_hash=task.fileinfo.sha256, service=task.service_name) is not None:
+                self.log.info(f"{worker_id}:{service_name}: task already complete {task.sid}:{task.fileinfo.sha256}")
+                return self.request_work(worker_id, service_name, blocking=blocking,
+                                         timeout=timeout - (time.time() - start))
 
             # Check if this task has reached the retry limit
             attempt_record = ExpiringHash(f'dispatch-hash-attempts-{task.sid}', host=self.redis)

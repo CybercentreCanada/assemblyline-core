@@ -422,6 +422,7 @@ class Dispatcher:
         dispatch_table = DispatchHash(submission.sid, self.redis)
         dispatch_table.delete()
 
+        submission.classification = submission.params.classification
         submission.error_count = len(errors)
         submission.errors = errors
         submission.state = 'failed'
