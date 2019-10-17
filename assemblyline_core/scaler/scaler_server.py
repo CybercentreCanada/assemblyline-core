@@ -1,14 +1,11 @@
 """
-An auto-scaling service specific to Assemblyline.
-
-TODO react to changes in memory/cpu limits
+An auto-scaling service specific to Assemblyline services.
 """
 
 import os
 import platform
 import time
 import sched
-from pprint import pprint
 
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 
@@ -17,15 +14,12 @@ from assemblyline.remote.datatypes.hash import ExpiringHash
 
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus, service_queue_name
 from assemblyline.odm.models.service import Service
-from assemblyline_core.metrics.metrics_server import METRICS_QUEUE
 from assemblyline_core.scaler.controllers import KubernetesController
 from assemblyline_core.scaler.controllers.interface import ServiceControlError
 from assemblyline.common import forge
 from assemblyline.remote.datatypes import get_client
-from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
 from assemblyline_core.server_base import ServerBase
-from assemblyline_core.metrics.heartbeat_formatter import STATUS_QUEUE
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from .scaling import ScalingGroup, ServiceProfile
@@ -69,10 +63,7 @@ class ScalerServer(ServerBase):
             port=self.config.core.redis.persistent.port,
             private=False,
         )
-        self.status_queue = CommsQueue(STATUS_QUEUE, self.redis)
-        self.metrics_queue = CommsQueue(METRICS_QUEUE, self.redis)
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
-        self._metrics_loop = self.get_metrics()
         self.error_count = {}
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
 
@@ -81,7 +72,6 @@ class ScalerServer(ServerBase):
             'section': 'service',
         }
 
-        # TODO select the right controller by examining our environment
         if KUBERNETES_AL_CONFIG:
             self.log.info("Loading Kubernetes cluster interface.")
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
@@ -201,35 +191,9 @@ class ScalerServer(ServerBase):
             ])
             del self.error_count[service_name]
 
-    def get_metrics(self):
-        """A generator that makes a non blocking check on the metrics queue each time it is called."""
-        with self.metrics_queue as sq:
-            for message in sq.listen(blocking=False):
-                yield message
-
     def sync_metrics(self):
         """Check if there are any pubsub messages we need."""
         self.scheduler.enter(METRIC_SYNC_INTERVAL, 3, self.sync_metrics)
-        for message in self._metrics_loop:
-            # We will get none when we have cleared the buffer
-            if message is None:
-                break
-
-            elif message.get('name', None) == 'dispatcher_submissions':
-                self.state.update(
-                    service=message['name'],
-                    host=message['host'],
-                    busy_seconds=message['busy_seconds.t'],
-                    throughput=message['submissions_completed']
-                )
-
-            elif message.get('name', None) == 'dispatcher_files':
-                self.state.update(
-                    service=message['name'],
-                    host=message['host'],
-                    busy_seconds=message['busy_seconds.t'],
-                    throughput=message['files_completed']
-                )
 
         # Pull service metrics from redis
         service_data = self.status_table.items()
