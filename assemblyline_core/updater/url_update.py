@@ -106,10 +106,10 @@ def url_update() -> None:
 
         # Create the response yaml
         with open(os.path.join(UPDATE_OUTPUT_PATH, 'response.yaml'), 'w') as yml_fh:
-            yaml.dump(yml_fh, dict(
+            yaml.safe_dump(dict(
                 previous_update=now_as_iso(),
                 previous_hash=new_hash,
-            ))
+            ), yml_fh)
 
         LOGGER.info("Service update file(s) successfully downloaded")
 
