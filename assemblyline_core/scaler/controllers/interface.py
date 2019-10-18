@@ -34,3 +34,6 @@ class ControllerInterface:
 
     def restart(self, service: ServiceProfile, updates):
         raise NotImplementedError()
+
+    def get_running_container_names(self):
+        raise NotImplementedError()

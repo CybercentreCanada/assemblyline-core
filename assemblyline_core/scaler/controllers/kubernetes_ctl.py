@@ -12,8 +12,6 @@ from assemblyline.odm.models.service import UpdateConfig
 
 
 # How to identify the update volume as a whole, in a way that the underlying container system recognizes.
-from assemblyline_core.scaler.scaling import ServiceProfile
-
 FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
 
 
@@ -171,6 +169,10 @@ class KubernetesController(ControllerInterface):
         memory = 0
         for node in self.api.list_node().items:
             memory += parse_memory(node.status.allocatable['memory'])
+
+        # for pod in self.api.list_pod_for_all_namespaces().items:
+        #     pod.
+
         return memory
 
     def _create_labels(self, service_name) -> Dict[str, str]:
@@ -221,7 +223,7 @@ class KubernetesController(ControllerInterface):
             volume_mounts=mounts,
             resources=V1ResourceRequirements(
                 limits={'cpu': profile.container_config.cpu_cores, 'memory': f'{profile.container_config.ram_mb}Mi'},
-                requests={'cpu': profile.container_config.cpu_cores, 'memory': f'{profile.container_config.ram_mb}Mi'},
+                requests={'cpu': profile.container_config.cpu_cores/4, 'memory': f'{int(profile.container_config.ram_mb/4)}Mi'},
             ),
         )]
 
@@ -288,5 +290,9 @@ class KubernetesController(ControllerInterface):
                 self.api.delete_namespaced_pod(name=container_id, namespace=self.namespace)
                 return
 
-    def restart(self, service: ServiceProfile, updates):
+    def restart(self, service, updates):
         self._create_deployment(service, self.get_target(service.name), updates=updates, replace=True)
+
+    def get_running_container_names(self):
+        pods = self.api.list_pod_for_all_namespaces()
+        return [pod.metadata.name for pod in pods.items]

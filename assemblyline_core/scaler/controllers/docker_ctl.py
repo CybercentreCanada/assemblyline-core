@@ -1,7 +1,4 @@
 from typing import Dict
-
-from assemblyline_core.scaler.scaling import ServiceProfile
-
 from assemblyline.odm.models.service import DockerConfig
 from .interface import ControllerInterface, ServiceControlError
 
@@ -29,7 +26,7 @@ class DockerController(ControllerInterface):
         self._reserved_mem = 500
         self.cpu_overallocation = cpu_overallocation
         self.memory_overallocation = memory_overallocation
-        self._profiles: Dict[str, ServiceProfile] = {}
+        self._profiles = {}
 
         # Prefetch some info that shouldn't change while we are running
         self._info = self.client.info()
@@ -168,6 +165,14 @@ class DockerController(ControllerInterface):
         if container and container.labels.get('component') == service_name and container.status == 'running':
             container.kill()
 
-    def restart(self, service: ServiceProfile, updates=None):
+    def restart(self, service, updates=None):
         for container in self.client.containers.list(filters={'label': f'component={service.name}'}):
             container.kill()
+
+    def get_running_container_names(self):
+        out = []
+        for container in self.client.containers.list():
+            out.append(container.id)
+            out.append(container.id[:12])
+            out.append(container.name)
+        return out
