@@ -61,7 +61,8 @@ class Plumber(ServerBase):
             for service_name, service in service_queues.items():
                 if not service or not service.enabled:
                     while True:
-                        task = self.dispatch_client.request_work(None, service_name=service_name, blocking=False)
+                        task = self.dispatch_client.request_work(None, service_name=service_name,
+                                                                 service_version='0', blocking=False)
                         if task is None:
                             break
 

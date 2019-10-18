@@ -116,7 +116,7 @@ class DispatchClient:
 
         return output
 
-    def request_work(self, worker_id, service_name, timeout: float = 60, blocking=True) -> Optional[ServiceTask]:
+    def request_work(self, worker_id, service_name, service_version, timeout: float = 60, blocking=True) -> Optional[ServiceTask]:
         """Pull work from the service queue for the service in question.
 
         :param worker_id:
@@ -150,7 +150,7 @@ class DispatchClient:
             process_table = DispatchHash(task.sid, self.redis)
             if process_table.finished(file_hash=task.fileinfo.sha256, service=task.service_name) is not None:
                 self.log.info(f"{worker_id}:{service_name}: task already complete {task.sid}:{task.fileinfo.sha256}")
-                return self.request_work(worker_id, service_name, blocking=blocking,
+                return self.request_work(worker_id, service_name, service_version, blocking=blocking,
                                          timeout=timeout - (time.time() - start))
 
             # Check if this task has reached the retry limit
@@ -167,7 +167,7 @@ class DispatchClient:
                     response=dict(
                         message=f'The number of retries has passed the limit.',
                         service_name=task.service_name,
-                        service_version='0',
+                        service_version=service_version,
                         status='FAIL_NONRECOVERABLE',
                     ),
                     sha256=task.fileinfo.sha256,
@@ -180,13 +180,14 @@ class DispatchClient:
                 self.service_failed(task.sid, error_key, error)
                 export_metrics_once(service_name, Metrics, dict(fail_nonrecoverable=1),
                                     host=worker_id, counter_type='service')
-                return self.request_work(worker_id, service_name, blocking=blocking,
+                return self.request_work(worker_id, service_name, service_version, blocking=blocking,
                                          timeout=timeout - (time.time() - start))
 
             self.timeout_watcher.touch_task(timeout=int(service_data.timeout), key=f'{task.sid}-{task.key()}',
                                             worker=worker_id, task_key=task.key())
             return task
-        return self.request_work(worker_id, service_name, blocking=blocking, timeout=timeout-(time.time()-start))
+        return self.request_work(worker_id, service_name, service_version,
+                                 blocking=blocking, timeout=timeout-(time.time()-start))
 
     def _dispatching_error(self, task, process_table, error):
         error_key = error.build_key()
@@ -263,9 +264,9 @@ class DispatchClient:
                             'message': f"Too many files extracted for submission {task.sid} "
                                        f"{extracted_data.sha256} extracted by "
                                        f"{task.service_name} will be dropped",
-                            'service_name': 'dispatcher',
-                            'service_tool_version': '0',
-                            'service_version': '0',  # TODO what values actually make sense for service_*
+                            'service_name': task.service_name,
+                            'service_tool_version': result.response.service_tool_version,
+                            'service_version': result.response.service_version,
                             'status': 'FAIL_NONRECOVERABLE'
                         },
                         'sha256': extracted_data.sha256,
@@ -295,9 +296,9 @@ class DispatchClient:
                     'response': {
                         'message': f"{task.service_name} has extracted a file "
                                    f"{extracted_data.sha256} beyond the depth limits",
-                        'service_name': 'dispatcher',
-                        'service_tool_version': '0',
-                        'service_version': '0',  # TODO what values actually make sense for service_*
+                        'service_name': result.response.service_name,
+                        'service_tool_version': result.response.service_tool_version,
+                        'service_version': result.response.service_version,
                         'status': 'FAIL_NONRECOVERABLE'
                     },
                     'sha256': extracted_data.sha256,
