@@ -560,6 +560,13 @@ class Dispatcher:
 
             for service_name, service in outstanding.items():
 
+                # Find the actual file name from the list of files in submission
+                filename = None
+                for file in submission.files:
+                    if task.file_info.sha256 == file.sha256:
+                        filename = file.name
+                        break
+
                 # Build the actual service dispatch message
                 config = self.build_service_config(service, submission)
                 service_task = ServiceTask(dict(
@@ -567,6 +574,7 @@ class Dispatcher:
                     service_name=service_name,
                     service_config=config,
                     fileinfo=task.file_info,
+                    filename=filename or task.file_info.sha256,
                     depth=task.depth,
                     max_files=task.max_files,
                     ttl=submission.params.ttl,
