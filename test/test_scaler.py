@@ -1,9 +1,8 @@
-from assemblyline_core.scaler.scaling import ServiceProfile
-
 from assemblyline.odm.models.service import DockerConfig
 from pytest import approx
 from unittest.mock import Mock, patch
 from assemblyline_core.scaler.collection import Collection
+from assemblyline_core.scaler.scaler_server import ServiceProfile
 
 mock_time = Mock()
 
