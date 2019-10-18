@@ -29,7 +29,7 @@ def ds(request):
             for x in range(expiry_len):
                 obj = random_model_obj(collection.model_class)
                 obj.expiry_ts = now_as_iso(-10000)
-                collection.save(x, obj)
+                collection.save(str(x), obj)
 
             collection.commit()
             collections_len[name] = expiry_len
