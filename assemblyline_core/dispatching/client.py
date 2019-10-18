@@ -127,7 +127,7 @@ class DispatchClient:
                  been returned by request_work.
         """
         # For when we recursively retry on bad task dequeue-ing
-        if timeout <= 0:
+        if int(timeout) <= 0:
             self.log.info(f"{worker_id}:{service_name}: no task returned: timeout")
             return None
         start = time.time()
