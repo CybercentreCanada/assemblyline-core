@@ -294,5 +294,5 @@ class KubernetesController(ControllerInterface):
         self._create_deployment(service, self.get_target(service.name), updates=updates, replace=True)
 
     def get_running_container_names(self):
-        pods = self.api.list_pod_for_all_namespaces()
+        pods = self.api.list_pod_for_all_namespaces(field_selector='status.phase==Running')
         return [pod.metadata.name for pod in pods.items]
