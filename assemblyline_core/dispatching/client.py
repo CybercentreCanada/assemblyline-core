@@ -167,7 +167,7 @@ class DispatchClient:
                     response=dict(
                         message=f'The number of retries has passed the limit.',
                         service_name=task.service_name,
-                        service_version=' ',
+                        service_version='0',
                         status='FAIL_NONRECOVERABLE',
                     ),
                     sha256=task.fileinfo.sha256,

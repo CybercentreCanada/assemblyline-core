@@ -71,7 +71,7 @@ class Plumber(ServerBase):
                             response=dict(
                                 message='The service was disabled while processing this task.',
                                 service_name=task.service_name,
-                                service_version=' ',
+                                service_version='0',
                                 status='FAIL_NONRECOVERABLE',
                             ),
                             sha256=task.fileinfo.sha256,
