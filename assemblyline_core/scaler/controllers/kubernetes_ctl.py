@@ -139,8 +139,9 @@ class KubernetesController(ControllerInterface):
             cpu += parse_cpu(node.status.allocatable['cpu'])
         for pod in self.api.list_pod_for_all_namespaces().items:
             for container in pod.spec.containers:
-                resources = container.resources
-                cpu -= parse_cpu(resources.requests.get('cpu', resources.limits.get('cpu', '0.5')))
+                requests = container.resources.requests or {}
+                limits = container.resources.limits or {}
+                cpu -= parse_cpu(requests.get('cpu', limits.get('cpu', '0.5')))
         return cpu
 
     def free_memory(self):
@@ -176,8 +177,9 @@ class KubernetesController(ControllerInterface):
             memory += parse_memory(node.status.allocatable['memory'])
         for pod in self.api.list_pod_for_all_namespaces().items:
             for container in pod.spec.containers:
-                resources = container.resources
-                memory -= parse_memory(resources.requests.get('memory', resources.limits.get('memory', '64Mi')))
+                requests = container.resources.requests or {}
+                limits = container.resources.limits or {}
+                memory -= parse_memory(requests.get('memory', limits.get('memory', '64Mi')))
         return memory
 
     def _create_labels(self, service_name) -> Dict[str, str]:
