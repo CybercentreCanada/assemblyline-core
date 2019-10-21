@@ -137,12 +137,18 @@ class KubernetesController(ControllerInterface):
         cpu = 0
         for node in self.api.list_node().items:
             cpu += parse_cpu(node.status.allocatable['cpu'])
+        for pod in self.api.list_pod_for_all_namespaces().items:
+            for container in pod.spec.containers:
+                resources = container.resources
+                cpu -= parse_cpu(resources.requests.get('cpu', resources.limits.get('cpu', '0.5')))
         return cpu
 
     def free_memory(self):
         """Megabytes of RAM that has not been reserved."""
-        # Try to get the limit from the namespace
         max_ram = float('inf')
+
+        # Try to get the limit from the namespace, if a specific quota has been set use
+        # that over any other options.
         used = 0
         found = False
         for limit in self.api.list_namespaced_resource_quota(namespace=self.namespace).items:
@@ -156,7 +162,6 @@ class KubernetesController(ControllerInterface):
 
             if 'limits.memory' in limit.status.used:
                 used = max(used, parse_memory(limit.status.used['limits.memory']))
-
         if found:
             return max_ram - used
 
@@ -169,10 +174,10 @@ class KubernetesController(ControllerInterface):
         memory = 0
         for node in self.api.list_node().items:
             memory += parse_memory(node.status.allocatable['memory'])
-
-        # for pod in self.api.list_pod_for_all_namespaces().items:
-        #     pod.
-
+        for pod in self.api.list_pod_for_all_namespaces().items:
+            for container in pod.spec.containers:
+                resources = container.resources
+                memory -= parse_memory(resources.requests.get('memory', resources.limits.get('memory', '64Mi')))
         return memory
 
     def _create_labels(self, service_name) -> Dict[str, str]:

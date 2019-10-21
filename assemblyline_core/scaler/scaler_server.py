@@ -80,7 +80,7 @@ class ServiceProfile:
         # Information tracking when we want to grow/shrink
         self.pressure: float = 0
         self.growth_threshold = abs(float(growth))
-        self.shrink_threshold = -self.growth_threshold if shrink is None else -abs(float(shrink))
+        self.shrink_threshold = -self.growth_threshold/2 if shrink is None else -abs(float(shrink))
         self.leak_rate: float = 0.1
 
         # How long does a backlog need to be before we are concerned
@@ -115,24 +115,15 @@ class ServiceProfile:
         # there is anything in the queue) this should have no effect for min_instances > 0
         self.min_instances = max(self._min_instances, int(bool(backlog)))
         self.desired_instances = max(self.min_instances, min(self.max_instances, self.desired_instances))
-        # print(self.name, self.pressure)
 
         # Should we scale up because of backlog
         self.pressure += delta * math.sqrt(backlog/self.backlog)
-        # print('queue', delta * math.sqrt(backlog / self.backlog), delta, backlog, self.backlog)
 
         # Should we scale down due to duty cycle? (are some of the workers idle)
         self.pressure -= delta * (self.target_duty_cycle - duty_cycle)
-        # print('duty', -delta * (self.target_duty_cycle - duty_cycle), delta, self.target_duty_cycle, duty_cycle)
 
-        # Should we scale up/down because the input rate vs our expected rate
-        # expected_max_throughput = data.per_unit_throughput / data.duty_cycle * self.desired_instances
-        # rate_pressure = (self.input_rate - self.max_expected_throughput)
-
-        # Apply the friction, tendency to do nothing, tendency of the 'what to do' bar
-        # to move to nothing over time when there is no strong up or down pressure
+        # Apply the friction, tendency to do nothing, move the change pressure gradually to the center.
         leak = min(self.leak_rate * delta, abs(self.pressure))
-        # print('leak', leak)
         self.pressure = math.copysign(abs(self.pressure) - leak, self.pressure)
 
         # When we are already at the minimum number of instances, don't let negative values build up
