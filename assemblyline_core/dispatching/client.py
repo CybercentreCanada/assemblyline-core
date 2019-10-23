@@ -148,8 +148,13 @@ class DispatchClient:
             self.log.info(f"{worker_id}:{service_name}: task found {task.sid}:{task.fileinfo.sha256} ")
 
             process_table = DispatchHash(task.sid, self.redis)
-            if process_table.finished(file_hash=task.fileinfo.sha256, service=task.service_name) is not None:
+
+            abandoned = process_table.dispatch_time(file_hash=task.fileinfo.sha256, service=task.service_name) == 0
+            finished = process_table.finished(file_hash=task.fileinfo.sha256, service=task.service_name) is not None
+
+            if abandoned or finished:
                 self.log.info(f"{worker_id}:{service_name}: task already complete {task.sid}:{task.fileinfo.sha256}")
+                self.running_tasks.pop(task.key())
                 return self.request_work(worker_id, service_name, service_version, blocking=blocking,
                                          timeout=timeout - (time.time() - start))
 

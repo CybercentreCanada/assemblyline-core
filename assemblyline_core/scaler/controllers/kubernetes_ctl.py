@@ -221,6 +221,8 @@ class KubernetesController(ControllerInterface):
         return volumes, mounts
 
     def _create_containers(self, profile, mounts):
+        cores = profile.container_config.cpu_cores
+        memory = profile.container_config.ram_mb
         return [V1Container(
             name=self._deployment_name(profile.name),
             image=profile.container_config.image,
@@ -229,8 +231,8 @@ class KubernetesController(ControllerInterface):
             image_pull_policy='Always',
             volume_mounts=mounts,
             resources=V1ResourceRequirements(
-                limits={'cpu': profile.container_config.cpu_cores, 'memory': f'{profile.container_config.ram_mb}Mi'},
-                requests={'cpu': profile.container_config.cpu_cores/4, 'memory': f'{int(profile.container_config.ram_mb/4)}Mi'},
+                limits={'cpu': cores, 'memory': f'{memory}Mi'},
+                requests={'cpu': cores/4, 'memory': f'{int(memory/4)}Mi'},
             ),
         )]
 
