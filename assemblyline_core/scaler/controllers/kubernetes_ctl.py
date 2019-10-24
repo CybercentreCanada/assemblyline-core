@@ -8,7 +8,6 @@ from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1Depl
 from kubernetes.client.rest import ApiException
 
 from assemblyline_core.scaler.controllers.interface import ControllerInterface
-from assemblyline.odm.models.service import UpdateConfig
 
 
 # How to identify the update volume as a whole, in a way that the underlying container system recognizes.
@@ -104,9 +103,9 @@ class KubernetesController(ControllerInterface):
 
         self.config_mounts.append((volume, mount))
 
-    def add_profile(self, profile, updates=None):
+    def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
-        self._create_deployment(profile, 0, updates=updates)
+        self._create_deployment(profile, 0)
 
     def free_cpu(self):
         """Number of cores available for reservation."""
