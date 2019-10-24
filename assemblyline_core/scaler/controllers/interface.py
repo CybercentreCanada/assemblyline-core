@@ -32,7 +32,7 @@ class ControllerInterface:
         """Set the target for running instances of a service."""
         raise NotImplementedError()
 
-    def restart(self, service: ServiceProfile, updates):
+    def restart(self, service: ServiceProfile):
         raise NotImplementedError()
 
     def get_running_container_names(self):

@@ -1,6 +1,13 @@
+import os
 from typing import Dict
 from assemblyline.odm.models.service import DockerConfig
 from .interface import ControllerInterface, ServiceControlError
+
+# How to identify the update volume as a whole, in a way that the underlying container system recognizes.
+FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
+
+# Where to find the update directory inside this container.
+FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 
 
 class DockerController(ControllerInterface):
@@ -34,7 +41,7 @@ class DockerController(ControllerInterface):
         # We aren't checking for swarm nodes
         assert not self._info['Swarm']['NodeID']
 
-    def add_profile(self, profile, updates=None):
+    def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
         self._profiles[profile.name] = profile
 
@@ -45,6 +52,13 @@ class DockerController(ControllerInterface):
         cfg = prof.container_config
         labels = dict(self._labels)
         labels.update({'component': service_name})
+
+        volumes = {row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.global_mounts}
+
+        volumes[os.path.join(FILE_UPDATE_VOLUME, service_name)] = {'bind': '/mount/updates/', 'mode': 'ro'}
+        if not os.path.exists(os.path.join(FILE_UPDATE_DIRECTORY, service_name)):
+            os.makedirs(os.path.join(FILE_UPDATE_DIRECTORY, service_name), 0x777)
+
         self.client.containers.run(
             image=cfg.image,
             name=container_name,
@@ -54,9 +68,9 @@ class DockerController(ControllerInterface):
             labels=labels,
             restart_policy={'Name': 'always'},
             command=cfg.command,
-            volumes={row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.global_mounts},
+            volumes=volumes,
             network=self.network,
-            environment=[f'{_e.name}={_e.value}' for _e in cfg.environment],
+            environment=[f'{_e.name}={_e.value}' for _e in cfg.environment] + ['UPDATE_PATH=/mount/updates/'],
             detach=True,
         )
 
@@ -165,7 +179,7 @@ class DockerController(ControllerInterface):
         if container and container.labels.get('component') == service_name and container.status == 'running':
             container.kill()
 
-    def restart(self, service, updates=None):
+    def restart(self, service):
         for container in self.client.containers.list(filters={'label': f'component={service.name}'}):
             container.kill()
 

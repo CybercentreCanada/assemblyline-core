@@ -184,13 +184,13 @@ class ScalerServer(ServerBase):
         self.state = collection.Collection(period=self.config.core.metrics.export_interval)
         self.scheduler = sched.scheduler()
 
-    def add_service(self, profile: ServiceProfile, updates=None):
+    def add_service(self, profile: ServiceProfile):
         profile.desired_instances = max(self.controller.get_target(profile.name), profile.min_instances)
         profile.running_instances = profile.desired_instances
         self.log.debug(f'Starting service {profile.name} with a target of {profile.desired_instances}')
         profile.last_update = time.time()
         self.profiles[profile.name] = profile
-        self.controller.add_profile(profile, updates=updates)
+        self.controller.add_profile(profile)
 
     def try_run(self):
         # Do an initial call to the main methods, who will then be registered with the scheduler
@@ -245,7 +245,7 @@ class ScalerServer(ServerBase):
                         container_config=docker_config,
                         queue=service_queue_name(name),
                         shutdown_seconds=service.timeout + 30,  # Give service an extra 30 seconds to upload results
-                    ), updates=service.update_config)
+                    ))
 
                 # Update RAM, CPU, licence requirements for running services
                 if service.enabled and name in self.profiles:
@@ -260,7 +260,7 @@ class ScalerServer(ServerBase):
                     if profile.container_config != service.docker_config:
                         self.log.info(f"Updating deployment information for {name}")
                         profile.container_config = service.docker_config
-                        self.controller.restart(profile, updates=service.update_config)
+                        self.controller.restart(profile)
 
                     if service.licence_count == 0:
                         profile._max_instances = float('inf')

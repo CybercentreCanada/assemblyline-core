@@ -13,6 +13,7 @@ from assemblyline.odm.models.service import UpdateConfig
 
 # How to identify the update volume as a whole, in a way that the underlying container system recognizes.
 FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
+CONTAINER_UPDATE_DIRECTORY = '/mount/updates/'
 
 
 def parse_memory(string):
@@ -193,7 +194,7 @@ class KubernetesController(ControllerInterface):
     def _create_selector(self, service_name) -> V1LabelSelector:
         return V1LabelSelector(match_labels=self._create_labels(service_name))
 
-    def _create_volumes(self, profile, updates: UpdateConfig=None):
+    def _create_volumes(self, profile):
         volumes, mounts = [], []
 
         # Attach the mount that provides the config file
@@ -202,32 +203,33 @@ class KubernetesController(ControllerInterface):
             mounts.append(_m)
 
         # Attach the mount that provides the update
-        if updates and updates.method == 'run':
-            volumes.append(V1Volume(
-                name='update-directory',
-                config_map=V1PersistentVolumeClaimVolumeSource(
-                    claim_name=FILE_UPDATE_VOLUME,
-                    read_only=True
-                ),
-            ))
+        volumes.append(V1Volume(
+            name='update-directory',
+            persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
+                claim_name=FILE_UPDATE_VOLUME,
+                read_only=True
+            ),
+        ))
 
-            mounts.append(V1VolumeMount(
-                name='update-directory',
-                mount_path='/mount/update-data/',
-                sub_path=profile.name,
-                read_only=True,
-            ))
+        mounts.append(V1VolumeMount(
+            name='update-directory',
+            mount_path=CONTAINER_UPDATE_DIRECTORY,
+            sub_path=profile.name,
+            read_only=True,
+        ))
 
         return volumes, mounts
 
     def _create_containers(self, profile, mounts):
         cores = profile.container_config.cpu_cores
         memory = profile.container_config.ram_mb
+        environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in profile.container_config.environment]
+        environment_variables += [V1EnvVar(name='UPDATE_PATH', value=CONTAINER_UPDATE_DIRECTORY)]
         return [V1Container(
             name=self._deployment_name(profile.name),
             image=profile.container_config.image,
             command=profile.container_config.command,
-            env=[V1EnvVar(name=_e.name, value=_e.value) for _e in profile.container_config.environment],
+            env=environment_variables,
             image_pull_policy='Always',
             volume_mounts=mounts,
             resources=V1ResourceRequirements(
@@ -236,12 +238,12 @@ class KubernetesController(ControllerInterface):
             ),
         )]
 
-    def _create_deployment(self, profile, scale: int, updates=None, replace=False):
+    def _create_deployment(self, profile, scale: int, replace=False):
         for dep in self.b1api.list_namespaced_deployment(namespace=self.namespace).items:
             if dep.metadata.name == self._deployment_name(profile.name):
                 return
 
-        volumes, mounts = self._create_volumes(profile, updates=updates)
+        volumes, mounts = self._create_volumes(profile)
         metadata = self._create_metadata(profile.name)
 
         pod = V1PodSpec(
@@ -299,8 +301,8 @@ class KubernetesController(ControllerInterface):
                 self.api.delete_namespaced_pod(name=container_id, namespace=self.namespace)
                 return
 
-    def restart(self, service, updates):
-        self._create_deployment(service, self.get_target(service.name), updates=updates, replace=True)
+    def restart(self, service):
+        self._create_deployment(service, self.get_target(service.name), replace=True)
 
     def get_running_container_names(self):
         pods = self.api.list_pod_for_all_namespaces(field_selector='status.phase==Running')
