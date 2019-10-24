@@ -14,6 +14,9 @@ from assemblyline_core.scaler.controllers.interface import ControllerInterface
 FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
 CONTAINER_UPDATE_DIRECTORY = '/mount/updates/'
 
+# Where to find the update directory inside this container.
+FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
+
 
 def parse_memory(string):
     # TODO use a library for parsing this?
@@ -238,6 +241,10 @@ class KubernetesController(ControllerInterface):
         )]
 
     def _create_deployment(self, profile, scale: int, replace=False):
+
+        if not os.path.exists(os.path.join(FILE_UPDATE_DIRECTORY, profile.name)):
+            os.makedirs(os.path.join(FILE_UPDATE_DIRECTORY, profile.name), 0x777)
+
         for dep in self.b1api.list_namespaced_deployment(namespace=self.namespace).items:
             if dep.metadata.name == self._deployment_name(profile.name):
                 return
