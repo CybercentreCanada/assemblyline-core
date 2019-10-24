@@ -46,6 +46,7 @@ ERROR_EXPIRY_INTERVAL = 60*60  # how long we wait before we forgive an error. (s
 KUBERNETES_AL_CONFIG = os.environ.get('KUBERNETES_AL_CONFIG')
 
 HOSTNAME = os.getenv('HOSTNAME', platform.node())
+NAMESPACE = os.getenv('NAMESPACE', 'al')
 
 
 class ServiceProfile:
@@ -169,12 +170,11 @@ class ScalerServer(ServerBase):
         if KUBERNETES_AL_CONFIG:
             self.log.info("Loading Kubernetes cluster interface.")
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
-                                                   namespace=self.config.core.scaler.service_namespace,
-                                                   priority='al-service-priority')
+                                                   namespace=NAMESPACE, priority='al-service-priority')
         else:
             self.log.info("Loading Docker cluster interface.")
             # TODO allocation parameters should be read from config
-            self.controller = DockerController(logger=self.log, prefix=self.config.core.scaler.service_namespace,
+            self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
                                                cpu_overallocation=100, memory_overallocation=1.5,
                                                labels=labels, network='svc')
 
