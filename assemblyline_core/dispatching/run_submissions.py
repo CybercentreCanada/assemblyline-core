@@ -16,8 +16,7 @@ class SubmissionDispatchServer(ServerBase):
 
         config = forge.get_config()
         datastore = datastore or forge.get_datastore(config)
-        self.dispatcher = Dispatcher(logger=self.log, redis=redis, redis_persist=redis_persist,
-                                     datastore=datastore, counter_name='dispatcher_submissions')
+        self.dispatcher = Dispatcher(logger=self.log, redis=redis, redis_persist=redis_persist, datastore=datastore)
 
         if config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {config.core.metrics.apm_server.server_url}")

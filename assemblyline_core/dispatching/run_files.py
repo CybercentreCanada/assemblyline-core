@@ -16,8 +16,7 @@ class FileDispatchServer(ServerBase):
         
         config: Config = forge.get_config()
         datastore: AssemblylineDatastore = datastore or forge.get_datastore(config)
-        self.dispatcher = Dispatcher(redis=redis, redis_persist=redis_persist, datastore=datastore, logger=self.log,
-                                     counter_name='dispatcher_files')
+        self.dispatcher = Dispatcher(redis=redis, redis_persist=redis_persist, datastore=datastore, logger=self.log)
         
         if config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {config.core.metrics.apm_server.server_url}")
