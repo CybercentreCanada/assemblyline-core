@@ -246,7 +246,7 @@ class DispatchClient:
 
         # Update the temporary data table for this file
         temp_data_hash = ExpiringHash(get_temporary_submission_data_name(sid=task.sid, file_hash=task.fileinfo.sha256), host=self.redis)
-        for key, value in temporary_data or {}:
+        for key, value in (temporary_data or {}).items():
             temp_data_hash.set(key, value)
 
         # Send the extracted files to the dispatcher
