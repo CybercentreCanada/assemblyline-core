@@ -167,8 +167,9 @@ class DispatchClient:
                 self.log.warning(f"{worker_id}:{service_name}: marking task  {task.sid}:{task.fileinfo.sha256} "
                                  f"failed: TASK PREEMPTED")
                 error = Error(dict(
+                    archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
                     created='NOW',
-                    expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60),
+                    expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60) if task.ttl else None,
                     response=dict(
                         message=f'The number of retries has passed the limit.',
                         service_name=task.service_name,
@@ -216,8 +217,10 @@ class DispatchClient:
         # most distant expiry time to prevent pulling it out from under another submission too early
         with Lock(f"lock-{result_key}", 5, self.redis):
             old = self.ds.result.get(result_key)
-            if old:
+            if old and old.expiry_ts and result.expiry_ts:
                 result.expiry_ts = max(result.expiry_ts, old.expiry_ts)
+            else:
+                result.expiry_ts = None
             self.ds.result.save(result_key, result)
 
         # Let the logs know we have received a result for this task
@@ -264,6 +267,7 @@ class DispatchClient:
                         ExpiringHash(child_hash_name, host=self.redis).multi_set(parent_data)
 
                     self._dispatching_error(task, process_table, Error({
+                        'archive_ts': result.archive_ts,
                         'expiry_ts': result.expiry_ts,
                         'response': {
                             'message': f"Too many files extracted for submission {task.sid} "
@@ -297,6 +301,7 @@ class DispatchClient:
         else:
             for extracted_data in result.response.extracted:
                 self._dispatching_error(task, process_table, Error({
+                    'archive_ts': result.archive_ts,
                     'expiry_ts': result.expiry_ts,
                     'response': {
                         'message': f"{task.service_name} has extracted a file "

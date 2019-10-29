@@ -55,7 +55,11 @@ class RandomService(ServerBase):
             if not message:
                 continue
 
-            expiry_ts = now_as_iso(self.config.submission.dtl * 24 * 60 * 60)
+            archive_ts = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
+            if self.config.submission.dtl:
+                expiry_ts = now_as_iso(self.config.submission.dtl * 24 * 60 * 60)
+            else:
+                expiry_ts = None
             queue, msg = message
             task = ServiceTask(msg)
 
@@ -78,6 +82,7 @@ class RandomService(ServerBase):
                     result = random_model_obj(Result)
                 result.sha256 = task.fileinfo.sha256
                 result.response.service_name = task.service_name
+                result.archive_ts = archive_ts
                 result.expiry_ts = expiry_ts
                 result_key = result.build_key(hashlib.md5(task.service_config.encode("utf-8")).hexdigest())
 
@@ -90,6 +95,7 @@ class RandomService(ServerBase):
                 for f in new_files:
                     if not self.datastore.file.get(f.sha256):
                         random_file = random_model_obj(File)
+                        random_file.archive_ts = archive_ts
                         random_file.expiry_ts = expiry_ts
                         random_file.sha256 = f.sha256
                         self.datastore.file.save(f.sha256, random_file)
@@ -108,6 +114,7 @@ class RandomService(ServerBase):
 
             else:
                 error = random_model_obj(Error)
+                error.archive_ts = archive_ts
                 error.expiry_ts = expiry_ts
                 error.sha256 = task.fileinfo.sha256
                 error.response.service_name = task.service_name

@@ -51,6 +51,7 @@ class FakeCounter(object):
     def get(self, name):
         return self.counts.get(name, 0)
 
+# TODO: We need to test archiving as well
 
 def test_expire_all(ds):
     expiry = ExpiryManager()

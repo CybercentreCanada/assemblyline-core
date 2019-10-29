@@ -290,6 +290,7 @@ class Dispatcher:
             errors = []
             for file_sha in missing.keys:
                 error = Error(dict(
+                    archive_ts=submission.archive_ts,
                     expiry_ts=submission.expiry_ts,
                     response=dict(
                         message="Submission couldn't be completed due to missing file.",

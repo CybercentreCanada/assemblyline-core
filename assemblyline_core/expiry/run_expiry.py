@@ -11,6 +11,7 @@ from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.expiry_heartbeat import Metrics
 
+#TODO: patch for archiving as well
 
 class ExpiryManager(ServerBase):
     def __init__(self):

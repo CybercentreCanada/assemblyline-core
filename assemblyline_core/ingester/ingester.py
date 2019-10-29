@@ -391,7 +391,7 @@ class Ingester:
 
         with self.cache_lock:
             fs = self.cache[scan_key] = FileScore({
-                'expiry_ts': now(2 * 24 * 60 * 60),
+                'expiry_ts': now(self.config.core.ingester.cache_dtl * 24 * 60 * 60),
                 'errors': errors,
                 'psid': psid,
                 'score': score,

@@ -131,10 +131,11 @@ class SubmissionClient:
 
             # We should now have all the information we need to construct a submission object
             sub = Submission(dict(
+                archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
                 classification=classification,
                 error_count=0,
                 errors=[],
-                expiry_ts=now_as_iso(submission_obj.params.ttl * 24 * 60 * 60),
+                expiry_ts=now_as_iso(submission_obj.params.ttl * 24 * 60 * 60) if submission_obj.params.ttl else None,
                 file_count=len(submission_obj.files),
                 files=submission_obj.files,
                 max_score=0,

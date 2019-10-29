@@ -291,12 +291,15 @@ def process_alert_message(counter, datastore, logger, alert_data):
             'score': alert_data['score']
         },
         'alert_id': generate_alert_id(alert_data),
-        'expiry_ts': now_as_iso(config.core.alerter.alert_ttl * 24 * 60 * 60),
+        'archive_ts': now_as_iso(config.datastore.ilm.days_until_archive * 24 * 60 * 60),
         'metadata': {safe_str(key): value for key, value in alert_data['submission']['metadata'].items()},
         'sid': alert_data['submission']['sid'],
         'ts': alert_data['submission']['time'],
         'type': alert_data['submission']['params']['type']
     }
+
+    if config.core.alerter.alert_ttl:
+        alert['expiry_ts'] = now_as_iso(config.core.alerter.alert_ttl * 24 * 60 * 60)
 
     ###############################
     # Additional alert_data parsing

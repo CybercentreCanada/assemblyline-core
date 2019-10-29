@@ -67,8 +67,9 @@ class Plumber(ServerBase):
                             break
 
                         error = Error(dict(
+                            archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
                             created='NOW',
-                            expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60),
+                            expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60) if task.ttl else None,
                             response=dict(
                                 message='The service was disabled while processing this task.',
                                 service_name=task.service_name,
