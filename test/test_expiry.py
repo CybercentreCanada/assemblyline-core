@@ -9,9 +9,9 @@ from assemblyline.odm.randomizer import random_model_obj
 
 MAX_OBJECTS = 10
 MIN_OBJECTS = 2
-datastore = forge.get_datastore()
-collections_len = {}
-
+datastore = forge.get_datastore(multi=True)
+expiry_collections_len = {}
+archive_collections_len = {}
 
 def purge_data():
     for name, definition in datastore.ds.get_models().items():
@@ -19,8 +19,8 @@ def purge_data():
             getattr(datastore, name).wipe()
 
 
-@pytest.fixture(scope="module")
-def ds(request):
+@pytest.fixture(scope="function")
+def ds_expiry(request):
     for name, definition in datastore.ds.get_models().items():
         if hasattr(definition, 'expiry_ts'):
             collection = getattr(datastore, name)
@@ -31,8 +31,26 @@ def ds(request):
                 obj.expiry_ts = now_as_iso(-10000)
                 collection.save(str(x), obj)
 
+            expiry_collections_len[name] = expiry_len
             collection.commit()
-            collections_len[name] = expiry_len
+
+    request.addfinalizer(purge_data)
+    return datastore
+
+@pytest.fixture(scope="function")
+def ds_archive(request):
+    for name, definition in datastore.ds.get_models().items():
+        if hasattr(definition, 'archive_ts'):
+            collection = getattr(datastore, name)
+            collection.wipe()
+            expiry_len = random.randint(MIN_OBJECTS, MAX_OBJECTS)
+            for x in range(expiry_len):
+                obj = random_model_obj(collection.model_class)
+                obj.archive_ts = now_as_iso(-10000)
+                collection.save(str(x), obj)
+
+            archive_collections_len[name] = expiry_len
+            collection.commit()
 
     request.addfinalizer(purge_data)
     return datastore
@@ -51,15 +69,26 @@ class FakeCounter(object):
     def get(self, name):
         return self.counts.get(name, 0)
 
-# TODO: We need to test archiving as well
-
-def test_expire_all(ds):
+def test_expire_all(ds_expiry):
     expiry = ExpiryManager()
     expiry.counter = FakeCounter()
-    expiry.run_once()
+    expiry.counter_archive = FakeCounter()
+    expiry.run_expiry_once()
 
-    for k, v in collections_len.items():
+    for k, v in expiry_collections_len.items():
         assert v == expiry.counter.get(k)
-        collection = getattr(ds, k)
+        collection = getattr(ds_expiry, k)
         collection.commit()
         assert collection.search("id:*")['total'] == 0
+
+def test_archive_all(ds_archive):
+    expiry = ExpiryManager()
+    expiry.counter = FakeCounter()
+    expiry.counter_archive = FakeCounter()
+    expiry.run_archive_once()
+
+    for k, v in archive_collections_len.items():
+        assert v == expiry.counter_archive.get(k)
+        collection = getattr(ds_archive, k)
+        collection.commit()
+        assert collection.search("id:*")['total'] == v

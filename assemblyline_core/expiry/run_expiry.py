@@ -5,23 +5,24 @@ import time
 
 import elasticapm
 
+from assemblyline.common.isotime import now_as_iso
 from assemblyline_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.expiry_heartbeat import Metrics
 
-#TODO: patch for archiving as well
-
 class ExpiryManager(ServerBase):
     def __init__(self):
         self.config = forge.get_config()
         super().__init__('assemblyline.expiry', shutdown_timeout=self.config.core.expiry.sleep_time + 5)
-        self.datastore = forge.get_datastore(config=self.config)
+        self.datastore = forge.get_datastore(config=self.config, multi=True)
         self.filestore = forge.get_filestore(config=self.config)
         self.cachestore = FileStore(*self.config.filestore.cache)
         self.expirable_collections = []
+        self.archiveable_collections = []
         self.counter = MetricsFactory('expiry', Metrics)
+        self.counter_archive = MetricsFactory('archive', Metrics)
 
         self.fs_hashmap = {
             'file': self.filestore.delete,
@@ -29,6 +30,8 @@ class ExpiryManager(ServerBase):
         }
 
         for name, definition in self.datastore.ds.get_models().items():
+            if hasattr(definition, 'archive_ts'):
+                self.archiveable_collections.append(getattr(self.datastore, name))
             if hasattr(definition, 'expiry_ts'):
                 self.expirable_collections.append(getattr(self.datastore, name))
 
@@ -47,18 +50,22 @@ class ExpiryManager(ServerBase):
         if self.apm_client:
             elasticapm.uninstrument()
 
-    def run_once(self):
+    def run_expiry_once(self):
+        now = now_as_iso()
+        delay = self.config.core.expiry.delay
+        hour = self.datastore.ds.hour
+        day = self.datastore.ds.day
+
+        # Expire data
         for collection in self.expirable_collections:
             # Start of expiry transaction
             if self.apm_client:
                 self.apm_client.begin_transaction("Delete expired documents")
 
             if self.config.core.expiry.batch_delete:
-                delete_query = f"expiry_ts:[* TO {self.datastore.ds.now}-{self.config.core.expiry.delay}" \
-                    f"{self.datastore.ds.hour}/DAY]"
+                delete_query = f"expiry_ts:[* TO {now}||-{delay}{hour}/{day}]"
             else:
-                delete_query = f"expiry_ts:[* TO {self.datastore.ds.now}-{self.config.core.expiry.delay}" \
-                    f"{self.datastore.ds.hour}]"
+                delete_query = f"expiry_ts:[* TO {now}||-{delay}{hour}]"
 
             number_to_delete = collection.search(delete_query, rows=0, as_obj=False)['total']
 
@@ -94,9 +101,41 @@ class ExpiryManager(ServerBase):
             if self.apm_client:
                 self.apm_client.end_transaction(collection.name, 'deleted')
 
+    def run_archive_once(self):
+        now = now_as_iso()
+        # Archive data
+        for collection in self.archiveable_collections:
+            # Start of expiry transaction
+            if self.apm_client:
+                self.apm_client.begin_transaction("Archive older documents")
+
+            archive_query = f"archive_ts:[* TO {now}]"
+
+            number_to_archive = collection.search(archive_query, rows=0, as_obj=False)['total']
+
+            if self.apm_client:
+                elasticapm.tag(query=archive_query)
+                elasticapm.tag(number_to_archive=number_to_archive)
+
+            self.log.info(f"Processing collection: {collection.name}")
+            if number_to_archive != 0:
+                # Proceed with archiving
+                collection.archive(archive_query)
+                self.counter_archive.increment(f'{collection.name}', increment_by=number_to_archive)
+
+                self.log.info(f"    Archived {number_to_archive} items to the time sliced storage...")
+
+            else:
+                self.log.debug("    Nothing to archive in this collection.")
+
+            # End of expiry transaction
+            if self.apm_client:
+                self.apm_client.end_transaction(collection.name, 'archived')
+
     def try_run(self):
         while self.running:
-            self.run_once()
+            self.run_expiry_once()
+            self.run_archive_once()
             time.sleep(self.config.core.expiry.sleep_time)
 
 
