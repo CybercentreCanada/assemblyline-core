@@ -4,7 +4,7 @@ from typing import Dict, Tuple, List
 from kubernetes import client, config
 from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1KeyToPath, V1ConfigMapVolumeSource, \
-    V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements
+    V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1Lifecycle, V1Handler, V1ExecAction
 from kubernetes.client.rest import ApiException
 
 from assemblyline_core.scaler.controllers.interface import ControllerInterface
@@ -238,6 +238,7 @@ class KubernetesController(ControllerInterface):
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
                 requests={'cpu': cores/4, 'memory': f'{int(memory/4)}Mi'},
             ),
+            lifecycle=V1Lifecycle(pre_stop=V1Handler(_exec=V1ExecAction(['python', '/media/stopping/log.py'])))
         )]
 
     def _create_deployment(self, profile, scale: int, replace=False):
@@ -256,7 +257,7 @@ class KubernetesController(ControllerInterface):
             volumes=volumes,
             containers=self._create_containers(profile, mounts),
             priority_class_name=self.priority,
-            termination_grace_period_seconds=profile.shutdown_seconds
+            termination_grace_period_seconds=profile.shutdown_seconds,
         )
 
         template = V1PodTemplateSpec(

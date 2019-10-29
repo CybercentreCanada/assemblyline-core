@@ -171,6 +171,7 @@ class ScalerServer(ServerBase):
             self.log.info("Loading Kubernetes cluster interface.")
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
                                                    namespace=NAMESPACE, priority='al-service-priority')
+            self.controller.config_mount('shutdown-script', 'shutdown-script', 'script', 'log.py', '/media/stopping/')
         else:
             self.log.info("Loading Docker cluster interface.")
             # TODO allocation parameters should be read from config
