@@ -16,7 +16,7 @@ class ExpiryManager(ServerBase):
     def __init__(self):
         self.config = forge.get_config()
         super().__init__('assemblyline.expiry', shutdown_timeout=self.config.core.expiry.sleep_time + 5)
-        self.datastore = forge.get_datastore(config=self.config, multi=True)
+        self.datastore = forge.get_datastore(config=self.config, archive_access=True)
         self.filestore = forge.get_filestore(config=self.config)
         self.cachestore = FileStore(*self.config.filestore.cache)
         self.expirable_collections = []

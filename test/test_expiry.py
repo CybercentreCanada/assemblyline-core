@@ -9,7 +9,7 @@ from assemblyline.odm.randomizer import random_model_obj
 
 MAX_OBJECTS = 10
 MIN_OBJECTS = 2
-datastore = forge.get_datastore(multi=True)
+datastore = forge.get_datastore(archive_access=True)
 expiry_collections_len = {}
 archive_collections_len = {}
 
