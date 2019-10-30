@@ -90,7 +90,7 @@ class KubernetesController(ControllerInterface):
 
     def config_mount(self, name, config_map, key, file_name, target_path):
         volume = V1Volume(
-            name='al-config',
+            name=name,
             config_map=V1ConfigMapVolumeSource(
                 name=config_map,
                 items=[V1KeyToPath(key=key, path=file_name)],
