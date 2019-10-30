@@ -1,10 +1,11 @@
 #!/usr/bin/env python
-import time
 
+import copy
 import elasticapm
 import elasticsearch
+import json
 import sys
-import copy
+import time
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from collections import Counter
@@ -45,6 +46,60 @@ def cleanup_metrics(input_dict):
 
     return output_dict
 
+def ilm_policy_exists(es, name):
+    conn = es.transport.get_connection()
+    pol_req = conn.session.get(f"{conn.base_url}/_ilm/policy/{name}_policy")
+    return pol_req.ok
+
+def create_ilm_policy(es, name, ilm_config):
+    data_base = {
+        "policy": {
+            "phases": {
+                "hot": {
+                    "min_age": "0ms",
+                    "actions": {
+                        "set_priority": {
+                            "priority": 100
+                        },
+                        "rollover": {
+                            "max_age": f"{ilm_config['warm']}{ilm_config['unit']}"
+                        }
+                    }
+                },
+                "warm": {
+                    "actions": {
+                        "set_priority": {
+                            "priority": 50
+                        }
+                    }
+                },
+                "cold": {
+                    "min_age": f"{ilm_config['cold']}{ilm_config['unit']}",
+                    "actions": {
+                        "set_priority": {
+                            "priority": 20
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if ilm_config['delete']:
+        data_base['policy']['phases']['delete'] = {
+            "min_age": f"{ilm_config['delete']}{ilm_config['unit']}",
+            "actions": {
+                "delete": {}
+            }
+        }
+
+    conn = es.transport.get_connection()
+    pol_req = conn.session.put(f"{conn.base_url}/_ilm/policy/{name}",
+                       headers={"Content-Type": "application/json"},
+                       data=json.dumps(data_base))
+    if not pol_req.ok:
+        raise Exception(f"ERROR: Failed to create ILM policy: {name}_policy")
+
 
 class MetricsServer(ServerBase):
     """
@@ -75,7 +130,8 @@ class MetricsServer(ServerBase):
 
     def try_run(self):
         self.metrics_queue = CommsQueue(METRICS_QUEUE)
-        self.es = elasticsearch.Elasticsearch(hosts=self.elastic_hosts)
+        self.es = elasticsearch.Elasticsearch(hosts=self.elastic_hosts,
+                                              connection_class=elasticsearch.RequestsHttpConnection)
 
         self.scheduler.add_job(self._create_aggregated_metrics, 'interval', seconds=60)
         self.scheduler.start()
@@ -140,11 +196,48 @@ class MetricsServer(ServerBase):
 
             output_metrics['timestamp'] = timestamp
             output_metrics = cleanup_metrics(output_metrics)
-            index_time = timestamp[:10].replace("-", ".")
 
             self.log.info(output_metrics)
             try:
-                self.es.index(f"al_metrics_{component_type}-{index_time}", output_metrics)
+                index = f"al_metrics_{component_type}"
+                policy = f"{index}_policy"
+                if not ilm_policy_exists(self.es, policy):
+                    self.log.debug(f"ILM Policy {policy.upper()} does not exists. Creating it now...")
+                    create_ilm_policy(self.es, policy, self.config.core.metrics.elasticsearch.as_primitives())
+
+                if not self.es.indices.exists_template(index):
+                    self.log.debug(f"Index template {index.upper()} does not exists. Creating it now...")
+
+                    template_body = {
+                        "index_patterns": [f"{index}-*"],
+                        "order": 1,
+                        "settings": {
+                            "index.lifecycle.name": policy,
+                            "index.lifecycle.rollover_alias": index
+                        }
+                    }
+
+                    try:
+                        self.es.indices.put_template(index, template_body)
+                    except elasticsearch.exceptions.RequestError as e:
+                        if "resource_already_exists_exception" not in str(e):
+                            raise
+                        self.log.warning(f"Tried to create an index template that already exists: {index.upper()}")
+
+                if not self.es.indices.exists_alias(index):
+                    self.log.debug(f"Index alias {index.upper()} does not exists. Creating it now...")
+
+                    index_body = {"aliases": {index: {"is_write_index": True}}}
+
+                    try:
+                        self.es.indices.create(f"{index}-000001", index_body)
+                    except elasticsearch.exceptions.RequestError as e:
+                        if "resource_already_exists_exception" not in str(e):
+                            raise
+                        self.log.warning(f"Tried to create an index template that "
+                                         f"already exists: {index.upper()}-000001")
+
+                self.es.index(index=index, body=output_metrics)
             except Exception as e:
                 self.log.exception(e)
 
