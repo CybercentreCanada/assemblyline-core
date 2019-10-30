@@ -90,7 +90,7 @@ class KubernetesController(ControllerInterface):
 
     def config_mount(self, name, config_map, key, file_name, target_path):
         volume = V1Volume(
-            name='al-config',
+            name=name,
             config_map=V1ConfigMapVolumeSource(
                 name=config_map,
                 items=[V1KeyToPath(key=key, path=file_name)],
@@ -241,14 +241,16 @@ class KubernetesController(ControllerInterface):
             lifecycle=V1Lifecycle(pre_stop=V1Handler(_exec=V1ExecAction(['python', '/media/stopping/log.py'])))
         )]
 
-    def _create_deployment(self, profile, scale: int, replace=False):
+    def _create_deployment(self, profile, scale: int):
+
+        replace = False
 
         if not os.path.exists(os.path.join(FILE_UPDATE_DIRECTORY, profile.name)):
             os.makedirs(os.path.join(FILE_UPDATE_DIRECTORY, profile.name), 0x777)
 
         for dep in self.b1api.list_namespaced_deployment(namespace=self.namespace).items:
             if dep.metadata.name == self._deployment_name(profile.name):
-                return
+                replace = True
 
         volumes, mounts = self._create_volumes(profile)
         metadata = self._create_metadata(profile.name)
@@ -278,8 +280,10 @@ class KubernetesController(ControllerInterface):
         )
 
         if replace:
+            self.logger.info("Requesting kubernetes replace deployment info for: " + metadata.name)
             self.b1api.replace_namespaced_deployment(namespace=self.namespace, body=deployment, name=metadata.name)
         else:
+            self.logger.info("Requesting kubernetes create deployment info for: " + metadata.name)
             self.b1api.create_namespaced_deployment(namespace=self.namespace, body=deployment)
 
     def get_target(self, service_name: str) -> int:
@@ -309,7 +313,7 @@ class KubernetesController(ControllerInterface):
                 return
 
     def restart(self, service):
-        self._create_deployment(service, self.get_target(service.name), replace=True)
+        self._create_deployment(service, self.get_target(service.name))
 
     def get_running_container_names(self):
         pods = self.api.list_pod_for_all_namespaces(field_selector='status.phase==Running')
