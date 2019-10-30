@@ -278,8 +278,10 @@ class KubernetesController(ControllerInterface):
         )
 
         if replace:
+            self.logger.info("Requesting kubernetes replace deployment info for: " + metadata.name)
             self.b1api.replace_namespaced_deployment(namespace=self.namespace, body=deployment, name=metadata.name)
         else:
+            self.logger.info("Requesting kubernetes create deployment info for: " + metadata.name)
             self.b1api.create_namespaced_deployment(namespace=self.namespace, body=deployment)
 
     def get_target(self, service_name: str) -> int:

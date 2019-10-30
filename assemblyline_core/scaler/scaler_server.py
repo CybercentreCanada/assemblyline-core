@@ -224,6 +224,7 @@ class ScalerServer(ServerBase):
                     self.log.info(f'Removing {service.name} from scaling')
                     self.profiles.pop(name)
                     self.controller.set_target(name, 0)
+                    continue
 
                 # Build the docker config for the service
                 docker_config = service.docker_config
@@ -257,6 +258,7 @@ class ScalerServer(ServerBase):
                         self.log.info(f"Updating deployment information for {name}")
                         profile.container_config = docker_config
                         self.controller.restart(profile)
+                        self.log.info(f"Deployment information for {name} replaced")
 
                     if service.licence_count == 0:
                         profile._max_instances = float('inf')
