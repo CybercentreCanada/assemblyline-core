@@ -210,6 +210,8 @@ class ScalerServer(ServerBase):
 
     def sync_services(self):
         self.scheduler.enter(SERVICE_SYNC_INTERVAL, 0, self.sync_services)
+        default_settings = self.config.core.scaler.service_defaults
+
         # Get all the service data
         for service in self.datastore.list_all_services(full=True):
             service: Service = service
@@ -223,17 +225,16 @@ class ScalerServer(ServerBase):
                     self.profiles.pop(name)
                     self.controller.set_target(name, 0)
 
+                # Build the docker config for the service
+                docker_config = service.docker_config
+                set_keys = set(var.name for var in docker_config.environment)
+                for var in default_settings.environment:
+                    if var.name not in set_keys:
+                        docker_config.environment.append(var)
+
                 # Check that all enabled services are enabled
                 if service.enabled and name not in self.profiles:
                     self.log.info(f'Adding {service.name} to scaling')
-                    default_settings = self.config.core.scaler.service_defaults
-
-                    # Apply global options to the docker configuration
-                    docker_config = service.docker_config
-                    set_keys = set(var.name for var in docker_config.environment)
-                    for var in default_settings.environment:
-                        if var.name not in set_keys:
-                            docker_config.environment.append(var)
 
                     # Add the service to the list of services being scaled
                     self.add_service(ServiceProfile(
@@ -249,18 +250,12 @@ class ScalerServer(ServerBase):
                     ))
 
                 # Update RAM, CPU, licence requirements for running services
-                if service.enabled and name in self.profiles:
-                    default_settings = self.config.core.scaler.service_defaults
+                elif service.enabled:
                     profile = self.profiles[name]
-                    docker_config = service.docker_config
-                    set_keys = set(var.name for var in docker_config.environment)
-                    for var in default_settings.environment:
-                        if var.name not in set_keys:
-                            docker_config.environment.append(var)
 
-                    if profile.container_config != service.docker_config:
+                    if profile.container_config != docker_config:
                         self.log.info(f"Updating deployment information for {name}")
-                        profile.container_config = service.docker_config
+                        profile.container_config = docker_config
                         self.controller.restart(profile)
 
                     if service.licence_count == 0:
