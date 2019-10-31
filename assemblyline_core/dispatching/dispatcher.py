@@ -581,7 +581,8 @@ class Dispatcher:
                     ttl=submission.params.ttl,
                     ignore_cache=submission.params.ignore_cache,
                     tags=file_tags_data,
-                    temporary_submission_data=temporary_data
+                    temporary_submission_data=temporary_data,
+                    deep_scan=submission.params.deep_scan,
                 ))
                 dispatch_table.dispatch(file_hash, service_name)
                 queue = self.volatile_named_queue(service_queue_name(service_name))
