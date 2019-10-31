@@ -141,6 +141,7 @@ class IngestTask(odm.Model):
     score = odm.Optional(odm.Integer())  # Score from previous processing of this file
     extended_scan = odm.Enum(EXTENDED_SCAN_VALUES, default="skipped")
     ingest_id = odm.UUID()
+    ingest_time = odm.Date(default="NOW")
 
 
 class Ingester:
