@@ -7,30 +7,30 @@ TODO:
 
 """
 import os
+import random
 import sched
 import shutil
-import tempfile
-import random
 import string
-import json
+import tempfile
 import time
 from contextlib import contextmanager
 from threading import Thread
 from typing import Dict
 
 import docker
+import yaml
 from passlib.hash import bcrypt
 
-from assemblyline_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.security import get_random_password, get_password_hash
 from assemblyline.datastore.helper import AssemblylineDatastore
+from assemblyline.odm.models.service import DockerConfig
 from assemblyline.odm.models.user import User
 from assemblyline.odm.models.user_settings import UserSettings
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline.odm.models.service import DockerConfig
-from assemblyline.common.security import get_random_password, get_password_hash
+from assemblyline_core.server_base import ServerBase
 
 SERVICE_SYNC_INTERVAL = 30  # How many seconds between checking for new services, or changes in service status
 UPDATE_CHECK_INTERVAL = 5   # How many seconds per check for outstanding updates
@@ -73,7 +73,7 @@ class DockerUpdateInterface:
     def __init__(self):
         self.client = docker.from_env()
 
-    def launch(self, name, docker_config: DockerConfig, mounts, env, namespace: str, blocking: bool = True):
+    def launch(self, name, docker_config: DockerConfig, mounts, env, blocking: bool = True):
         """Run a container to completion."""
         self.client.containers.run(
             image=docker_config.image,
@@ -81,16 +81,16 @@ class DockerUpdateInterface:
             # cpu_period=100000,
             # cpu_quota=int(100000*prof.cpu),
             # mem_limit=f'{prof.ram}m',
-            restart_policy={'Name': 'never'},
+            restart_policy={'Name': 'no'},
             command=docker_config.command,
             volumes={os.path.join(row['volume'], row['source_path']): {'bind': row['dest_path'], 'mode': 'rw'}
                      for row in mounts},
-            environment=[f'{_e.name}={_e.value}' for _e in docker_config.environment]
-                        + [f'{_e.name}={_e.value}' for _e in env],
+            environment=[f'{_e.name}={_e.value}' for _e in docker_config.environment] +
+                        [f'{k}={v}' for k, v in env.items()],
             detach=not blocking,
         )
 
-    def restart(self, service_name, namespace):
+    def restart(self, service_name):
         for container in self.client.containers.list(filters={'label': f'component={service_name}'}):
             container.kill()
 
@@ -188,7 +188,7 @@ class ServiceUpdater(ServerBase):
         self.running_updates = {name: thread for name, thread in self.running_updates.items() if thread.is_alive()}
 
         # Check if its time to try to update the service
-        for service_name, data in self.services.items():
+        for service_name, data in self.services.items().items():
             if data['next_update'] <= now_as_iso() and service_name not in self.running_updates:
                 self.running_updates[service_name] = Thread(
                     target=self.run_update,
@@ -230,7 +230,7 @@ class ServiceUpdater(ServerBase):
                 self.services.set(service_name, update_data)
 
             if update_hash:
-                self.controller.restart(service_name=service_name, namespace=self.config.core.scaler.service_namespace)
+                self.controller.restart(service_name=service_name)
 
         except BaseException:
             self.log.exception("An error occurred while running an update for: " + service_name)
@@ -251,14 +251,14 @@ class ServiceUpdater(ServerBase):
             with temporary_api_key(self.datastore, username) as api_key:
 
                 # Write out the parameters we want to pass to the update container
-                with open(os.path.join(input_directory, 'config.yaml'), 'w') as update_config:
-                    json.dump(update_config, {
+                with open(os.path.join(input_directory, 'config.yaml'), 'w') as fh:
+                    yaml.safe_dump({
                         'previous_update': previous_update,
                         'previous_hash': previous_hash,
-                        'sources': service.update_config.sources.as_primitives(),
+                        'sources': [x.as_primitives() for x in service.update_config.sources],
                         'api_user': username,
                         'api_key': api_key,
-                    })
+                    }, fh)
 
                 # Run the update container
                 self.controller.launch(
@@ -267,12 +267,12 @@ class ServiceUpdater(ServerBase):
                     mounts=[
                         {
                             'volume': FILE_UPDATE_VOLUME,
-                            'source_path': os.path.relpath(input_directory, FILE_UPDATE_DIRECTORY),
+                            'source_path': os.path.relpath(input_directory, start=FILE_UPDATE_DIRECTORY),
                             'dest_path': '/mount/input_directory'
                         },
                         {
                             'volume': FILE_UPDATE_VOLUME,
-                            'source_path': os.path.relpath(output_directory, FILE_UPDATE_DIRECTORY),
+                            'source_path': os.path.relpath(output_directory, start=FILE_UPDATE_DIRECTORY),
                             'dest_path': '/mount/output_directory'
                         },
                     ],
@@ -281,7 +281,6 @@ class ServiceUpdater(ServerBase):
                         'UPDATE_OUTPUT_PATH': '/mount/output_directory/'
                     },
                     blocking=True,
-                    namespace=self.config.core.scaler.core_namespace,
                 )
 
                 # Read out the results from the output container
@@ -291,7 +290,7 @@ class ServiceUpdater(ServerBase):
                     return None
 
                 with open(results_meta_file) as rf:
-                    results_meta = json.load(rf)
+                    results_meta = yaml.safe_load(rf)
                 update_hash = results_meta.get('hash', None)
 
                 # Erase the results meta file
