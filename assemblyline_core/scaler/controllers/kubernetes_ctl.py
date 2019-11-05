@@ -85,8 +85,15 @@ class KubernetesController(ControllerInterface):
         self.namespace = namespace
         self.config_mounts: List[Tuple[V1Volume, V1VolumeMount]] = []
 
-        # A record of previously reported events so that we don't report the same message repeatedly
+        # A record of previously reported events so that we don't report the same message repeatedly, fill it with
+        # existing messages so we don't have a huge dump of duplicates on restart
         self.events_window = {}
+        response = self.api.list_namespaced_event(namespace='al', pretty='false',
+                                                  field_selector='type=Warning', watch=False)
+        for event in response.items:
+            # Keep the scaler related events in case it helps us know why scaler was restarting
+            if 'scaler' not in event.involved_object.name:
+                self.events_window[event.metadata.uid] = event.count
 
     def _deployment_name(self, service_name):
         return (self.prefix + service_name).lower().replace('_', '-')
@@ -322,7 +329,8 @@ class KubernetesController(ControllerInterface):
         return [pod.metadata.name for pod in pods.items]
 
     def new_events(self):
-        response = self.api.list_namespaced_event(namespace='al', pretty='false', field_selector='type=Warning', watch=False)
+        response = self.api.list_namespaced_event(namespace='al', pretty='false',
+                                                  field_selector='type=Warning', watch=False)
 
         # Pull out events that are new, or have occurred again since last reporting
         new = []
