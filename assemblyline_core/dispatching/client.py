@@ -8,7 +8,11 @@ import json
 import hashlib
 import logging
 import time
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, cast
+
+from assemblyline.common.forge import CachedObject
+
+from assemblyline.odm.models.service import Service
 
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 
@@ -59,8 +63,12 @@ class DispatchClient:
         self.results = datastore.result
         self.errors = datastore.error
         self.files = datastore.file
-        self.schedule_builder = Scheduler(self.ds, self.config)
         self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
+        self.service_data = cast(Dict[str, Service], CachedObject(self._get_services))
+
+    def _get_services(self):
+        # noinspection PyUnresolvedReferences
+        return {x.name: x for x in self.datastore.list_all_services(full=True)}
 
     def dispatch_submission(self, submission: Submission, completed_queue: str = None):
         """Insert a submission into the dispatching system.
@@ -140,9 +148,6 @@ class DispatchClient:
             return None
         task = ServiceTask(result)
 
-        # Get the service information
-        service_data = self.schedule_builder.services[task.service_name]
-
         # If someone is supposed to be working on this task right now, we won't be able to add it
         if self.running_tasks.add(task.key(), task.as_primitives()):
             self.log.info(f"{worker_id}:{service_name}: task found {task.sid}:{task.fileinfo.sha256} ")
@@ -189,6 +194,8 @@ class DispatchClient:
                 return self.request_work(worker_id, service_name, service_version, blocking=blocking,
                                          timeout=timeout - (time.time() - start))
 
+            # Get the service information
+            service_data = self.service_data[task.service_name]
             self.timeout_watcher.touch_task(timeout=int(service_data.timeout), key=f'{task.sid}-{task.key()}',
                                             worker=worker_id, task_key=task.key())
             return task
