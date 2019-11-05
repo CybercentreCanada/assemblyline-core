@@ -83,9 +83,9 @@ class SubmissionClient:
 
                 for local_file in local_files:
                     # Upload/download, extract, analyze files
-                    file_hash, size, new_metadata = self._ready_file(local_file, expiry, classification, cleanup)
-                    self.filestore.upload(local_file, file_hash)
-                    submission_obj.metadata.update(**new_metadata)
+                    file_hash, size, new_metadata = self._ready_file(local_file, expiry, classification,
+                                                                     cleanup, upload=True)
+                    submission_obj.metadata.update(**new_metadata.get("al", {}).get("meta", {}))
 
                     # Check that after we have resolved exactly what to pass on, that it
                     # remains a valid target for scanning
@@ -97,7 +97,7 @@ class SubmissionClient:
                         raise SubmissionException(msg)
 
                     submission_obj.files.append(File({
-                        'name': safe_str(os.path.basename(local_file)),
+                        'name': new_metadata.get('name', safe_str(os.path.basename(local_file))),
                         'size': size,
                         'sha256': file_hash,
                     }))
@@ -123,6 +123,8 @@ class SubmissionClient:
 
                         if f.size is None:
                             f.size = size
+
+                        f.name = new_metadata.get('name', f.name)
 
                     finally:
                         if temporary_path:
@@ -162,7 +164,8 @@ class SubmissionClient:
                         except Exception:
                             self.log.error("Couldn't delete dangling file %s", path)
 
-    def _ready_file(self, local_path: str, expiry, classification, cleanup, sha256=None) -> Tuple[str, int, dict]:
+    def _ready_file(self, local_path: str, expiry, classification, cleanup,
+                    sha256=None, upload=False) -> Tuple[str, int, dict]:
         """Take a file from local storage and prepare it for submission.
 
         After this method finished the file will ONLY exist on the filestore, not locally.
@@ -190,6 +193,9 @@ class SubmissionClient:
                 sha256 = fileinfo['sha256']
                 self.filestore.upload(local_path, sha256)
                 self.datastore.save_or_freshen_file(sha256, fileinfo, expiry, classification, redis=self.redis)
+            elif upload:
+                self.filestore.upload(local_path, fileinfo['sha256'])
+
 
             return fileinfo['sha256'], fileinfo['size'], al_meta
 
