@@ -37,3 +37,6 @@ class ControllerInterface:
 
     def get_running_container_names(self):
         raise NotImplementedError()
+
+    def new_events(self):
+        return []

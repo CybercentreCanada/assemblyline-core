@@ -4,7 +4,7 @@ from typing import Dict, Tuple, List
 from kubernetes import client, config
 from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1KeyToPath, V1ConfigMapVolumeSource, \
-    V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1Lifecycle, V1Handler, V1ExecAction
+    V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements
 from kubernetes.client.rest import ApiException
 
 from assemblyline_core.scaler.controllers.interface import ControllerInterface
@@ -84,6 +84,9 @@ class KubernetesController(ControllerInterface):
         self.auto_cloud = False  #  TODO draw from config
         self.namespace = namespace
         self.config_mounts: List[Tuple[V1Volume, V1VolumeMount]] = []
+
+        # A record of previously reported events so that we don't report the same message repeatedly
+        self.events_window = {}
 
     def _deployment_name(self, service_name):
         return (self.prefix + service_name).lower().replace('_', '-')
@@ -237,8 +240,7 @@ class KubernetesController(ControllerInterface):
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
                 requests={'cpu': cores/4, 'memory': f'{int(memory/4)}Mi'},
-            ),
-            lifecycle=V1Lifecycle(pre_stop=V1Handler(_exec=V1ExecAction(['python', '/media/stopping/log.py'])))
+            )
         )]
 
     def _create_deployment(self, profile, scale: int):
@@ -318,3 +320,20 @@ class KubernetesController(ControllerInterface):
     def get_running_container_names(self):
         pods = self.api.list_pod_for_all_namespaces(field_selector='status.phase==Running')
         return [pod.metadata.name for pod in pods.items]
+
+    def new_events(self):
+        response = self.api.list_namespaced_event(namespace='al', pretty='false', field_selector='type=Warning', watch=False)
+
+        # Pull out events that are new, or have occurred again since last reporting
+        new = []
+        for event in response.items:
+            if self.events_window.get(event.metadata.uid, 0) != event.count:
+                self.events_window[event.metadata.uid] = event.count
+                new.append(event.involved_object.name + ': ' + event.message)
+
+        # Flush out events that have moved outside the window
+        old = set(self.events_window.keys()) - {event.metadata.uid for event in response.items}
+        for uid in old:
+            self.events_window.pop(uid)
+
+        return new
