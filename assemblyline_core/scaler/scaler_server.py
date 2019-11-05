@@ -35,6 +35,7 @@ SCALE_INTERVAL = 5
 METRIC_SYNC_INTERVAL = 0.1
 METRIC_EXPORT_INTERVAL = 60
 SERVICE_STATUS_FLUSH = 5
+CONTAINER_EVENTS_LOG_INTERVAL = 2
 
 # How many times to let a service generate an error in this module before we disable it.
 # This is only for analysis services, core services we keep retrying forever
@@ -171,7 +172,6 @@ class ScalerServer(ServerBase):
             self.log.info("Loading Kubernetes cluster interface.")
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
                                                    namespace=NAMESPACE, priority='al-service-priority')
-            self.controller.config_mount('shutdown-script', 'shutdown-script', 'script', 'log.py', '/media/stopping/')
         else:
             self.log.info("Loading Docker cluster interface.")
             # TODO allocation parameters should be read from config
@@ -202,6 +202,7 @@ class ScalerServer(ServerBase):
         self.process_timeouts()
         self.export_metrics()
         self.flush_service_status()
+        self.log_container_events()
 
         # Run as long as we need to
         while self.running:
@@ -471,3 +472,10 @@ class ScalerServer(ServerBase):
         for hostname in self.status_table.keys():
             if hostname not in names:
                 self.status_table.pop(hostname)
+
+    def log_container_events(self):
+        """The service status table may have references to containers that have crashed. Try to remove them all."""
+        self.scheduler.enter(CONTAINER_EVENTS_LOG_INTERVAL, 0, self.log_container_events)
+
+        for message in self.controller.new_events():
+            self.log.warning("Container Event :: " + message)
