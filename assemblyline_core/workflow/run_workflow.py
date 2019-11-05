@@ -59,6 +59,7 @@ class WorkflowManager(ServerBase):
         return ret_val
 
     def try_run(self):
+        self.datastore.alert.commit()
         while self.running:
             end_ts = self.get_last_reporting_ts(self.start_ts)
             if self.start_ts != end_ts:
