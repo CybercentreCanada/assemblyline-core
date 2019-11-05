@@ -33,7 +33,7 @@ from assemblyline.remote.datatypes.lock import Lock
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 
-from assemblyline_core.dispatching.dispatcher import SubmissionTask, FileTask, Scheduler, ServiceTask
+from assemblyline_core.dispatching.dispatcher import SubmissionTask, FileTask, ServiceTask
 from assemblyline_core.dispatching.dispatch_hash import DispatchHash
 from assemblyline_core.watcher.client import WatcherClient
 
@@ -68,7 +68,7 @@ class DispatchClient:
 
     def _get_services(self):
         # noinspection PyUnresolvedReferences
-        return {x.name: x for x in self.datastore.list_all_services(full=True)}
+        return {x.name: x for x in self.ds.list_all_services(full=True)}
 
     def dispatch_submission(self, submission: Submission, completed_queue: str = None):
         """Insert a submission into the dispatching system.
