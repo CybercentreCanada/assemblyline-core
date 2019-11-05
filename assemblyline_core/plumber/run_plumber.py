@@ -6,8 +6,6 @@ emptied. The status of all the services will be periodically checked and any ser
 disabled or deleted for which a service queue exists, the dispatcher will be informed that the task(s)
 had an error.
 """
-from __future__ import annotations
-from typing import TYPE_CHECKING
 import hashlib
 import json
 import time
@@ -22,12 +20,8 @@ from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.server_base import ServerBase, SHUTDOWN_SECONDS_LIMIT
 
 
-if TYPE_CHECKING:
-    import logging
-
-
 class Plumber(ServerBase):
-    def __init__(self, logger: logging.Logger = None, shutdown_timeout: float = SHUTDOWN_SECONDS_LIMIT, config=None,
+    def __init__(self, logger=None, shutdown_timeout: float = SHUTDOWN_SECONDS_LIMIT, config=None,
                  redis=None, redis_persist=None, datastore=None):
         super().__init__('plumber', logger, shutdown_timeout)
         self.config = config or forge.get_config()
