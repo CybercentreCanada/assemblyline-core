@@ -172,7 +172,7 @@ class KubernetesUpdateInterface:
             command=docker_config.command,
             env=environment_variables,
             image_pull_policy='Always',
-            volume_mounts=mounts,
+            volume_mounts=volume_mounts,
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
                 requests={'cpu': cores/4, 'memory': f'{int(memory/4)}Mi'},
