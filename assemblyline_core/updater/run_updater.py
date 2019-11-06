@@ -198,13 +198,11 @@ class KubernetesUpdateInterface:
             )
         )
 
-        self.batch_api.create_namespaced_job(namespace=self.namespace, body=job)
+        status = self.batch_api.create_namespaced_job(namespace=self.namespace, body=job).status
 
-        if blocking:
-            while True:
-                status = self.batch_api.read_namespaced_job_status(namespace=self.namespace, name=name).status
-                if status.failed or status.succeeded:
-                    return
+        while blocking and not(status.failed or status.succeeded):
+            time.sleep(3)
+            status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name).status
 
     def restart(self, service_name):
         name = (self.prefix + service_name.lower()).replace('_', '-')
