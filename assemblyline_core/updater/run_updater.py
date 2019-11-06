@@ -46,7 +46,7 @@ FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 
 # How many past updates to keep for file based updates
 UPDATE_FOLDER_LIMIT = 5
-NAMESPACE = os.getenv('NAMESPACE', 'al')
+NAMESPACE = os.getenv('NAMESPACE', None)
 
 
 @contextmanager
@@ -246,7 +246,7 @@ class ServiceUpdater(ServerBase):
         self.scheduler = sched.scheduler()
 
         #
-        if 'KUBERNETES_SERVICE_HOST' in os.environ:
+        if 'KUBERNETES_SERVICE_HOST' in os.environ and NAMESPACE:
             self.controller = KubernetesUpdateInterface(prefix='alsvc_', namespace=NAMESPACE,
                                                         priority_class='al-core-priority')
         else:
