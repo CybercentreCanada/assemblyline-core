@@ -135,9 +135,9 @@ class KubernetesUpdateInterface:
         volumes = []
         volume_mounts = []
 
-        for mnt in mounts:
+        for index, mnt in enumerate(mounts):
             volumes.append(V1Volume(
-                name=mnt['volume'],
+                name=f'mount-{index}',
                 persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
                     claim_name=mnt['volume'],
                     read_only=False
@@ -145,7 +145,7 @@ class KubernetesUpdateInterface:
             ))
 
             volume_mounts.append(V1VolumeMount(
-                name=mnt['volume'],
+                name=f'mount-{index}',
                 mount_path=mnt['dest_path'],
                 sub_path=mnt['source_path'],
                 read_only=False,
