@@ -22,6 +22,7 @@ import yaml
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
     V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements
 from kubernetes import client, config
+from kubernetes.client.rest import ApiException
 
 from passlib.hash import bcrypt
 
@@ -132,6 +133,14 @@ class KubernetesUpdateInterface:
     def launch(self, name, docker_config: DockerConfig, mounts, env, blocking: bool = True):
         name = (self.prefix + 'update-' + name.lower()).replace('_', '-')
 
+        try:
+            self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace, propagation_policy='Foreground')
+            while True:
+                self.batch_api.read_namespaced_job(namespace=self.namespace, name=name)
+                time.sleep(1)
+        except ApiException:
+            pass
+
         volumes = []
         volume_mounts = []
 
@@ -175,7 +184,7 @@ class KubernetesUpdateInterface:
             volume_mounts=volume_mounts,
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
-                requests={'cpu': cores/4, 'memory': f'{int(memory/4)}Mi'},
+                requests={'cpu': cores / 4, 'memory': f'{int(memory / 4)}Mi'},
             )
         )
 
@@ -200,9 +209,12 @@ class KubernetesUpdateInterface:
 
         status = self.batch_api.create_namespaced_job(namespace=self.namespace, body=job).status
 
-        while blocking and not(status.failed or status.succeeded):
-            time.sleep(3)
-            status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name).status
+        if blocking:
+            while not (status.failed or status.succeeded):
+                time.sleep(3)
+                status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name).status
+
+            self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace, propagation_policy='Foreground')
 
     def restart(self, service_name):
         name = (self.prefix + service_name.lower()).replace('_', '-')
