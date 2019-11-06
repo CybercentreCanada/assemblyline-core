@@ -181,6 +181,7 @@ class KubernetesUpdateInterface:
 
         pod = V1PodSpec(
             volumes=volumes,
+            restart_policy='Never',
             containers=[container],
             priority_class_name=self.priority_class,
         )
