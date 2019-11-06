@@ -19,6 +19,10 @@ from typing import Dict
 
 import docker
 import yaml
+from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
+    V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements
+from kubernetes import client, config
+
 from passlib.hash import bcrypt
 
 from assemblyline.common import forge
@@ -42,6 +46,7 @@ FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 
 # How many past updates to keep for file based updates
 UPDATE_FOLDER_LIMIT = 5
+NAMESPACE = os.getenv('NAMESPACE', 'al')
 
 
 @contextmanager
@@ -96,11 +101,115 @@ class DockerUpdateInterface:
 
 
 class KubernetesUpdateInterface:
-    def launch(self, name, docker_config: DockerConfig, mounts, env, namespace: str, blocking: bool = True):
-        raise NotImplementedError()
+    def __init__(self, prefix, namespace, priority_class):
+        # Try loading a kubernetes connection from either the fact that we are running
+        # inside of a cluster,
+        try:
+            config.load_incluster_config()
+        except config.config_exception.ConfigException:
+            # Load the configuration once to initialize the defaults
+            config.load_kube_config()
 
-    def restart(self, service_name, namespace):
-        raise NotImplementedError()
+            # Now we can actually apply any changes we want to make
+            cfg = client.configuration.Configuration()
+
+            if 'HTTPS_PROXY' in os.environ:
+                cfg.proxy = os.environ['HTTPS_PROXY']
+                if not cfg.proxy.startswith("http"):
+                    cfg.proxy = "https://" + cfg.proxy
+                client.Configuration.set_default(cfg)
+
+            # Load again with our settings set
+            config.load_kube_config(client_configuration=cfg)
+
+        self.prefix = prefix.lower()
+        self.b1api = client.AppsV1beta1Api()
+        self.api = client.CoreV1Api()
+        self.batch_api = client.BatchV1Api()
+        self.namespace = namespace
+        self.priority_class = priority_class
+
+    def launch(self, name, docker_config: DockerConfig, mounts, env, blocking: bool = True):
+        name = (self.prefix + 'update-' + name.lower()).replace('_', '-')
+
+        volumes = []
+        volume_mounts = []
+
+        for mnt in mounts:
+            volumes.append(V1Volume(
+                name=mnt['volume'],
+                persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
+                    claim_name=mnt['volume'],
+                    read_only=False
+                ),
+            ))
+
+            volume_mounts.append(V1VolumeMount(
+                name=mnt['volume'],
+                mount_path=mnt['dest_path'],
+                sub_path=mnt['source_path'],
+                read_only=False,
+            ))
+
+        metadata = V1ObjectMeta(
+            name=name,
+            labels={
+                'app': 'assemblyline',
+                'section': 'core',
+                'component': 'update-script'
+            }
+        )
+
+        environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in docker_config.environment]
+        environment_variables.extend([V1EnvVar(name=k, value=v) for k, v in env.items()])
+
+        cores = docker_config.cpu_cores
+        memory = docker_config.ram_mb
+
+        container = V1Container(
+            name=name,
+            image=docker_config.image,
+            command=docker_config.command,
+            env=environment_variables,
+            image_pull_policy='Always',
+            volume_mounts=mounts,
+            resources=V1ResourceRequirements(
+                limits={'cpu': cores, 'memory': f'{memory}Mi'},
+                requests={'cpu': cores/4, 'memory': f'{int(memory/4)}Mi'},
+            )
+        )
+
+        pod = V1PodSpec(
+            volumes=volumes,
+            containers=[container],
+            priority_class_name=self.priority_class,
+        )
+
+        job = V1Job(
+            metadata=metadata,
+            spec=V1JobSpec(
+                backoff_limit=1,
+                completions=1,
+                template=V1PodTemplateSpec(
+                    metadata=metadata,
+                    spec=pod
+                )
+            )
+        )
+
+        self.batch_api.create_namespaced_job(namespace=self.namespace, body=job)
+
+        if blocking:
+            while True:
+                status = self.batch_api.read_namespaced_job_status(namespace=self.namespace, name=name).status
+                if status.failed or status.succeeded:
+                    return
+
+    def restart(self, service_name):
+        name = (self.prefix + service_name.lower()).replace('_', '-')
+        scale = self.b1api.read_namespaced_deployment_scale(name=name, namespace=self.namespace)
+        scale.spec.replicas = 0
+        self.b1api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
 
 
 class ServiceUpdater(ServerBase):
@@ -138,7 +247,8 @@ class ServiceUpdater(ServerBase):
 
         #
         if 'KUBERNETES_SERVICE_HOST' in os.environ:
-            self.controller = KubernetesUpdateInterface()
+            self.controller = KubernetesUpdateInterface(prefix='alsvc_', namespace=NAMESPACE,
+                                                        priority_class='al-core-priority')
         else:
             self.controller = DockerUpdateInterface()
 
