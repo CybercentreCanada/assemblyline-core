@@ -48,7 +48,7 @@ def cleanup_metrics(input_dict):
 
 def ilm_policy_exists(es, name):
     conn = es.transport.get_connection()
-    pol_req = conn.session.get(f"{conn.base_url}/_ilm/policy/{name}_policy")
+    pol_req = conn.session.get(f"{conn.base_url}/_ilm/policy/{name}")
     return pol_req.ok
 
 def create_ilm_policy(es, name, ilm_config):
@@ -98,7 +98,7 @@ def create_ilm_policy(es, name, ilm_config):
                        headers={"Content-Type": "application/json"},
                        data=json.dumps(data_base))
     if not pol_req.ok:
-        raise Exception(f"ERROR: Failed to create ILM policy: {name}_policy")
+        raise Exception(f"ERROR: Failed to create ILM policy: {name}")
 
 
 class MetricsServer(ServerBase):
