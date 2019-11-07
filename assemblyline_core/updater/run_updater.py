@@ -362,11 +362,15 @@ class ServiceUpdater(ServerBase):
 
     def do_file_update(self, service, previous_hash, previous_update):
         """Update a service by running a container to get new files."""
-        input_directory = tempfile.mkdtemp(dir=self.temporary_directory)
-        output_directory = tempfile.mkdtemp(dir=self.temporary_directory)
+        temp_directory = tempfile.mkdtemp(dir=self.temporary_directory)
+        input_directory = os.path.join(temp_directory, 'input_directory')
+        output_directory = os.path.join(temp_directory, 'output_directory')
         service_dir = os.path.join(FILE_UPDATE_DIRECTORY, service.name)
 
         try:
+            os.makedirs(input_directory)
+            os.makedirs(output_directory)
+
             username = self.ensure_service_account()
 
             with temporary_api_key(self.datastore, username) as api_key:
@@ -388,13 +392,8 @@ class ServiceUpdater(ServerBase):
                     mounts=[
                         {
                             'volume': FILE_UPDATE_VOLUME,
-                            'source_path': os.path.relpath(input_directory, start=FILE_UPDATE_DIRECTORY),
-                            'dest_path': '/mount/input_directory'
-                        },
-                        {
-                            'volume': FILE_UPDATE_VOLUME,
-                            'source_path': os.path.relpath(output_directory, start=FILE_UPDATE_DIRECTORY),
-                            'dest_path': '/mount/output_directory'
+                            'source_path': os.path.relpath(temp_directory, start=FILE_UPDATE_DIRECTORY),
+                            'dest_path': '/mount/'
                         },
                     ],
                     env={
@@ -434,8 +433,7 @@ class ServiceUpdater(ServerBase):
                 return update_hash
         finally:
             # If the working directory is still there for any reason erase it
-            shutil.rmtree(input_directory, ignore_errors=True)
-            shutil.rmtree(output_directory, ignore_errors=True)
+            shutil.rmtree(temp_directory, ignore_errors=True)
 
     def ensure_service_account(self):
         """Check that the update service account exists, if it doesn't, create it."""
