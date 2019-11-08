@@ -48,6 +48,7 @@ FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 # How many past updates to keep for file based updates
 UPDATE_FOLDER_LIMIT = 5
 NAMESPACE = os.getenv('NAMESPACE', None)
+UI_SERVER = os.getenv('UI_SERVER', 'localhost:5000')
 
 
 @contextmanager
@@ -311,6 +312,7 @@ class ServiceUpdater(ServerBase):
         # Check if its time to try to update the service
         for service_name, data in self.services.items().items():
             if data['next_update'] <= now_as_iso() and service_name not in self.running_updates:
+                self.log.info(f"Time to update {service_name}")
                 self.running_updates[service_name] = Thread(
                     target=self.run_update,
                     kwargs=dict(service_name=service_name)
@@ -351,6 +353,7 @@ class ServiceUpdater(ServerBase):
                 self.services.set(service_name, update_data)
 
             if update_hash:
+                self.log(f"New update applied for {service_name}. Restarting service.")
                 self.controller.restart(service_name=service_name)
 
         except BaseException:
@@ -383,6 +386,7 @@ class ServiceUpdater(ServerBase):
                         'sources': [x.as_primitives() for x in service.update_config.sources],
                         'api_user': username,
                         'api_key': api_key,
+                        'ui_server': UI_SERVER
                     }, fh)
 
                 # Run the update container
@@ -407,6 +411,7 @@ class ServiceUpdater(ServerBase):
                 results_meta_file = os.path.join(output_directory, 'response.yaml')
 
                 if not os.path.exists(results_meta_file) or not os.path.isfile(results_meta_file):
+                    self.log.warning(f"Update produced no output for {service.name}")
                     return None
 
                 with open(results_meta_file) as rf:
