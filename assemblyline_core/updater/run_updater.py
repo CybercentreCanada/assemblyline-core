@@ -135,7 +135,7 @@ class KubernetesUpdateInterface:
         name = (self.prefix + 'update-' + name.lower()).replace('_', '-')
 
         try:
-            self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace, propagation_policy='Foreground')
+            self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace, propagation_policy='Background')
             while True:
                 self.batch_api.read_namespaced_job(namespace=self.namespace, name=name)
                 time.sleep(1)
@@ -215,7 +215,7 @@ class KubernetesUpdateInterface:
                 time.sleep(3)
                 status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name).status
 
-            self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace, propagation_policy='Foreground')
+            self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace, propagation_policy='Background')
 
     def restart(self, service_name):
         name = (self.prefix + service_name.lower()).replace('_', '-')
