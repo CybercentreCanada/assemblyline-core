@@ -55,7 +55,7 @@ UI_SERVER = os.getenv('UI_SERVER', 'localhost:5000')
 def temporary_api_key(ds: AssemblylineDatastore, user_name: str, permissions=('R', 'W')):
     """Creates a context where a temporary API key is available."""
 
-    name = ''.join(random.choices(string.ascii_letters, k=20))
+    name = ''.join(random.choices(string.ascii_lowercase, k=20))
     random_pass = get_random_password(length=48)
     ds.user.update(user_name, [
         (ds.user.UPDATE_SET, f'apikeys.{name}', {"password": bcrypt.encrypt(random_pass), "acl": permissions})
