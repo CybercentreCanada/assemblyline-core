@@ -68,7 +68,7 @@ class MockService(ServerBase):
 
     def try_run(self):
         while self.running:
-            task = self.dispatch_client.request_work('worker', self.service_name, '0', timeout=1)
+            task = self.dispatch_client.request_work('worker', self.service_name, '0', timeout=2)
             if not task:
                 continue
             print(self.service_name, 'has received a job', task.sid)

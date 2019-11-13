@@ -139,15 +139,16 @@ class DispatchClient:
                  been returned by request_work.
         """
         start = time.time()
-        while timeout > time.time() - start:
+        remaining = timeout
+        while int(remaining) > 0:
             try:
                 return self._request_work(worker_id, service_name, service_version,
-                                          blocking=blocking, timeout=timeout-(time.time()-start))
+                                          blocking=blocking, timeout=remaining)
             except RetryRequestWork:
-                pass
+                remaining = timeout - (time.time() - start)
         return None
 
-    def _request_work(self, worker_id, service_name, service_version, timeout: float = 60, blocking=True) -> Optional[ServiceTask]:
+    def _request_work(self, worker_id, service_name, service_version, timeout, blocking) -> Optional[ServiceTask]:
         # For when we recursively retry on bad task dequeue-ing
         if int(timeout) <= 0:
             self.log.info(f"{worker_id}:{service_name}: no task returned: timeout")
