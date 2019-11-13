@@ -236,7 +236,10 @@ class KubernetesController(ControllerInterface):
         cores = profile.container_config.cpu_cores
         memory = profile.container_config.ram_mb
         environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in profile.container_config.environment]
-        environment_variables += [V1EnvVar(name='UPDATE_PATH', value=CONTAINER_UPDATE_DIRECTORY)]
+        environment_variables += [
+            V1EnvVar(name='UPDATE_PATH', value=CONTAINER_UPDATE_DIRECTORY),
+            V1EnvVar(name='FILE_UPDATE_DIRECTORY', value=CONTAINER_UPDATE_DIRECTORY)
+        ]
         return [V1Container(
             name=self._deployment_name(profile.name),
             image=profile.container_config.image,

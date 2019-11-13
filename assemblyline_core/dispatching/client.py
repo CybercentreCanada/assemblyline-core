@@ -38,6 +38,10 @@ from assemblyline_core.dispatching.dispatch_hash import DispatchHash
 from assemblyline_core.watcher.client import WatcherClient
 
 
+class RetryRequestWork(Exception):
+    pass
+
+
 class DispatchClient:
     def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None):
         self.config = forge.get_config()
@@ -134,11 +138,21 @@ class DispatchClient:
         :return: The job found, and a boolean value indicating if this is the first time this task has
                  been returned by request_work.
         """
+        start = time.time()
+        remaining = timeout
+        while int(remaining) > 0:
+            try:
+                return self._request_work(worker_id, service_name, service_version,
+                                          blocking=blocking, timeout=remaining)
+            except RetryRequestWork:
+                remaining = timeout - (time.time() - start)
+        return None
+
+    def _request_work(self, worker_id, service_name, service_version, timeout, blocking) -> Optional[ServiceTask]:
         # For when we recursively retry on bad task dequeue-ing
         if int(timeout) <= 0:
             self.log.info(f"{worker_id}:{service_name}: no task returned: timeout")
             return None
-        start = time.time()
 
         # Get work from the queue
         work_queue = NamedQueue(service_queue_name(service_name), host=self.redis)
@@ -160,8 +174,7 @@ class DispatchClient:
             if abandoned or finished:
                 self.log.info(f"{worker_id}:{service_name}: task already complete {task.sid}:{task.fileinfo.sha256}")
                 self.running_tasks.pop(task.key())
-                return self.request_work(worker_id, service_name, service_version, blocking=blocking,
-                                         timeout=timeout - (time.time() - start))
+                raise RetryRequestWork()
 
             # Check if this task has reached the retry limit
             attempt_record = ExpiringHash(f'dispatch-hash-attempts-{task.sid}', host=self.redis)
@@ -191,16 +204,14 @@ class DispatchClient:
                 self.service_failed(task.sid, error_key, error)
                 export_metrics_once(service_name, Metrics, dict(fail_nonrecoverable=1),
                                     host=worker_id, counter_type='service')
-                return self.request_work(worker_id, service_name, service_version, blocking=blocking,
-                                         timeout=timeout - (time.time() - start))
+                raise RetryRequestWork()
 
             # Get the service information
             service_data = self.service_data[task.service_name]
             self.timeout_watcher.touch_task(timeout=int(service_data.timeout), key=f'{task.sid}-{task.key()}',
                                             worker=worker_id, task_key=task.key())
             return task
-        return self.request_work(worker_id, service_name, service_version,
-                                 blocking=blocking, timeout=timeout-(time.time()-start))
+        raise RetryRequestWork()
 
     def _dispatching_error(self, task, process_table, error):
         error_key = error.build_key()

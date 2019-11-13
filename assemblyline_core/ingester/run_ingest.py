@@ -96,8 +96,8 @@ class IngesterInput(ServerBase):
                 ))
                 task.submission.sid = None  # Reset to new random uuid
 
-            except ValueError:
-                self.log.warning(f"Dropped ingest submission {message}")
+            except (ValueError, TypeError) as error:
+                self.log.exception(f"Dropped ingest submission {message} because {str(error)}")
 
                 # End of ingest message (value_error)
                 if self.apm_client:

@@ -19,6 +19,7 @@ from typing import Dict
 
 import docker
 import yaml
+from assemblyline.remote.datatypes.lock import Lock
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
     V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements
 from kubernetes import client, config
@@ -54,17 +55,23 @@ UI_SERVER = os.getenv('UI_SERVER', 'localhost:5000')
 @contextmanager
 def temporary_api_key(ds: AssemblylineDatastore, user_name: str, permissions=('R', 'W')):
     """Creates a context where a temporary API key is available."""
-
-    name = ''.join(random.choices(string.ascii_lowercase, k=20))
-    random_pass = get_random_password(length=48)
-    ds.user.update(user_name, [
-        (ds.user.UPDATE_SET, f'apikeys.{name}', {"password": bcrypt.encrypt(random_pass), "acl": permissions})
-    ])
+    with Lock(f'user-{user_name}', timeout=10):
+        name = ''.join(random.choices(string.ascii_lowercase, k=20))
+        random_pass = get_random_password(length=48)
+        user = ds.user.get(user_name)
+        user.apikeys[name] = {
+            "password": bcrypt.encrypt(random_pass),
+            "acl": permissions
+        }
+        ds.user.save(user_name, user)
 
     try:
         yield f"{name}:{random_pass}"
     finally:
-        ds.user.update(user_name, [(ds.user.UPDATE_DELETE, 'apikeys', name)])
+        with Lock(f'user-{user_name}', timeout=10):
+            user = ds.user.get(user_name)
+            user.apikeys.pop(name)
+            ds.user.save(user_name, user)
 
 
 class DockerUpdateInterface:
