@@ -27,6 +27,7 @@ from typing import Tuple, List
 from assemblyline.common import forge
 from assemblyline.common import identify
 from assemblyline.common.codec import decode_file
+from assemblyline.common.dict_utils import flatten
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.str_utils import safe_str
 from assemblyline.datastore.helper import AssemblylineDatastore
@@ -85,7 +86,8 @@ class SubmissionClient:
                     # Upload/download, extract, analyze files
                     file_hash, size, new_metadata = self._ready_file(local_file, expiry, classification,
                                                                      cleanup, upload=True)
-                    submission_obj.metadata.update(**new_metadata.get("al", {}).get("meta", {}))
+                    new_name = new_metadata.pop('name', safe_str(os.path.basename(local_file)))
+                    submission_obj.metadata.update(**flatten(new_metadata))
 
                     # Check that after we have resolved exactly what to pass on, that it
                     # remains a valid target for scanning
@@ -97,7 +99,7 @@ class SubmissionClient:
                         raise SubmissionException(msg)
 
                     submission_obj.files.append(File({
-                        'name': new_metadata.get('name', safe_str(os.path.basename(local_file))),
+                        'name': new_name,
                         'size': size,
                         'sha256': file_hash,
                     }))
@@ -110,7 +112,8 @@ class SubmissionClient:
                         self.filestore.download(f.sha256, temporary_path)
                         file_hash, size, new_metadata = self._ready_file(temporary_path, expiry,
                                                                          classification, cleanup, sha256=f.sha256)
-                        submission_obj.metadata.update(**new_metadata)
+                        new_name = new_metadata.pop('name', f.name)
+                        submission_obj.metadata.update(**flatten(new_metadata))
 
                         # Check that after we have resolved exactly what to pass on, that it
                         # remains a valid target for scanning
@@ -124,7 +127,7 @@ class SubmissionClient:
                         if f.size is None:
                             f.size = size
 
-                        f.name = new_metadata.get('name', f.name)
+                        f.name = new_name
 
                     finally:
                         if temporary_path:
@@ -195,7 +198,6 @@ class SubmissionClient:
                 self.datastore.save_or_freshen_file(sha256, fileinfo, expiry, classification, redis=self.redis)
             elif upload:
                 self.filestore.upload(local_path, fileinfo['sha256'])
-
 
             return fileinfo['sha256'], fileinfo['size'], al_meta
 
