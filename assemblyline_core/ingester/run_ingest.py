@@ -96,7 +96,7 @@ class IngesterInput(ServerBase):
                 ))
                 task.submission.sid = None  # Reset to new random uuid
 
-            except ValueError:
+            except (ValueError, TypeError):
                 self.log.warning(f"Dropped ingest submission {message}")
 
                 # End of ingest message (value_error)
