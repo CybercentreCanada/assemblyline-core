@@ -202,12 +202,12 @@ class SubmissionClient:
 
             if extracted_path:
                 local_path = extracted_path
-                sha256 = fileinfo['sha256']
-                self.filestore.upload(local_path, sha256)
+                self.filestore.upload(local_path, fileinfo['sha256'])
             elif upload:
                 self.filestore.upload(local_path, fileinfo['sha256'])
 
-            self.datastore.save_or_freshen_file(sha256, fileinfo, expiry, al_meta['classification'], redis=self.redis)
+            self.datastore.save_or_freshen_file(fileinfo['sha256'], fileinfo, expiry,
+                                                al_meta['classification'], redis=self.redis)
             return fileinfo['sha256'], fileinfo['size'], al_meta
 
         finally:
