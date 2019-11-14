@@ -37,6 +37,8 @@ from assemblyline.filestore import CorruptedFileStoreException, FileStore
 
 from assemblyline_core.dispatching.client import DispatchClient
 
+Classification = forge.get_classification()
+
 
 def assert_valid_sha256(sha256):
     if len(sha256) != 64:
@@ -74,8 +76,7 @@ class SubmissionClient:
             local_files = []
 
         try:
-            classification = str(submission_obj.params.classification)
-            expiry = now_as_iso(submission_obj.params.ttl * 60 * 60 * 24)
+            expiry = now_as_iso(submission_obj.params.ttl * 24 * 60 * 60) if submission_obj.params.ttl else None
             max_size = self.config.submission.max_file_size
 
             if len(submission_obj.files) == 0:
@@ -84,9 +85,12 @@ class SubmissionClient:
 
                 for local_file in local_files:
                     # Upload/download, extract, analyze files
-                    file_hash, size, new_metadata = self._ready_file(local_file, expiry, classification,
+                    file_hash, size, new_metadata = self._ready_file(local_file, expiry,
+                                                                     str(submission_obj.params.classification),
                                                                      cleanup, upload=True)
                     new_name = new_metadata.pop('name', safe_str(os.path.basename(local_file)))
+                    submission_obj.params.classification = new_metadata.pop('classification',
+                                                                            submission_obj.params.classification)
                     submission_obj.metadata.update(**flatten(new_metadata))
 
                     # Check that after we have resolved exactly what to pass on, that it
@@ -111,8 +115,11 @@ class SubmissionClient:
                         os.close(fd)  # We don't need the file descriptor open
                         self.filestore.download(f.sha256, temporary_path)
                         file_hash, size, new_metadata = self._ready_file(temporary_path, expiry,
-                                                                         classification, cleanup, sha256=f.sha256)
+                                                                         str(submission_obj.params.classification),
+                                                                         cleanup, sha256=f.sha256)
                         new_name = new_metadata.pop('name', f.name)
+                        submission_obj.params.classification = new_metadata.pop('classification',
+                                                                                submission_obj.params.classification)
                         submission_obj.metadata.update(**flatten(new_metadata))
 
                         # Check that after we have resolved exactly what to pass on, that it
@@ -137,10 +144,10 @@ class SubmissionClient:
             # We should now have all the information we need to construct a submission object
             sub = Submission(dict(
                 archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
-                classification=classification,
+                classification=submission_obj.params.classification,
                 error_count=0,
                 errors=[],
-                expiry_ts=now_as_iso(submission_obj.params.ttl * 24 * 60 * 60) if submission_obj.params.ttl else None,
+                expiry_ts=expiry,
                 file_count=len(submission_obj.files),
                 files=submission_obj.files,
                 max_score=0,
@@ -184,21 +191,23 @@ class SubmissionClient:
             if sha256 is not None and fileinfo['sha256'] != sha256:
                 raise CorruptedFileStoreException('SHA256 mismatch between received '
                                                   'and calculated sha256. %s != %s' % (sha256, fileinfo['sha256']))
-            self.datastore.save_or_freshen_file(fileinfo['sha256'], fileinfo, expiry, classification, redis=self.redis)
 
             # Check if there is an integrated decode process for this file
             # eg. files that are packaged, and the contained file (not the package
             # that local_path points to) should be passed into the system.
             extracted_path, fileinfo, al_meta = decode_file(local_path, fileinfo)
+            al_meta['classification'] = Classification.max_classification(classification,
+                                                                          al_meta.get('classification', classification),
+                                                                          long_format=False)
 
             if extracted_path:
                 local_path = extracted_path
                 sha256 = fileinfo['sha256']
                 self.filestore.upload(local_path, sha256)
-                self.datastore.save_or_freshen_file(sha256, fileinfo, expiry, classification, redis=self.redis)
             elif upload:
                 self.filestore.upload(local_path, fileinfo['sha256'])
 
+            self.datastore.save_or_freshen_file(sha256, fileinfo, expiry, al_meta['classification'], redis=self.redis)
             return fileinfo['sha256'], fileinfo['size'], al_meta
 
         finally:
