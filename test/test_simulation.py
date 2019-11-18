@@ -4,7 +4,6 @@ A test of ingest+dispatch running in one process.
 Needs the datastore and filestore to be running, otherwise these test are stand alone.
 """
 
-import fakeredis
 import hashlib
 import json
 import os
@@ -14,6 +13,7 @@ import threading
 
 from unittest import mock
 
+from assemblyline.common.forge import get_service_queue
 from assemblyline_core.plumber.run_plumber import Plumber
 from tempfile import NamedTemporaryFile
 from typing import List
@@ -30,10 +30,10 @@ from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.messages.submission import Submission as SubmissionInput
+from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from assemblyline_core.dispatching.client import DispatchClient
-from assemblyline_core.dispatching.dispatcher import service_queue_name
 from assemblyline_core.dispatching.run_files import FileDispatchServer
 from assemblyline_core.dispatching.run_submissions import SubmissionDispatchServer
 from assemblyline_core.ingester.ingester import IngestTask
@@ -43,15 +43,21 @@ from assemblyline_core.ingester.run_submit import IngesterSubmitter
 from assemblyline_core.server_base import ServerBase
 from assemblyline_core.watcher.server import WatcherServer
 
-from .mocking import MockCollection, RedisTime
+from .mocking import MockCollection
 from .test_scheduler import dummy_service
 
 
 @pytest.fixture(scope='module')
 def redis():
-    client = fakeredis.FakeStrictRedis()
-    client.time = RedisTime()
-    return client
+    config = forge.get_config()
+    client = get_client(
+        config.core.metrics.redis.host,
+        config.core.metrics.redis.port,
+        False
+    )
+    client.flushdb()
+    yield client
+    client.flushdb()
 
 
 _global_semaphore = threading.Semaphore()
@@ -67,7 +73,7 @@ class MockService(ServerBase):
         self.service_name = name
         self.datastore = datastore
         self.filestore = filestore
-        self.queue = NamedQueue(service_queue_name(name), redis)
+        self.queue = get_service_queue(name, redis)
         self.dispatch_client = DispatchClient(self.datastore, redis)
         self.hits = dict()
         self.drops = dict()
@@ -689,6 +695,9 @@ def test_caching(core: CoreSession):
 
 
 def test_plumber_clearing(core):
+    global _global_semaphore
+    _global_semaphore = threading.Semaphore(value=0)
+
     start = time.time()
     watch = WatcherServer(redis=core.redis)
     watch.start()
@@ -719,8 +728,8 @@ def test_plumber_clearing(core):
             )]
         )).as_primitives())
 
-        service_queue = NamedQueue(service_queue_name('pre'), core.redis)
-        time.sleep(0.1)
+        service_queue = get_service_queue('pre', core.redis)
+        time.sleep(0.5)
         while service_queue.length() == 0 and time.time() - start < 20:
             time.sleep(0.1)
 

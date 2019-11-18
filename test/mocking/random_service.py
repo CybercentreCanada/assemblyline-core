@@ -3,10 +3,10 @@ import random
 import time
 
 from assemblyline.common.constants import SERVICE_STATE_HASH, ServiceStatus
+from assemblyline.common.forge import get_service_queue
 from assemblyline.common.uid import get_random_id
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline_core.dispatching.client import DispatchClient
-from assemblyline_core.dispatching.dispatcher import service_queue_name
 from assemblyline_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
@@ -16,7 +16,7 @@ from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.file import File
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.randomizer import random_model_obj, random_minimal_obj
-from assemblyline.remote.datatypes.queues.named import NamedQueue, select
+from assemblyline.remote.datatypes.queues.priority import select
 
 
 class RandomService(ServerBase):
@@ -34,7 +34,7 @@ class RandomService(ServerBase):
 
         self.counters = {n: MetricsFactory('service', Metrics, name=n, config=self.config)
                          for n in datastore.service_delta.keys()}
-        self.queues = [NamedQueue(service_queue_name(name)) for name in datastore.service_delta.keys()]
+        self.queues = [get_service_queue(name) for name in datastore.service_delta.keys()]
         self.dispatch_client = DispatchClient(datastore)
 
     def run(self):

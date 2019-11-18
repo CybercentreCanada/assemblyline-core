@@ -1,9 +1,10 @@
 import elasticapm
 import time
 
+from assemblyline.common.forge import get_service_queue
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 
-from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, service_queue_name
+from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE
 
 from assemblyline.odm.messages.task import Task
 
@@ -125,7 +126,7 @@ class WatcherServer(ServerBase):
         dispatch_table = DispatchHash(task.sid, self.redis)
         dispatch_table.fail_recoverable(task.fileinfo.sha256, task.service_name)
         dispatch_table.dispatch(task.fileinfo.sha256, task.service_name)
-        NamedQueue(service_queue_name(task.service_name), self.redis).push(task.as_primitives())
+        get_service_queue(task.service_name, self.redis).push(task.priority, task.as_primitives())
 
         # We push the task of killing the container off on the scaler, which already has root access
         # the scaler can also double check that the service name and container id match, to be sure

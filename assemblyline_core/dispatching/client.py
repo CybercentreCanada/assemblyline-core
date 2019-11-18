@@ -10,7 +10,7 @@ import logging
 import time
 from typing import Dict, Optional, Any, cast
 
-from assemblyline.common.forge import CachedObject
+from assemblyline.common.forge import CachedObject, get_service_queue
 
 from assemblyline.odm.models.service import Service
 
@@ -20,7 +20,7 @@ from assemblyline.odm.messages.service_heartbeat import Metrics
 
 from assemblyline.common import forge
 from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, FILE_QUEUE, SUBMISSION_QUEUE, \
-    make_watcher_list_name, service_queue_name, get_temporary_submission_data_name, get_tag_set_name
+    make_watcher_list_name, get_temporary_submission_data_name, get_tag_set_name
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
@@ -155,8 +155,14 @@ class DispatchClient:
             return None
 
         # Get work from the queue
-        work_queue = NamedQueue(service_queue_name(service_name), host=self.redis)
-        result = work_queue.pop(blocking=blocking, timeout=int(timeout))
+        work_queue = get_service_queue(service_name, self.redis)
+        if blocking:
+            result = work_queue.blocking_pop(timeout=int(timeout))
+        else:
+            result = work_queue.pop(1)
+            if result:
+                result = result[0]
+
         if not result:
             self.log.info(f"{worker_id}:{service_name}: no task returned: empty message")
             return None

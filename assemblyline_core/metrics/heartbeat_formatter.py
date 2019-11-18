@@ -2,11 +2,12 @@ import time
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from assemblyline.common.forge import get_service_queue
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from assemblyline_core.ingester import INGEST_QUEUE_NAME, drop_chance
 from assemblyline_core.watcher.client import WATCHER_QUEUE
 from assemblyline.common import forge, metrics
-from assemblyline.common.constants import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, FILE_QUEUE, service_queue_name, \
+from assemblyline.common.constants import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, FILE_QUEUE, \
     SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.datastore import SearchException
 from assemblyline.odm.messages.alerter_heartbeat import AlerterMessage
@@ -206,7 +207,7 @@ class HeartbeatFormatter(object):
                             'busy': len(busy),
                             'idle': len(idle)
                         },
-                        "queue": NamedQueue(service_queue_name(m_name), host=self.redis).length(),
+                        "queue": get_service_queue(m_name, self.redis).length(),
                         "service_name": m_name
                     }
                 }

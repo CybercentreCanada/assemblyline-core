@@ -3,7 +3,7 @@ from unittest import mock
 
 import assemblyline.odm.models.file
 import assemblyline.odm.models.submission
-from assemblyline.common.constants import service_queue_name
+from assemblyline.common.forge import get_service_queue
 from assemblyline.odm.randomizer import random_model_obj, get_random_hash
 from assemblyline.odm import models
 from assemblyline.common.metrics import MetricsFactory
@@ -60,7 +60,7 @@ class Scheduler(RealScheduler):
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
 def test_dispatch_file(clean_redis):
 
-    service_queue = lambda name: NamedQueue(service_queue_name(name), clean_redis)
+    service_queue = lambda name: get_service_queue(name, clean_redis)
 
     ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file', 'filescore'])
     file_hash = get_random_hash(64)
@@ -86,7 +86,7 @@ def test_dispatch_file(clean_redis):
     assert dh.dispatch_time(file_hash, 'extract') > 0
     assert dh.dispatch_time(file_hash, 'wrench') > 0
     assert service_queue('extract').length() == 1
-    assert len(service_queue('wrench')) == 1
+    assert service_queue('wrench').length() == 1
 
     # Making the same call again will queue it up again
     print('==== second dispatch')
@@ -94,8 +94,8 @@ def test_dispatch_file(clean_redis):
 
     assert dh.dispatch_time(file_hash, 'extract') > 0
     assert dh.dispatch_time(file_hash, 'wrench') > 0
-    assert len(service_queue('extract')) == 2
-    assert len(service_queue('wrench')) == 2
+    assert service_queue('extract').length() == 2
+    assert service_queue('wrench').length() == 2
     # assert len(mq) == 4
 
     # Push back the timestamp in the dispatch hash to simulate a timeout,
@@ -121,9 +121,9 @@ def test_dispatch_file(clean_redis):
 
     assert dh.finished(file_hash, 'extract')
     assert dh.finished(file_hash, 'wrench')
-    assert len(service_queue('av-a')) == 1
-    assert len(service_queue('av-b')) == 1
-    assert len(service_queue('frankenstrings')) == 1
+    assert service_queue('av-a').length() == 1
+    assert service_queue('av-b').length() == 1
+    assert service_queue('frankenstrings').length() == 1
 
     # Have the AVs fail, frankenstrings finishes
     print('==== fifth dispatch')
@@ -137,7 +137,7 @@ def test_dispatch_file(clean_redis):
     assert dh.finished(file_hash, 'av-a')
     assert dh.finished(file_hash, 'av-b')
     assert dh.finished(file_hash, 'frankenstrings')
-    assert len(service_queue('xerox')) == 1
+    assert service_queue('xerox').length() == 1
 
     # Finish the xerox service and check if the submission completion got checked
     print('==== sixth dispatch')

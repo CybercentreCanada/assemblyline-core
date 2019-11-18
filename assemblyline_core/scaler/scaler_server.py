@@ -9,12 +9,17 @@ import platform
 import time
 import sched
 
+from assemblyline.remote.datatypes.queues.named import NamedQueue
+
+from assemblyline.remote.datatypes.queues.priority import PriorityQueue
+
+from assemblyline.common.forge import get_service_queue
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 
 from assemblyline.odm.messages.scaler_heartbeat import Status, Metrics
 from assemblyline.remote.datatypes.hash import ExpiringHash
 
-from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus, service_queue_name
+from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.odm.models.service import Service, DockerConfig
 from assemblyline_core.scaler.controllers import KubernetesController
 from assemblyline_core.scaler.controllers.interface import ServiceControlError
@@ -22,7 +27,6 @@ from assemblyline.common import forge
 from assemblyline.remote.datatypes import get_client
 
 from assemblyline_core.server_base import ServerBase
-from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from .controllers import DockerController
 from . import collection
@@ -68,7 +72,7 @@ class ServiceProfile:
         :param queue: Queue name for monitoring
         """
         self.name = name
-        self.queue = queue
+        self.queue: PriorityQueue = queue
         self.container_config = container_config
         self.target_duty_cycle = 0.9
         self.shutdown_seconds = shutdown_seconds
@@ -247,7 +251,7 @@ class ScalerServer(ServerBase):
                         backlog=default_settings.backlog,
                         max_instances=service.licence_count,
                         container_config=docker_config,
-                        queue=service_queue_name(name),
+                        queue=get_service_queue(name, self.redis),
                         shutdown_seconds=service.timeout + 30,  # Give service an extra 30 seconds to upload results
                     ))
 
@@ -391,13 +395,13 @@ class ScalerServer(ServerBase):
                 delta = time.time() - profile.last_update
                 profile.update(
                     delta=delta,
-                    backlog=NamedQueue(profile.queue, self.redis).length(),
+                    backlog=profile.queue.length(),
                     **update
                 )
 
             # Check if we expect no messages, if so pull the queue length ourselves since there is no heartbeat
             if self.controller.get_target(profile_name) == 0 and profile.desired_instances == 0 and profile.queue:
-                queue_length = NamedQueue(profile.queue, self.redis).length()
+                queue_length = profile.queue.length()
                 if queue_length > 0:
                     self.log.info(f"Service at zero instances has messages: "
                                   f"{profile.name} ({queue_length} in queue)")
@@ -447,7 +451,7 @@ class ScalerServer(ServerBase):
                 'minimum': profile.min_instances,
                 'maximum': profile.instance_limit,
                 'dynamic_maximum': profile.max_instances,
-                'queue': NamedQueue(profile.queue, self.redis).length(),
+                'queue': profile.queue.length(),
                 'pressure': profile.pressure
             }
             export_metrics_once('scaler-'+service_name, Status, metrics, host=HOSTNAME, counter_type='scaler-status',

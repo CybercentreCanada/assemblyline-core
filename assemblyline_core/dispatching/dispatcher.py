@@ -4,10 +4,10 @@ import time
 from typing import Dict, List, cast
 
 from assemblyline.common import isotime, forge
-from assemblyline.common.constants import SUBMISSION_QUEUE, FILE_QUEUE, DISPATCH_TASK_HASH, DISPATCH_RUNNING_TASK_HASH, \
-    service_queue_name, get_temporary_submission_data_name, get_tag_set_name, make_watcher_list_name
+from assemblyline.common.constants import SUBMISSION_QUEUE, FILE_QUEUE, DISPATCH_TASK_HASH, \
+    DISPATCH_RUNNING_TASK_HASH, get_temporary_submission_data_name, get_tag_set_name, make_watcher_list_name
 from assemblyline.common.exceptions import MultiKeyError
-from assemblyline.common.forge import CachedObject
+from assemblyline.common.forge import CachedObject, get_service_queue
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.datastore import Collection
 from assemblyline.datastore.helper import AssemblylineDatastore
@@ -308,7 +308,7 @@ class Dispatcher:
             return self.cancel_submission(task, errors, file_parents)
 
         # Files that have already been encountered, but may or may not have been processed yet
-        encountered_files = {file.sha256 for file in submission.files}
+        # encountered_files = {file.sha256 for file in submission.files}
         pending_files = {}  # Files that have not yet been processed
 
         # Track information about the results as we hit them
@@ -583,10 +583,11 @@ class Dispatcher:
                     tags=file_tags_data,
                     temporary_submission_data=temporary_data,
                     deep_scan=submission.params.deep_scan,
+                    priority=submission.params.priority,
                 ))
                 dispatch_table.dispatch(file_hash, service_name)
-                queue = self.volatile_named_queue(service_queue_name(service_name))
-                queue.push(service_task.as_primitives())
+                queue = get_service_queue(service_name, self.redis)
+                queue.push(service_task.priority, service_task.as_primitives())
 
         else:
             # There are no outstanding services, this file is done
