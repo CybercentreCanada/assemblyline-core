@@ -22,9 +22,10 @@ from assemblyline_core.server_base import ServerBase, SHUTDOWN_SECONDS_LIMIT
 
 class Plumber(ServerBase):
     def __init__(self, logger=None, shutdown_timeout: float = SHUTDOWN_SECONDS_LIMIT, config=None,
-                 redis=None, redis_persist=None, datastore=None):
+                 redis=None, redis_persist=None, datastore=None, delay=60):
         super().__init__('plumber', logger, shutdown_timeout)
         self.config = config or forge.get_config()
+        self.delay = float(delay)
         self.redis = redis or get_client(
             host=self.config.core.redis.nonpersistent.host,
             port=self.config.core.redis.nonpersistent.port,
@@ -82,7 +83,7 @@ class Plumber(ServerBase):
                         self.dispatch_client.service_failed(task.sid, error_key, error)
 
             # Wait a while before checking status of all services again
-            time.sleep(60)
+            time.sleep(self.delay)
 
 
 if __name__ == '__main__':

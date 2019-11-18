@@ -10,8 +10,11 @@ import json
 import os
 import pytest
 import time
+import threading
 
 from unittest import mock
+
+from assemblyline_core.plumber.run_plumber import Plumber
 from tempfile import NamedTemporaryFile
 from typing import List
 
@@ -51,6 +54,9 @@ def redis():
     return client
 
 
+_global_semaphore = threading.Semaphore()
+
+
 class MockService(ServerBase):
     """Replaces everything past the dispatcher.
 
@@ -79,6 +85,10 @@ class MockService(ServerBase):
             instructions = instructions.get(self.service_name, {})
             print(self.service_name, 'following instruction:', instructions)
             hits = self.hits[task.fileinfo.sha256] = self.hits.get(task.fileinfo.sha256, 0) + 1
+
+            if instructions.get('semaphore', False):
+                _global_semaphore.acquire(blocking=True, timeout=instructions['semaphore'])
+                continue
 
             if 'drop' in instructions:
                 if instructions['drop'] >= hits:
@@ -152,6 +162,9 @@ def core(request, redis):
         # Start the dispatcher
         FileDispatchServer(datastore=ds, redis=redis, redis_persist=redis),
         SubmissionDispatchServer(datastore=ds, redis=redis, redis_persist=redis),
+
+        # Start plumber
+        Plumber(datastore=ds, redis=redis, redis_persist=redis, delay=0.5),
     ]
 
     ingester_input_thread: IngesterInput = threads[0]
@@ -673,3 +686,62 @@ def test_caching(core: CoreSession):
     assert (('cache_hit_local',), {}) not in counter.call_args_list
     assert (('cache_hit',), {}) in counter.call_args_list
     assert sid1 == sid3
+
+
+def test_plumber_clearing(core):
+    start = time.time()
+    watch = WatcherServer(redis=core.redis)
+    watch.start()
+
+    try:
+        # Have the plumber cancel tasks
+        sha, size = ready_body(core, {
+            'pre': {'semaphore': 60}
+        })
+
+        core.ingest_queue.push(SubmissionInput(dict(
+            metadata={},
+            params=dict(
+                description="file abc123",
+                services=dict(selected=''),
+                submitter='user',
+                groups=['user'],
+                max_extracted=10000
+            ),
+            notification=dict(
+                queue='test_plumber_clearing',
+                threshold=0
+            ),
+            files=[dict(
+                sha256=sha,
+                size=size,
+                name='abc123'
+            )]
+        )).as_primitives())
+
+        service_queue = NamedQueue(service_queue_name('pre'), core.redis)
+        time.sleep(0.1)
+        while service_queue.length() == 0 and time.time() - start < 20:
+            time.sleep(0.1)
+
+        service_delta = core.ds.service_delta.get('pre')
+        service_delta['enabled'] = False
+        core.ds.service_delta.save('pre', service_delta)
+
+        notification_queue = NamedQueue('nq-test_plumber_clearing', core.redis)
+        dropped_task = notification_queue.pop(timeout=5)
+        dropped_task = IngestTask(dropped_task)
+        sub = core.ds.submission.get(dropped_task.submission.sid)
+        assert len(sub.files) == 1
+        assert len(sub.results) == 3
+        assert len(sub.errors) == 1
+
+        error = core.ds.error.get(sub.errors[0])
+        assert "disabled" in error.response.message
+    finally:
+        _global_semaphore.release()
+        service_delta = core.ds.service_delta.get('pre')
+        service_delta['enabled'] = True
+        core.ds.service_delta.save('pre', service_delta)
+        watch.stop()
+        watch.join()
