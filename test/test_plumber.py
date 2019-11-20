@@ -1,4 +1,5 @@
 from unittest import mock
+from redis import Redis
 
 from assemblyline.odm.messages.task import Task
 
@@ -11,9 +12,9 @@ from .mocking import TrueCountTimes
 
 
 def test_expire_missing_service():
-    redis = mock.MagicMock()
+    redis = mock.MagicMock(spec=Redis)
     redis.keys.return_value = [b'service-queue-XXX']
-    redis_persist = mock.MagicMock()
+    redis_persist = mock.MagicMock(spec=Redis)
     datastore = mock.MagicMock()
 
     service_a = random_model_obj(Service)
