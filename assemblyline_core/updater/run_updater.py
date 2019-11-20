@@ -293,7 +293,7 @@ class ServiceUpdater(CoreBase):
 
             if stage == ServiceStage.Update:
                 record = self.services.get(service.name)
-                if (record and record.get('previous_hash', None) is not None) or not service.update_config:
+                if (record and record.get('sha256', None) is not None) or not service.update_config:
                     self._service_stage_hash.set(service.name, ServiceStage.Running)
 
     def try_run(self):
