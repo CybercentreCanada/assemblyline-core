@@ -361,7 +361,7 @@ class ServiceUpdater(CoreBase):
                 self.services.set(service_name, update_data)
 
             if update_hash:
-                self.log(f"New update applied for {service_name}. Restarting service.")
+                self.log.info(f"New update applied for {service_name}. Restarting service.")
                 self.controller.restart(service_name=service_name)
 
         except BaseException:
