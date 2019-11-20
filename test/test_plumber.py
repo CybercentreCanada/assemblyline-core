@@ -14,12 +14,13 @@ from .mocking import TrueCountTimes
 
 def test_expire_missing_service():
     redis = mock.MagicMock(spec=Redis)
-    redis.keys.return_value = [b'service-queue-a']
+    redis.keys.return_value = [b'service-queue-not-service-a']
     redis_persist = mock.MagicMock(spec=Redis)
     datastore = mock.MagicMock()
 
     service_a = random_model_obj(Service)
     service_a.name = 'a'
+    service_a.enabled = True
 
     datastore.list_all_services.return_value = [service_a]
 
@@ -27,7 +28,6 @@ def test_expire_missing_service():
         plumber = Plumber(redis=redis, redis_persist=redis_persist, datastore=datastore)
         plumber.get_service_stage = mock.MagicMock(return_value=ServiceStage.Running)
         plumber.dispatch_client = mock.MagicMock()
-        plumber.dispatch_client.request_work.return_value = None
 
         task = random_model_obj(Task)
         plumber.dispatch_client.request_work.side_effect = [task, None, None]
