@@ -16,6 +16,7 @@ CONTAINER_UPDATE_DIRECTORY = '/mount/updates/'
 
 # Where to find the update directory inside this container.
 FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
+# RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
 
 
 def parse_memory(string):
@@ -235,6 +236,7 @@ class KubernetesController(ControllerInterface):
     def _create_containers(self, profile, mounts):
         cores = profile.container_config.cpu_cores
         memory = profile.container_config.ram_mb
+        min_memory = max(int(memory/4), min(64, memory))
         environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in profile.container_config.environment]
         environment_variables += [
             V1EnvVar(name='UPDATE_PATH', value=CONTAINER_UPDATE_DIRECTORY),
@@ -249,7 +251,7 @@ class KubernetesController(ControllerInterface):
             volume_mounts=mounts,
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
-                requests={'cpu': cores/4, 'memory': f'{int(memory/4)}Mi'},
+                requests={'cpu': cores/4, 'memory': f'{min_memory}Mi'},
             )
         )]
 

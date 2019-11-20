@@ -12,31 +12,18 @@ import time
 
 from assemblyline.odm.models.error import Error
 from assemblyline.common.isotime import now_as_iso
-from assemblyline.common import forge
 from assemblyline.common.constants import service_queue_name
-from assemblyline.remote.datatypes import get_client
 
 from assemblyline_core.dispatching.client import DispatchClient
-from assemblyline_core.server_base import ServerBase, SHUTDOWN_SECONDS_LIMIT
+from assemblyline_core.server_base import CoreBase, ServiceStage
 
 
-class Plumber(ServerBase):
-    def __init__(self, logger=None, shutdown_timeout: float = SHUTDOWN_SECONDS_LIMIT, config=None,
+class Plumber(CoreBase):
+    def __init__(self, logger=None, shutdown_timeout: float = None, config=None,
                  redis=None, redis_persist=None, datastore=None, delay=60):
-        super().__init__('plumber', logger, shutdown_timeout)
-        self.config = config or forge.get_config()
+        super().__init__('plumber', logger, shutdown_timeout, config=config, redis=redis,
+                         redis_persist=redis_persist, datastore=datastore)
         self.delay = float(delay)
-        self.redis = redis or get_client(
-            host=self.config.core.redis.nonpersistent.host,
-            port=self.config.core.redis.nonpersistent.port,
-            private=False,
-        )
-        self.redis_persist = redis_persist or get_client(
-            host=self.config.core.redis.persistent.host,
-            port=self.config.core.redis.persistent.port,
-            private=False,
-        )
-        self.datastore = datastore or forge.get_datastore()
         self.dispatch_client = DispatchClient(datastore=self.datastore, redis=self.redis,
                                               redis_persist=self.redis_persist, logger=self.log)
 
@@ -54,7 +41,7 @@ class Plumber(ServerBase):
                 service_queues[service.name] = service
 
             for service_name, service in service_queues.items():
-                if not service or not service.enabled:
+                if not service or not service.enabled or self.get_service_stage(service_name) != ServiceStage.Running:
                     while True:
                         task = self.dispatch_client.request_work(None, service_name=service_name,
                                                                  service_version='0', blocking=False)

@@ -23,10 +23,8 @@ from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HA
 from assemblyline.odm.models.service import Service, DockerConfig
 from assemblyline_core.scaler.controllers import KubernetesController
 from assemblyline_core.scaler.controllers.interface import ServiceControlError
-from assemblyline.common import forge
-from assemblyline.remote.datatypes import get_client
 
-from assemblyline_core.server_base import ServerBase
+from assemblyline_core.server_base import CoreBase, ServiceStage
 
 from .controllers import DockerController
 from . import collection
@@ -146,23 +144,11 @@ class ServiceProfile:
             self.pressure = 0
 
 
-class ScalerServer(ServerBase):
+class ScalerServer(CoreBase):
     def __init__(self, config=None, datastore=None, redis=None, redis_persist=None):
-        super().__init__('assemblyline.scaler')
-        # Connect to the assemblyline system
-        self.config = config or forge.get_config()
-        self.datastore = datastore or forge.get_datastore()
-        self.redis = redis or get_client(
-            host=self.config.core.redis.nonpersistent.host,
-            port=self.config.core.redis.nonpersistent.port,
-            private=False,
-        )
+        super().__init__('assemblyline.scaler', config=config, datastore=datastore,
+                         redis=redis, redis_persist=redis_persist)
 
-        self.redis_persist = redis_persist or get_client(
-            host=self.config.core.redis.persistent.host,
-            port=self.config.core.redis.persistent.port,
-            private=False,
-        )
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
         self.error_count = {}
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
@@ -220,55 +206,75 @@ class ScalerServer(ServerBase):
         # Get all the service data
         for service in self.datastore.list_all_services(full=True):
             service: Service = service
+            name = service.name
+            stage = self.get_service_stage(service.name)
+
             # noinspection PyBroadException
             try:
-                name = service.name
+                if service.enabled and stage == ServiceStage.Off:
+                    # Enable this service's dependencies
+                    self.log.warning("Action for service dependency skipped")
 
-                # Stop any running disabled services
-                if not service.enabled and (name in self.profiles or self.controller.get_target(name) > 0):
-                    self.log.info(f'Removing {service.name} from scaling')
-                    self.profiles.pop(name)
-                    self.controller.set_target(name, 0)
-                    continue
+                    # Move to the next service stage
+                    if service.update_config:
+                        self._service_stage_hash.set(name, ServiceStage.Update)
+                    else:
+                        self._service_stage_hash.set(name, ServiceStage.Running)
 
-                # Build the docker config for the service
-                docker_config = service.docker_config
-                set_keys = set(var.name for var in docker_config.environment)
-                for var in default_settings.environment:
-                    if var.name not in set_keys:
-                        docker_config.environment.append(var)
+                if not service.enabled:
+                    if stage != ServiceStage.Off:
+                        # Disable this service's dependencies
+                        self.log.warning("Action for service dependency skipped")
+
+                        #
+                        self._service_stage_hash.set(name, ServiceStage.Off)
+
+                    # Stop any running disabled services
+                    if name in self.profiles or self.controller.get_target(name) > 0:
+                        self.log.info(f'Removing {service.name} from scaling')
+                        self.profiles.pop(name)
+                        self.controller.set_target(name, 0)
+                        continue
 
                 # Check that all enabled services are enabled
-                if service.enabled and name not in self.profiles:
-                    self.log.info(f'Adding {service.name} to scaling')
+                if service.enabled and stage == ServiceStage.Running:
+                    # Build the docker config for the service, we are going to either create it or
+                    # update it so we need to know what the current configuration is either way
+                    docker_config = service.docker_config
+                    set_keys = set(var.name for var in docker_config.environment)
+                    for var in default_settings.environment:
+                        if var.name not in set_keys:
+                            docker_config.environment.append(var)
 
                     # Add the service to the list of services being scaled
-                    self.add_service(ServiceProfile(
-                        name=name,
-                        min_instances=default_settings.min_instances,
-                        growth=default_settings.growth,
-                        shrink=default_settings.shrink,
-                        backlog=default_settings.backlog,
-                        max_instances=service.licence_count,
-                        container_config=docker_config,
-                        queue=get_service_queue(name, self.redis),
-                        shutdown_seconds=service.timeout + 30,  # Give service an extra 30 seconds to upload results
-                    ))
+                    if name not in self.profiles:
+                        self.log.info(f'Adding {service.name} to scaling')
+                        self.add_service(ServiceProfile(
+                            name=name,
+                            min_instances=default_settings.min_instances,
+                            growth=default_settings.growth,
+                            shrink=default_settings.shrink,
+                            backlog=default_settings.backlog,
+                            max_instances=service.licence_count,
+                            container_config=docker_config,
+                            queue=get_service_queue(name, self.redis),
+                            shutdown_seconds=service.timeout + 30,  # Give service an extra 30 seconds to upload results
+                        ))
 
-                # Update RAM, CPU, licence requirements for running services
-                elif service.enabled:
-                    profile = self.profiles[name]
-
-                    if profile.container_config != docker_config:
-                        self.log.info(f"Updating deployment information for {name}")
-                        profile.container_config = docker_config
-                        self.controller.restart(profile)
-                        self.log.info(f"Deployment information for {name} replaced")
-
-                    if service.licence_count == 0:
-                        profile._max_instances = float('inf')
+                    # Update RAM, CPU, licence requirements for running services
                     else:
-                        profile._max_instances = service.licence_count
+                        profile = self.profiles[name]
+
+                        if profile.container_config != docker_config:
+                            self.log.info(f"Updating deployment information for {name}")
+                            profile.container_config = docker_config
+                            self.controller.restart(profile)
+                            self.log.info(f"Deployment information for {name} replaced")
+
+                        if service.licence_count == 0:
+                            profile._max_instances = float('inf')
+                        else:
+                            profile._max_instances = service.licence_count
             except:
                 self.log.exception(f"Error applying service settings from: {service.name}")
                 self.handle_service_error(service.name)

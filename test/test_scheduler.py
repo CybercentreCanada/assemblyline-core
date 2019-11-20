@@ -1,4 +1,7 @@
 import pytest
+from assemblyline.remote.datatypes import get_client
+
+from assemblyline.common import forge
 
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.config import Config, DEFAULT_CONFIG
@@ -6,6 +9,20 @@ from assemblyline.odm.models.service import Service
 from assemblyline.odm.randomizer import random_model_obj
 
 from assemblyline_core.dispatching.dispatcher import Scheduler
+from assemblyline_core.server_base import get_service_stage_hash, ServiceStage
+
+
+@pytest.fixture(scope='module')
+def redis():
+    config = forge.get_config()
+    client = get_client(
+        config.core.metrics.redis.host,
+        config.core.metrics.redis.port,
+        False
+    )
+    client.flushdb()
+    yield client
+    client.flushdb()
 
 
 def dummy_service(name, stage, category='static', accepts='', rejects=None):
@@ -74,10 +91,14 @@ def submission(selected, excluded):
 
 
 @pytest.fixture
-def scheduler():
+def scheduler(redis):
     config = Config(DEFAULT_CONFIG)
     config.services.stages = ['pre', 'core', 'post']
-    return Scheduler(FakeDatastore(), config)
+    stages = get_service_stage_hash(redis)
+    ds = FakeDatastore()
+    for service in ds.list_all_services():
+        stages.set(service.name, ServiceStage.Running)
+    return Scheduler(ds, config, redis)
 
 
 def test_schedule_simple(scheduler):

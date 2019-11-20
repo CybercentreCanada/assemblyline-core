@@ -10,35 +10,21 @@ from assemblyline.odm.messages.task import Task
 
 from assemblyline_core.dispatching.dispatch_hash import DispatchHash
 
-from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm.messages.watcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
-from assemblyline.remote.datatypes import get_client, retry_call
+from assemblyline.remote.datatypes import retry_call
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import UniquePriorityQueue
 from assemblyline.remote.datatypes.hash import ExpiringHash
 
-from assemblyline_core.server_base import ServerBase
+from assemblyline_core.server_base import CoreBase
 from assemblyline_core.watcher.client import WATCHER_HASH, WATCHER_QUEUE, MAX_TIMEOUT, WatcherAction
 
 
-class WatcherServer(ServerBase):
+class WatcherServer(CoreBase):
     def __init__(self, redis=None, redis_persist=None):
-        super().__init__('assemblyline.watcher')
-        config = forge.get_config()
-
-        self.redis = redis or get_client(
-            host=config.core.redis.nonpersistent.host,
-            port=config.core.redis.nonpersistent.port,
-            private=False,
-        )
-
-        self.redis_persist = redis_persist or get_client(
-            host=config.core.redis.persistent.host,
-            port=config.core.redis.persistent.port,
-            private=False,
-        )
+        super().__init__('assemblyline.watcher', redis=redis, redis_persist=redis_persist)
 
         # Watcher structures
         self.hash = ExpiringHash(name=WATCHER_HASH, ttl=MAX_TIMEOUT, host=self.redis_persist)
@@ -50,12 +36,12 @@ class WatcherServer(ServerBase):
 
         # Metrics tracking
         self.counter = MetricsFactory(metrics_type='watcher', schema=Metrics, name='watcher',
-                                      redis=self.redis, config=config)
+                                      redis=self.redis, config=self.config)
 
-        if config.core.metrics.apm_server.server_url is not None:
-            self.log.info(f"Exporting application metrics to: {config.core.metrics.apm_server.server_url}")
+        if self.config.core.metrics.apm_server.server_url is not None:
+            self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
             elasticapm.instrument()
-            self.apm_client = elasticapm.Client(server_url=config.core.metrics.apm_server.server_url,
+            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
                                                 service_name="watcher")
         else:
             self.apm_client = None

@@ -3,7 +3,7 @@ A process that manages tracking and running update commands for the AL services.
 
 TODO:
     - docker build updates
-    - kubernetes interfaces
+    - If the service update interval changes in datastore move the next update time
 
 """
 import os
@@ -27,19 +27,18 @@ from kubernetes.client.rest import ApiException
 
 from passlib.hash import bcrypt
 
-from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.security import get_random_password, get_password_hash
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.models.service import DockerConfig
 from assemblyline.odm.models.user import User
 from assemblyline.odm.models.user_settings import UserSettings
-from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline_core.server_base import ServerBase
+from assemblyline_core.server_base import CoreBase, ServiceStage
 
 SERVICE_SYNC_INTERVAL = 30  # How many seconds between checking for new services, or changes in service status
-UPDATE_CHECK_INTERVAL = 5   # How many seconds per check for outstanding updates
+UPDATE_CHECK_INTERVAL = 60  # How many seconds per check for outstanding updates
+UPDATE_STAGES = [ServiceStage.Update, ServiceStage.Running]
 
 # How to identify the update volume as a whole, in a way that the underlying container system recognizes.
 FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
@@ -231,9 +230,10 @@ class KubernetesUpdateInterface:
         self.b1api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
 
 
-class ServiceUpdater(ServerBase):
-    def __init__(self, persistent_redis=None, logger=None, datastore=None):
-        super().__init__('assemblyline.service.updater', logger=logger)
+class ServiceUpdater(CoreBase):
+    def __init__(self, redis_persist=None, logger=None, datastore=None):
+        super().__init__('assemblyline.service.updater', logger=logger, datastore=datastore,
+                         redis_persist=redis_persist)
 
         if not FILE_UPDATE_DIRECTORY:
             raise RuntimeError("The updater process must be run within the orchestration environment, "
@@ -250,15 +250,7 @@ class ServiceUpdater(ServerBase):
         shutil.rmtree(self.temporary_directory, ignore_errors=True)
         os.mkdir(self.temporary_directory)
 
-        self.config = forge.get_config()
-        self.datastore = datastore or forge.get_datastore()
-        self.persistent_redis = persistent_redis or get_client(
-            host=self.config.core.redis.persistent.host,
-            port=self.config.core.redis.persistent.port,
-            private=False,
-        )
-
-        self.services = Hash('service-updates', self.persistent_redis)
+        self.services = Hash('service-updates', self.redis_persist)
         self.running_updates: Dict[str, Thread] = {}
 
         # Prepare a single threaded scheduler
@@ -283,17 +275,26 @@ class ServiceUpdater(ServerBase):
                 self.log.info(f"Service updates disabled for {service.name}")
                 self.services.pop(service.name)
 
+            if not service.enabled:
+                continue
+
             # Ensure that any enabled services with an update config are being updated
-            if service.enabled and service.update_config and not self.services.exists(service.name):
+            stage = self.get_service_stage(service.name)
+            if stage in UPDATE_STAGES and service.update_config and not self.services.exists(service.name):
                 self.log.info(f"Service updates enabled for {service.name}")
                 self.services.add(
                     service.name,
                     dict(
                         next_update=now_as_iso(),
                         previous_update=now_as_iso(-10**10),
-                        sha256='',
+                        sha256=None,
                     )
                 )
+
+            if stage == ServiceStage.Update:
+                record = self.services.get(service.name)
+                if (record and record.get('previous_hash', None) is not None) or not service.update_config:
+                    self._service_stage_hash.set(service.name, ServiceStage.Running)
 
     def try_run(self):
         """Run the scheduler loop until told to stop."""

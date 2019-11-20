@@ -4,6 +4,7 @@ import redis
 import tempfile
 import pytest
 
+from assemblyline_core.server_base import ServiceStage
 from assemblyline_core.updater import run_updater
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.helper import AssemblylineDatastore
@@ -28,7 +29,7 @@ def ds():
 
 @pytest.fixture
 def updater(clean_redis: Union[clean_redis, redis.Redis], ds, updater_directory):
-    return run_updater.ServiceUpdater(persistent_redis=clean_redis, datastore=ds)
+    return run_updater.ServiceUpdater(redis_persist=clean_redis, datastore=ds)
 
 
 def test_service_changes(updater: run_updater.ServiceUpdater):
@@ -46,6 +47,7 @@ def test_service_changes(updater: run_updater.ServiceUpdater):
     create_services(updater.datastore, limit=1)
     for data in ds._collections['service']._docs.values():
         data.enabled = True
+        updater._service_stage_hash.set(data.name, ServiceStage.Update)
         data.update_config = random_model_obj(UpdateConfig)
     assert len(updater.datastore.list_all_services(full=True)) == 1
     updater.sync_services()

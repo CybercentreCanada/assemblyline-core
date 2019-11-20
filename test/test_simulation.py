@@ -40,7 +40,7 @@ from assemblyline_core.ingester.ingester import IngestTask
 from assemblyline_core.ingester.run_ingest import IngesterInput
 from assemblyline_core.ingester.run_internal import IngesterInternals
 from assemblyline_core.ingester.run_submit import IngesterSubmitter
-from assemblyline_core.server_base import ServerBase
+from assemblyline_core.server_base import ServerBase, get_service_stage_hash, ServiceStage
 from assemblyline_core.watcher.server import WatcherServer
 
 from .mocking import MockCollection
@@ -173,6 +173,7 @@ def core(request, redis):
         Plumber(datastore=ds, redis=redis, redis_persist=redis, delay=0.5),
     ]
 
+    stages = get_service_stage_hash(redis)
     ingester_input_thread: IngesterInput = threads[0]
     fields.ingest = ingester_input_thread
     fields.ingest_queue = ingester_input_thread.ingester.ingest_queue
@@ -181,18 +182,24 @@ def core(request, redis):
     ds.ds.service_delta = MockCollection(Service)
     ds.service.save('pre_0', dummy_service('pre', 'EXTRACT'))
     ds.service_delta.save('pre', dummy_service('pre', 'EXTRACT'))
+    stages.set('pre', ServiceStage.Running)
 
     threads.append(MockService('pre', ds, redis, filestore))
     fields.pre_service = threads[-1]
     ds.service.save('core-a_0', dummy_service('core-a', 'CORE'))
     ds.service_delta.save('core-a', dummy_service('core-a', 'CORE'))
+    stages.set('core-a', ServiceStage.Running)
+
     threads.append(MockService('core-a', ds, redis, filestore))
     ds.service.save('core-b_0', dummy_service('core-b', 'CORE'))
     ds.service_delta.save('core-b', dummy_service('core-b', 'CORE'))
     threads.append(MockService('core-b', ds, redis, filestore))
+    stages.set('core-b', ServiceStage.Running)
+
     ds.service.save('finish_0', dummy_service('finish', 'POST'))
     ds.service_delta.save('finish', dummy_service('finish', 'POST'))
     threads.append(MockService('finish', ds, redis, filestore))
+    stages.set('finish', ServiceStage.Running)
 
     for t in threads:
         t.daemon = True
@@ -323,7 +330,7 @@ def test_deduplication(core):
 
 
 def test_watcher_recovery(core):
-    watch = WatcherServer(redis=core.redis)
+    watch = WatcherServer(redis=core.redis, redis_persist=core.redis)
     watch.start()
     try:
         # This time have the service 'crash'
@@ -366,7 +373,7 @@ def test_watcher_recovery(core):
 
 
 def test_service_retry_limit(core):
-    watch = WatcherServer(redis=core.redis)
+    watch = WatcherServer(redis=core.redis, redis_persist=core.redis)
     watch.start()
     try:
         # This time have the service 'crash'
@@ -699,7 +706,7 @@ def test_plumber_clearing(core):
     _global_semaphore = threading.Semaphore(value=0)
 
     start = time.time()
-    watch = WatcherServer(redis=core.redis)
+    watch = WatcherServer(redis=core.redis, redis_persist=core.redis)
     watch.start()
 
     try:

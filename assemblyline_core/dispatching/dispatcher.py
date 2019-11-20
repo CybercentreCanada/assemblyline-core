@@ -1,5 +1,6 @@
 import logging
 import re
+import os
 import time
 from typing import Dict, List, cast
 
@@ -25,7 +26,12 @@ from assemblyline_core.dispatching.dispatch_hash import DispatchHash
 from assemblyline import odm
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.submission import Submission
+from assemblyline_core.server_base import get_service_stage_hash, ServiceStage
 from assemblyline_core.watcher.client import WatcherClient
+
+# If you are doing development and you want the system to route jobs ignoring the service setup/teardown
+# set an environment variable SKIP_SERVICE_SETUP to true for all dispatcher containers
+SKIP_SERVICE_SETUP = os.environ.get('SKIP_SERVICE_SETUP', 'false').lower() in ['true', '1']
 
 
 @odm.model()
@@ -56,10 +62,11 @@ class FileTask(odm.Model):
 class Scheduler:
     """This object encapsulates building the schedule for a given file type for a submission."""
 
-    def __init__(self, datastore: AssemblylineDatastore, config: Config):
+    def __init__(self, datastore: AssemblylineDatastore, config: Config, redis):
         self.datastore = datastore
         self.config = config
         self.services = cast(Dict[str, Service], CachedObject(self._get_services))
+        self.service_stage = get_service_stage_hash(redis)
 
     def build_schedule(self, submission: Submission, file_type: str) -> List[Dict[str, Service]]:
         all_services = dict(self.services)
@@ -141,8 +148,11 @@ class Scheduler:
         return self.config.services.stages.index(stage)
 
     def _get_services(self):
+        stages = self.service_stage.items()
+
         # noinspection PyUnresolvedReferences
-        return {x.name: x for x in self.datastore.list_all_services(full=True) if x.enabled}
+        return {x.name: x for x in self.datastore.list_all_services(full=True)
+                if x.enabled and (stages.get(x.name) == ServiceStage.Running or SKIP_SERVICE_SETUP)}
 
 
 def depths_from_tree(file_tree: Dict[str, List[str]]) -> Dict[str, int]:
@@ -191,10 +201,6 @@ class Dispatcher:
         # Create a config cache that will refresh config values periodically
         self.config: Config = forge.get_config()
 
-        # Build some utility classes
-        self.scheduler = Scheduler(datastore, self.config)
-        self.classification_engine = forge.get_classification()
-
         # Connect to all of our persistent redis structures
         self.redis = redis or get_client(
             host=self.config.core.redis.nonpersistent.host,
@@ -206,6 +212,10 @@ class Dispatcher:
             port=self.config.core.redis.persistent.port,
             private=False,
         )
+
+        # Build some utility classes
+        self.scheduler = Scheduler(datastore, self.config, self.redis)
+        self.classification_engine = forge.get_classification()
         self.timeout_watcher = WatcherClient(self.redis_persist)
 
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
