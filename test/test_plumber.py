@@ -7,6 +7,7 @@ from assemblyline.odm.random_data import random_model_obj
 from assemblyline.odm.models.service import Service
 
 from assemblyline_core.plumber.run_plumber import Plumber
+from assemblyline_core.server_base import ServiceStage
 
 from .mocking import TrueCountTimes
 
@@ -24,6 +25,7 @@ def test_expire_missing_service():
 
     with mock.patch('assemblyline_core.plumber.run_plumber.time'):
         plumber = Plumber(redis=redis, redis_persist=redis_persist, datastore=datastore)
+        plumber.get_service_stage = mock.MagicMock(return_value=ServiceStage.Running)
         plumber.dispatch_client = mock.MagicMock()
         plumber.dispatch_client.request_work.return_value = None
 
