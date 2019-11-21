@@ -440,8 +440,17 @@ class ServiceUpdater(CoreBase):
                     if os.path.isdir(folder_name) and folder_name.startswith(service.name):
                         existing_folders.append(folder_name)
                 existing_folders.sort()
-                for extra_folder in existing_folders[:UPDATE_FOLDER_LIMIT]:
-                    shutil.rmtree(os.path.join(service_dir, extra_folder), ignore_errors=True)
+
+                self.log.info(f'There are {len(existing_folders)} update folders for {service.name} in cache.')
+                if len(existing_folders) > UPDATE_FOLDER_LIMIT:
+                    extra_count = len(existing_folders) - UPDATE_FOLDER_LIMIT
+                    self.log.info(f'We will only keep {UPDATE_FOLDER_LIMIT} updates, deleting {extra_count}.')
+                    for extra_folder in existing_folders[:extra_count]:
+                        # noinspection PyBroadException
+                        try:
+                            shutil.rmtree(os.path.join(service_dir, extra_folder))
+                        except:
+                            self.log.exception('Failed to delete update folder')
 
                 return update_hash
         finally:
