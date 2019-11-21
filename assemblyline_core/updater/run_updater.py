@@ -437,7 +437,8 @@ class ServiceUpdater(CoreBase):
                 # Remove older update files, due to the naming scheme, older ones will sort first lexically
                 existing_folders = []
                 for folder_name in os.listdir(service_dir):
-                    if os.path.isdir(folder_name) and folder_name.startswith(service.name):
+                    folder_path = os.path.join(service_dir, folder_name)
+                    if os.path.isdir(folder_path) and folder_path.startswith(service.name):
                         existing_folders.append(folder_name)
                 existing_folders.sort()
 
