@@ -438,7 +438,7 @@ class ServiceUpdater(CoreBase):
                 existing_folders = []
                 for folder_name in os.listdir(service_dir):
                     folder_path = os.path.join(service_dir, folder_name)
-                    if os.path.isdir(folder_path) and folder_path.startswith(service.name):
+                    if os.path.isdir(folder_path) and folder_name.startswith(service.name):
                         existing_folders.append(folder_name)
                 existing_folders.sort()
 
