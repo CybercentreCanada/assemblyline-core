@@ -232,7 +232,7 @@ class ScalerServer(CoreBase):
                     # Stop any running disabled services
                     if name in self.profiles or self.controller.get_target(name) > 0:
                         self.log.info(f'Removing {service.name} from scaling')
-                        self.profiles.pop(name)
+                        self.profiles.pop(name, None)
                         self.controller.set_target(name, 0)
                         continue
 
