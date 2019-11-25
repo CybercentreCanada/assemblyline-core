@@ -40,6 +40,6 @@ setup(
         'pytest',
     ],
     package_data={
-        '': ["*schema.xml", "*managed-schema", "*solrconfig.xml", "*classification.yml", "*.magic"]
+        '': ["*classification.yml", "*.magic"]
     }
 )
