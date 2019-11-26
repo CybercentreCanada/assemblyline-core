@@ -111,7 +111,7 @@ class ExpiryManager(ServerBase):
 
             archive_query = f"archive_ts:[* TO {now}]"
 
-            number_to_archive = collection.search(archive_query, rows=0, as_obj=False)['total']
+            number_to_archive = collection.search(archive_query, rows=0, as_obj=False, use_archive=False)['total']
 
             if self.apm_client:
                 elasticapm.tag(query=archive_query)
