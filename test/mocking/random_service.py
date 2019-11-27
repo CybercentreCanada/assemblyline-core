@@ -1,9 +1,10 @@
-import hashlib
 import random
 import time
 
+from assemblyline.common.forge import CachedObject
+
 from assemblyline.common.constants import SERVICE_STATE_HASH, ServiceStatus
-from assemblyline.common.forge import get_service_queue
+from assemblyline.common import forge
 from assemblyline.common.uid import get_random_id
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline_core.dispatching.client import DispatchClient
@@ -24,18 +25,19 @@ class RandomService(ServerBase):
 
     Including service API, in the future probably include that in this test.
     """
-    def __init__(self, datastore, filestore):
+    def __init__(self, datastore=None, filestore=None):
+        super().__init__('assemblyline.randomservice')
         self.config = forge.get_config()
-        super().__init__("assemblyline.randomservice")
-        self.datastore = datastore
-        self.filestore = filestore
+        self.datastore = datastore or forge.get_datastore()
+        self.filestore = filestore or forge.get_filestore()
         self.client_id = get_random_id()
         self.service_state_hash = ExpiringHash(SERVICE_STATE_HASH, ttl=30 * 60)
 
         self.counters = {n: MetricsFactory('service', Metrics, name=n, config=self.config)
-                         for n in datastore.service_delta.keys()}
-        self.queues = [get_service_queue(name) for name in datastore.service_delta.keys()]
-        self.dispatch_client = DispatchClient(datastore)
+                         for n in self.datastore.service_delta.keys()}
+        self.queues = [forge.get_service_queue(name) for name in self.datastore.service_delta.keys()]
+        self.dispatch_client = DispatchClient(self.datastore)
+        self.service_info = CachedObject(self.datastore.list_all_services, kwargs={'as_obj': False})
 
     def run(self):
         self.log.info("Random service result generator ready!")
@@ -46,7 +48,7 @@ class RandomService(ServerBase):
         self.log.info("Waiting for messages...")
         while self.running:
             # Reset Idle flags
-            for s in self.datastore.list_all_services(as_obj=False):
+            for s in self.service_info:
                 if s['enabled']:
                     self.service_state_hash.set(f"{self.client_id}_{s['name']}",
                                                 (s['name'], ServiceStatus.Idle, time.time() + 30 + 5))
@@ -63,6 +65,9 @@ class RandomService(ServerBase):
             queue, msg = message
             task = ServiceTask(msg)
 
+            if not self.dispatch_client.running_tasks.add(task.key(), task.as_primitives()):
+                continue
+
             # Set service busy flag
             self.service_state_hash.set(f"{self.client_id}_{task.service_name}",
                                         (task.service_name, ServiceStatus.Running, time.time() + 30 + 5))
@@ -72,7 +77,6 @@ class RandomService(ServerBase):
             # METRICS (not caching here so always miss)
             self.counters[task.service_name].increment('cache_miss')
 
-            self.dispatch_client.running_tasks.set(task.key(), task.as_primitives())
             self.log.info(f"\tQueue {queue} received a new task for sid {task.sid}.")
             action = random.randint(1, 10)
             if action >= 2:
@@ -84,7 +88,10 @@ class RandomService(ServerBase):
                 result.response.service_name = task.service_name
                 result.archive_ts = archive_ts
                 result.expiry_ts = expiry_ts
-                result_key = result.build_key(hashlib.md5(task.service_config.encode("utf-8")).hexdigest())
+                result_key = Result.help_build_key(sha256=task.fileinfo.sha256,
+                                                   service_name=task.service_name,
+                                                   service_version='0',
+                                                   conf_key='0')
 
                 result.response.extracted = result.response.extracted[task.depth+2:]
                 result.response.supplementary = result.response.supplementary[task.depth+2:]
@@ -120,7 +127,7 @@ class RandomService(ServerBase):
                 error.response.service_name = task.service_name
                 error.type = random.choice(["EXCEPTION", "SERVICE DOWN", "SERVICE BUSY"])
 
-                error_key = error.build_key(hashlib.md5(task.service_config.encode("utf-8")).hexdigest())
+                error_key = error.build_key('0')
 
                 self.log.info(f"\t\tA {error.response.status}:{error.type} "
                               f"error was generated for this task: {error_key}")
@@ -135,5 +142,4 @@ class RandomService(ServerBase):
 
 
 if __name__ == "__main__":
-    from assemblyline.common import forge
-    RandomService(forge.get_datastore(), forge.get_filestore()).serve_forever()
+    RandomService().serve_forever()
