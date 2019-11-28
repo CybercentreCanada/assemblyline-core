@@ -56,7 +56,7 @@ class SubmissionClient:
     datastore, dispatcher, and any sources of files to be processed.
     """
 
-    def __init__(self, datastore: AssemblylineDatastore=None, filestore: FileStore=None,
+    def __init__(self, datastore: AssemblylineDatastore = None, filestore: FileStore = None,
                  config=None, redis=None):
         self.log = logging.getLogger('assemblyline.submission_client')
         self.config = config or forge.CachedObject(forge.get_config)
@@ -117,6 +117,7 @@ class SubmissionClient:
                         file_hash, size, new_metadata = self._ready_file(temporary_path, expiry,
                                                                          str(submission_obj.params.classification),
                                                                          cleanup, sha256=f.sha256)
+
                         new_name = new_metadata.pop('name', f.name)
                         submission_obj.params.classification = new_metadata.pop('classification',
                                                                                 submission_obj.params.classification)
@@ -135,6 +136,7 @@ class SubmissionClient:
                             f.size = size
 
                         f.name = new_name
+                        f.sha256 = file_hash
 
                     finally:
                         if temporary_path:
@@ -189,8 +191,8 @@ class SubmissionClient:
                 raise SubmissionException("File empty. Submission failed")
 
             if sha256 is not None and fileinfo['sha256'] != sha256:
-                raise CorruptedFileStoreException('SHA256 mismatch between received '
-                                                  'and calculated sha256. %s != %s' % (sha256, fileinfo['sha256']))
+                raise CorruptedFileStoreException(f"SHA256 mismatch between received and calculated "
+                                                  f"sha256. {sha256} != {fileinfo['sha256']}")
 
             # Check if there is an integrated decode process for this file
             # eg. files that are packaged, and the contained file (not the package
