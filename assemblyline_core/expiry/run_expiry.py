@@ -12,6 +12,7 @@ from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.expiry_heartbeat import Metrics
 
+
 class ExpiryManager(ServerBase):
     def __init__(self):
         self.config = forge.get_config()
@@ -134,8 +135,16 @@ class ExpiryManager(ServerBase):
 
     def try_run(self):
         while self.running:
-            self.run_expiry_once()
-            self.run_archive_once()
+            try:
+                self.run_expiry_once()
+            except Exception as e:
+                self.log.exception(str(e))
+
+            try:
+                self.run_archive_once()
+            except Exception as e:
+                self.log.exception(str(e))
+
             time.sleep(self.config.core.expiry.sleep_time)
 
 
