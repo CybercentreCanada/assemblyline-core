@@ -1,7 +1,6 @@
 import hashlib
 
 from assemblyline.common import forge
-from assemblyline.common.classification import InvalidClassification
 from assemblyline.common.caching import TimeExpiredCache
 from assemblyline.common.dict_utils import recursive_update
 from assemblyline.common.str_utils import safe_str
@@ -24,6 +23,23 @@ summary_tags = (
     "technique.obfuscation", "attribution.actor",
 )
 
+TAG_MAP = {
+    'attribution.exploit': 'EXP',
+    'file.config': 'CFG',
+    'technique.obfuscation': 'OB',
+    'attribution.family': 'IMP',
+    'attribution.implant': 'IMP',
+    'technique.config': 'CFG',
+    'attribution.actor': 'TA',
+}
+
+AV_TO_BEAVIOR = (
+    'Corrupted executable file',
+    'Encrypted container deleted',
+    'Encrypted container deleted;',
+    'Password-protected',
+    'Malformed container violation',
+)
 
 def service_name_from_key(key):
     # noinspection PyBroadException
@@ -72,48 +88,22 @@ def get_summary(datastore, srecord):
         if tag_value == '':
             continue
 
-        tag_context = t.get('context', None)
         tag_type = t['type']
+        # TODO: We should not have to do this because ips and domains should be pre-typed
         if tag_type in ('network.domain', 'network.ip'):
-            if tag_context is None:
-                tag_type += '.static'
-            else:
-                tag_type += '.dynamic'
+            tag_type += '.static'
+
         elif tag_type not in summary:
             continue
 
-        sub_tag = {
-            'attribution.exploit': 'EXP',
-            'file.config': 'CFG',
-            'technique.obfuscation': 'OB',
-            'attribution.family': 'IMP',
-            'attribution.implant': 'IMP',
-            'technique.config': 'CFG',
-            'attribution.actor': 'TA',
-        }.get(tag_type, None)
+        sub_tag = TAG_MAP.get(tag_type, None)
         if sub_tag:
             tag_type = 'attribution'
             tag_value = "%s [%s]" % (tag_value, sub_tag)
 
         if tag_type == 'av.virus_name':
-            if tag_value in (
-                'Corrupted executable file',
-                'Encrypted container deleted',
-                'Encrypted container deleted;',
-                'Password-protected',
-                'Malformed container violation',
-            ):
+            if tag_value in AV_TO_BEAVIOR:
                 tag_type = 'file.behavior'
-
-            else:
-                av_name = (tag_context or '').split('scanner:')
-                if len(av_name) == 2:
-                    av_name = av_name[1]
-                else:
-                    av_name = service_name_from_key(t['key'])
-
-                if av_name:
-                    tag_value = "[%s] %s" % (av_name, tag_value)
 
         summary_values = summary.get(tag_type, None)
         if summary_values is not None:
@@ -286,6 +276,9 @@ def process_alert_message(counter, datastore, logger, alert_data):
     # Additional init goes here
     ###############################
 
+    a_type = alert_data.get('submission', {}).get('metadata', {}).pop('type', None)
+    a_ts = alert_data.get('submission', {}).get('metadata', {}).pop('ts', None)
+
     alert = {
         'al': {
             'score': alert_data['score']
@@ -294,8 +287,8 @@ def process_alert_message(counter, datastore, logger, alert_data):
         'archive_ts': now_as_iso(config.datastore.ilm.days_until_archive * 24 * 60 * 60),
         'metadata': {safe_str(key): value for key, value in alert_data['submission']['metadata'].items()},
         'sid': alert_data['submission']['sid'],
-        'ts': alert_data['submission']['time'],
-        'type': alert_data['submission']['params']['type']
+        'ts': a_ts or alert_data['submission']['time'],
+        'type': a_type or alert_data['submission']['params']['type']
     }
 
     if config.core.alerter.alert_ttl:
