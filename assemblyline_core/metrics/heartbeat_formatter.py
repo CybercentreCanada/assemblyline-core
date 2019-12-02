@@ -3,6 +3,8 @@ import time
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from assemblyline.common.forge import get_service_queue
+from assemblyline.odm.messages.scaler_heartbeat import ScalerMessage
+from assemblyline.odm.messages.scaler_status_heartbeat import ScalerStatusMessage
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from assemblyline_core.ingester import INGEST_QUEUE_NAME, drop_chance
 from assemblyline_core.watcher.client import WATCHER_QUEUE
@@ -209,6 +211,34 @@ class HeartbeatFormatter(object):
                 self.log.info(f"Sent archive heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating ArchiveMessage")
+
+        elif m_type == "scaler":
+            try:
+                msg = {
+                    "sender": self.sender,
+                    "msg": {
+                        "instances": instances,
+                        "metrics": m_data,
+                    }
+                }
+                self.status_queue.publish(ScalerMessage(msg).as_primitives())
+                self.log.info(f"Sent scaler heartbeat: {msg['msg']}")
+            except Exception:
+                self.log.exception("An exception occurred while generating WatcherMessage")
+
+        elif m_type == "scaler-status":
+            try:
+                msg = {
+                    "sender": self.sender,
+                    "msg": {
+                        "service_name": m_name,
+                        "metrics": m_data,
+                    }
+                }
+                self.status_queue.publish(ScalerStatusMessage(msg).as_primitives())
+                self.log.info(f"Sent scaler status heartbeat: {msg['msg']}")
+            except Exception:
+                self.log.exception("An exception occurred while generating WatcherMessage")
 
         elif m_type == "service":
             try:

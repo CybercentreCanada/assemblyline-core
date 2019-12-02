@@ -16,7 +16,8 @@ from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 from assemblyline.common.forge import get_service_queue
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 
-from assemblyline.odm.messages.scaler_heartbeat import Status, Metrics
+from assemblyline.odm.messages.scaler_heartbeat import Metrics
+from assemblyline.odm.messages.scaler_status_heartbeat import Status
 from assemblyline.remote.datatypes.hash import ExpiringHash
 
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
