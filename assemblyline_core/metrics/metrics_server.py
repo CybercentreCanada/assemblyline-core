@@ -18,6 +18,7 @@ from assemblyline.common import forge
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
 METRICS_QUEUE = "assemblyline_metrics"
+NON_AGGREGATED = ['scaler', 'scaler-status']
 
 
 def cleanup_metrics(input_dict):
@@ -46,10 +47,12 @@ def cleanup_metrics(input_dict):
 
     return output_dict
 
+
 def ilm_policy_exists(es, name):
     conn = es.transport.get_connection()
     pol_req = conn.session.get(f"{conn.base_url}/_ilm/policy/{name}")
     return pol_req.ok
+
 
 def create_ilm_policy(es, name, ilm_config):
     data_base = {
@@ -157,7 +160,7 @@ class MetricsServer(ServerBase):
 
                 with self.counters_lock:
                     c_key = (m_name, m_type)
-                    if c_key not in self.counters:
+                    if c_key not in self.counters or m_type in NON_AGGREGATED:
                         self.counters[c_key] = Counter(msg)
                     else:
                         self.counters[c_key] += Counter(msg)
@@ -298,7 +301,7 @@ class HeartbeatManager(ServerBase):
                     continue
 
                 w_key = (m_name, m_type, m_host)
-                if w_key not in self.rolling_window:
+                if w_key not in self.rolling_window or m_type in NON_AGGREGATED:
                     self.rolling_window[w_key] = [Counter(msg)]
                 else:
                     self.rolling_window[w_key].append(Counter(msg))
