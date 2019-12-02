@@ -11,6 +11,7 @@ from assemblyline.common.constants import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, 
     SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.datastore import SearchException
 from assemblyline.odm.messages.alerter_heartbeat import AlerterMessage
+from assemblyline.odm.messages.archive_heartbeat import ArchiveMessage
 from assemblyline.odm.messages.dispatcher_heartbeat import DispatcherMessage
 from assemblyline.odm.messages.expiry_heartbeat import ExpiryMessage
 from assemblyline.odm.messages.ingest_heartbeat import IngestMessage
@@ -194,6 +195,20 @@ class HeartbeatFormatter(object):
                 self.log.info(f"Sent expiry heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating ExpiryMessage")
+
+        elif m_type == "archive":
+            try:
+                msg = {
+                    "sender": self.sender,
+                    "msg": {
+                        "instances": instances,
+                        "metrics": m_data
+                    }
+                }
+                self.status_queue.publish(ArchiveMessage(msg).as_primitives())
+                self.log.info(f"Sent archive heartbeat: {msg['msg']}")
+            except Exception:
+                self.log.exception("An exception occurred while generating ArchiveMessage")
 
         elif m_type == "service":
             try:
