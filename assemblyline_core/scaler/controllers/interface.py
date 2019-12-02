@@ -16,13 +16,21 @@ class ControllerInterface:
         """Tell the controller about a service profile it needs to manage."""
         raise NotImplementedError()
 
+    def memory_info(self):
+        """Return free and total memory in the system."""
+        raise NotImplementedError()
+
+    def cpu_info(self):
+        """Return free and total memory in the system."""
+        raise NotImplementedError()
+
     def free_cpu(self):
         """Number of cores available for reservation."""
-        raise NotImplementedError()
+        return self.cpu_info()[0]
 
     def free_memory(self):
         """Megabytes of RAM that has not been reserved."""
-        raise NotImplementedError()
+        return self.memory_info()[0]
 
     def get_target(self, service_name):
         """Get the target for running instances of a service."""

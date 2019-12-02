@@ -89,6 +89,8 @@ class ServiceProfile:
 
         # How long does a backlog need to be before we are concerned
         self.backlog = int(backlog)
+        self.queue_length = 0
+        self.duty_cycle = 0
         self.last_update = 0
 
     @property
@@ -114,6 +116,8 @@ class ServiceProfile:
     def update(self, delta, instances, backlog, duty_cycle):
         self.last_update = time.time()
         self.running_instances = instances
+        self.queue_length = backlog
+        self.duty_cycle = duty_cycle
 
         # Adjust min instances based on queue (if something has min_instances == 0, bump it up to 1 when
         # there is anything in the queue) this should have no effect for min_instances > 0
@@ -457,17 +461,20 @@ class ScalerServer(CoreBase):
                 'minimum': profile.min_instances,
                 'maximum': profile.instance_limit,
                 'dynamic_maximum': profile.max_instances,
-                'queue': profile.queue.length(),
+                'queue': profile.queue_length,
+                'duty_cycle': profile.duty_cycle,
                 'pressure': profile.pressure
             }
             export_metrics_once(service_name, Status, metrics, host=HOSTNAME, counter_type='scaler-status',
                                 config=self.config, redis=self.redis)
 
+        memory, memory_total = self.controller.memory_info()
+        cpu, cpu_total = self.controller.cpu_info()
         metrics = {
-            'memory_total': 9000.5,
-            'cpu_total': 9000,
-            'memory_free': self.controller.free_memory(),
-            'cpu_free': self.controller.free_cpu()
+            'memory_total': memory_total,
+            'cpu_total': cpu_total,
+            'memory_free': memory,
+            'cpu_free': cpu
         }
 
         export_metrics_once('scaler', Metrics, metrics, host=HOSTNAME,

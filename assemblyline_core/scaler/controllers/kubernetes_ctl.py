@@ -121,7 +121,7 @@ class KubernetesController(ControllerInterface):
         """Tell the controller about a service profile it needs to manage."""
         self._create_deployment(profile, 0)
 
-    def free_cpu(self):
+    def cpu_info(self):
         """Number of cores available for reservation."""
         # Try to get the limit from the namespace
         max_cpu = parse_cpu('inf')
@@ -140,25 +140,26 @@ class KubernetesController(ControllerInterface):
                 used = max(used, parse_cpu(limit.status.used['limits.cpu']))
 
         if found:
-            return max_cpu - used
+            return max_cpu - used, max_cpu
 
         # If the limit isn't set by the user, and we are on a cloud with auto-scaling
         # we don't have a real memory limit
         if self.auto_cloud:
-            return parse_cpu('inf')
+            return parse_cpu('inf'), parse_cpu('inf')
 
         # Try to get the limit by looking at the host list
         cpu = 0
         for node in self.api.list_node().items:
             cpu += parse_cpu(node.status.allocatable['cpu'])
+        max_cpu = cpu
         for pod in self.api.list_pod_for_all_namespaces().items:
             for container in pod.spec.containers:
                 requests = container.resources.requests or {}
                 limits = container.resources.limits or {}
                 cpu -= parse_cpu(requests.get('cpu', limits.get('cpu', '0.1')))
-        return cpu
+        return cpu, max_cpu
 
-    def free_memory(self):
+    def memory_info(self):
         """Megabytes of RAM that has not been reserved."""
         max_ram = float('inf')
 
@@ -178,23 +179,24 @@ class KubernetesController(ControllerInterface):
             if 'limits.memory' in limit.status.used:
                 used = max(used, parse_memory(limit.status.used['limits.memory']))
         if found:
-            return max_ram - used
+            return max_ram - used, max_ram
 
         # If the limit isn't set by the user, and we are on a cloud with auto-scaling
         # we don't have a real memory limit
         if self.auto_cloud:
-            return float('inf')
+            return float('inf'), float('inf')
 
         # Read the memory that is free from the node list
         memory = 0
         for node in self.api.list_node().items:
             memory += parse_memory(node.status.allocatable['memory'])
+        max_memory = memory
         for pod in self.api.list_pod_for_all_namespaces().items:
             for container in pod.spec.containers:
                 requests = container.resources.requests or {}
                 limits = container.resources.limits or {}
                 memory -= parse_memory(requests.get('memory', limits.get('memory', '16Mi')))
-        return memory
+        return memory, max_memory
 
     def _create_labels(self, service_name) -> Dict[str, str]:
         x = dict(self._labels)

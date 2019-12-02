@@ -96,28 +96,28 @@ class DockerController(ControllerInterface):
                 return name
             index += 1
 
-    def free_cpu(self):
+    def cpu_info(self):
         """Try to estimate how much CPU the docker host has unreserved.
 
         NOTE: There is probably a better way to do this.
         """
-        cpu = self._info['NCPU'] * self.cpu_overallocation - self._reserved_cpu
+        total_cpu = cpu = self._info['NCPU'] * self.cpu_overallocation - self._reserved_cpu
         for container in self.client.containers.list():
             if container.attrs['HostConfig']['CpuPeriod']:
                 cpu -= container.attrs['HostConfig']['CpuQuota']/container.attrs['HostConfig']['CpuPeriod']
         self.log.debug(f'Total CPU available {cpu}/{self._info["NCPU"]}')
-        return cpu
+        return cpu, total_cpu
 
-    def free_memory(self):
+    def memory_info(self):
         """Try to estimate how much RAM the docker host has unreserved.
 
         NOTE: There is probably a better way to do this.
         """
-        mem = self._info['MemTotal']/1024 * self.memory_overallocation - self._reserved_mem
+        total_mem = mem = self._info['MemTotal']/1024 * self.memory_overallocation - self._reserved_mem
         for container in self.client.containers.list():
             mem -= container.attrs['HostConfig']['Memory']/1024
         self.log.debug(f'Total Memory available {mem}/{self._info["MemTotal"]/2**10}')
-        return mem
+        return mem, total_mem
 
     def get_target(self, service_name):
         """Get how many instances of a service we expect to be running.
