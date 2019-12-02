@@ -231,8 +231,7 @@ class Ingester:
         self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.persistent_redis)
 
         # Utility object to help submit tasks to dispatching
-        self.submit_client = SubmissionClient(datastore=self.datastore,
-                                              redis=self.redis)
+        self.submit_client = SubmissionClient(datastore=self.datastore, redis=self.redis)
 
     def ingest(self, task: IngestTask):
         self.log.info(f"[{task.ingest_id} :: {task.sha256}] Task received for processing")

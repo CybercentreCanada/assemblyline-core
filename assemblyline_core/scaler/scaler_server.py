@@ -460,10 +460,12 @@ class ScalerServer(CoreBase):
                 'queue': profile.queue.length(),
                 'pressure': profile.pressure
             }
-            export_metrics_once('scaler-'+service_name, Status, metrics, host=HOSTNAME, counter_type='scaler-status',
+            export_metrics_once(service_name, Status, metrics, host=HOSTNAME, counter_type='scaler-status',
                                 config=self.config, redis=self.redis)
 
         metrics = {
+            'memory_total': 9000.5,
+            'cpu_total': 9000,
             'memory_free': self.controller.free_memory(),
             'cpu_free': self.controller.free_cpu()
         }
