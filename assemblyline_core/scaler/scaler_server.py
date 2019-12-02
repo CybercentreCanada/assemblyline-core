@@ -128,7 +128,7 @@ class ServiceProfile:
         self.pressure += delta * math.sqrt(backlog/self.backlog)
 
         # Should we scale down due to duty cycle? (are some of the workers idle)
-        self.pressure -= delta * 4 * (self.target_duty_cycle - duty_cycle)
+        self.pressure -= delta * (self.target_duty_cycle - duty_cycle)/self.target_duty_cycle
 
         # Apply the friction, tendency to do nothing, move the change pressure gradually to the center.
         leak = min(self.leak_rate * delta, abs(self.pressure))
