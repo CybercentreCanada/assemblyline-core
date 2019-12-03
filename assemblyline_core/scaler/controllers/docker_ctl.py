@@ -113,10 +113,11 @@ class DockerController(ControllerInterface):
 
         NOTE: There is probably a better way to do this.
         """
-        total_mem = mem = self._info['MemTotal']/1024 * self.memory_overallocation - self._reserved_mem
+        mega = 2**20
+        total_mem = mem = self._info['MemTotal']/mega * self.memory_overallocation - self._reserved_mem
         for container in self.client.containers.list():
-            mem -= container.attrs['HostConfig']['Memory']/1024
-        self.log.debug(f'Total Memory available {mem}/{self._info["MemTotal"]/2**10}')
+            mem -= container.attrs['HostConfig']['Memory']/mega
+        self.log.debug(f'Total Memory available {mem}/{self._info["MemTotal"]/mega}')
         return mem, total_mem
 
     def get_target(self, service_name):

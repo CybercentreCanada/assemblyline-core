@@ -19,10 +19,16 @@ FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 # RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
 
 
+_exponents = {
+    'Ki': 2**10,
+    'Mi': 2**20,
+    'Gi': 2**30,
+    'Ti': 2**40,
+    'Pi': 2**50,
+}
+
+
 def parse_memory(string):
-    # TODO use a library for parsing this?
-    #      I tried a couple, and they weren't compatable with the formats kubernetes uses
-    #      if we can't find one, this needs to be improved
     # Maybe we have a number in bytes
     try:
         return float(string)/2**20
@@ -30,16 +36,10 @@ def parse_memory(string):
         pass
 
     # Try parsing a unit'd number then
-    if string.endswith('Ki'):
-        byte_count = float(string[:-2]) * 2**10
-    elif string.endswith('Mi'):
-        byte_count = float(string[:-2]) * 2**20
-    elif string.endswith('Gi'):
-        byte_count = float(string[:-2]) * 2**30
-    else:
-        raise ValueError(string)
+    if string[-2:] in _exponents:
+        return (float(string[:-2]) * _exponents[string[-2:]])/(2**20)
 
-    return byte_count/2**20
+    raise ValueError(string)
 
 
 def parse_cpu(string):

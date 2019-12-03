@@ -36,7 +36,6 @@ SERVICE_SYNC_INTERVAL = 30
 PROCESS_TIMEOUT_INTERVAL = 30
 SCALE_INTERVAL = 5
 METRIC_SYNC_INTERVAL = 0.1
-METRIC_EXPORT_INTERVAL = 5
 SERVICE_STATUS_FLUSH = 5
 CONTAINER_EVENTS_LOG_INTERVAL = 2
 
@@ -169,9 +168,9 @@ class ScalerServer(CoreBase):
                                                    namespace=NAMESPACE, priority='al-service-priority')
         else:
             self.log.info("Loading Docker cluster interface.")
-            # TODO allocation parameters should be read from config
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
-                                               cpu_overallocation=100, memory_overallocation=1.5,
+                                               cpu_overallocation=self.config.core.scaler.cpu_overallocation,
+                                               memory_overallocation=self.config.core.scaler.memory_overallocation,
                                                labels=labels, network='svc')
 
         self.profiles: Dict[str, ServiceProfile] = {}
@@ -454,7 +453,7 @@ class ScalerServer(CoreBase):
                 self.log.exception(f"Exception trying to stop timed out service container: {message}")
 
     def export_metrics(self):
-        self.scheduler.enter(METRIC_EXPORT_INTERVAL, 0, self.export_metrics)
+        self.scheduler.enter(self.config.logging.export_interval, 0, self.export_metrics)
         for service_name, profile in self.profiles.items():
             metrics = {
                 'running': profile.running_instances,
