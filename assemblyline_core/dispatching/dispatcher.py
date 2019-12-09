@@ -312,7 +312,7 @@ class Dispatcher:
                     sha256=file_sha,
                     type='UNKNOWN'
                 ))
-                error_key = error.build_key(sid)
+                error_key = error.build_key(service_tool_version=sid)
                 self.datastore.error.save(error_key, error)
                 errors.append(error_key)
             return self.cancel_submission(task, errors, file_parents)

@@ -90,8 +90,7 @@ class RandomService(ServerBase):
                 result.expiry_ts = expiry_ts
                 result_key = Result.help_build_key(sha256=task.fileinfo.sha256,
                                                    service_name=task.service_name,
-                                                   service_version='0',
-                                                   conf_key='0')
+                                                   service_version='0')
 
                 result.response.extracted = result.response.extracted[task.depth+2:]
                 result.response.supplementary = result.response.supplementary[task.depth+2:]

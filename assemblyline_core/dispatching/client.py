@@ -203,10 +203,7 @@ class DispatchClient:
                     sha256=task.fileinfo.sha256,
                     type="TASK PRE-EMPTED",
                 ))
-                service_tool_version_hash = ''
-                task_config_hash = hashlib.md5((json.dumps(sorted(task.service_config)).encode('utf-8'))).hexdigest()
-                conf_key = hashlib.md5((str(service_tool_version_hash + task_config_hash).encode('utf-8'))).hexdigest()
-                error_key = error.build_key(conf_key)
+                error_key = error.build_key(task=task)
                 self.service_failed(task.sid, error_key, error)
                 export_metrics_once(service_name, Metrics, dict(fail_nonrecoverable=1),
                                     host=worker_id, counter_type='service')
@@ -220,7 +217,7 @@ class DispatchClient:
         raise RetryRequestWork()
 
     def _dispatching_error(self, task, process_table, error):
-        error_key = error.build_key()
+        error_key = error.build_key(task=task)
         if process_table.add_error(error_key):
             self.errors.save(error_key, error)
             msg = {'status': 'FAIL', 'cache_key': error_key}

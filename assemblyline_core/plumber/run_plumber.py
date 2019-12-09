@@ -62,10 +62,7 @@ class Plumber(CoreBase):
                             type="TASK PRE-EMPTED",
                         ))
 
-                        service_tool_version_hash = ''
-                        task_config_hash = hashlib.md5((json.dumps(sorted(task.service_config)).encode('utf-8'))).hexdigest()
-                        conf_key = hashlib.md5((str(service_tool_version_hash + task_config_hash).encode('utf-8'))).hexdigest()
-                        error_key = error.build_key(conf_key)
+                        error_key = error.build_key(task=task)
 
                         self.dispatch_client.service_failed(task.sid, error_key, error)
 
