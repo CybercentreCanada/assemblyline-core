@@ -19,8 +19,8 @@ config = forge.get_config()
 summary_tags = (
     "av.virus_name", "attribution.exploit",
     "file.config", "technique.obfuscation", "file.behavior",
-    "attribution.family", "attribution.implant", "network.domain", "network.ip",
-    "technique.obfuscation", "attribution.actor",
+    "attribution.family", "attribution.implant", "network.static.domain", "network.static.ip",
+    "network.dynamic.domain", "network.dynamic.ip", "technique.obfuscation", "attribution.actor",
 )
 
 TAG_MAP = {
@@ -75,25 +75,19 @@ def get_summary(datastore, srecord):
         'file.rule.yara': set(),
         'attribution.family': set(),
         'attribution.implant': set(),
-        'network.domain.static': set(),
-        'network.domain.dynamic': set(),
-        'network.ip.static': set(),
-        'network.ip.dynamic': set(),
+        'network.static.domain': set(),
+        'network.dynamic.domain': set(),
+        'network.static.ip': set(),
+        'network.dynamic.ip': set(),
         'technique.config': set(),
         'attribution.actor': set()
     }
 
     for t in datastore.get_tag_list_from_keys(srecord.get('results', [])):
         tag_value = t['value']
-        if tag_value == '':
-            continue
-
         tag_type = t['type']
-        # TODO: We should not have to do this because ips and domains should be pre-typed
-        if tag_type in ('network.domain', 'network.ip'):
-            tag_type += '.static'
 
-        elif tag_type not in summary:
+        if tag_value == '' or tag_type not in summary:
             continue
 
         sub_tag = TAG_MAP.get(tag_type, None)
@@ -143,8 +137,8 @@ def parse_submission_record(counter, datastore, alert_data, logger):
         except Exception:  # pylint: disable=W0702
             logger.exception('Problem determining extended scan state:')
 
-    domains = summary['network.domain.dynamic'].union(summary['network.domain.static'])
-    ips = summary['network.ip.dynamic'].union(summary['network.ip.static'])
+    domains = summary['network.dynamic.domain'].union(summary['network.static.domain'])
+    ips = summary['network.dynamic.ip'].union(summary['network.static.ip'])
 
     return {
         'behaviors': behaviors,
@@ -234,11 +228,11 @@ def get_alert_update_parts(counter, datastore, alert_data, logger):
                 'av': list(parsed_record['summary']['av.virus_name']),
                 'behavior': parsed_record['behaviors'],
                 'domain': list(parsed_record['domains']),
-                'domain_dynamic': list(parsed_record['summary']['network.domain.dynamic']),
-                'domain_static': list(parsed_record['summary']['network.domain.static']),
+                'domain_dynamic': list(parsed_record['summary']['network.dynamic.domain']),
+                'domain_static': list(parsed_record['summary']['network.static.domain']),
                 'ip': list(parsed_record['ips']),
-                'ip_dynamic': list(parsed_record['summary']['network.ip.dynamic']),
-                'ip_static': list(parsed_record['summary']['network.ip.static']),
+                'ip_dynamic': list(parsed_record['summary']['network.dynamic.ip']),
+                'ip_static': list(parsed_record['summary']['network.static.ip']),
                 'request_end_time': parsed_record['srecord']['times']['completed'],
                 'yara': list(parsed_record['summary']['file.rule.yara']),
             }
