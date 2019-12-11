@@ -63,14 +63,31 @@ class DockerController(ControllerInterface):
             image=cfg.image,
             name=container_name,
             cpu_period=100000,
-            cpu_quota=int(100000*prof.container_config.cpu_cores),
-            mem_limit=f'{prof.container_config.ram_mb}m',
+            cpu_quota=int(100000*cfg.cpu_cores),
+            mem_limit=f'{cfg.ram_mb}m',
             labels=labels,
             restart_policy={'Name': 'always'},
             command=cfg.command,
             volumes=volumes,
             network=self.network,
             environment=[f'{_e.name}={_e.value}' for _e in cfg.environment] + ['UPDATE_PATH=/mount/updates/'],
+            detach=True,
+        )
+
+    def _start_container(self, name, labels, volumes, cfg: DockerConfig):
+        """Launch a docker container."""
+        self.client.containers.run(
+            image=cfg.image,
+            name=name,
+            cpu_period=100000,
+            cpu_quota=int(100000*cfg.cpu_cores),
+            mem_limit=f'{cfg.ram_mb}m',
+            labels=labels,
+            restart_policy={'Name': 'always'},
+            command=cfg.command,
+            volumes=volumes,
+            network=self.network,
+            environment=[f'{_e.name}={_e.value}' for _e in cfg.environment],
             detach=True,
         )
 
@@ -191,3 +208,12 @@ class DockerController(ControllerInterface):
             out.append(container.id[:12])
             out.append(container.name)
         return out
+
+    def start_stateful_container(self, service_name, deployment_name, spec, labels):
+        volumes = {_n: {'bind': _v.mount_path, 'mode': 'rw'} for _n, _v in spec.volumes.items()}
+        self._start_container(name=deployment_name, labels=labels, volumes=volumes, cfg=spec.container)
+
+    def stop_containers(self, labels):
+        label_strings = [f'{name}={value}' for name, value in labels.items()]
+        for container in self.client.containers.list(filters={'label': label_strings}):
+            container.stop()

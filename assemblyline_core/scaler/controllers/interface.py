@@ -48,3 +48,9 @@ class ControllerInterface:
 
     def new_events(self):
         return []
+
+    def start_stateful_container(self, service_name, deployment_name, spec, labels):
+        raise NotImplementedError()
+
+    def stop_containers(self, labels):
+        raise NotImplementedError()

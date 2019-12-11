@@ -4,7 +4,8 @@ from typing import Dict, Tuple, List
 from kubernetes import client, config
 from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1KeyToPath, V1ConfigMapVolumeSource, \
-    V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements
+    V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
+    V1PersistentVolumeClaimSpec
 from kubernetes.client.rest import ApiException
 
 from assemblyline_core.scaler.controllers.interface import ControllerInterface
@@ -119,7 +120,8 @@ class KubernetesController(ControllerInterface):
 
     def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
-        self._create_deployment(profile, 0)
+        self._create_deployment(profile.name, self._deployment_name(profile.name),
+                                profile.docker_config, profile.timeout, 0)
 
     def cpu_info(self):
         """Number of cores available for reservation."""
@@ -198,18 +200,10 @@ class KubernetesController(ControllerInterface):
                 memory -= parse_memory(requests.get('memory', limits.get('memory', '16Mi')))
         return memory, max_memory
 
-    def _create_labels(self, service_name) -> Dict[str, str]:
-        x = dict(self._labels)
-        x['component'] = service_name
-        return x
+    def _create_metadata(self, deployment_name: str, labels: Dict[str, str]):
+        return V1ObjectMeta(name=deployment_name, labels=labels)
 
-    def _create_metadata(self, service_name):
-        return V1ObjectMeta(name=self._deployment_name(service_name), labels=self._create_labels(service_name))
-
-    def _create_selector(self, service_name) -> V1LabelSelector:
-        return V1LabelSelector(match_labels=self._create_labels(service_name))
-
-    def _create_volumes(self, profile):
+    def _create_volumes(self, service_name):
         volumes, mounts = [], []
 
         # Attach the mount that provides the config file
@@ -229,25 +223,25 @@ class KubernetesController(ControllerInterface):
         mounts.append(V1VolumeMount(
             name='update-directory',
             mount_path=CONTAINER_UPDATE_DIRECTORY,
-            sub_path=profile.name,
+            sub_path=service_name,
             read_only=True,
         ))
 
         return volumes, mounts
 
-    def _create_containers(self, profile, mounts):
-        cores = profile.container_config.cpu_cores
-        memory = profile.container_config.ram_mb
+    def _create_containers(self, deployment_name, container_config, mounts):
+        cores = container_config.cpu_cores
+        memory = container_config.ram_mb
         min_memory = max(int(memory/4), min(64, memory))
-        environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in profile.container_config.environment]
+        environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]
         environment_variables += [
             V1EnvVar(name='UPDATE_PATH', value=CONTAINER_UPDATE_DIRECTORY),
             V1EnvVar(name='FILE_UPDATE_DIRECTORY', value=CONTAINER_UPDATE_DIRECTORY)
         ]
         return [V1Container(
-            name=self._deployment_name(profile.name),
-            image=profile.container_config.image,
-            command=profile.container_config.command,
+            name=deployment_name,
+            image=container_config.image,
+            command=container_config.command,
             env=environment_variables,
             image_pull_policy='Always',
             volume_mounts=mounts,
@@ -257,25 +251,32 @@ class KubernetesController(ControllerInterface):
             )
         )]
 
-    def _create_deployment(self, profile, scale: int):
+    def _create_deployment(self, service_name: str, deployment_name: str, docker_config,
+                           shutdown_seconds, scale: int, labels=None, volumes=None, mounts=None):
 
         replace = False
 
-        if not os.path.exists(os.path.join(FILE_UPDATE_DIRECTORY, profile.name)):
-            os.makedirs(os.path.join(FILE_UPDATE_DIRECTORY, profile.name), 0x777)
+        if not os.path.exists(os.path.join(FILE_UPDATE_DIRECTORY, service_name)):
+            os.makedirs(os.path.join(FILE_UPDATE_DIRECTORY, service_name), 0x777)
 
         for dep in self.b1api.list_namespaced_deployment(namespace=self.namespace).items:
-            if dep.metadata.name == self._deployment_name(profile.name):
+            if dep.metadata.name == deployment_name:
                 replace = True
 
-        volumes, mounts = self._create_volumes(profile)
-        metadata = self._create_metadata(profile.name)
+        all_labels = dict(self._labels)
+        all_labels['component'] = service_name
+        all_labels.update(labels or {})
+
+        all_volumes, all_mounts = self._create_volumes(service_name)
+        all_volumes.extend(volumes or [])
+        all_mounts.extend(mounts or [])
+        metadata = self._create_metadata(deployment_name=deployment_name, labels=all_labels)
 
         pod = V1PodSpec(
-            volumes=volumes,
-            containers=self._create_containers(profile, mounts),
+            volumes=all_volumes,
+            containers=self._create_containers(deployment_name, docker_config, all_mounts),
             priority_class_name=self.priority,
-            termination_grace_period_seconds=profile.shutdown_seconds,
+            termination_grace_period_seconds=shutdown_seconds,
         )
 
         template = V1PodTemplateSpec(
@@ -285,7 +286,7 @@ class KubernetesController(ControllerInterface):
 
         spec = ExtensionsV1beta1DeploymentSpec(
             replicas=int(scale),
-            selector=self._create_selector(profile.name),
+            selector=V1LabelSelector(match_labels=all_labels),
             template=template,
         )
 
@@ -329,7 +330,8 @@ class KubernetesController(ControllerInterface):
                 return
 
     def restart(self, service):
-        self._create_deployment(service, self.get_target(service.name))
+        self._create_deployment(service.name, self._deployment_name(service.name), service.docker_config,
+                                service.timeout, self.get_target(service.name))
 
     def get_running_container_names(self):
         pods = self.api.list_pod_for_all_namespaces(field_selector='status.phase==Running')
@@ -352,3 +354,32 @@ class KubernetesController(ControllerInterface):
             self.events_window.pop(uid)
 
         return new
+
+    def start_stateful_container(self, service_name, deployment_name, spec, labels):
+        # Setup PVC
+        mounts, volumes = [], []
+        for volume_name, volume_spec in spec.volumes.items():
+            mount_name = deployment_name + volume_name
+
+            # Check if the PVC exists, create if not
+            self._ensure_pvc(mount_name, volume_spec.storage_class, volume_spec.capacity)
+
+            # Create the volume info
+            volumes.append(V1Volume(name=mount_name, persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(mount_name)))
+            mounts.append(V1VolumeMount(mount_path=volume_spec.mount_path, name=mount_name))
+
+        self._create_deployment(service_name, deployment_name, spec.container,
+                                30, 1, labels, volumes=volumes, mounts=mounts)
+
+    def _ensure_pvc(self, name, storage_class, size):
+        request = V1ResourceRequirements(requests={'storage': size})
+        claim_spec = V1PersistentVolumeClaimSpec(storage_class_name=storage_class, resources=request)
+        metadata = V1ObjectMeta(namespace=self.namespace, name=name)
+        claim = V1PersistentVolumeClaim(metadata=metadata, spec=claim_spec)
+        self.api.create_namespaced_persistent_volume_claim(namespace=self.namespace, body=claim)
+
+    def stop_containers(self, labels):
+        label_selector = ','.join(f'{_n}={_v}' for _n, _v in labels.items())
+        for dep in self.b1api.list_namespaced_deployment(namespace=self.namespace, label_selector=label_selector).items:
+            self.b1api.delete_namespaced_deployment(name=dep.metadata.name, namespace=self.namespace)
+
