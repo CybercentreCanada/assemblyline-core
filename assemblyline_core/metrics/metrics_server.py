@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-import copy
 import elasticapm
 import elasticsearch
 import json
@@ -19,6 +18,10 @@ from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
 METRICS_QUEUE = "assemblyline_metrics"
 NON_AGGREGATED = ['scaler', 'scaler-status']
+
+
+class ILMException(Exception):
+    pass
 
 
 def cleanup_metrics(input_dict):
@@ -98,10 +101,10 @@ def create_ilm_policy(es, name, ilm_config):
 
     conn = es.transport.get_connection()
     pol_req = conn.session.put(f"{conn.base_url}/_ilm/policy/{name}",
-                       headers={"Content-Type": "application/json"},
-                       data=json.dumps(data_base))
+                               headers={"Content-Type": "application/json"},
+                               data=json.dumps(data_base))
     if not pol_req.ok:
-        raise Exception(f"ERROR: Failed to create ILM policy: {name}")
+        raise ILMException(f"ERROR: Failed to create ILM policy: {name}")
 
 
 class MetricsServer(ServerBase):
@@ -204,9 +207,13 @@ class MetricsServer(ServerBase):
             try:
                 index = f"al_metrics_{component_type}"
                 policy = f"{index}_policy"
-                if not ilm_policy_exists(self.es, policy):
+                while not ilm_policy_exists(self.es, policy):
                     self.log.debug(f"ILM Policy {policy.upper()} does not exists. Creating it now...")
-                    create_ilm_policy(self.es, policy, self.config.core.metrics.elasticsearch.as_primitives())
+                    try:
+                        create_ilm_policy(self.es, policy, self.config.core.metrics.elasticsearch.as_primitives())
+                    except ILMException:
+                        time.sleep(0.1)
+                        pass
 
                 if not self.es.indices.exists_template(index):
                     self.log.debug(f"Index template {index.upper()} does not exists. Creating it now...")

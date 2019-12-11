@@ -7,10 +7,10 @@ from typing import Dict, List, cast
 from assemblyline.common import isotime, forge
 from assemblyline.common.constants import SUBMISSION_QUEUE, FILE_QUEUE, DISPATCH_TASK_HASH, \
     DISPATCH_RUNNING_TASK_HASH, get_temporary_submission_data_name, get_tag_set_name, make_watcher_list_name
-from assemblyline.common.exceptions import MultiKeyError
 from assemblyline.common.forge import CachedObject, get_service_queue
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.datastore import Collection
+from assemblyline.datastore.exceptions import MultiKeyError
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm import ClassificationObject
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
