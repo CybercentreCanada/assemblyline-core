@@ -217,10 +217,13 @@ class ScalerServer(CoreBase):
             try:
                 if service.enabled and stage == ServiceStage.Off:
                     # Enable this service's dependencies
-                    for index, dependency in enumerate(service.dependencies):
-                        self.controller.start_stateful_container(f'{service.name}-dep-{index}', dependency, labels={
-                            'dependency_for': service.name
-                        })
+                    for name, dependency in service.dependencies.items():
+                        self.controller.start_stateful_container(
+                            service_name=service.name,
+                            deployment_name=f'{service.name}-dep-{name}',
+                            spec=dependency,
+                            labels={'dependency_for': service.name}
+                        )
 
                     # Move to the next service stage
                     if service.update_config:

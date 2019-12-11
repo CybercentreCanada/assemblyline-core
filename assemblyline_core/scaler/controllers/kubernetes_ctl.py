@@ -362,7 +362,7 @@ class KubernetesController(ControllerInterface):
             mount_name = deployment_name + volume_name
 
             # Check if the PVC exists, create if not
-            self._ensure_pvc(mount_name, 'default', volume_spec.capacity)
+            self._ensure_pvc(mount_name, volume_spec.storage_class, volume_spec.capacity)
 
             # Create the volume info
             volumes.append(V1Volume(name=mount_name, persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(mount_name)))
