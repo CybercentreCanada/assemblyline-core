@@ -217,7 +217,10 @@ class ScalerServer(CoreBase):
             try:
                 if service.enabled and stage == ServiceStage.Off:
                     # Enable this service's dependencies
-                    self.log.warning("Action for service dependency skipped")
+                    for index, dependency in enumerate(service.dependencies):
+                        self.controller.start_stateful_container(f'{service.name}-dep-{index}', dependency, labels={
+                            'dependency_for': service.name
+                        })
 
                     # Move to the next service stage
                     if service.update_config:
@@ -228,7 +231,9 @@ class ScalerServer(CoreBase):
                 if not service.enabled:
                     if stage != ServiceStage.Off:
                         # Disable this service's dependencies
-                        self.log.warning("Action for service dependency skipped")
+                        self.controller.stop_containers(labels={
+                            'dependency_for': service.name
+                        })
 
                         #
                         self._service_stage_hash.set(name, ServiceStage.Off)
