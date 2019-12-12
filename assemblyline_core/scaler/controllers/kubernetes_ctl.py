@@ -121,7 +121,7 @@ class KubernetesController(ControllerInterface):
     def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
         self._create_deployment(profile.name, self._deployment_name(profile.name),
-                                profile.docker_config, profile.timeout, 0)
+                                profile.container_config, profile.shutdown_seconds, 0)
 
     def cpu_info(self):
         """Number of cores available for reservation."""
