@@ -126,7 +126,10 @@ while True:
             }
         }
 
-        # TODO: Index memory, read/write thread queues, cgroup CPU/CFS
+        # TODO on Nodes: Index memory, read/write thread queues, cgroup CPU/CFS, Number of indicies and shards,
+        #                node type, node status, transport address
+
         pprint(metric)
 
+        # TODO Other: All of cluster wide stats, Per index stats
     time.sleep(INDEX_INTERVAL)
