@@ -1,135 +1,556 @@
+import elasticapm
+import sys
+
 import elasticsearch
 import time
 
-from pprint import pprint
+from assemblyline_core.metrics.metrics_server import ilm_policy_exists, create_ilm_policy, ILMException
+from assemblyline_core.server_base import ServerBase
 
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 
-config = forge.get_config()
 
-es_hosts = config.datastore.hosts
-es = elasticsearch.Elasticsearch(hosts=config.datastore.hosts, connection_class=elasticsearch.RequestsHttpConnection)
+class ESMetricsServer(ServerBase):
+    """
+    There can only be one of these type of metrics server running because it gathers elasticsearch metrics for 
+    the whole cluster.
+    """
+    def __init__(self, config=None):
+        super().__init__('assemblyline.es_metrics', shutdown_timeout=15)
+        self.config = config or forge.get_config()
+        self.elastic_hosts = self.config.core.metrics.elasticsearch.hosts
+        
+        self.index_interval = 10
+        self.old_node_data = {}
+        self.old_cluster_data = {}
+        self.old_index_data = {}
 
-INDEX_INTERVAL = 10
+        if not self.elastic_hosts:
+            self.log.error("No elasticsearch cluster defined to store metrics. All gathered stats will be ignored...")
+            sys.exit(1)
 
-old_data = {}
-while True:
-    node_stats = es.nodes.stats()
-    for node, stats in node_stats['nodes'].items():
-        name = stats["name"]
-
-        # Compute current values
-        #    GC
-        if name in old_data:
-            old_gc_count = stats['jvm']['gc']['collectors']['old']['collection_count'] - old_data[name]['o_ogcc']
-            old_gc_time = \
-                stats['jvm']['gc']['collectors']['old']['collection_time_in_millis'] - old_data[name]['o_ogct']
-            young_gc_count = stats['jvm']['gc']['collectors']['young']['collection_count'] - old_data[name]['o_ygcc']
-            young_gc_time = \
-                stats['jvm']['gc']['collectors']['young']['collection_time_in_millis'] - old_data[name]['o_ygct']
-
-            #    Rates
-            get_rate = (stats['indices']['get']['total'] - old_data[name]['o_gr'])
-            index_rate = (stats['indices']['indexing']['index_total'] - old_data[name]['o_ir'])
-            search_rate = (stats['indices']['search']['query_total'] - old_data[name]['o_sr'])
-
-            #    Times
-            get_time = stats['indices']['get']['time_in_millis'] - old_data[name]['o_gt']
-            index_time = stats['indices']['indexing']['index_time_in_millis'] - old_data[name]['o_it']
-            search_time = stats['indices']['search']['query_time_in_millis'] - old_data[name]['o_st']
-
-            # Latency
-            get_latency = get_time / get_rate
-            index_latency = index_time / index_rate
-            search_latency = search_time / search_rate
+        self.es = None
+        
+        if self.config.core.metrics.apm_server.server_url is not None:
+            self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
+            elasticapm.instrument()
+            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
+                                                service_name="es_metrics")
         else:
-            old_gc_count = old_gc_time = young_gc_count = young_gc_time = 0
-            get_rate = index_rate = search_rate = 0
-            get_time = index_time = search_time = 0
-            get_latency = index_latency = search_latency = 0
+            self.apm_client = None
 
-        # Save old fields values
-        old_data.setdefault(name, {})
-        old_data[name]['o_ogcc'] = stats['jvm']['gc']['collectors']['old']['collection_count']
-        old_data[name]['o_ogct'] = stats['jvm']['gc']['collectors']['old']['collection_time_in_millis']
-        old_data[name]['o_ygcc'] = stats['jvm']['gc']['collectors']['young']['collection_count']
-        old_data[name]['o_ygct'] = stats['jvm']['gc']['collectors']['young']['collection_time_in_millis']
-        old_data[name]['o_gr'] = stats['indices']['get']['total']
-        old_data[name]['o_ir'] = stats['indices']['indexing']['index_total']
-        old_data[name]['o_sr'] = stats['indices']['search']['query_total']
-        old_data[name]['o_gt'] = stats['indices']['get']['time_in_millis']
-        old_data[name]['o_it'] = stats['indices']['indexing']['index_time_in_millis']
-        old_data[name]['o_st'] = stats['indices']['search']['query_time_in_millis']
+    def get_node_metrics(self):
+        if self.apm_client:
+            self.apm_client.begin_transaction('metrics')
 
-        # Build Metrics document
-        metric = {
-            "timestamp": now_as_iso(),
-            "node": {
-                "name": name
-            },
-            "clients": {
-                "current": stats['http']['current_open'],
-                "total": stats['http']['total_opened']
-            },
-            "cpu": {
-                "percent": stats["process"]["cpu"]["percent"]
-            },
-            "disk": {
-                "total": stats["fs"]["total"]["total_in_bytes"],
-                "available": stats["fs"]["total"]["available_in_bytes"],
-            },
-            "file_descriptors": {
-                "open": stats['process']['open_file_descriptors'],
-                "max": stats['process']['max_file_descriptors']
-            },
-            # This is an aggregate over time. Should we compute the value from the last time ?
-            "gc": {
-                "old": {
-                    "count": old_gc_count / INDEX_INTERVAL,
-                    "time": old_gc_time / INDEX_INTERVAL,
-                },
-                "young": {
-                    "count": young_gc_count / INDEX_INTERVAL,
-                    "time": young_gc_time / INDEX_INTERVAL,
+        try:
+            node_metrics = {}
+            for node, stats in self.es.nodes.stats(level='shards')['nodes'].items():
+                state = "Online"
+                name = stats["name"]
+                index_count = 0
+                shard_count = 0
+                for index, shards in stats['indices']['shards'].items():
+                    index_count += 1
+                    for shard in shards:
+                        for s_name, s_stats in shard.items():
+                            shard_count += 1
+                            if not s_stats['routing']['state'] == "STARTED":
+                                state = "Degraded"
+
+                gc_collectors = stats['jvm']['gc']['collectors']
+                # Compute current values
+                if name in self.old_node_data:
+                    # GC
+                    old_gc_count = gc_collectors['old']['collection_count'] - self.old_node_data[name]['ogcc']
+                    old_gc_time = gc_collectors['old']['collection_time_in_millis'] - self.old_node_data[name]['ogct']
+                    young_gc_count = gc_collectors['young']['collection_count'] - self.old_node_data[name]['ygcc']
+                    young_gc_time = \
+                        gc_collectors['young']['collection_time_in_millis'] - self.old_node_data[name]['ygct']
+
+                    # Rates
+                    get_rate = (stats['indices']['get']['total'] - self.old_node_data[name]['gr'])
+                    index_rate = (stats['indices']['indexing']['index_total'] - self.old_node_data[name]['ir'])
+                    search_rate = (stats['indices']['search']['query_total'] - self.old_node_data[name]['sr'])
+
+                    # Times
+                    get_time = stats['indices']['get']['time_in_millis'] - self.old_node_data[name]['gt']
+                    index_time = stats['indices']['indexing']['index_time_in_millis'] - self.old_node_data[name]['it']
+                    search_time = stats['indices']['search']['query_time_in_millis'] - self.old_node_data[name]['st']
+
+                    # Latency
+                    get_latency = get_time / (get_rate or 1)
+                    index_latency = index_time / (index_rate or 1)
+                    search_latency = search_time / (search_rate or 1)
+
+                    # CGroup
+                    cg = stats['os']['cgroup']
+                    cg_nanos = cg['cpuacct']['usage_nanos'] - self.old_node_data[name]['cgn']
+                    cg_throttled = cg['cpu']['stat']['time_throttled_nanos'] - self.old_node_data[name]['cgt']
+                else:
+                    old_gc_count = old_gc_time = young_gc_count = young_gc_time = 0
+                    get_rate = index_rate = search_rate = 0
+                    get_latency = index_latency = search_latency = 0
+                    cg_nanos = cg_throttled = 0
+
+                # Save old fields values
+                self.old_node_data.setdefault(name, {})
+                self.old_node_data[name]['ogcc'] = gc_collectors['old']['collection_count']
+                self.old_node_data[name]['ogct'] = gc_collectors['old']['collection_time_in_millis']
+                self.old_node_data[name]['ygcc'] = gc_collectors['young']['collection_count']
+                self.old_node_data[name]['ygct'] = gc_collectors['young']['collection_time_in_millis']
+                self.old_node_data[name]['gr'] = stats['indices']['get']['total']
+                self.old_node_data[name]['ir'] = stats['indices']['indexing']['index_total']
+                self.old_node_data[name]['sr'] = stats['indices']['search']['query_total']
+                self.old_node_data[name]['gt'] = stats['indices']['get']['time_in_millis']
+                self.old_node_data[name]['it'] = stats['indices']['indexing']['index_time_in_millis']
+                self.old_node_data[name]['st'] = stats['indices']['search']['query_time_in_millis']
+                self.old_node_data[name]['cgn'] = stats['os']['cgroup']['cpuacct']['usage_nanos']
+                self.old_node_data[name]['cgt'] = stats['os']['cgroup']['cpu']['stat']['time_throttled_nanos']
+
+                # Build Metrics document
+                metric = {
+                    "timestamp": now_as_iso(),
+                    "node": {
+                        "name": name,
+                        "state": state,
+                        "roles": stats["roles"],
+                        "transport_address": stats['transport_address']
+                    },
+                    "clients": {
+                        "current": stats['http']['current_open'],
+                        "total": stats['http']['total_opened']
+                    },
+                    "cpu": {
+                        "percent": stats["process"]["cpu"]["percent"],
+                        "cgroup": {
+                            "timing": {
+                                "usage": cg_nanos / self.index_interval,
+                                "throttled": cg_throttled / self.index_interval
+                            },
+                            "count": {
+                                "periods": stats['os']['cgroup']['cpu']['stat']['number_of_elapsed_periods'],
+                                "throttled": stats['os']['cgroup']['cpu']['stat']['number_of_times_throttled']
+                            }
+
+                        }
+                    },
+                    "disk": {
+                        "total": stats["fs"]["total"]["total_in_bytes"],
+                        "available": stats["fs"]["total"]["available_in_bytes"],
+                    },
+                    "file_descriptors": {
+                        "open": stats['process']['open_file_descriptors'],
+                        "max": stats['process']['max_file_descriptors']
+                    },
+                    # This is an aggregate over time. Should we compute the value from the last time ?
+                    "gc": {
+                        "old": {
+                            "count": old_gc_count / self.index_interval,
+                            "time": old_gc_time / self.index_interval,
+                        },
+                        "young": {
+                            "count": young_gc_count / self.index_interval,
+                            "time": young_gc_time / self.index_interval,
+                        }
+                    },
+                    "indices": {
+                        "count": index_count,
+                        "docs": {
+                            "count": stats['indices']['docs']['count'],
+                            "deleted": stats['indices']['docs']['deleted'],
+                            "size": stats['indices']['store']['size_in_bytes'],
+                        },
+                        "latency": {
+                            "get": get_latency,
+                            "index": index_latency,
+                            "search": search_latency,
+                        },
+                        "rate": {
+                            "get": get_rate / self.index_interval,
+                            "index": index_rate / self.index_interval,
+                            "search": search_rate / self.index_interval,
+                        },
+                        "time": {
+                            "get": get_latency * ((get_rate / self.index_interval) or 1),
+                            "index": index_latency * ((index_rate / self.index_interval) or 1),
+                            "search": search_latency * ((search_rate / self.index_interval) or 1),
+                        },
+                        "segments": stats['indices']['segments']['count'],
+                        "memory": {
+                            "total": stats['indices']['segments']['memory_in_bytes'],
+                            "docs": stats['indices']['segments']['doc_values_memory_in_bytes'],
+                            "terms": stats['indices']['segments']['terms_memory_in_bytes'],
+                            "points": stats['indices']['segments']['points_memory_in_bytes'],
+                            "stored_fields": stats['indices']['segments']['stored_fields_memory_in_bytes'],
+                            "index_writer": stats['indices']['segments']['index_writer_memory_in_bytes'],
+                            "norms": stats['indices']['segments']['norms_memory_in_bytes'],
+                            "fixed_bitsets": stats['indices']['segments']['fixed_bit_set_memory_in_bytes'],
+                            "term_vectors": stats['indices']['segments']['term_vectors_memory_in_bytes'],
+                            "version_map": stats['indices']['segments']['version_map_memory_in_bytes'],
+                            "query_cache": stats['indices']['query_cache']['memory_size_in_bytes'],
+                            "request_cache": stats['indices']['request_cache']['memory_size_in_bytes'],
+                            "fielddata": stats['indices']['fielddata']['memory_size_in_bytes']
+                        }
+                    },
+                    "jvm": {
+                        "max": stats["jvm"]["mem"]["heap_max_in_bytes"],
+                        "used": stats["jvm"]["mem"]["heap_used_in_bytes"]
+                    },
+                    "shards": {
+                        "count": shard_count
+                    },
+                    "system": {
+                        "load": stats["os"]["cpu"]["load_average"]["1m"]
+                    },
+                    "thread": {
+                        "write": {
+                            "queue": stats['thread_pool']['write']['queue'],
+                            "rejection": stats['thread_pool']['write']['rejected'],
+                        },
+                        "search": {
+                            "queue": stats['thread_pool']['search']['queue'],
+                            "rejection": stats['thread_pool']['search']['rejected'],
+                        },
+                        "get": {
+                            "queue": stats['thread_pool']['get']['queue'],
+                            "rejection": stats['thread_pool']['get']['rejected'],
+                        },
+                    }
                 }
-            },
-            "indices": {
-                "docs": {
-                    "count": stats['indices']['docs']['count'],
-                    "deleted": stats['indices']['docs']['deleted'],
-                    "size": stats['indices']['store']['size_in_bytes'],
+
+                node_metrics[node] = metric
+
+            return node_metrics
+        finally:
+            if self.apm_client:
+                self.apm_client.end_transaction('gather_node_metrics', 'success')
+
+    def get_cluster_metrics(self):
+        if self.apm_client:
+            self.apm_client.begin_transaction('metrics')
+
+        try:
+            cluster_stats = self.es.cluster.stats()
+            cluster_health = self.es.cluster.health()
+            indices_metrics = self.es.indices.stats(level='cluster')
+
+            # Compute current values
+            if len(self.old_cluster_data) != 0:
+                all_metrics = indices_metrics['_all']['total']
+                # Rates
+                get_rate = (all_metrics['get']['total'] - self.old_cluster_data['gr'])
+                index_rate = (all_metrics['indexing']['index_total'] - self.old_cluster_data['ir'])
+                search_rate = (all_metrics['search']['query_total'] - self.old_cluster_data['sr'])
+
+                # Times
+                get_time = all_metrics['get']['time_in_millis'] - self.old_cluster_data['gt']
+                index_time = all_metrics['indexing']['index_time_in_millis'] - self.old_cluster_data['it']
+                search_time = all_metrics['search']['query_time_in_millis'] - self.old_cluster_data['st']
+
+                # Latency
+                get_latency = get_time / get_rate
+                index_latency = index_time / index_rate
+                search_latency = search_time / search_rate
+
+            else:
+                get_rate = index_rate = search_rate = 0
+                get_latency = index_latency = search_latency = 0
+
+            # Save old fields values
+            self.old_cluster_data['gr'] = indices_metrics['_all']['total']['get']['total']
+            self.old_cluster_data['ir'] = indices_metrics['_all']['total']['indexing']['index_total']
+            self.old_cluster_data['sr'] = indices_metrics['_all']['total']['search']['query_total']
+            self.old_cluster_data['gt'] = indices_metrics['_all']['total']['get']['time_in_millis']
+            self.old_cluster_data['it'] = indices_metrics['_all']['total']['indexing']['index_time_in_millis']
+            self.old_cluster_data['st'] = indices_metrics['_all']['total']['search']['query_time_in_millis']
+
+            jvm_mem = cluster_stats['nodes']["jvm"]["mem"]
+            fs = cluster_stats['nodes']["fs"]
+            metric = {
+                "timestamp": now_as_iso(),
+                "name": cluster_health['cluster_name'],
+                "status": cluster_health['status'],
+                "indices": {
+                    "count": cluster_stats['indices']["count"],
+                    "docs": {
+                        "count": cluster_stats['indices']["docs"]["count"],
+                        "size": cluster_stats['indices']["store"]["size_in_bytes"]
+                    },
+                    "latency": {
+                        "get": get_latency,
+                        "index": index_latency,
+                        "search": search_latency,
+                    },
+                    "rate": {
+                        "get": get_rate / self.index_interval,
+                        "index": index_rate / self.index_interval,
+                        "search": search_rate / self.index_interval,
+                    },
+                    "time": {
+                        "get": get_latency * ((get_rate / self.index_interval) or 1),
+                        "index": index_latency * ((index_rate / self.index_interval) or 1),
+                        "search": search_latency * ((search_rate / self.index_interval) or 1),
+                    },
+                    "shards": {
+                        "initializing": cluster_health["initializing_shards"],
+                        "delayed": cluster_health["delayed_unassigned_shards"],
+                        "relocating": cluster_health["relocating_shards"],
+                        "primary": cluster_health["active_primary_shards"],
+                        "active": cluster_health["active_shards"],
+                        "unassigned": cluster_health['unassigned_shards']
+                    }
                 },
-                "latency": {
-                    "get": get_latency,
-                    "index": index_latency,
-                    "search": search_latency,
-                },
-                "rate": {
-                    "get": int(get_rate / INDEX_INTERVAL),
-                    "index": int(index_rate / INDEX_INTERVAL),
-                    "search": int(search_rate / INDEX_INTERVAL),
-                },
-                "time": {
-                    "get": get_latency * int(get_rate / INDEX_INTERVAL),
-                    "index": index_latency * int(index_rate / INDEX_INTERVAL),
-                    "search": search_latency * int(search_rate / INDEX_INTERVAL),
-                },
-                "segments": stats['indices']['segments']['count']
-            },
-            "jvm": {
-                "max": stats["jvm"]["mem"]["heap_max_in_bytes"],
-                "used": stats["jvm"]["mem"]["heap_used_in_bytes"]
-            },
-            "system": {
-                "load": stats["os"]["cpu"]["load_average"]["1m"]
+                "nodes": {
+                    "count": cluster_health['number_of_nodes'],
+                    "heap": {
+                        "total": jvm_mem["heap_max_in_bytes"],
+                        "used": jvm_mem["heap_used_in_bytes"],
+                        "available": jvm_mem["heap_max_in_bytes"] - jvm_mem["heap_used_in_bytes"]
+                    },
+                    "fs": {
+                        "total": fs["total_in_bytes"],
+                        "used": fs["total_in_bytes"] - fs["available_in_bytes"],
+                        "available": fs["available_in_bytes"],
+                    },
+                }
             }
-        }
+            return metric
+        finally:
+            if self.apm_client:
+                self.apm_client.end_transaction('gather_cluster_metrics', 'success')
 
-        # TODO on Nodes: Index memory, read/write thread queues, cgroup CPU/CFS, Number of indicies and shards,
-        #                node type, node status, transport address
+    def get_index_metrics(self):
+        if self.apm_client:
+            self.apm_client.begin_transaction('metrics')
 
-        pprint(metric)
+        try:
+            health = {x['index']: x['health'] for x in self.es.cat.indices(format='json')}
+            shards = {}
+            for x in self.es.cat.shards(format='json'):
+                shards.setdefault(x['index'], {"total": 0, "unassigned": 0})
+                shards[x['index']]['total'] += 1
+                if x['state'] != "STARTED":
+                    shards[x['index']]['unassigned'] += 1
 
-        # TODO Other: All of cluster wide stats, Per index stats
-    time.sleep(INDEX_INTERVAL)
+            indices_metrics = {}
+            for name, stats in self.es.indices.stats(level='indices')['indices'].items():
+
+                # Compute current values
+                if name in self.old_index_data:
+                    p_stat = stats['primaries']
+                    # Rates
+                    get_rate = (stats['total']['get']['total'] - self.old_index_data[name]['gr'])
+                    index_rate = (stats['total']['indexing']['index_total'] - self.old_index_data[name]['ir'])
+                    search_rate = (stats['total']['search']['query_total'] - self.old_index_data[name]['sr'])
+                    get_p_rate = (p_stat['get']['total'] - self.old_index_data[name]['pgr'])
+                    index_p_rate = (p_stat['indexing']['index_total'] - self.old_index_data[name]['pir'])
+                    search_p_rate = (p_stat['search']['query_total'] - self.old_index_data[name]['psr'])
+
+                    # Times
+                    get_time = stats['total']['get']['time_in_millis'] - self.old_index_data[name]['gt']
+                    index_time = stats['total']['indexing']['index_time_in_millis'] - self.old_index_data[name]['it']
+                    search_time = stats['total']['search']['query_time_in_millis'] - self.old_index_data[name]['st']
+                    get_p_time = p_stat['get']['time_in_millis'] - self.old_index_data[name]['pgt']
+                    index_p_time = p_stat['indexing']['index_time_in_millis'] - self.old_index_data[name]['pit']
+                    search_p_time = p_stat['search']['query_time_in_millis'] - self.old_index_data[name]['pst']
+
+                    # Latency
+                    get_latency = get_time / (get_rate or 1)
+                    index_latency = index_time / (index_rate or 1)
+                    search_latency = search_time / (search_rate or 1)
+                    get_p_latency = get_p_time / (get_p_rate or 1)
+                    index_p_latency = index_p_time / (index_p_rate or 1)
+                    search_p_latency = search_p_time / (search_p_rate or 1)
+
+                else:
+                    get_rate = index_rate = search_rate = 0
+                    get_latency = index_latency = search_latency = 0
+                    get_p_rate = index_p_rate = search_p_rate = 0
+                    get_p_latency = index_p_latency = search_p_latency = 0
+
+                # Save old fields values
+                self.old_index_data.setdefault(name, {})
+                self.old_index_data[name]['gr'] = stats['total']['get']['total']
+                self.old_index_data[name]['ir'] = stats['total']['indexing']['index_total']
+                self.old_index_data[name]['sr'] = stats['total']['search']['query_total']
+                self.old_index_data[name]['gt'] = stats['total']['get']['time_in_millis']
+                self.old_index_data[name]['it'] = stats['total']['indexing']['index_time_in_millis']
+                self.old_index_data[name]['st'] = stats['total']['search']['query_time_in_millis']
+
+                self.old_index_data[name]['pgr'] = stats['primaries']['get']['total']
+                self.old_index_data[name]['pir'] = stats['primaries']['indexing']['index_total']
+                self.old_index_data[name]['psr'] = stats['primaries']['search']['query_total']
+                self.old_index_data[name]['pgt'] = stats['primaries']['get']['time_in_millis']
+                self.old_index_data[name]['pit'] = stats['primaries']['indexing']['index_time_in_millis']
+                self.old_index_data[name]['pst'] = stats['primaries']['search']['query_time_in_millis']
+
+                metric = {
+                    "name": name,
+                    "timestamp": now_as_iso(),
+                    "status": health.get(name, 'red'),
+                    "shards": shards.get(name, {"total": 0, "unassigned": 0}),
+                    "docs": {
+                        "total": stats['total']['docs']['count']
+                    },
+                    "latency": {
+                        "get": {
+                            "total": get_latency,
+                            "primaries": get_p_latency
+                        },
+                        "index": {
+                            "total": index_latency,
+                            "primaries": index_p_latency
+                        },
+                        "search": {
+                            "total": search_latency,
+                            "primaries": search_p_latency,
+                        }
+                    },
+                    "rate": {
+                        "get": {
+                            "total": get_rate / self.index_interval,
+                            "primaries": get_p_rate / self.index_interval
+                        },
+                        "index": {
+                            "total": index_rate / self.index_interval,
+                            "primaries": index_p_rate / self.index_interval
+                        },
+                        "search": {
+                            "total": search_rate / self.index_interval,
+                            "primaries": search_p_rate / self.index_interval,
+                        }
+                    },
+                    "time": {
+                        "get": {
+                            "total": get_latency * ((get_rate / self.index_interval) or 1),
+                            "primaries": get_p_latency * ((get_p_rate / self.index_interval) or 1)
+                        },
+                        "index": {
+                            "total": index_latency * ((index_rate / self.index_interval) or 1),
+                            "primaries": index_p_latency * ((index_p_rate / self.index_interval) or 1)
+                        },
+                        "search": {
+                            "total": search_latency * ((search_rate / self.index_interval) or 1),
+                            "primaries": search_p_latency * ((search_p_rate / self.index_interval) or 1),
+                        }
+                    },
+                    "segments": {
+                        "total": stats['total']['segments']['count'],
+                        "primaries": stats['primaries']['segments']['count'],
+                    },
+                    "merges_size": {
+                        "primaries": stats['primaries']['merges']['current_size_in_bytes'],
+                        "total": stats['total']['merges']['current_size_in_bytes']
+                    },
+                    "size": {
+                        "primaries": stats['primaries']['store']['size_in_bytes'],
+                        "total": stats['total']['store']['size_in_bytes']
+                    },
+                    "memory": {
+                        "total": stats['total']['segments']['memory_in_bytes'],
+                        "docs": stats['total']['segments']['doc_values_memory_in_bytes'],
+                        "terms": stats['total']['segments']['terms_memory_in_bytes'],
+                        "points": stats['total']['segments']['points_memory_in_bytes'],
+                        "stored_fields": stats['total']['segments']['stored_fields_memory_in_bytes'],
+                        "index_writer": stats['total']['segments']['index_writer_memory_in_bytes'],
+                        "norms": stats['total']['segments']['norms_memory_in_bytes'],
+                        "fixed_bitsets": stats['total']['segments']['fixed_bit_set_memory_in_bytes'],
+                        "term_vectors": stats['total']['segments']['term_vectors_memory_in_bytes'],
+                        "version_map": stats['total']['segments']['version_map_memory_in_bytes'],
+                        "query_cache": stats['total']['query_cache']['memory_size_in_bytes'],
+                        "request_cache": stats['total']['request_cache']['memory_size_in_bytes'],
+                        "fielddata": stats['total']['fielddata']['memory_size_in_bytes']
+                    }
+                }
+                indices_metrics[name] = metric
+
+            return indices_metrics
+        finally:
+            if self.apm_client:
+                self.apm_client.end_transaction('gather_index_metrics', 'success')
+
+    def _ensure_indexes(self):
+        for index_type in ('es_cluster', 'es_nodes', 'es_indices'):
+            try:
+                index = f"al_metrics_{index_type}"
+                policy = f"{index}_policy"
+                while not ilm_policy_exists(self.es, policy):
+                    self.log.debug(f"ILM Policy {policy.upper()} does not exists. Creating it now...")
+                    try:
+                        create_ilm_policy(self.es, policy, self.config.core.metrics.elasticsearch.as_primitives())
+                    except ILMException:
+                        time.sleep(0.1)
+                        pass
+
+                if not self.es.indices.exists_template(index):
+                    self.log.debug(f"Index template {index.upper()} does not exists. Creating it now...")
+
+                    template_body = {
+                        "index_patterns": [f"{index}-*"],
+                        "order": 1,
+                        "settings": {
+                            "index.lifecycle.name": policy,
+                            "index.lifecycle.rollover_alias": index
+                        }
+                    }
+
+                    try:
+                        self.es.indices.put_template(index, template_body)
+                    except elasticsearch.exceptions.RequestError as e:
+                        if "resource_already_exists_exception" not in str(e):
+                            raise
+                        self.log.warning(f"Tried to create an index template that already exists: {index.upper()}")
+
+                if not self.es.indices.exists_alias(index):
+                    self.log.debug(f"Index alias {index.upper()} does not exists. Creating it now...")
+
+                    index_body = {"aliases": {index: {"is_write_index": True}}}
+
+                    try:
+                        self.es.indices.create(f"{index}-000001", index_body)
+                    except elasticsearch.exceptions.RequestError as e:
+                        if "resource_already_exists_exception" not in str(e):
+                            raise
+                        self.log.warning(f"Tried to create an index template that "
+                                         f"already exists: {index.upper()}-000001")
+
+            except Exception as e:
+                self.log.exception(e)
+
+    def try_run(self):
+        self.es = elasticsearch.Elasticsearch(hosts=forge.get_config().datastore.hosts,
+                                              connection_class=elasticsearch.RequestsHttpConnection)
+        self._ensure_indexes()
+
+        # TODO: All the metrics divided by the time interval are wrong because they don't take into account the
+        #       time to get the metrics and index the data. This should use timestamp comparison for the division
+        #       and use a task scheduler to get the data at a more clear rate.
+
+        while self.running:
+            self.log.info("Gathering cluster metrics ...")
+            cluster_metrics = self.get_cluster_metrics()
+            self.es.index('al_metrics_es_cluster', body=cluster_metrics)
+            self.log.debug(cluster_metrics)
+
+            self.log.info("Gathering node metrics ...")
+            node_metrics = self.get_node_metrics()
+            for metric in node_metrics.values():
+                self.es.index('al_metrics_es_nodes', body=metric)
+                self.log.debug(metric)
+
+            self.log.info("Gathering indices metrics ...")
+            index_metrics = self.get_index_metrics()
+            for metric in index_metrics.values():
+                self.es.index('al_metrics_es_indices', body=metric)
+                self.log.debug(metric)
+
+            self.log.info(f'Watting for next run ... ({self.index_interval})')
+            time.sleep(self.index_interval)
+
+
+if __name__ == '__main__':
+    cfg = forge.get_config()
+    with ESMetricsServer(config=cfg) as metricsd:
+        metricsd.serve_forever()
