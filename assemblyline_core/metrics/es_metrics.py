@@ -21,13 +21,13 @@ class ESMetricsServer(ServerBase):
         self.config = config or forge.get_config()
         self.elastic_hosts = self.config.core.metrics.elasticsearch.hosts
         
-        self.index_interval = 10
+        self.index_interval = 10.0
         self.old_node_data = {}
         self.old_cluster_data = {}
         self.old_index_data = {}
-        self.old_index_time = 0
-        self.old_node_time = 0
-        self.old_cluster_time = 0
+        self.old_index_time = 0.0
+        self.old_node_time = 0.0
+        self.old_cluster_time = 0.0
 
         if not self.elastic_hosts:
             self.log.error("No elasticsearch cluster defined to store metrics. All gathered stats will be ignored...")
@@ -92,19 +92,19 @@ class ESMetricsServer(ServerBase):
                     search_time = stats['indices']['search']['query_time_in_millis'] - self.old_node_data[name]['st']
 
                     # Latency
-                    get_latency = get_time / (get_rate or 1)
-                    index_latency = index_time / (index_rate or 1)
-                    search_latency = search_time / (search_rate or 1)
+                    get_latency = float(get_time / (get_rate or 1.0))
+                    index_latency = float(index_time / (index_rate or 1.0))
+                    search_latency = float(search_time / (search_rate or 1.0))
 
                     # CGroup
                     cg = stats['os']['cgroup']
                     cg_nanos = cg['cpuacct']['usage_nanos'] - self.old_node_data[name]['cgn']
                     cg_throttled = cg['cpu']['stat']['time_throttled_nanos'] - self.old_node_data[name]['cgt']
                 else:
-                    old_gc_count = old_gc_time = young_gc_count = young_gc_time = 0
-                    get_rate = index_rate = search_rate = 0
-                    get_latency = index_latency = search_latency = 0
-                    cg_nanos = cg_throttled = 0
+                    old_gc_count = old_gc_time = young_gc_count = young_gc_time = 0.0
+                    get_rate = index_rate = search_rate = 0.0
+                    get_latency = index_latency = search_latency = 0.0
+                    cg_nanos = cg_throttled = 0.0
 
                 # Save old fields values
                 self.old_node_data.setdefault(name, {})
@@ -185,9 +185,9 @@ class ESMetricsServer(ServerBase):
                             "search": search_rate / divider,
                         },
                         "time": {
-                            "get": get_latency * ((get_rate / divider) or 1),
-                            "index": index_latency * ((index_rate / divider) or 1),
-                            "search": search_latency * ((search_rate / divider) or 1),
+                            "get": get_latency * ((get_rate / divider) or 1.0),
+                            "index": index_latency * ((index_rate / divider) or 1.0),
+                            "search": search_latency * ((search_rate / divider) or 1.0),
                         },
                         "segments": stats['indices']['segments']['count'],
                         "memory": {
@@ -269,13 +269,13 @@ class ESMetricsServer(ServerBase):
                 search_time = all_metrics['search']['query_time_in_millis'] - self.old_cluster_data['st']
 
                 # Latency
-                get_latency = get_time / get_rate
-                index_latency = index_time / index_rate
-                search_latency = search_time / search_rate
+                get_latency = float(get_time / get_rate)
+                index_latency = float(index_time / index_rate)
+                search_latency = float(search_time / search_rate)
 
             else:
-                get_rate = index_rate = search_rate = 0
-                get_latency = index_latency = search_latency = 0
+                get_rate = index_rate = search_rate = 0.0
+                get_latency = index_latency = search_latency = 0.0
 
             # Save old fields values
             self.old_cluster_data['gr'] = indices_metrics['_all']['total']['get']['total']
@@ -308,9 +308,9 @@ class ESMetricsServer(ServerBase):
                         "search": search_rate / divider,
                     },
                     "time": {
-                        "get": get_latency * ((get_rate / divider) or 1),
-                        "index": index_latency * ((index_rate / divider) or 1),
-                        "search": search_latency * ((search_rate / divider) or 1),
+                        "get": get_latency * ((get_rate / divider) or 1.0),
+                        "index": index_latency * ((index_rate / divider) or 1.0),
+                        "search": search_latency * ((search_rate / divider) or 1.0),
                     },
                     "shards": {
                         "initializing": cluster_health["initializing_shards"],
@@ -385,18 +385,18 @@ class ESMetricsServer(ServerBase):
                     search_p_time = p_stat['search']['query_time_in_millis'] - self.old_index_data[name]['pst']
 
                     # Latency
-                    get_latency = get_time / (get_rate or 1)
-                    index_latency = index_time / (index_rate or 1)
-                    search_latency = search_time / (search_rate or 1)
-                    get_p_latency = get_p_time / (get_p_rate or 1)
-                    index_p_latency = index_p_time / (index_p_rate or 1)
-                    search_p_latency = search_p_time / (search_p_rate or 1)
+                    get_latency = float(get_time / (get_rate or 1.0))
+                    index_latency = float(index_time / (index_rate or 1.0))
+                    search_latency = float(search_time / (search_rate or 1.0))
+                    get_p_latency = float(get_p_time / (get_p_rate or 1.0))
+                    index_p_latency = float(index_p_time / (index_p_rate or 1.0))
+                    search_p_latency = float(search_p_time / (search_p_rate or 1.0))
 
                 else:
-                    get_rate = index_rate = search_rate = 0
-                    get_latency = index_latency = search_latency = 0
-                    get_p_rate = index_p_rate = search_p_rate = 0
-                    get_p_latency = index_p_latency = search_p_latency = 0
+                    get_rate = index_rate = search_rate = 0.0
+                    get_latency = index_latency = search_latency = 0.0
+                    get_p_rate = index_p_rate = search_p_rate = 0.0
+                    get_p_latency = index_p_latency = search_p_latency = 0.0
 
                 # Save old fields values
                 self.old_index_data.setdefault(name, {})
@@ -452,16 +452,16 @@ class ESMetricsServer(ServerBase):
                     },
                     "time": {
                         "get": {
-                            "total": get_latency * ((get_rate / divider) or 1),
-                            "primaries": get_p_latency * ((get_p_rate / divider) or 1)
+                            "total": get_latency * ((get_rate / divider) or 1.0),
+                            "primaries": get_p_latency * ((get_p_rate / divider) or 1.0)
                         },
                         "index": {
-                            "total": index_latency * ((index_rate / divider) or 1),
-                            "primaries": index_p_latency * ((index_p_rate / divider) or 1)
+                            "total": index_latency * ((index_rate / divider) or 1.0),
+                            "primaries": index_p_latency * ((index_p_rate / divider) or 1.0)
                         },
                         "search": {
-                            "total": search_latency * ((search_rate / divider) or 1),
-                            "primaries": search_p_latency * ((search_p_rate / divider) or 1),
+                            "total": search_latency * ((search_rate / divider) or 1.0),
+                            "primaries": search_p_latency * ((search_p_rate / divider) or 1.0),
                         }
                     },
                     "segments": {
