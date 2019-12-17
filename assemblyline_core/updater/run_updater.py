@@ -85,15 +85,18 @@ class DockerUpdateInterface:
     """
     def __init__(self):
         self.client = docker.from_env()
+        for network in self.client.networks.list(names=['external']):
+            self.external_network = network
+            break
+        else:
+            self.external_network = self.client.networks.create(name='external', internal=False)
 
-    def launch(self, name, docker_config: DockerConfig, mounts, env, blocking: bool = True):
+    def launch(self, name, docker_config: DockerConfig, mounts, env, network, blocking: bool = True):
         """Run a container to completion."""
-        self.client.containers.run(
+        container = self.client.containers.run(
             image=docker_config.image,
             name='update_' + name,
-            # cpu_period=100000,
-            # cpu_quota=int(100000*prof.cpu),
-            # mem_limit=f'{prof.ram}m',
+            network=network,
             restart_policy={'Name': 'no'},
             command=docker_config.command,
             volumes={os.path.join(row['volume'], row['source_path']): {'bind': row['dest_path'], 'mode': 'rw'}
@@ -102,6 +105,8 @@ class DockerUpdateInterface:
                         [f'{k}={v}' for k, v in env.items()],
             detach=not blocking,
         )
+        if docker_config.allow_internet_access:
+            self.external_network.connect(container)
 
     def restart(self, service_name):
         for container in self.client.containers.list(filters={'label': f'component={service_name}'}):
@@ -412,6 +417,7 @@ class ServiceUpdater(CoreBase):
                         'UPDATE_CONFIGURATION_PATH': '/mount/input_directory/config.yaml',
                         'UPDATE_OUTPUT_PATH': '/mount/output_directory/'
                     },
+                    network=f'service-net-{service.name}',
                     blocking=True,
                 )
 

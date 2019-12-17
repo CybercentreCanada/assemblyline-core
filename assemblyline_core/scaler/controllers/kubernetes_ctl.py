@@ -355,8 +355,9 @@ class KubernetesController(ControllerInterface):
 
         return new
 
-    def start_stateful_container(self, service_name, deployment_name, spec, labels):
+    def start_stateful_container(self, service_name, container_name, spec, labels):
         # Setup PVC
+        deployment_name = service_name + '-' + container_name
         mounts, volumes = [], []
         for volume_name, volume_spec in spec.volumes.items():
             mount_name = deployment_name + volume_name

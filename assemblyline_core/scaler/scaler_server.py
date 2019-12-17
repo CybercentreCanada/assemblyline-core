@@ -171,7 +171,7 @@ class ScalerServer(CoreBase):
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
                                                cpu_overallocation=self.config.core.scaler.cpu_overallocation,
                                                memory_overallocation=self.config.core.scaler.memory_overallocation,
-                                               labels=labels, network='svc')
+                                               labels=labels)
 
         self.profiles: Dict[str, ServiceProfile] = {}
 
@@ -220,7 +220,7 @@ class ScalerServer(CoreBase):
                     for name, dependency in service.dependencies.items():
                         self.controller.start_stateful_container(
                             service_name=service.name,
-                            deployment_name=f'{service.name}-dep-{name}',
+                            container_name=name,
                             spec=dependency,
                             labels={'dependency_for': service.name}
                         )

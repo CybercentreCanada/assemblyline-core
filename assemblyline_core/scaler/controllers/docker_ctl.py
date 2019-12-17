@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Dict
 from assemblyline.odm.models.service import DockerConfig
 from .interface import ControllerInterface, ServiceControlError
@@ -12,7 +13,7 @@ FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 
 class DockerController(ControllerInterface):
     """A controller for *non* swarm mode docker."""
-    def __init__(self, logger, prefix='', labels=None, cpu_overallocation=1, memory_overallocation=1, network='default'):
+    def __init__(self, logger, prefix='', labels=None, cpu_overallocation=1, memory_overallocation=1):
         """
         :param logger: A logger to report status and debug information.
         :param prefix: A prefix used to distinguish containers launched by this controller.
@@ -26,7 +27,23 @@ class DockerController(ControllerInterface):
         self.global_mounts = []
         self._prefix = prefix
         self._labels = labels
-        self.network = network
+
+        for network in self.client.networks.list(names=['external']):
+            self.external_network = network
+            break
+        else:
+            self.external_network = self.client.networks.create(name='external', internal=False)
+        self.networks = {}
+
+        self.service_server_container = None
+        while self.service_server_container is None:
+            for container in self.client.containers.list():
+                if 'service_server' in container.name:
+                    self.service_server_container = container
+                    self.log.info(f'Found the service server at: {container.id} [{container.name}]')
+                    break
+            if not self.service_server_container:
+                time.sleep(1)
 
         # CPU and memory reserved for the host
         self._reserved_cpu = 0.3
@@ -45,21 +62,35 @@ class DockerController(ControllerInterface):
         """Tell the controller about a service profile it needs to manage."""
         self._profiles[profile.name] = profile
 
+        # Create network for service
+        network_name = f'service-net-{profile.name}'
+        for network in self.client.networks.list(names=[network_name]):
+            self.networks[profile.name] = network
+            network.reload()
+            break
+        else:
+            self.networks[profile.name] = self.client.networks.create(name=network_name, internal=True)
+
+        if self.service_server_container.name not in {c.name for c in self.networks[profile.name].containers}:
+            self.networks[profile.name].connect(self.service_server_container, aliases=['service-server'])
+
     def _start(self, service_name):
         """Launch a docker container in a manner suitable for Assembylyline."""
         container_name = self._name_container(service_name)
         prof = self._profiles[service_name]
         cfg = prof.container_config
+
+        # Set the list of labels
         labels = dict(self._labels)
         labels.update({'component': service_name})
 
+        # Prepare the volumes and folders
         volumes = {row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.global_mounts}
-
         volumes[os.path.join(FILE_UPDATE_VOLUME, service_name)] = {'bind': '/mount/updates/', 'mode': 'ro'}
         if not os.path.exists(os.path.join(FILE_UPDATE_DIRECTORY, service_name)):
             os.makedirs(os.path.join(FILE_UPDATE_DIRECTORY, service_name), 0x777)
 
-        self.client.containers.run(
+        container = self.client.containers.run(
             image=cfg.image,
             name=container_name,
             cpu_period=100000,
@@ -69,14 +100,37 @@ class DockerController(ControllerInterface):
             restart_policy={'Name': 'always'},
             command=cfg.command,
             volumes=volumes,
-            network=self.network,
+            network=self.networks[service_name].name,
             environment=[f'{_e.name}={_e.value}' for _e in cfg.environment] + ['UPDATE_PATH=/mount/updates/'],
             detach=True,
         )
 
-    def _start_container(self, name, labels, volumes, cfg: DockerConfig):
+        if cfg.allow_internet_access:
+            self.external_network.connect(container)
+
+    def _start_container(self, name, labels, volumes, cfg: DockerConfig, network, hostname):
         """Launch a docker container."""
-        self.client.containers.run(
+
+        # Take the port strings and convert them to a dictionary
+        ports = {}
+        for port_string in cfg.ports:
+            # It might just be a port number, try that
+            try:
+                port_number = int(port_string)
+                ports[port_number] = port_number
+                continue
+            except ValueError:
+                pass
+
+            # Then it might be "number:number"
+            if ':' in port_string:
+                a, b = port_string.split(':')
+                ports[int(a)] = int(b)
+                continue
+
+            self.log.warning(f"Not sure how to parse port string {port_string} for container {name} not using it...")
+
+        container = self.client.containers.run(
             image=cfg.image,
             name=name,
             cpu_period=100000,
@@ -86,10 +140,13 @@ class DockerController(ControllerInterface):
             restart_policy={'Name': 'always'},
             command=cfg.command,
             volumes=volumes,
-            network=self.network,
+            network=network,
             environment=[f'{_e.name}={_e.value}' for _e in cfg.environment],
             detach=True,
+            ports=ports
         )
+        if cfg.allow_internet_access:
+            self.external_network.connect(container, aliases=[hostname])
 
     def _name_container(self, service_name):
         """Find an unused name for a container.
@@ -209,9 +266,11 @@ class DockerController(ControllerInterface):
             out.append(container.name)
         return out
 
-    def start_stateful_container(self, service_name, deployment_name, spec, labels):
+    def start_stateful_container(self, service_name, container_name, spec, labels):
         volumes = {_n: {'bind': _v.mount_path, 'mode': 'rw'} for _n, _v in spec.volumes.items()}
-        self._start_container(name=deployment_name, labels=labels, volumes=volumes, cfg=spec.container)
+        deployment_name = f'{service_name}-dep-{container_name}'
+        self._start_container(name=deployment_name, labels=labels, volumes=volumes, hostname=container_name,
+                              cfg=spec.container, network=self.networks[service_name].name)
 
     def stop_containers(self, labels):
         label_strings = [f'{name}={value}' for name, value in labels.items()]
