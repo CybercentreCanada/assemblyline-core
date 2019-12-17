@@ -25,6 +25,9 @@ class ESMetricsServer(ServerBase):
         self.old_node_data = {}
         self.old_cluster_data = {}
         self.old_index_data = {}
+        self.old_index_time = 0
+        self.old_node_time = 0
+        self.old_cluster_time = 0
 
         if not self.elastic_hosts:
             self.log.error("No elasticsearch cluster defined to store metrics. All gathered stats will be ignored...")
@@ -45,8 +48,17 @@ class ESMetricsServer(ServerBase):
             self.apm_client.begin_transaction('metrics')
 
         try:
+            es_nodes = self.es.nodes.stats(level='shards')
+
+            cur_time = time.time()
+            if self.old_node_time:
+                divider = cur_time - self.old_node_time
+            else:
+                divider = self.index_interval
+            self.old_node_time = cur_time
+
             node_metrics = {}
-            for node, stats in self.es.nodes.stats(level='shards')['nodes'].items():
+            for node, stats in es_nodes['nodes'].items():
                 state = "Online"
                 name = stats["name"]
                 index_count = 0
@@ -126,8 +138,8 @@ class ESMetricsServer(ServerBase):
                         "percent": stats["process"]["cpu"]["percent"],
                         "cgroup": {
                             "timing": {
-                                "usage": cg_nanos / self.index_interval,
-                                "throttled": cg_throttled / self.index_interval
+                                "usage": cg_nanos / divider,
+                                "throttled": cg_throttled / divider
                             },
                             "count": {
                                 "periods": stats['os']['cgroup']['cpu']['stat']['number_of_elapsed_periods'],
@@ -147,12 +159,12 @@ class ESMetricsServer(ServerBase):
                     # This is an aggregate over time. Should we compute the value from the last time ?
                     "gc": {
                         "old": {
-                            "count": old_gc_count / self.index_interval,
-                            "time": old_gc_time / self.index_interval,
+                            "count": old_gc_count / divider,
+                            "time": old_gc_time / divider,
                         },
                         "young": {
-                            "count": young_gc_count / self.index_interval,
-                            "time": young_gc_time / self.index_interval,
+                            "count": young_gc_count / divider,
+                            "time": young_gc_time / divider,
                         }
                     },
                     "indices": {
@@ -168,14 +180,14 @@ class ESMetricsServer(ServerBase):
                             "search": search_latency,
                         },
                         "rate": {
-                            "get": get_rate / self.index_interval,
-                            "index": index_rate / self.index_interval,
-                            "search": search_rate / self.index_interval,
+                            "get": get_rate / divider,
+                            "index": index_rate / divider,
+                            "search": search_rate / divider,
                         },
                         "time": {
-                            "get": get_latency * ((get_rate / self.index_interval) or 1),
-                            "index": index_latency * ((index_rate / self.index_interval) or 1),
-                            "search": search_latency * ((search_rate / self.index_interval) or 1),
+                            "get": get_latency * ((get_rate / divider) or 1),
+                            "index": index_latency * ((index_rate / divider) or 1),
+                            "search": search_latency * ((search_rate / divider) or 1),
                         },
                         "segments": stats['indices']['segments']['count'],
                         "memory": {
@@ -236,6 +248,13 @@ class ESMetricsServer(ServerBase):
             cluster_health = self.es.cluster.health()
             indices_metrics = self.es.indices.stats(level='cluster')
 
+            cur_time = time.time()
+            if self.old_cluster_time:
+                divider = cur_time - self.old_cluster_time
+            else:
+                divider = self.index_interval
+            self.old_cluster_time = cur_time
+
             # Compute current values
             if len(self.old_cluster_data) != 0:
                 all_metrics = indices_metrics['_all']['total']
@@ -284,14 +303,14 @@ class ESMetricsServer(ServerBase):
                         "search": search_latency,
                     },
                     "rate": {
-                        "get": get_rate / self.index_interval,
-                        "index": index_rate / self.index_interval,
-                        "search": search_rate / self.index_interval,
+                        "get": get_rate / divider,
+                        "index": index_rate / divider,
+                        "search": search_rate / divider,
                     },
                     "time": {
-                        "get": get_latency * ((get_rate / self.index_interval) or 1),
-                        "index": index_latency * ((index_rate / self.index_interval) or 1),
-                        "search": search_latency * ((search_rate / self.index_interval) or 1),
+                        "get": get_latency * ((get_rate / divider) or 1),
+                        "index": index_latency * ((index_rate / divider) or 1),
+                        "search": search_latency * ((search_rate / divider) or 1),
                     },
                     "shards": {
                         "initializing": cluster_health["initializing_shards"],
@@ -334,8 +353,17 @@ class ESMetricsServer(ServerBase):
                 if x['state'] != "STARTED":
                     shards[x['index']]['unassigned'] += 1
 
+            es_indices = self.es.indices.stats(level='indices')
+
+            cur_time = time.time()
+            if self.old_index_time:
+                divider = cur_time - self.old_index_time
+            else:
+                divider = self.index_interval
+            self.old_index_time = cur_time
+
             indices_metrics = {}
-            for name, stats in self.es.indices.stats(level='indices')['indices'].items():
+            for name, stats in es_indices['indices'].items():
 
                 # Compute current values
                 if name in self.old_index_data:
@@ -410,30 +438,30 @@ class ESMetricsServer(ServerBase):
                     },
                     "rate": {
                         "get": {
-                            "total": get_rate / self.index_interval,
-                            "primaries": get_p_rate / self.index_interval
+                            "total": get_rate / divider,
+                            "primaries": get_p_rate / divider
                         },
                         "index": {
-                            "total": index_rate / self.index_interval,
-                            "primaries": index_p_rate / self.index_interval
+                            "total": index_rate / divider,
+                            "primaries": index_p_rate / divider
                         },
                         "search": {
-                            "total": search_rate / self.index_interval,
-                            "primaries": search_p_rate / self.index_interval,
+                            "total": search_rate / divider,
+                            "primaries": search_p_rate / divider,
                         }
                     },
                     "time": {
                         "get": {
-                            "total": get_latency * ((get_rate / self.index_interval) or 1),
-                            "primaries": get_p_latency * ((get_p_rate / self.index_interval) or 1)
+                            "total": get_latency * ((get_rate / divider) or 1),
+                            "primaries": get_p_latency * ((get_p_rate / divider) or 1)
                         },
                         "index": {
-                            "total": index_latency * ((index_rate / self.index_interval) or 1),
-                            "primaries": index_p_latency * ((index_p_rate / self.index_interval) or 1)
+                            "total": index_latency * ((index_rate / divider) or 1),
+                            "primaries": index_p_latency * ((index_p_rate / divider) or 1)
                         },
                         "search": {
-                            "total": search_latency * ((search_rate / self.index_interval) or 1),
-                            "primaries": search_p_latency * ((search_p_rate / self.index_interval) or 1),
+                            "total": search_latency * ((search_rate / divider) or 1),
+                            "primaries": search_p_latency * ((search_p_rate / divider) or 1),
                         }
                     },
                     "segments": {
@@ -524,11 +552,8 @@ class ESMetricsServer(ServerBase):
                                               connection_class=elasticsearch.RequestsHttpConnection)
         self._ensure_indexes()
 
-        # TODO: All the metrics divided by the time interval are wrong because they don't take into account the
-        #       time to get the metrics and index the data. This should use timestamp comparison for the division
-        #       and use a task scheduler to get the data at a more clear rate.
-
         while self.running:
+            start_time = time.time()
             self.log.info("Gathering cluster metrics ...")
             cluster_metrics = self.get_cluster_metrics()
             self.es.index('al_metrics_es_cluster', body=cluster_metrics)
@@ -546,8 +571,12 @@ class ESMetricsServer(ServerBase):
                 self.es.index('al_metrics_es_indices', body=metric)
                 self.log.debug(metric)
 
-            self.log.info(f'Watting for next run ... ({self.index_interval})')
-            time.sleep(self.index_interval)
+            sleep_time = max(0.0, self.index_interval - (time.time() - start_time))
+            if sleep_time < 5:
+                self.log.warning("Metrics gathering is taking longer than it should!")
+
+            self.log.info(f'Waiting {int(sleep_time)}s for next run ...')
+            time.sleep(sleep_time)
 
 
 if __name__ == '__main__':
