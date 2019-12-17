@@ -166,7 +166,7 @@ class MetricsServer(ServerBase):
                     if c_key not in self.counters or m_type in NON_AGGREGATED:
                         self.counters[c_key] = Counter(msg)
                     else:
-                        self.counters[c_key] += Counter(msg)
+                        self.counters[c_key].update(Counter(msg))
 
                 # APM Transaction end
                 if self.apm_client:
@@ -314,7 +314,7 @@ class HeartbeatManager(ServerBase):
                     if c_key not in self.counters or m_type in NON_AGGREGATED:
                         self.counters[c_key] = Counter(msg)
                     else:
-                        self.counters[c_key] += Counter(msg)
+                        self.counters[c_key].update(Counter(msg))
 
                 # APM Transaction end
                 if self.apm_client:
