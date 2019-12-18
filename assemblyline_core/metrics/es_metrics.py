@@ -1,10 +1,12 @@
+import json
+
 import elasticapm
 import sys
 
 import elasticsearch
 import time
 
-from assemblyline_core.metrics.metrics_server import ilm_policy_exists, create_ilm_policy, ILMException
+from assemblyline_core.metrics.helper import with_retries, ensure_indexes
 from assemblyline_core.server_base import ServerBase
 
 from assemblyline.common import forge
@@ -19,7 +21,7 @@ class ESMetricsServer(ServerBase):
     def __init__(self, config=None):
         super().__init__('assemblyline.es_metrics', shutdown_timeout=15)
         self.config = config or forge.get_config()
-        self.elastic_hosts = self.config.core.metrics.elasticsearch.hosts
+        self.target_hosts = self.config.core.metrics.elasticsearch.hosts
         
         self.index_interval = 10.0
         self.old_node_data = {}
@@ -29,11 +31,12 @@ class ESMetricsServer(ServerBase):
         self.old_node_time = 0.0
         self.old_cluster_time = 0.0
 
-        if not self.elastic_hosts:
+        if not self.target_hosts:
             self.log.error("No elasticsearch cluster defined to store metrics. All gathered stats will be ignored...")
             sys.exit(1)
 
-        self.es = None
+        self.input_es = None
+        self.target_es = None
         
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
@@ -48,7 +51,7 @@ class ESMetricsServer(ServerBase):
             self.apm_client.begin_transaction('metrics')
 
         try:
-            es_nodes = self.es.nodes.stats(level='shards')
+            es_nodes = with_retries(self.log, self.input_es.nodes.stats, level='shards')
 
             cur_time = time.time()
             if self.old_node_time:
@@ -244,9 +247,9 @@ class ESMetricsServer(ServerBase):
             self.apm_client.begin_transaction('metrics')
 
         try:
-            cluster_stats = self.es.cluster.stats()
-            cluster_health = self.es.cluster.health()
-            indices_metrics = self.es.indices.stats(level='cluster')
+            cluster_stats = with_retries(self.log, self.input_es.cluster.stats)
+            cluster_health = with_retries(self.log, self.input_es.cluster.health)
+            indices_metrics = with_retries(self.log, self.input_es.indices.stats, level='cluster')
 
             cur_time = time.time()
             if self.old_cluster_time:
@@ -345,15 +348,15 @@ class ESMetricsServer(ServerBase):
             self.apm_client.begin_transaction('metrics')
 
         try:
-            health = {x['index']: x['health'] for x in self.es.cat.indices(format='json')}
+            health = {x['index']: x['health'] for x in with_retries(self.log, self.input_es.cat.indices, format='json')}
             shards = {}
-            for x in self.es.cat.shards(format='json'):
+            for x in with_retries(self.log, self.input_es.cat.shards, format='json'):
                 shards.setdefault(x['index'], {"total": 0, "unassigned": 0})
                 shards[x['index']]['total'] += 1
                 if x['state'] != "STARTED":
                     shards[x['index']]['unassigned'] += 1
 
-            es_indices = self.es.indices.stats(level='indices')
+            es_indices = with_retries(self.log, self.input_es.indices.stats, level='indices')
 
             cur_time = time.time()
             if self.old_index_time:
@@ -499,81 +502,58 @@ class ESMetricsServer(ServerBase):
             if self.apm_client:
                 self.apm_client.end_transaction('gather_index_metrics', 'success')
 
-    def _ensure_indexes(self):
-        for index_type in ('es_cluster', 'es_nodes', 'es_indices'):
-            try:
-                index = f"al_metrics_{index_type}"
-                policy = f"{index}_policy"
-                while not ilm_policy_exists(self.es, policy):
-                    self.log.debug(f"ILM Policy {policy.upper()} does not exists. Creating it now...")
-                    try:
-                        create_ilm_policy(self.es, policy, self.config.core.metrics.elasticsearch.as_primitives())
-                    except ILMException:
-                        time.sleep(0.1)
-                        pass
-
-                if not self.es.indices.exists_template(index):
-                    self.log.debug(f"Index template {index.upper()} does not exists. Creating it now...")
-
-                    template_body = {
-                        "index_patterns": [f"{index}-*"],
-                        "order": 1,
-                        "settings": {
-                            "index.lifecycle.name": policy,
-                            "index.lifecycle.rollover_alias": index
-                        }
-                    }
-
-                    try:
-                        self.es.indices.put_template(index, template_body)
-                    except elasticsearch.exceptions.RequestError as e:
-                        if "resource_already_exists_exception" not in str(e):
-                            raise
-                        self.log.warning(f"Tried to create an index template that already exists: {index.upper()}")
-
-                if not self.es.indices.exists_alias(index):
-                    self.log.debug(f"Index alias {index.upper()} does not exists. Creating it now...")
-
-                    index_body = {"aliases": {index: {"is_write_index": True}}}
-
-                    try:
-                        self.es.indices.create(f"{index}-000001", index_body)
-                    except elasticsearch.exceptions.RequestError as e:
-                        if "resource_already_exists_exception" not in str(e):
-                            raise
-                        self.log.warning(f"Tried to create an index template that "
-                                         f"already exists: {index.upper()}-000001")
-
-            except Exception as e:
-                self.log.exception(e)
-
     def try_run(self):
-        self.es = elasticsearch.Elasticsearch(hosts=forge.get_config().datastore.hosts,
-                                              connection_class=elasticsearch.RequestsHttpConnection)
-        self._ensure_indexes()
+        self.input_es = elasticsearch.Elasticsearch(hosts=self.config.datastore.hosts,
+                                                    connection_class=elasticsearch.RequestsHttpConnection,
+                                                    max_retries=0)
+        self.target_es = elasticsearch.Elasticsearch(hosts=self.target_hosts,
+                                                     connection_class=elasticsearch.RequestsHttpConnection,
+                                                     max_retries=0)
+        ensure_indexes(self.log, self.target_es, self.config.core.metrics.elasticsearch,
+                       ['es_cluster', 'es_nodes', 'es_indices'])
 
         while self.running:
             start_time = time.time()
+
+            # CLUSTER
             self.log.info("Gathering cluster metrics ...")
             cluster_metrics = self.get_cluster_metrics()
-            self.es.index('al_metrics_es_cluster', body=cluster_metrics)
             self.log.debug(cluster_metrics)
 
+            # NODES
             self.log.info("Gathering node metrics ...")
             node_metrics = self.get_node_metrics()
-            for metric in node_metrics.values():
-                self.es.index('al_metrics_es_nodes', body=metric)
-                self.log.debug(metric)
+            self.log.debug(node_metrics)
 
+            # INDICES
             self.log.info("Gathering indices metrics ...")
             index_metrics = self.get_index_metrics()
-            for metric in index_metrics.values():
-                self.es.index('al_metrics_es_indices', body=metric)
-                self.log.debug(metric)
+            self.log.debug(index_metrics)
 
-            sleep_time = max(0.0, self.index_interval - (time.time() - start_time))
+            # Saving Metrics
+            self.log.info("Saving metrics ...")
+            if self.apm_client:
+                self.apm_client.begin_transaction('metrics')
+
+            plan = [json.dumps({"index": {"_index": "al_metrics_es_cluster"}}), json.dumps(cluster_metrics)]
+
+            for metric in node_metrics.values():
+                plan.append(json.dumps({"index": {"_index": "al_metrics_es_nodes"}}))
+                plan.append(json.dumps(metric))
+
+            for metric in index_metrics.values():
+                plan.append(json.dumps({"index": {"_index": "al_metrics_es_indices"}}))
+                plan.append(json.dumps(metric))
+
+            with_retries(self.log, self.target_es.bulk, body="\n".join(plan))
+            if self.apm_client:
+                self.apm_client.end_transaction('saving_metrics', 'success')
+
+            # Wait and repeat
+            elapsed_time = (time.time() - start_time)
+            sleep_time = max(0.0, self.index_interval - elapsed_time)
             if sleep_time < 5:
-                self.log.warning("Metrics gathering is taking longer than it should!")
+                self.log.warning(f"Metrics gathering is taking longer than it should! [{int(elapsed_time)}s]")
 
             self.log.info(f'Waiting {int(sleep_time)}s for next run ...')
             time.sleep(sleep_time)

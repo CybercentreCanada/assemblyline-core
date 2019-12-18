@@ -2,7 +2,6 @@
 
 import elasticapm
 import elasticsearch
-import json
 import sys
 import time
 
@@ -11,6 +10,7 @@ from collections import Counter
 from threading import Lock
 
 from assemblyline_core.metrics.heartbeat_formatter import HeartbeatFormatter
+from assemblyline_core.metrics.helper import ensure_indexes, with_retries
 from assemblyline_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common import forge
@@ -18,10 +18,6 @@ from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
 METRICS_QUEUE = "assemblyline_metrics"
 NON_AGGREGATED = ['scaler', 'scaler-status']
-
-
-class ILMException(Exception):
-    pass
 
 
 def cleanup_metrics(input_dict):
@@ -49,62 +45,6 @@ def cleanup_metrics(input_dict):
             parent = parent[i]
 
     return output_dict
-
-
-def ilm_policy_exists(es, name):
-    conn = es.transport.get_connection()
-    pol_req = conn.session.get(f"{conn.base_url}/_ilm/policy/{name}")
-    return pol_req.ok
-
-
-def create_ilm_policy(es, name, ilm_config):
-    data_base = {
-        "policy": {
-            "phases": {
-                "hot": {
-                    "min_age": "0ms",
-                    "actions": {
-                        "set_priority": {
-                            "priority": 100
-                        },
-                        "rollover": {
-                            "max_age": f"{ilm_config['warm']}{ilm_config['unit']}"
-                        }
-                    }
-                },
-                "warm": {
-                    "actions": {
-                        "set_priority": {
-                            "priority": 50
-                        }
-                    }
-                },
-                "cold": {
-                    "min_age": f"{ilm_config['cold']}{ilm_config['unit']}",
-                    "actions": {
-                        "set_priority": {
-                            "priority": 20
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if ilm_config['delete']:
-        data_base['policy']['phases']['delete'] = {
-            "min_age": f"{ilm_config['delete']}{ilm_config['unit']}",
-            "actions": {
-                "delete": {}
-            }
-        }
-
-    conn = es.transport.get_connection()
-    pol_req = conn.session.put(f"{conn.base_url}/_ilm/policy/{name}",
-                               headers={"Content-Type": "application/json"},
-                               data=json.dumps(data_base))
-    if not pol_req.ok:
-        raise ILMException(f"ERROR: Failed to create ILM policy: {name}")
 
 
 class MetricsServer(ServerBase):
@@ -204,52 +144,8 @@ class MetricsServer(ServerBase):
             output_metrics = cleanup_metrics(output_metrics)
 
             self.log.info(output_metrics)
-            try:
-                index = f"al_metrics_{component_type}"
-                policy = f"{index}_policy"
-                while not ilm_policy_exists(self.es, policy):
-                    self.log.debug(f"ILM Policy {policy.upper()} does not exists. Creating it now...")
-                    try:
-                        create_ilm_policy(self.es, policy, self.config.core.metrics.elasticsearch.as_primitives())
-                    except ILMException:
-                        time.sleep(0.1)
-                        pass
-
-                if not self.es.indices.exists_template(index):
-                    self.log.debug(f"Index template {index.upper()} does not exists. Creating it now...")
-
-                    template_body = {
-                        "index_patterns": [f"{index}-*"],
-                        "order": 1,
-                        "settings": {
-                            "index.lifecycle.name": policy,
-                            "index.lifecycle.rollover_alias": index
-                        }
-                    }
-
-                    try:
-                        self.es.indices.put_template(index, template_body)
-                    except elasticsearch.exceptions.RequestError as e:
-                        if "resource_already_exists_exception" not in str(e):
-                            raise
-                        self.log.warning(f"Tried to create an index template that already exists: {index.upper()}")
-
-                if not self.es.indices.exists_alias(index):
-                    self.log.debug(f"Index alias {index.upper()} does not exists. Creating it now...")
-
-                    index_body = {"aliases": {index: {"is_write_index": True}}}
-
-                    try:
-                        self.es.indices.create(f"{index}-000001", index_body)
-                    except elasticsearch.exceptions.RequestError as e:
-                        if "resource_already_exists_exception" not in str(e):
-                            raise
-                        self.log.warning(f"Tried to create an index template that "
-                                         f"already exists: {index.upper()}-000001")
-
-                self.es.index(index=index, body=output_metrics)
-            except Exception as e:
-                self.log.exception(e)
+            ensure_indexes(self.log, self.es, self.config.core.metrics.elasticsearch, [component_type])
+            with_retries(self.log, self.es.index, index=f"al_metrics_{component_type}", body=output_metrics)
 
         self.log.info("Metrics aggregated. Waiting for next run...")
 
