@@ -152,7 +152,7 @@ class KubernetesUpdateInterface:
         self.namespace = namespace
         self.priority_class = priority_class
 
-    def launch(self, name, docker_config: DockerConfig, mounts, env, blocking: bool = True):
+    def launch(self, name, docker_config: DockerConfig, mounts, env, network, blocking: bool = True):
         name = (self.prefix + 'update-' + name.lower()).replace('_', '-')
 
         try:
