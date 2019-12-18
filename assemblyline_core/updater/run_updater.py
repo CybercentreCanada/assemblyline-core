@@ -85,11 +85,21 @@ class DockerUpdateInterface:
     """
     def __init__(self):
         self.client = docker.from_env()
-        for network in self.client.networks.list(names=['external']):
-            self.external_network = network
-            break
-        else:
-            self.external_network = self.client.networks.create(name='external', internal=False)
+        self._external_network = None
+
+    @property
+    def external_network(self):
+        """Lazy load the external network information from docker.
+
+        In testing environments it may not exists, and we may not have docker socket anyway.
+        """
+        if not self._external_network:
+            for network in self.client.networks.list(names=['external']):
+                self._external_network = network
+                break
+            else:
+                self._external_network = self.client.networks.create(name='external', internal=False)
+        return self._external_network
 
     def launch(self, name, docker_config: DockerConfig, mounts, env, network, blocking: bool = True):
         """Run a container to completion."""
