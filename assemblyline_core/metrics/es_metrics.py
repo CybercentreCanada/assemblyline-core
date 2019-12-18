@@ -272,9 +272,9 @@ class ESMetricsServer(ServerBase):
                 search_time = all_metrics['search']['query_time_in_millis'] - self.old_cluster_data['st']
 
                 # Latency
-                get_latency = float(get_time / get_rate)
-                index_latency = float(index_time / index_rate)
-                search_latency = float(search_time / search_rate)
+                get_latency = float(get_time / (get_rate or 1.0))
+                index_latency = float(index_time / (index_rate or 1.0))
+                search_latency = float(search_time / (search_rate or 1.0))
 
             else:
                 get_rate = index_rate = search_rate = 0.0
