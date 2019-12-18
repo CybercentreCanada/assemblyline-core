@@ -41,6 +41,7 @@ class ServerBase(threading.Thread):
         self._shutdown_timeout = shutdown_timeout if shutdown_timeout is not None else SHUTDOWN_SECONDS_LIMIT
         self._old_sigint = None
         self._old_sigterm = None
+        self._stopped = False
 
     def __enter__(self):
         self.log.info(f"Initialized")
@@ -57,9 +58,12 @@ class ServerBase(threading.Thread):
         """Hard stop, can still be blocked in some cases, but we should try to avoid them."""
         time.sleep(self._shutdown_timeout)
         self.log.error(f"Server has shutdown hard after waiting {self._shutdown_timeout} seconds to stop")
+
+        if not self._stopped:
+            self._stopped = True
+            exit(1)  # So any static analysis tools get the behaviour of this function 'correct'
         import ctypes
         ctypes.string_at(0)  # SEGFAULT out of here
-        exit(1)  # So any static analysis tools get the behaviour of this function 'correct'
 
     def close(self):
         pass
