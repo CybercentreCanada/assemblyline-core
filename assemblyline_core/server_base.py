@@ -57,7 +57,9 @@ class ServerBase(threading.Thread):
         """Hard stop, can still be blocked in some cases, but we should try to avoid them."""
         time.sleep(self._shutdown_timeout)
         self.log.error(f"Server has shutdown hard after waiting {self._shutdown_timeout} seconds to stop")
-        exit(1)
+        import ctypes
+        ctypes.string_at(0)  # SEGFAULT out of here
+        exit(1)  # So any static analysis tools get the behaviour of this function 'correct'
 
     def close(self):
         pass
