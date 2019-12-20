@@ -3,9 +3,6 @@ An interface to the core system for the edge services.
 
 
 """
-import json
-
-import hashlib
 import logging
 import time
 from typing import Dict, Optional, Any, cast
@@ -128,9 +125,11 @@ class DispatchClient:
 
         return output
 
-    def request_work(self, worker_id, service_name, service_version, timeout: float = 60, blocking=True) -> Optional[ServiceTask]:
+    def request_work(self, worker_id, service_name, service_version,
+                     timeout: float = 60, blocking=True) -> Optional[ServiceTask]:
         """Pull work from the service queue for the service in question.
 
+        :param service_version:
         :param worker_id:
         :param service_name: Which service needs work.
         :param timeout: How many seconds to block before returning if blocking is true.
@@ -151,7 +150,7 @@ class DispatchClient:
     def _request_work(self, worker_id, service_name, service_version, timeout, blocking) -> Optional[ServiceTask]:
         # For when we recursively retry on bad task dequeue-ing
         if int(timeout) <= 0:
-            self.log.info(f"{worker_id}:{service_name}: no task returned: timeout")
+            self.log.info(f"{service_name}:{worker_id} no task returned [timeout]")
             return None
 
         # Get work from the queue
@@ -164,13 +163,13 @@ class DispatchClient:
                 result = result[0]
 
         if not result:
-            self.log.info(f"{worker_id}:{service_name}: no task returned: empty message")
+            self.log.info(f"{service_name}:{worker_id} no task returned: [empty message]")
             return None
         task = ServiceTask(result)
 
         # If someone is supposed to be working on this task right now, we won't be able to add it
         if self.running_tasks.add(task.key(), task.as_primitives()):
-            self.log.info(f"{worker_id}:{service_name}: task found {task.sid}:{task.fileinfo.sha256} ")
+            self.log.info(f"[{task.sid}/{task.fileinfo.sha256}] {service_name}:{worker_id} task found")
 
             process_table = DispatchHash(task.sid, self.redis)
 
@@ -178,18 +177,18 @@ class DispatchClient:
             finished = process_table.finished(file_hash=task.fileinfo.sha256, service=task.service_name) is not None
 
             if abandoned or finished:
-                self.log.info(f"{worker_id}:{service_name}: task already complete {task.sid}:{task.fileinfo.sha256}")
+                self.log.info(f"[{task.sid}/{task.fileinfo.sha256}] {service_name}:{worker_id} task already complete")
                 self.running_tasks.pop(task.key())
                 raise RetryRequestWork()
 
             # Check if this task has reached the retry limit
             attempt_record = ExpiringHash(f'dispatch-hash-attempts-{task.sid}', host=self.redis)
             total_attempts = attempt_record.increment(task.key())
-            self.log.info(f"{worker_id}:{service_name}: task  {task.sid}:{task.fileinfo.sha256} "
-                          f"attempt {total_attempts}/3")
+            self.log.info(f"[{task.sid}/{task.fileinfo.sha256}] {service_name}:{worker_id} "
+                          f"task attempt {total_attempts}/3")
             if total_attempts > 3:
-                self.log.warning(f"{worker_id}:{service_name}: marking task  {task.sid}:{task.fileinfo.sha256} "
-                                 f"failed: TASK PREEMPTED")
+                self.log.warning(f"[{task.sid}/{task.fileinfo.sha256}] "
+                                 f"{service_name}:{worker_id} marking task failed: TASK PREEMPTED ")
                 error = Error(dict(
                     archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
                     created='NOW',
@@ -224,13 +223,15 @@ class DispatchClient:
             for w in self._get_watcher_list(task.sid).members():
                 NamedQueue(w).push(msg)
 
-    def service_finished(self, sid: str, result_key: str, result: Result, temporary_data: Optional[Dict[str, Any]] = None):
+    def service_finished(self, sid: str, result_key: str, result: Result,
+                         temporary_data: Optional[Dict[str, Any]] = None):
         """Notifies the dispatcher of service completion, and possible new files to dispatch."""
         # Make sure the dispatcher knows we were working on this task
         task_key = ServiceTask.make_key(sid=sid, service_name=result.response.service_name, sha=result.sha256)
         task = self.running_tasks.pop(task_key)
         if not task:
-            self.log.warning(f"[{sid} :: {result.response.service_name}] Service tried to finish the same task twice.")
+            self.log.warning(f"[{sid}/{result.sha256}] {result.response.service_name} could not find the specified "
+                             f"task in its set of running tasks while processing successful results.")
             return
         task = ServiceTask(task)
 
@@ -246,10 +247,11 @@ class DispatchClient:
 
         # Let the logs know we have received a result for this task
         if result.drop_file:
-            self.log.debug(f"Service {task.service_name} succeeded. "
+            self.log.debug(f"[{sid}/{result.sha256}] {task.service_name} succeeded. "
                            f"Result will be stored in {result_key} but processing will stop after this service.")
         else:
-            self.log.debug(f"Service {task.service_name} succeeded. Result will be stored in {result_key}")
+            self.log.debug(f"[{sid}/{result.sha256}] {task.service_name} succeeded. "
+                           f"Result will be stored in {result_key}")
 
         # Store the result object and mark the service finished in the global table
         process_table = DispatchHash(task.sid, self.redis)
@@ -257,7 +259,8 @@ class DispatchClient:
                                                     result.result.score, result.classification, result.drop_file)
         self.timeout_watcher.clear(f'{task.sid}-{task.key()}')
         if duplicate:
-            self.log.warning(f"[{sid} :: {result.response.service_name}] Service tried to finish the same task twice.")
+            self.log.warning(f"[{sid}/{result.sha256}] {result.response.service_name}'s current task was already "
+                             f"completed in the global processing table.")
             return
 
         # Push the result tags into redis
@@ -269,7 +272,8 @@ class DispatchClient:
             tag_set.add(*new_tags)
 
         # Update the temporary data table for this file
-        temp_data_hash = ExpiringHash(get_temporary_submission_data_name(sid=task.sid, file_hash=task.fileinfo.sha256), host=self.redis)
+        temp_data_hash = ExpiringHash(get_temporary_submission_data_name(sid=task.sid, file_hash=task.fileinfo.sha256),
+                                      host=self.redis)
         for key, value in (temporary_data or {}).items():
             temp_data_hash.set(key, value)
 
@@ -355,11 +359,12 @@ class DispatchClient:
         task_key = ServiceTask.make_key(sid=sid, service_name=error.response.service_name, sha=error.sha256)
         task = self.running_tasks.pop(task_key)
         if not task:
-            self.log.warning(f"[{sid} :: {error.response.service_name}] Service tried to finish the same task twice.")
+            self.log.warning(f"[{sid}/{error.sha256}] {error.response.service_name} could not find the specified "
+                             f"task in its set of running tasks while processing an error.")
             return
         task = ServiceTask(task)
 
-        self.log.debug(f"Service {task.service_name} failed with {error.response.status} error.")
+        self.log.debug(f"[{sid}/{error.sha256}] {task.service_name} Failed with {error.response.status} error.")
         remaining = -1
         # Mark the attempt to process the file over in the dispatch table
         process_table = DispatchHash(task.sid, self.redis)
@@ -370,7 +375,8 @@ class DispatchClient:
             # This is a NON_RECOVERABLE error, error will be saved and transmitted to the user
             self.errors.save(error_key, error)
 
-            remaining, _duplicate = process_table.fail_nonrecoverable(task.fileinfo.sha256, task.service_name, error_key)
+            remaining, _duplicate = process_table.fail_nonrecoverable(task.fileinfo.sha256,
+                                                                      task.service_name, error_key)
 
             # Send the result key to any watching systems
             msg = {'status': 'FAIL', 'cache_key': error_key}
