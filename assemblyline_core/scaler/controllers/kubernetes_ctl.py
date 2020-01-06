@@ -330,7 +330,7 @@ class KubernetesController(ControllerInterface):
                 return
 
     def restart(self, service):
-        self._create_deployment(service.name, self._deployment_name(service.name), service.docker_config,
+        self._create_deployment(service.name, self._deployment_name(service.name), service.container_config,
                                 service.timeout, self.get_target(service.name))
 
     def get_running_container_names(self):
