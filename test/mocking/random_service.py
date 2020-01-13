@@ -88,12 +88,12 @@ class RandomService(ServerBase):
                 result.response.service_name = task.service_name
                 result.archive_ts = archive_ts
                 result.expiry_ts = expiry_ts
-                result_key = Result.help_build_key(sha256=task.fileinfo.sha256,
-                                                   service_name=task.service_name,
-                                                   service_version='0')
-
                 result.response.extracted = result.response.extracted[task.depth+2:]
                 result.response.supplementary = result.response.supplementary[task.depth+2:]
+                result_key = Result.help_build_key(sha256=task.fileinfo.sha256,
+                                                   service_name=task.service_name,
+                                                   service_version='0',
+                                                   is_empty=result.is_empty())
 
                 self.log.info(f"\t\tA result was generated for this task: {result_key}")
 

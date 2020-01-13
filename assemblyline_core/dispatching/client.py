@@ -237,13 +237,17 @@ class DispatchClient:
 
         # Save or freshen the result, the CONTENT of the result shouldn't change, but we need to keep the
         # most distant expiry time to prevent pulling it out from under another submission too early
-        with Lock(f"lock-{result_key}", 5, self.redis):
-            old = self.ds.result.get(result_key)
-            if old and old.expiry_ts and result.expiry_ts:
-                result.expiry_ts = max(result.expiry_ts, old.expiry_ts)
-            else:
-                result.expiry_ts = None
-            self.ds.result.save(result_key, result)
+        if result.is_empty():
+            # Empty Result will not be archived therefore result.archive_ts drives their deletion
+            self.ds.emptyresult.save(result_key, {"expiry_ts": result.archive_ts})
+        else:
+            with Lock(f"lock-{result_key}", 5, self.redis):
+                old = self.ds.result.get(result_key)
+                if old and old.expiry_ts and result.expiry_ts:
+                    result.expiry_ts = max(result.expiry_ts, old.expiry_ts)
+                else:
+                    result.expiry_ts = None
+                self.ds.result.save(result_key, result)
 
         # Let the logs know we have received a result for this task
         if result.drop_file:
