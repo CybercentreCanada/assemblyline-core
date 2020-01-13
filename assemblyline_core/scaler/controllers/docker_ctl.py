@@ -1,9 +1,7 @@
 import os
 import time
-from typing import Dict
 from assemblyline.odm.models.service import DockerConfig
 from .interface import ControllerInterface, ServiceControlError
-from retrying import retry
 
 # How to identify the update volume as a whole, in a way that the underlying container system recognizes.
 FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
