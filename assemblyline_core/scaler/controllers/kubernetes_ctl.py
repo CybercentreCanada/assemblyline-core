@@ -5,7 +5,8 @@ from kubernetes import client, config
 from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1KeyToPath, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
-    V1PersistentVolumeClaimSpec
+    V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
+    V1NetworkPolicyIngressRule
 from kubernetes.client.rest import ApiException
 
 from assemblyline_core.scaler.controllers.interface import ControllerInterface
@@ -83,6 +84,7 @@ class KubernetesController(ControllerInterface):
         self._labels = labels
         self.b1api = client.AppsV1beta1Api()
         self.api = client.CoreV1Api()
+        self.net_api = client.NetworkingV1Api()
         self.auto_cloud = False  #  TODO draw from config
         self.namespace = namespace
         self.config_mounts: List[Tuple[V1Volume, V1VolumeMount]] = []
@@ -384,3 +386,56 @@ class KubernetesController(ControllerInterface):
         for dep in self.b1api.list_namespaced_deployment(namespace=self.namespace, label_selector=label_selector).items:
             self.b1api.delete_namespaced_deployment(name=dep.metadata.name, namespace=self.namespace)
 
+    def prepare_network(self, service_name, internet):
+        # Allow access to containers with dependency_for
+        self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
+            metadata=V1ObjectMeta(name='allow-service-to-dep'),
+            spec=V1NetworkPolicySpec(
+                pod_selector=V1LabelSelector(match_labels={
+                    'app': 'assemblyline',
+                    'section': 'service',
+                    'component': service_name,
+                }),
+                egress=[V1NetworkPolicyEgressRule(
+                    to=[V1NetworkPolicyPeer(
+                        pod_selector=V1LabelSelector(match_labels={
+                            'app': 'assemblyline',
+                            'dependency_for': service_name,
+                        })
+                    )]
+                )],
+            )
+        ))
+
+        self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
+            metadata=V1ObjectMeta(name='allow-dep-from-service'),
+            spec=V1NetworkPolicySpec(
+                pod_selector=V1LabelSelector(match_labels={
+                    'app': 'assemblyline',
+                    'dependency_for': service_name,
+                }),
+                ingress=[V1NetworkPolicyIngressRule(
+                    _from=[V1NetworkPolicyPeer(
+                        pod_selector=V1LabelSelector(match_labels={
+                            'app': 'assemblyline',
+                            'section': 'service',
+                            'component': service_name,
+                        })
+                    )]
+                )],
+            )
+        ))
+
+        # Allow outgoing
+        if internet:
+            self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
+                metadata=V1ObjectMeta(name='allow-service-outgoing'),
+                spec=V1NetworkPolicySpec(
+                    pod_selector=V1LabelSelector(match_labels={
+                        'app': 'assemblyline',
+                        'section': 'service',
+                        'component': service_name,
+                    }),
+                    egress=[V1NetworkPolicyEgressRule(to=[])],
+                )
+            ))

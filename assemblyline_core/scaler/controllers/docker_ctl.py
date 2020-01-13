@@ -3,6 +3,7 @@ import time
 from typing import Dict
 from assemblyline.odm.models.service import DockerConfig
 from .interface import ControllerInterface, ServiceControlError
+from retrying import retry
 
 # How to identify the update volume as a whole, in a way that the underlying container system recognizes.
 FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
@@ -62,18 +63,6 @@ class DockerController(ControllerInterface):
         """Tell the controller about a service profile it needs to manage."""
         self._profiles[profile.name] = profile
 
-        # Create network for service
-        network_name = f'service-net-{profile.name}'
-        for network in self.client.networks.list(names=[network_name]):
-            self.networks[profile.name] = network
-            network.reload()
-            break
-        else:
-            self.networks[profile.name] = self.client.networks.create(name=network_name, internal=True)
-
-        if self.service_server_container.name not in {c.name for c in self.networks[profile.name].containers}:
-            self.networks[profile.name].connect(self.service_server_container, aliases=['service-server'])
-
     def _start(self, service_name):
         """Launch a docker container in a manner suitable for Assembylyline."""
         container_name = self._name_container(service_name)
@@ -110,7 +99,6 @@ class DockerController(ControllerInterface):
 
     def _start_container(self, name, labels, volumes, cfg: DockerConfig, network, hostname):
         """Launch a docker container."""
-
         # Take the port strings and convert them to a dictionary
         ports = {}
         for port_string in cfg.ports:
@@ -269,10 +257,34 @@ class DockerController(ControllerInterface):
     def start_stateful_container(self, service_name, container_name, spec, labels):
         volumes = {_n: {'bind': _v.mount_path, 'mode': 'rw'} for _n, _v in spec.volumes.items()}
         deployment_name = f'{service_name}-dep-{container_name}'
-        self._start_container(name=deployment_name, labels=labels, volumes=volumes, hostname=container_name,
+
+        all_labels = dict(self._labels)
+        all_labels.update({'component': service_name})
+        all_labels.update(labels)
+
+        self._start_container(name=deployment_name, labels=all_labels, volumes=volumes, hostname=container_name,
                               cfg=spec.container, network=self.networks[service_name].name)
 
     def stop_containers(self, labels):
         label_strings = [f'{name}={value}' for name, value in labels.items()]
         for container in self.client.containers.list(filters={'label': label_strings}):
             container.stop()
+
+    def prepare_network(self, service_name, internet):
+        """
+
+        NOTE: internet parameter isn't used, because the
+        """
+        from docker.errors import NotFound
+        # Create network for service
+        network_name = f'service-net-{service_name}'
+        try:
+            network = self.client.networks.get(network_name)
+            self.networks[service_name] = network
+            network.reload()
+        except NotFound:
+            self.networks[service_name] = self.client.networks.create(name=network_name, internal=True)
+
+        if self.service_server_container.name not in {c.name for c in self.networks[service_name].containers}:
+            self.networks[service_name].connect(self.service_server_container, aliases=['service-server'])
+

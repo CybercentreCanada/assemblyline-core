@@ -217,6 +217,7 @@ class ScalerServer(CoreBase):
             try:
                 if service.enabled and stage == ServiceStage.Off:
                     # Enable this service's dependencies
+                    self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
                     for name, dependency in service.dependencies.items():
                         self.controller.start_stateful_container(
                             service_name=service.name,
