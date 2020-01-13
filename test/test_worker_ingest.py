@@ -63,6 +63,10 @@ def test_ingest_simple(ingest_harness):
         files={'sha256': '1'*10}
     ))
 
+    with pytest.raises(ValueError):
+        # Process garbled message
+        ingester.try_run(volatile=True)
+
     # Send a message that is fine, but has an illegal metadata field
     in_queue.push(make_message(dict(
         metadata={
@@ -71,7 +75,7 @@ def test_ingest_simple(ingest_harness):
         }
     )))
 
-    # Process those messages
+    # Process those ok message
     ingester.try_run(volatile=True)
 
     mm = ingester.ingester
