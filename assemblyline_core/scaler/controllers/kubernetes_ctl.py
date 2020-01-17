@@ -390,7 +390,11 @@ class KubernetesController(ControllerInterface):
         safe_name = service_name.lower().replace('_', '-')
 
         # Allow access to containers with dependency_for
-        self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-to-dep')
+        try:
+            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-to-dep')
+        except ApiException as error:
+            if error.status != 404:
+                raise
         self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
             metadata=V1ObjectMeta(name=f'allow-{safe_name}-to-dep'),
             spec=V1NetworkPolicySpec(
@@ -410,7 +414,11 @@ class KubernetesController(ControllerInterface):
             )
         ))
 
-        self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-dep-from-{safe_name}')
+        try:
+            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-dep-from-{safe_name}')
+        except ApiException as error:
+            if error.status != 404:
+                raise
         self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
             metadata=V1ObjectMeta(name=f'allow-dep-from-{safe_name}'),
             spec=V1NetworkPolicySpec(
@@ -431,7 +439,11 @@ class KubernetesController(ControllerInterface):
         ))
 
         # Allow outgoing
-        self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-outgoing')
+        try:
+            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-outgoing')
+        except ApiException as error:
+            if error.status != 404:
+                raise
         if internet:
             self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
                 metadata=V1ObjectMeta(name=f'allow-{safe_name}-outgoing'),
