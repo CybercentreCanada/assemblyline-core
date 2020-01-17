@@ -387,9 +387,12 @@ class KubernetesController(ControllerInterface):
             self.b1api.delete_namespaced_deployment(name=dep.metadata.name, namespace=self.namespace)
 
     def prepare_network(self, service_name, internet):
+        safe_name = service_name.lower().replace('_', '-')
+
         # Allow access to containers with dependency_for
+        self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-to-dep')
         self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
-            metadata=V1ObjectMeta(name='allow-service-to-dep'),
+            metadata=V1ObjectMeta(name=f'allow-{safe_name}-to-dep'),
             spec=V1NetworkPolicySpec(
                 pod_selector=V1LabelSelector(match_labels={
                     'app': 'assemblyline',
@@ -407,8 +410,9 @@ class KubernetesController(ControllerInterface):
             )
         ))
 
+        self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-dep-from-{safe_name}')
         self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
-            metadata=V1ObjectMeta(name='allow-dep-from-service'),
+            metadata=V1ObjectMeta(name=f'allow-dep-from-{safe_name}'),
             spec=V1NetworkPolicySpec(
                 pod_selector=V1LabelSelector(match_labels={
                     'app': 'assemblyline',
@@ -427,9 +431,10 @@ class KubernetesController(ControllerInterface):
         ))
 
         # Allow outgoing
+        self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-outgoing')
         if internet:
             self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
-                metadata=V1ObjectMeta(name='allow-service-outgoing'),
+                metadata=V1ObjectMeta(name=f'allow-{safe_name}-outgoing'),
                 spec=V1NetworkPolicySpec(
                     pod_selector=V1LabelSelector(match_labels={
                         'app': 'assemblyline',

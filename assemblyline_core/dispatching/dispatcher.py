@@ -336,6 +336,8 @@ class Dispatcher:
             while schedule:
                 stage = schedule.pop(0)
                 for service_name in stage:
+                    # Only active services should be in this dict, so if a service that was placed in the
+                    # schedule is now missing it has been disabled or taken offline.
                     service = self.scheduler.services.get(service_name)
                     if not service:
                         continue
