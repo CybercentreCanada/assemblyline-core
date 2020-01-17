@@ -49,7 +49,7 @@ FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 # How many past updates to keep for file based updates
 UPDATE_FOLDER_LIMIT = 5
 NAMESPACE = os.getenv('NAMESPACE', None)
-UI_SERVER = os.getenv('UI_SERVER', 'localhost:5000')
+UI_SERVER = os.getenv('UI_SERVER', 'https://nginx')
 
 
 @contextmanager
