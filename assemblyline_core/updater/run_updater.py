@@ -394,6 +394,7 @@ class ServiceUpdater(CoreBase):
     def do_file_update(self, service, previous_hash, previous_update):
         """Update a service by running a container to get new files."""
         temp_directory = tempfile.mkdtemp(dir=self.temporary_directory)
+        os.chmod(temp_directory, 0o777)
         input_directory = os.path.join(temp_directory, 'input_directory')
         output_directory = os.path.join(temp_directory, 'output_directory')
         service_dir = os.path.join(FILE_UPDATE_DIRECTORY, service.name)
