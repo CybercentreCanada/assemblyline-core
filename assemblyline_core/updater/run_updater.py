@@ -7,6 +7,7 @@ TODO:
 
 """
 import os
+import uuid
 import random
 import sched
 import shutil
@@ -59,7 +60,7 @@ def temporary_api_key(ds: AssemblylineDatastore, user_name: str, permissions=('R
         random_pass = get_random_password(length=48)
         user = ds.user.get(user_name)
         user.apikeys[name] = {
-            "password": bcrypt.encrypt(random_pass),
+            "password": bcrypt.hash(random_pass),
             "acl": permissions
         }
         ds.user.save(user_name, user)
@@ -105,7 +106,7 @@ class DockerUpdateInterface:
         """Run a container to completion."""
         container = self.client.containers.run(
             image=docker_config.image,
-            name='update_' + name,
+            name='update_' + name + '_' + uuid.uuid4().hex,
             network=network,
             restart_policy={'Name': 'no'},
             command=docker_config.command,
