@@ -114,10 +114,14 @@ class DockerUpdateInterface:
                      for row in mounts},
             environment=[f'{_e.name}={_e.value}' for _e in docker_config.environment] +
                         [f'{k}={v}' for k, v in env.items()],
-            detach=not blocking,
+            detach=True,
         )
+
         if docker_config.allow_internet_access:
             self.external_network.connect(container)
+
+        if blocking:
+            container.wait()
 
     def restart(self, service_name):
         for container in self.client.containers.list(filters={'label': f'component={service_name}'}):
