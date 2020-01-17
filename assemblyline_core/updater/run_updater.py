@@ -400,8 +400,11 @@ class ServiceUpdater(CoreBase):
         service_dir = os.path.join(FILE_UPDATE_DIRECTORY, service.name)
 
         try:
+            # Use chmod directly to avoid effects of umask
             os.makedirs(input_directory)
-            os.makedirs(output_directory)
+            os.chmod(input_directory, 0o755)
+            os.makedirs(output_directory,)
+            os.chmod(output_directory, 0o777)
 
             username = self.ensure_service_account()
 
