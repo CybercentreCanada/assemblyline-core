@@ -303,7 +303,7 @@ class ScalerServer(CoreBase):
             for name, profile in self.profiles.items():
                 self.log.debug(f'{name}')
                 self.log.debug(f'Instances \t{profile.min_instances} < {profile.desired_instances} | '
-                             f'{targets[name]} < {profile.max_instances}')
+                               f'{targets[name]} < {profile.max_instances}')
                 self.log.debug(
                     f'Pressure \t{profile.shrink_threshold} < {profile.pressure} < {profile.growth_threshold}')
 
@@ -313,7 +313,7 @@ class ScalerServer(CoreBase):
             for name, profile in self.profiles.items():
                 if targets[name] > profile.desired_instances:
                     self.log.info(f"{name} wants less resources changing allocation "
-                                f"{targets[name]} -> {profile.desired_instances}")
+                                  f"{targets[name]} -> {profile.desired_instances}")
                     self.controller.set_target(name, profile.desired_instances)
                     targets[name] = profile.desired_instances
 
@@ -323,8 +323,8 @@ class ScalerServer(CoreBase):
             #
             for name, profile in self.profiles.items():
                 if targets[name] < profile.min_instances:
-                    self.log.info(
-                        f"{name} isn't meeting minimum allocation {targets[name]} -> {profile.min_instances}")
+                    self.log.info(f"{name} isn't meeting minimum allocation "
+                                  f"{targets[name]} -> {profile.min_instances}")
                     self.controller.set_target(name, profile.min_instances)
                     targets[name] = profile.min_instances
 

@@ -87,7 +87,7 @@ class DockerController(ControllerInterface):
             restart_policy={'Name': 'always'},
             command=cfg.command,
             volumes=volumes,
-            network=self.networks[service_name].name,
+            network=self._get_network(service_name).name,
             environment=[f'{_e.name}={_e.value}' for _e in cfg.environment] + ['UPDATE_PATH=/mount/updates/'],
             detach=True,
         )
@@ -208,7 +208,8 @@ class DockerController(ControllerInterface):
 
             if delta < 0:
                 # Kill off delta instances of of the service
-                running = [container for container in self.client.containers.list(filters={'label': f'component={service_name}'})
+                filters = {'label': f'component={service_name}'}
+                running = [container for container in self.client.containers.list(filters=filters)
                            if container.status in {'restarting', 'running'}]
                 running = running[0:-delta]
                 for container in running:
@@ -261,17 +262,18 @@ class DockerController(ControllerInterface):
         all_labels.update(labels)
 
         self._start_container(name=deployment_name, labels=all_labels, volumes=volumes, hostname=container_name,
-                              cfg=spec.container, network=self.networks[service_name].name)
+                              cfg=spec.container, network=self._get_network(service_name).name)
 
     def stop_containers(self, labels):
         label_strings = [f'{name}={value}' for name, value in labels.items()]
         for container in self.client.containers.list(filters={'label': label_strings}):
             container.stop()
 
-    def prepare_network(self, service_name, internet):
-        """
+    def _get_network(self, service_name):
+        """Get a reference to the network a service uses.
 
-        NOTE: internet parameter isn't used, because the
+        Since we need a reference to networks in docker we will do this setup
+        dynamically rather than in prepare_network.
         """
         from docker.errors import NotFound
         # Create network for service
@@ -285,4 +287,7 @@ class DockerController(ControllerInterface):
 
         if self.service_server_container.name not in {c.name for c in self.networks[service_name].containers}:
             self.networks[service_name].connect(self.service_server_container, aliases=['service-server'])
+        return self.networks[service_name]
 
+    def prepare_network(self, service_name, internet):
+        pass
