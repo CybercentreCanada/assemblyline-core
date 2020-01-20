@@ -201,7 +201,7 @@ class ScalerServer(CoreBase):
         # Run as long as we need to
         while self.running:
             delay = self.scheduler.run(False)
-            time.sleep(min(delay, 0.02))
+            time.sleep(min(delay, 2))
 
     def sync_services(self):
         self.scheduler.enter(SERVICE_SYNC_INTERVAL, 0, self.sync_services)
