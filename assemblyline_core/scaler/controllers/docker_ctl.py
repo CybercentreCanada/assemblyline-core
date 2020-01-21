@@ -290,4 +290,5 @@ class DockerController(ControllerInterface):
         return self.networks[service_name]
 
     def prepare_network(self, service_name, internet):
-        pass
+        self._get_network(service_name)
+
