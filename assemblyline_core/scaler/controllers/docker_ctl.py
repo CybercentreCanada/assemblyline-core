@@ -8,6 +8,7 @@ FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
 
 # Where to find the update directory inside this container.
 FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
+INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
 
 
 class DockerController(ControllerInterface):
@@ -88,7 +89,8 @@ class DockerController(ControllerInterface):
             command=cfg.command,
             volumes=volumes,
             network=self._get_network(service_name).name,
-            environment=[f'{_e.name}={_e.value}' for _e in cfg.environment] + ['UPDATE_PATH=/mount/updates/'],
+            environment=[f'{_e.name}={_e.value}' for _e in cfg.environment] + ['UPDATE_PATH=/mount/updates/'] +
+                        [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ],
             detach=True,
         )
 
@@ -127,7 +129,8 @@ class DockerController(ControllerInterface):
             command=cfg.command,
             volumes=volumes,
             network=network,
-            environment=[f'{_e.name}={_e.value}' for _e in cfg.environment],
+            environment=[f'{_e.name}={_e.value}' for _e in cfg.environment] +
+                        [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ],
             detach=True,
             ports=ports
         )

@@ -50,6 +50,7 @@ FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 UPDATE_FOLDER_LIMIT = 5
 NAMESPACE = os.getenv('NAMESPACE', None)
 UI_SERVER = os.getenv('UI_SERVER', 'https://nginx')
+INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
 
 
 @contextmanager
@@ -113,7 +114,8 @@ class DockerUpdateInterface:
             volumes={os.path.join(row['volume'], row['source_path']): {'bind': row['dest_path'], 'mode': 'rw'}
                      for row in mounts},
             environment=[f'{_e.name}={_e.value}' for _e in docker_config.environment] +
-                        [f'{k}={v}' for k, v in env.items()],
+                        [f'{k}={v}' for k, v in env.items()] +
+                        [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ],
             detach=True,
         )
 
