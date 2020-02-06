@@ -1,10 +1,10 @@
-import hashlib
 import json
 import logging
 import os
 import shutil
 import time
-from urllib.parse import urlparse
+
+from copy import deepcopy
 
 import requests
 import yaml
@@ -61,11 +61,18 @@ def url_update() -> None:
     # Create a requests session
     session = requests.Session()
 
-    files_sha256 = []
+    files_sha256 = {}
 
     # Go through each source and download file
     for source in sources:
         uri = source['uri']
+        name = source['name']
+
+        if not uri or not name:
+            LOGGER.warning(f"Invalid source: {source}")
+            continue
+
+        LOGGER.info(f"Downloading file '{name}' from uri '{uri}' ...")
 
         username = source.get('username', None)
         password = source.get('password', None)
@@ -84,6 +91,7 @@ def url_update() -> None:
                 # Compare the last modified time with the last updated time
                 if update_config.get('previous_update', None) and last_modified <= previous_update:
                     # File has not been modified since last update, do nothing
+                    LOGGER.info("File has not changed since last time, Skipping...")
                     continue
 
             if update_config.get('previous_update', None):
@@ -100,26 +108,31 @@ def url_update() -> None:
             # Check the response code
             if response.status_code == requests.codes['not_modified']:
                 # File has not been modified since last update, do nothing
+                LOGGER.info("File has not changed since last time, Skipping...")
                 continue
             elif response.ok:
-                file_name = source.get("name", os.path.basename(urlparse(uri).path) or 'update_file')
-                file_path = os.path.join(UPDATE_OUTPUT_PATH, file_name)
+                file_path = os.path.join(UPDATE_OUTPUT_PATH, name)
                 with open(file_path, 'wb') as f:
                     f.write(response.content)
 
                 # Append the SHA256 of the file to a list of downloaded files
-                files_sha256.append(get_sha256_for_file(file_path))
+                sha256 = get_sha256_for_file(file_path)
+                if previous_hash.get(name, None) != sha256:
+                    files_sha256[name] = sha256
+                else:
+                    LOGGER.info("File as the same hash as last time. Skipping...")
+
+                LOGGER.info("File successfully downloaded!")
         except requests.Timeout:
-            # TODO: should we retry?
-            pass
+            LOGGER.warning(f"Cannot find the file for source {name} with url {uri} - (Timeout)")
+            continue
         except Exception as e:
             # Catch all other types of exceptions such as ConnectionError, ProxyError, etc.
-            LOGGER.warning(str(e))
-            exit()
-            # TODO: Should we exit even if one file fails to download? Or should we continue downloading other files?
+            LOGGER.warning(f"Source {name} failed with error: {str(e)}")
 
     if files_sha256:
-        new_hash = hashlib.md5(' '.join(sorted(files_sha256)).encode('utf-8')).hexdigest()
+        new_hash = deepcopy(previous_hash)
+        new_hash.update(files_sha256)
 
         # Check if the new update hash matches the previous update hash
         if new_hash == previous_hash:
@@ -131,7 +144,7 @@ def url_update() -> None:
         with open(os.path.join(UPDATE_OUTPUT_PATH, 'response.yaml'), 'w') as yml_fh:
             yaml.safe_dump(dict(
                 previous_update=now_as_iso(),
-                previous_hash=new_hash,
+                previous_hash=json.dumps(new_hash),
             ), yml_fh)
 
         LOGGER.info("Service update file(s) successfully downloaded")
