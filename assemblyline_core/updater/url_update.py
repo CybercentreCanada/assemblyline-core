@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -10,7 +11,7 @@ import yaml
 
 from assemblyline.common import log as al_log
 from assemblyline.common.digests import get_sha256_for_file
-from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.isotime import now_as_iso, iso_to_epoch
 
 al_log.init_logging('service_updater')
 
@@ -18,7 +19,7 @@ LOGGER = logging.getLogger('assemblyline.service_updater')
 
 
 UPDATE_CONFIGURATION_PATH = os.environ.get('UPDATE_CONFIGURATION_PATH', None)
-UPDATE_OUTPUT_PATH = os.environ.get('UPDATE_OUTPUT_PATH', None)
+UPDATE_OUTPUT_PATH = os.environ.get('UPDATE_OUTPUT_PATH', "/tmp/updater_output")
 
 
 def url_update() -> None:
@@ -26,15 +27,36 @@ def url_update() -> None:
     Using an update configuration file as an input, which contains a list of sources, download all the file(s) which
     have been modified since the last update.
     """
-    if os.path.exists(UPDATE_CONFIGURATION_PATH):
+    update_config = {}
+    # Load configuration
+    if UPDATE_CONFIGURATION_PATH and os.path.exists(UPDATE_CONFIGURATION_PATH):
         with open(UPDATE_CONFIGURATION_PATH, 'r') as yml_fh:
             update_config = yaml.safe_load(yml_fh)
+    else:
+        LOGGER.warning("Could not find update configuration file.")
+        exit(1)
 
+    # Cleanup output path
+    if os.path.exists(UPDATE_OUTPUT_PATH):
+        if os.path.isdir(UPDATE_OUTPUT_PATH):
+            shutil.rmtree(UPDATE_OUTPUT_PATH)
+        else:
+            os.unlink(UPDATE_OUTPUT_PATH)
+    os.makedirs(UPDATE_OUTPUT_PATH)
+
+    # Get sources
     sources = update_config.get('sources', None)
-
     # Exit if no update sources given
     if not sources:
         exit()
+
+    # Parse updater configuration
+    previous_update = update_config.get('previous_update', None)
+    previous_hash = update_config.get('previous_hash', None) or {}
+    if previous_hash:
+        previous_hash = json.loads(previous_hash)
+    if isinstance(previous_update, str):
+        previous_update = iso_to_epoch(previous_update)
 
     # Create a requests session
     session = requests.Session()
@@ -60,12 +82,12 @@ def url_update() -> None:
                 last_modified = time.mktime(time.strptime(last_modified, "%a, %d %b %Y %H:%M:%S %Z"))
 
                 # Compare the last modified time with the last updated time
-                if update_config.get('previous_update', None) and last_modified <= update_config['previous_update']:
+                if update_config.get('previous_update', None) and last_modified <= previous_update:
                     # File has not been modified since last update, do nothing
                     continue
 
             if update_config.get('previous_update', None):
-                previous_update = time.strftime("%a, %d %b %Y %H:%M:%S %Z", time.gmtime(update_config['previous_update']))
+                previous_update = time.strftime("%a, %d %b %Y %H:%M:%S %Z", time.gmtime(previous_update))
                 if headers:
                     headers['If-Modified-Since'] = previous_update
                 else:
@@ -80,7 +102,7 @@ def url_update() -> None:
                 # File has not been modified since last update, do nothing
                 continue
             elif response.ok:
-                file_name = os.path.basename(urlparse(uri).path)
+                file_name = source.get("name", os.path.basename(urlparse(uri).path) or 'update_file')
                 file_path = os.path.join(UPDATE_OUTPUT_PATH, file_name)
                 with open(file_path, 'wb') as f:
                     f.write(response.content)
@@ -92,14 +114,15 @@ def url_update() -> None:
             pass
         except Exception as e:
             # Catch all other types of exceptions such as ConnectionError, ProxyError, etc.
-            LOGGER.info(str(e))
-            exit()  # TODO: Should we exit even if one file fails to download? Or should we continue downloading other files?
+            LOGGER.warning(str(e))
+            exit()
+            # TODO: Should we exit even if one file fails to download? Or should we continue downloading other files?
 
     if files_sha256:
         new_hash = hashlib.md5(' '.join(sorted(files_sha256)).encode('utf-8')).hexdigest()
 
         # Check if the new update hash matches the previous update hash
-        if new_hash == update_config.get('previous_hash', None):
+        if new_hash == previous_hash:
             # Update file(s) not changed, delete the downloaded files and exit
             shutil.rmtree(UPDATE_OUTPUT_PATH, ignore_errors=True)
             exit()
