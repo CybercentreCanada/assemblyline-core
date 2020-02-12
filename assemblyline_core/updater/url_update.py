@@ -11,7 +11,7 @@ import yaml
 
 from assemblyline.common import log as al_log
 from assemblyline.common.digests import get_sha256_for_file
-from assemblyline.common.isotime import now_as_iso, iso_to_epoch
+from assemblyline.common.isotime import iso_to_epoch
 
 al_log.init_logging('service_updater')
 
@@ -22,7 +22,11 @@ UPDATE_CONFIGURATION_PATH = os.environ.get('UPDATE_CONFIGURATION_PATH', None)
 UPDATE_OUTPUT_PATH = os.environ.get('UPDATE_OUTPUT_PATH', "/tmp/updater_output")
 
 
-def url_update() -> None:
+def test_file(_):
+    return True
+
+
+def url_update(test_func=test_file) -> None:
     """
     Using an update configuration file as an input, which contains a list of sources, download all the file(s) which
     have been modified since the last update.
@@ -114,6 +118,11 @@ def url_update() -> None:
                 file_path = os.path.join(UPDATE_OUTPUT_PATH, name)
                 with open(file_path, 'wb') as f:
                     f.write(response.content)
+
+                if not test_func(file_path):
+                    os.unlink(file_path)
+                    LOGGER.warning(f"The downloaded file was invalid. It will not be part of this update...")
+                    continue
 
                 # Append the SHA256 of the file to a list of downloaded files
                 sha256 = get_sha256_for_file(file_path)
