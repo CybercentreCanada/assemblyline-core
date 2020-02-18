@@ -227,7 +227,7 @@ class ScalerServer(CoreBase):
                         )
 
                     # Move to the next service stage
-                    if service.update_config:
+                    if service.update_config and service.update_config.wait_for_update:
                         self._service_stage_hash.set(name, ServiceStage.Update)
                     else:
                         self._service_stage_hash.set(name, ServiceStage.Running)
