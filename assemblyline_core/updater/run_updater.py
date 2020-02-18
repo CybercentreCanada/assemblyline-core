@@ -6,6 +6,8 @@ TODO:
     - If the service update interval changes in datastore move the next update time
 
 """
+from collections import defaultdict
+
 import os
 import uuid
 import random
@@ -400,6 +402,8 @@ class ServiceUpdater(CoreBase):
         input_directory = os.path.join(temp_directory, 'input_directory')
         output_directory = os.path.join(temp_directory, 'output_directory')
         service_dir = os.path.join(FILE_UPDATE_DIRECTORY, service.name)
+        image_variables = defaultdict(str)
+        image_variables.update(self.config.services.image_variables)
 
         try:
             # Use chmod directly to avoid effects of umask
@@ -424,9 +428,11 @@ class ServiceUpdater(CoreBase):
                     }, fh)
 
                 # Run the update container
+                run_options = service.update_config.run_options
+                run_options.image = string.Template(run_options.image).safe_substitute(image_variables)
                 self.controller.launch(
                     name=service.name,
-                    docker_config=service.update_config.run_options,
+                    docker_config=run_options,
                     mounts=[
                         {
                             'volume': FILE_UPDATE_VOLUME,

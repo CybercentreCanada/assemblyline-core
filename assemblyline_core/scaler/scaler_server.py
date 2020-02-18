@@ -1,6 +1,8 @@
 """
 An auto-scaling service specific to Assemblyline services.
 """
+from collections import defaultdict
+from string import Template
 from typing import Dict, List
 
 import os
@@ -206,6 +208,8 @@ class ScalerServer(CoreBase):
     def sync_services(self):
         self.scheduler.enter(SERVICE_SYNC_INTERVAL, 0, self.sync_services)
         default_settings = self.config.core.scaler.service_defaults
+        image_variables = defaultdict(str)
+        image_variables.update(self.config.services.image_variables)
 
         # Get all the service data
         for service in self.datastore.list_all_services(full=True):
@@ -254,6 +258,7 @@ class ScalerServer(CoreBase):
                     # Build the docker config for the service, we are going to either create it or
                     # update it so we need to know what the current configuration is either way
                     docker_config = service.docker_config
+                    docker_config.image = Template(docker_config.image).safe_substitute(image_variables)
                     set_keys = set(var.name for var in docker_config.environment)
                     for var in default_settings.environment:
                         if var.name not in set_keys:
