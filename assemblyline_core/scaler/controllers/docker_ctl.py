@@ -10,6 +10,9 @@ FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
 FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
 
+# Every this many seconds, check that the services can actually reach the service server.
+NETWORK_REFRESH_INTERVAL = 60 * 3
+
 
 class DockerController(ControllerInterface):
     """A controller for *non* swarm mode docker."""
@@ -34,16 +37,7 @@ class DockerController(ControllerInterface):
         else:
             self.external_network = self.client.networks.create(name='external', internal=False)
         self.networks = {}
-
-        self.service_server_container = None
-        while self.service_server_container is None:
-            for container in self.client.containers.list():
-                if 'service_server' in container.name:
-                    self.service_server_container = container
-                    self.log.info(f'Found the service server at: {container.id} [{container.name}]')
-                    break
-            if not self.service_server_container:
-                time.sleep(1)
+        self._last_network_refresh = 0
 
         # CPU and memory reserved for the host
         self._reserved_cpu = 0.3
@@ -57,6 +51,26 @@ class DockerController(ControllerInterface):
 
         # We aren't checking for swarm nodes
         assert not self._info['Swarm']['NodeID']
+
+    def get_service_server(self):
+        service_server_container = None
+        while service_server_container is None:
+            for container in self.client.containers.list():
+                if 'service_server' in container.name:
+                    service_server_container = container
+                    self.log.info(f'Found the service server at: {container.id} [{container.name}]')
+                    break
+            if not service_server_container:
+                time.sleep(1)
+        return service_server_container
+
+    def refresh_service_networks(self):
+        service_server = self.get_service_server()
+        for service_name in self.networks:
+            network = self._get_network(service_name)
+            if service_server.name not in {c.name for c in network.containers}:
+                self.networks[service_name].connect(service_server, aliases=['service-server'])
+        self._last_network_refresh = time.time()
 
     def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
@@ -164,6 +178,11 @@ class DockerController(ControllerInterface):
 
         NOTE: There is probably a better way to do this.
         """
+        # This network thing has nothing to do with cpu_info, its just here because this
+        # is a method we know will run regularly.
+        if time.time() - self._last_network_refresh > NETWORK_REFRESH_INTERVAL:
+            self.refresh_service_networks()
+
         total_cpu = cpu = self._info['NCPU'] * self.cpu_overallocation - self._reserved_cpu
         for container in self.client.containers.list():
             if container.attrs['HostConfig']['CpuPeriod']:
@@ -287,11 +306,9 @@ class DockerController(ControllerInterface):
             network.reload()
         except NotFound:
             self.networks[service_name] = self.client.networks.create(name=network_name, internal=True)
-
-        if self.service_server_container.name not in {c.name for c in self.networks[service_name].containers}:
-            self.networks[service_name].connect(self.service_server_container, aliases=['service-server'])
         return self.networks[service_name]
 
     def prepare_network(self, service_name, internet):
         self._get_network(service_name)
+        self.refresh_service_networks()
 
