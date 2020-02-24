@@ -1,6 +1,7 @@
 """
 An auto-scaling service specific to Assemblyline services.
 """
+import threading
 from collections import defaultdict
 from string import Template
 from typing import Dict, List
@@ -180,6 +181,7 @@ class ScalerServer(CoreBase):
         # Prepare a single threaded scheduler
         self.state = collection.Collection(period=self.config.core.metrics.export_interval)
         self.scheduler = sched.scheduler()
+        self.scheduler_stopped = threading.Event()
 
     def add_service(self, profile: ServiceProfile):
         profile.desired_instances = max(self.controller.get_target(profile.name), profile.min_instances)
@@ -204,6 +206,12 @@ class ScalerServer(CoreBase):
         while self.running:
             delay = self.scheduler.run(False)
             time.sleep(min(delay, 2))
+        self.scheduler_stopped.set()
+
+    def stop(self):
+        super().stop()
+        self.scheduler_stopped.wait(5)
+        self.controller.stop()
 
     def sync_services(self):
         self.scheduler.enter(SERVICE_SYNC_INTERVAL, 0, self.sync_services)
@@ -321,6 +329,8 @@ class ScalerServer(CoreBase):
                                   f"{targets[name]} -> {profile.desired_instances}")
                     self.controller.set_target(name, profile.desired_instances)
                     targets[name] = profile.desired_instances
+                if not self.running:
+                    return
 
             #
             #   2.  Any processes that aren't reaching their min_instances target must be given
@@ -374,6 +384,9 @@ class ScalerServer(CoreBase):
                 if value != old:
                     self.log.info(f"Scaling service {name}: {old} -> {value}")
                     self.controller.set_target(name, value)
+                if not self.running:
+                    return
+
         except ServiceControlError as error:
             self.log.exception("Error while scaling services.")
             self.handle_service_error(error.service_name)
@@ -512,3 +525,4 @@ class ScalerServer(CoreBase):
 
         for message in self.controller.new_events():
             self.log.warning("Container Event :: " + message)
+

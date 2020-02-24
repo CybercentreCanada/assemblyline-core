@@ -57,3 +57,6 @@ class ControllerInterface:
 
     def prepare_network(self, service_name, internet):
         raise NotImplementedError()
+
+    def stop(self):
+        pass

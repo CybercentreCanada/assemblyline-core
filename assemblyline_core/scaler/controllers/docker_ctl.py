@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from assemblyline.odm.models.service import DockerConfig
 from .interface import ControllerInterface, ServiceControlError
@@ -37,7 +38,6 @@ class DockerController(ControllerInterface):
         else:
             self.external_network = self.client.networks.create(name='external', internal=False)
         self.networks = {}
-        self._last_network_refresh = 0
 
         # CPU and memory reserved for the host
         self._reserved_cpu = 0.3
@@ -45,6 +45,7 @@ class DockerController(ControllerInterface):
         self.cpu_overallocation = cpu_overallocation
         self.memory_overallocation = memory_overallocation
         self._profiles = {}
+        self.service_server = self.find_service_server()
 
         # Prefetch some info that shouldn't change while we are running
         self._info = self.client.info()
@@ -52,7 +53,11 @@ class DockerController(ControllerInterface):
         # We aren't checking for swarm nodes
         assert not self._info['Swarm']['NodeID']
 
-    def get_service_server(self):
+        # Start a background thread to keep the service server connected
+        threading.Thread(target=self._refresh_service_networks, daemon=True).start()
+        self._flush_containers()  # Clear out any containers that are left over from a previous run
+
+    def find_service_server(self):
         service_server_container = None
         while service_server_container is None:
             for container in self.client.containers.list():
@@ -64,13 +69,38 @@ class DockerController(ControllerInterface):
                 time.sleep(1)
         return service_server_container
 
-    def refresh_service_networks(self):
-        service_server = self.get_service_server()
-        for service_name in self.networks:
-            network = self._get_network(service_name)
-            if service_server.name not in {c.name for c in network.containers}:
-                self.networks[service_name].connect(service_server, aliases=['service-server'])
-        self._last_network_refresh = time.time()
+    def _refresh_service_networks(self):
+        while True:
+            # noinspection PyBroadException
+            try:
+                # Make sure the server is attached to all networks
+                for service_name in self.networks:
+                    network = self._get_network(service_name)
+                    if self.service_server.name not in {c.name for c in network.containers}:
+                        self.networks[service_name].connect(self.service_server, aliases=['service-server'])
+
+                # As long as the current service server is still running, just block its exit code in this thread
+                self.service_server.wait()
+
+                # If it does return, find the new service server
+                self.service_server = self.find_service_server()
+            except:
+                self.log.exception("An error occurred while watching the service server.")
+
+    def stop(self):
+        self._flush_containers()
+
+    def _flush_containers(self):
+        from docker.errors import APIError
+        labels = [f'{name}={value}' for name, value in self._labels.items()]
+        if labels:
+            for container in self.client.containers.list(filters={'label': labels}):
+                try:
+                    container.kill()
+                except APIError:
+                    pass
+        self.client.containers.prune()
+        self.client.volumes.prune()
 
     def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
@@ -146,7 +176,7 @@ class DockerController(ControllerInterface):
             environment=[f'{_e.name}={_e.value}' for _e in cfg.environment] +
                         [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ],
             detach=True,
-            ports=ports
+            ports=ports,
         )
         if cfg.allow_internet_access:
             self.external_network.connect(container, aliases=[hostname])
@@ -178,11 +208,6 @@ class DockerController(ControllerInterface):
 
         NOTE: There is probably a better way to do this.
         """
-        # This network thing has nothing to do with cpu_info, its just here because this
-        # is a method we know will run regularly.
-        if time.time() - self._last_network_refresh > NETWORK_REFRESH_INTERVAL:
-            self.refresh_service_networks()
-
         total_cpu = cpu = self._info['NCPU'] * self.cpu_overallocation - self._reserved_cpu
         for container in self.client.containers.list():
             if container.attrs['HostConfig']['CpuPeriod']:
@@ -301,14 +326,16 @@ class DockerController(ControllerInterface):
         # Create network for service
         network_name = f'service-net-{service_name}'
         try:
-            network = self.client.networks.get(network_name)
-            self.networks[service_name] = network
+            self.networks[service_name] = network = self.client.networks.get(network_name)
             network.reload()
         except NotFound:
-            self.networks[service_name] = self.client.networks.create(name=network_name, internal=True)
-        return self.networks[service_name]
+            network = self.networks[service_name] = self.client.networks.create(name=network_name, internal=True)
+
+        if self.service_server.name not in {c.name for c in network.containers}:
+            self.networks[service_name].connect(self.service_server, aliases=['service-server'])
+
+        return network
 
     def prepare_network(self, service_name, internet):
         self._get_network(service_name)
-        self.refresh_service_networks()
 
