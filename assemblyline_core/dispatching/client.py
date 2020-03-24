@@ -243,8 +243,11 @@ class DispatchClient:
         else:
             with Lock(f"lock-{result_key}", 5, self.redis):
                 old = self.ds.result.get(result_key)
-                if old and old.expiry_ts and result.expiry_ts:
-                    result.expiry_ts = max(result.expiry_ts, old.expiry_ts)
+                if old:
+                    if old.expiry_ts and result.expiry_ts:
+                        result.expiry_ts = max(result.expiry_ts, old.expiry_ts)
+                    else:
+                        result.expiry_ts = None
                 self.ds.result.save(result_key, result)
 
         # Let the logs know we have received a result for this task
