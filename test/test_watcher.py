@@ -3,7 +3,6 @@ import pytest
 import redis.exceptions
 
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.common.testing import skip
 from assemblyline.common.uid import get_random_id
 
 from assemblyline_core.watcher.client import WatcherClient
@@ -12,18 +11,11 @@ from assemblyline_core.watcher.run_watcher import WatcherServer
 from .mocking import ToggleTrue, RedisTime
 
 
-@pytest.fixture
-def redis_connection():
-    from assemblyline.remote.datatypes import get_client
-    c = get_client(None, None, False)
-    try:
-        ret_val = c.ping()
-        if ret_val:
-            return c
-    except redis.exceptions.ConnectionError:
-        pass
-
-    return skip("Connection to the Redis server failed. This test cannot be performed...")
+@pytest.fixture(scope='module')
+def redis(redis_connection):
+    redis_connection.flushdb()
+    yield redis_connection
+    redis_connection.flushdb()
 
 
 def test_watcher(redis_connection):

@@ -9,18 +9,23 @@ from assemblyline.odm.randomizer import random_model_obj
 
 MAX_OBJECTS = 10
 MIN_OBJECTS = 2
-datastore = forge.get_datastore(archive_access=True)
 expiry_collections_len = {}
 archive_collections_len = {}
 
-def purge_data():
+
+@pytest.fixture(scope='module')
+def datastore(archive_connection):
+    return archive_connection
+
+
+def purge_data(datastore):
     for name, definition in datastore.ds.get_models().items():
         if hasattr(definition, 'expiry_ts'):
             getattr(datastore, name).wipe()
 
 
 @pytest.fixture(scope="function")
-def ds_expiry(request):
+def ds_expiry(request, datastore):
     for name, definition in datastore.ds.get_models().items():
         if hasattr(definition, 'expiry_ts'):
             collection = getattr(datastore, name)
@@ -34,11 +39,12 @@ def ds_expiry(request):
             expiry_collections_len[name] = expiry_len
             collection.commit()
 
-    request.addfinalizer(purge_data)
+    request.addfinalizer(lambda: purge_data(datastore))
     return datastore
 
+
 @pytest.fixture(scope="function")
-def ds_archive(request):
+def ds_archive(request, datastore):
     for name, definition in datastore.ds.get_models().items():
         if hasattr(definition, 'archive_ts'):
             collection = getattr(datastore, name)
@@ -52,7 +58,7 @@ def ds_archive(request):
             archive_collections_len[name] = expiry_len
             collection.commit()
 
-    request.addfinalizer(purge_data)
+    request.addfinalizer(lambda: purge_data(datastore))
     return datastore
 
 
@@ -69,6 +75,7 @@ class FakeCounter(object):
     def get(self, name):
         return self.counts.get(name, 0)
 
+
 def test_expire_all(ds_expiry):
     expiry = ExpiryManager()
     expiry.counter = FakeCounter()
@@ -80,6 +87,7 @@ def test_expire_all(ds_expiry):
         collection = getattr(ds_expiry, k)
         collection.commit()
         assert collection.search("id:*")['total'] == 0
+
 
 def test_archive_all(ds_archive):
     expiry = ExpiryManager()

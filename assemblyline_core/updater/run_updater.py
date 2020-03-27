@@ -255,9 +255,9 @@ class KubernetesUpdateInterface:
 
 
 class ServiceUpdater(CoreBase):
-    def __init__(self, redis_persist=None, logger=None, datastore=None):
+    def __init__(self, redis_persist=None, redis=None, logger=None, datastore=None):
         super().__init__('assemblyline.service.updater', logger=logger, datastore=datastore,
-                         redis_persist=redis_persist)
+                         redis_persist=redis_persist, redis=redis)
 
         if not FILE_UPDATE_DIRECTORY:
             raise RuntimeError("The updater process must be run within the orchestration environment, "

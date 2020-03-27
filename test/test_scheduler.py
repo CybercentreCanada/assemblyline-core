@@ -13,16 +13,10 @@ from assemblyline_core.server_base import get_service_stage_hash, ServiceStage
 
 
 @pytest.fixture(scope='module')
-def redis():
-    config = forge.get_config()
-    client = get_client(
-        config.core.metrics.redis.host,
-        config.core.metrics.redis.port,
-        False
-    )
-    client.flushdb()
-    yield client
-    client.flushdb()
+def redis(redis_connection):
+    redis_connection.flushdb()
+    yield redis_connection
+    redis_connection.flushdb()
 
 
 def dummy_service(name, stage, category='static', accepts='', rejects=None):

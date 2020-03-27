@@ -21,7 +21,6 @@ from typing import List
 from assemblyline.common import forge, identify
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.isotime import now_as_iso
-from assemblyline.common.testing import skip
 from assemblyline.common.uid import get_random_id
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.models.config import Config
@@ -48,16 +47,10 @@ from .test_scheduler import dummy_service
 
 
 @pytest.fixture(scope='module')
-def redis():
-    config = forge.get_config()
-    client = get_client(
-        config.core.metrics.redis.host,
-        config.core.metrics.redis.port,
-        False
-    )
-    client.flushdb()
-    yield client
-    client.flushdb()
+def redis(redis_connection):
+    redis_connection.flushdb()
+    yield redis_connection
+    redis_connection.flushdb()
 
 
 _global_semaphore = threading.Semaphore()

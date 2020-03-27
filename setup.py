@@ -36,6 +36,12 @@ setup(
         'assemblyline',
         'docker',
     ],
+    extras_require={
+        'test': [
+            'fakeredis[lua]',
+            'pytest'
+        ]
+    },
     tests_require=[
         'pytest',
     ],

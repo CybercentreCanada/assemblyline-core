@@ -17,10 +17,12 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 
 NUM_SUBMISSIONS = 2
-config = forge.get_config()
-ds = forge.get_datastore(config)
-fs = forge.get_filestore(config)
 all_submissions = []
+
+
+@pytest.fixture(scope='module')
+def fs(config):
+    return forge.get_filestore(config)
 
 
 def recursive_extend(d, u):
@@ -35,21 +37,19 @@ def recursive_extend(d, u):
     return d
 
 
-def purge_data():
-    wipe_submissions(ds, fs)
-    ds.alert.wipe()
-
-
 @pytest.fixture(scope="module")
-def datastore(request):
+def datastore(request, datastore_connection, fs):
     for _ in range(NUM_SUBMISSIONS):
-        all_submissions.append(create_submission(ds, fs))
+        all_submissions.append(create_submission(datastore_connection, fs))
 
-    request.addfinalizer(purge_data)
-    return ds
+    try:
+        yield datastore_connection
+    finally:
+        wipe_submissions(datastore_connection, fs)
+        datastore_connection.alert.wipe()
 
 
-def test_create_single_alert(datastore):
+def test_create_single_alert(config, datastore):
     persistent_redis = get_client(
         host=config.core.redis.persistent.host,
         port=config.core.redis.persistent.port,
@@ -82,7 +82,7 @@ def test_create_single_alert(datastore):
     assert alert.sid == submission.sid
 
 
-def test_update_single_alert(datastore):
+def test_update_single_alert(config, datastore):
     persistent_redis = get_client(
         host=config.core.redis.persistent.host,
         port=config.core.redis.persistent.port,

@@ -29,7 +29,7 @@ def ds():
 
 @pytest.fixture
 def updater(clean_redis: Union[clean_redis, redis.Redis], ds, updater_directory):
-    return run_updater.ServiceUpdater(redis_persist=clean_redis, datastore=ds)
+    return run_updater.ServiceUpdater(redis_persist=clean_redis, redis=clean_redis, datastore=ds)
 
 
 def test_service_changes(updater: run_updater.ServiceUpdater):
