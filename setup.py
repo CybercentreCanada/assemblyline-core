@@ -19,7 +19,7 @@ setup(
     description="Assemblyline (v4) automated malware analysis framework - Core components.",
     long_description="This package provides the core components of Assemblyline v4 malware analysis framework. "
                      "(Alerter, Dispatcher, Expiry, Ingester, Metrics, Watcher, Workflow)",
-    url="https://bitbucket.org/cse-assemblyline/alv4_core/",
+    url="https://github.com/CybercentreCanada/assemblyline-core/",
     author="CCCS Assemblyline development team",
     author_email="assemblyline@cyber.gc.ca",
     license="MIT",

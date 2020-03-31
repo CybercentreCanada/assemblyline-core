@@ -19,8 +19,8 @@ pipelines:
             - mkdir -p /var/cache/assemblyline/
             - cp test/bitbucket/config.yml /etc/assemblyline
             # Install al common from source
-            - git clone git@bitbucket.org:cse-assemblyline/alv4.git ~/alv4
-            - cd ~/alv4 && pwd
+            - git clone git@github.com:CybercentreCanada/assemblyline-base.git ~/assemblyline-base
+            - cd ~/assemblyline-base && pwd
             # Try to checkout the matching branch, if the command fails, don't care.
             - git checkout -b $BITBUCKET_BRANCH -t origin/$BITBUCKET_BRANCH || true
             - pip install --no-cache-dir -e .
