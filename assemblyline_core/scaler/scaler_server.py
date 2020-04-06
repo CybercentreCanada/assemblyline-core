@@ -166,7 +166,7 @@ class ScalerServer(CoreBase):
         }
 
         if KUBERNETES_AL_CONFIG:
-            self.log.info("Loading Kubernetes cluster interface.")
+            self.log.info(f"Loading Kubernetes cluster interface on namespace: {NAMESPACE}")
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
                                                    namespace=NAMESPACE, priority='al-service-priority')
         else:
