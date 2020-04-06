@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from assemblyline_core.scaler.scaling import ServiceProfile
+    from assemblyline_core.scaler.scaler_server import ServiceProfile
 
 
 class ServiceControlError(RuntimeError):
