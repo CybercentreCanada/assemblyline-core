@@ -166,7 +166,7 @@ class KubernetesUpdateInterface:
             config.load_kube_config(client_configuration=cfg)
 
         self.prefix = prefix.lower()
-        self.b1api = client.AppsV1beta1Api()
+        self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
         self.batch_api = client.BatchV1Api()
         self.namespace = namespace
@@ -260,9 +260,9 @@ class KubernetesUpdateInterface:
 
     def restart(self, service_name):
         name = (self.prefix + service_name.lower()).replace('_', '-')
-        scale = self.b1api.read_namespaced_deployment_scale(name=name, namespace=self.namespace)
+        scale = self.apps_api.read_namespaced_deployment_scale(name=name, namespace=self.namespace)
         scale.spec.replicas = 0
-        self.b1api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
+        self.apps_api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
 
 
 class ServiceUpdater(CoreBase):
