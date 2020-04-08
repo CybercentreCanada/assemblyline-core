@@ -420,7 +420,7 @@ class ServiceUpdater(CoreBase):
             # Use chmod directly to avoid effects of umask
             os.makedirs(input_directory)
             chmod(input_directory, 0o755)
-            os.makedirs(output_directory,)
+            os.makedirs(output_directory)
             chmod(output_directory, 0o777)
 
             username = self.ensure_service_account()
