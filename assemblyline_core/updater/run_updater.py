@@ -77,6 +77,17 @@ def temporary_api_key(ds: AssemblylineDatastore, user_name: str, permissions=('R
             ds.user.save(user_name, user)
 
 
+def chmod(directory, mask):
+    try:
+        os.chmod(directory, mask)
+    except PermissionError as error:
+        # If we are using an azure file share, we may not be able to change the permissions
+        # on files, everything might be set to a pre defined permission level by the file share
+        if "Operation not permitted" in str(error):
+            return
+        raise
+
+
 class DockerUpdateInterface:
     """Wrap docker interface for the commands used in the update process.
 
@@ -398,7 +409,7 @@ class ServiceUpdater(CoreBase):
     def do_file_update(self, service, previous_hash, previous_update):
         """Update a service by running a container to get new files."""
         temp_directory = tempfile.mkdtemp(dir=self.temporary_directory)
-        os.chmod(temp_directory, 0o777)
+        chmod(temp_directory, 0o777)
         input_directory = os.path.join(temp_directory, 'input_directory')
         output_directory = os.path.join(temp_directory, 'output_directory')
         service_dir = os.path.join(FILE_UPDATE_DIRECTORY, service.name)
@@ -408,9 +419,9 @@ class ServiceUpdater(CoreBase):
         try:
             # Use chmod directly to avoid effects of umask
             os.makedirs(input_directory)
-            os.chmod(input_directory, 0o755)
+            chmod(input_directory, 0o755)
             os.makedirs(output_directory,)
-            os.chmod(output_directory, 0o777)
+            chmod(output_directory, 0o777)
 
             username = self.ensure_service_account()
 
