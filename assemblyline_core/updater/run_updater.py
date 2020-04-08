@@ -473,9 +473,13 @@ class ServiceUpdater(CoreBase):
                 # Erase the results meta file
                 os.unlink(results_meta_file)
 
+                # Get a timestamp for now, and switch it to basic format representation of time
+                # Still valid iso 8601, and : is sometimes a restricted character
+                timestamp = now_as_iso().replace(":", "")
+
                 # FILE_UPDATE_DIRECTORY/{service_name} is the directory mounted to the service,
                 # the service sees multiple directories in that directory, each with a timestamp
-                destination_dir = os.path.join(service_dir, service.name + '_' + now_as_iso())
+                destination_dir = os.path.join(service_dir, service.name + '_' + timestamp)
                 shutil.move(output_directory, destination_dir)
 
                 # Remove older update files, due to the naming scheme, older ones will sort first lexically
