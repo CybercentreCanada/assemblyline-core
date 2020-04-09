@@ -60,7 +60,7 @@ class ServiceProfile:
 
     This includes how the service should be run, and conditions related to the scaling of the service.
     """
-    def __init__(self, name, container_config: DockerConfig, config_hash, min_instances=0, max_instances=None,
+    def __init__(self, name, container_config: DockerConfig, config_hash=0, min_instances=0, max_instances=None,
                  growth=600, shrink=None, backlog=500, queue=None, shutdown_seconds=30):
         """
         :param name: Name of the service to manage
