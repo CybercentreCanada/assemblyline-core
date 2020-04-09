@@ -138,7 +138,7 @@ def make_magic(*_, **__):
 @pytest.fixture(scope='module')
 @mock.patch('assemblyline_core.ingester.ingester.MetricsFactory', new=make_magic)
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', new=make_magic)
-def core(request, redis):
+def core(request, redis, filestore, config):
     from assemblyline.common import log as al_log
     al_log.init_logging("simulation")
 
@@ -146,12 +146,11 @@ def core(request, redis):
     fields.redis = redis
     fields.ds = ds = forge.get_datastore()
 
-    dir_path = os.path.dirname(os.path.realpath(__file__))
-    fields.config = forge.get_config(yml_config=os.path.join(dir_path, 'bitbucket', 'config.yml'))
+    fields.config = config
     forge.config_singletons[False, None] = fields.config
 
     threads = []
-    fields.filestore = filestore = forge.get_filestore()
+    fields.filestore = filestore
     threads: List[ServerBase] = [
         # Start the ingester components
         IngesterInput(datastore=ds, redis=redis, persistent_redis=redis),

@@ -65,3 +65,11 @@ def redis_connection():
         pass
 
     return pytest.skip("Connection to the Redis server failed. This test cannot be performed...")
+
+
+@pytest.fixture(scope='module')
+def filestore(config):
+    try:
+        return forge.get_filestore(config, connection_attempts=1)
+    except ConnectionError as err:
+        pytest.skip(str(err))
