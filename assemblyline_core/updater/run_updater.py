@@ -77,6 +77,17 @@ def temporary_api_key(ds: AssemblylineDatastore, user_name: str, permissions=('R
             ds.user.save(user_name, user)
 
 
+def chmod(directory, mask):
+    try:
+        os.chmod(directory, mask)
+    except PermissionError as error:
+        # If we are using an azure file share, we may not be able to change the permissions
+        # on files, everything might be set to a pre defined permission level by the file share
+        if "Operation not permitted" in str(error):
+            return
+        raise
+
+
 class DockerUpdateInterface:
     """Wrap docker interface for the commands used in the update process.
 
@@ -155,7 +166,7 @@ class KubernetesUpdateInterface:
             config.load_kube_config(client_configuration=cfg)
 
         self.prefix = prefix.lower()
-        self.b1api = client.AppsV1beta1Api()
+        self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
         self.batch_api = client.BatchV1Api()
         self.namespace = namespace
@@ -249,9 +260,9 @@ class KubernetesUpdateInterface:
 
     def restart(self, service_name):
         name = (self.prefix + service_name.lower()).replace('_', '-')
-        scale = self.b1api.read_namespaced_deployment_scale(name=name, namespace=self.namespace)
+        scale = self.apps_api.read_namespaced_deployment_scale(name=name, namespace=self.namespace)
         scale.spec.replicas = 0
-        self.b1api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
+        self.apps_api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
 
 
 class ServiceUpdater(CoreBase):
@@ -398,7 +409,7 @@ class ServiceUpdater(CoreBase):
     def do_file_update(self, service, previous_hash, previous_update):
         """Update a service by running a container to get new files."""
         temp_directory = tempfile.mkdtemp(dir=self.temporary_directory)
-        os.chmod(temp_directory, 0o777)
+        chmod(temp_directory, 0o777)
         input_directory = os.path.join(temp_directory, 'input_directory')
         output_directory = os.path.join(temp_directory, 'output_directory')
         service_dir = os.path.join(FILE_UPDATE_DIRECTORY, service.name)
@@ -408,9 +419,9 @@ class ServiceUpdater(CoreBase):
         try:
             # Use chmod directly to avoid effects of umask
             os.makedirs(input_directory)
-            os.chmod(input_directory, 0o755)
-            os.makedirs(output_directory,)
-            os.chmod(output_directory, 0o777)
+            chmod(input_directory, 0o755)
+            os.makedirs(output_directory)
+            chmod(output_directory, 0o777)
 
             username = self.ensure_service_account()
 
@@ -462,9 +473,13 @@ class ServiceUpdater(CoreBase):
                 # Erase the results meta file
                 os.unlink(results_meta_file)
 
+                # Get a timestamp for now, and switch it to basic format representation of time
+                # Still valid iso 8601, and : is sometimes a restricted character
+                timestamp = now_as_iso().replace(":", "")
+
                 # FILE_UPDATE_DIRECTORY/{service_name} is the directory mounted to the service,
                 # the service sees multiple directories in that directory, each with a timestamp
-                destination_dir = os.path.join(service_dir, service.name + '_' + now_as_iso())
+                destination_dir = os.path.join(service_dir, service.name + '_' + timestamp)
                 shutil.move(output_directory, destination_dir)
 
                 # Remove older update files, due to the naming scheme, older ones will sort first lexically
