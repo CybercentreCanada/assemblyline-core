@@ -266,7 +266,7 @@ class ScalerServer(CoreBase):
                 if service.enabled and stage == ServiceStage.Running:
                     # Compute a hash of service properties not include in the docker config, that
                     # should still result in a service being restarted when changed
-                    config_hash = hash(sorted(service.config.items()))
+                    config_hash = hash(str(sorted(service.config.items())))
 
                     # Build the docker config for the service, we are going to either create it or
                     # update it so we need to know what the current configuration is either way
