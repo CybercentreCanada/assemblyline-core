@@ -60,7 +60,7 @@ class ServiceProfile:
 
     This includes how the service should be run, and conditions related to the scaling of the service.
     """
-    def __init__(self, name, container_config: DockerConfig, min_instances=0, max_instances=None,
+    def __init__(self, name, container_config: DockerConfig, config_hash, min_instances=0, max_instances=None,
                  growth=600, shrink=None, backlog=500, queue=None, shutdown_seconds=30):
         """
         :param name: Name of the service to manage
@@ -77,6 +77,7 @@ class ServiceProfile:
         self.container_config = container_config
         self.target_duty_cycle = 0.9
         self.shutdown_seconds = shutdown_seconds
+        self.config_hash = config_hash
 
         # How many instances we want, and can have
         self.min_instances = self._min_instances = max(0, int(min_instances))
@@ -263,6 +264,10 @@ class ScalerServer(CoreBase):
 
                 # Check that all enabled services are enabled
                 if service.enabled and stage == ServiceStage.Running:
+                    # Compute a hash of service properties not include in the docker config, that
+                    # should still result in a service being restarted when changed
+                    config_hash = hash(sorted(service.config.items()))
+
                     # Build the docker config for the service, we are going to either create it or
                     # update it so we need to know what the current configuration is either way
                     docker_config = service.docker_config
@@ -280,6 +285,7 @@ class ScalerServer(CoreBase):
                             min_instances=default_settings.min_instances,
                             growth=default_settings.growth,
                             shrink=default_settings.shrink,
+                            config_hash=config_hash,
                             backlog=default_settings.backlog,
                             max_instances=service.licence_count,
                             container_config=docker_config,
@@ -291,9 +297,10 @@ class ScalerServer(CoreBase):
                     else:
                         profile = self.profiles[name]
 
-                        if profile.container_config != docker_config:
+                        if profile.container_config != docker_config or profile.config_hash != config_hash:
                             self.log.info(f"Updating deployment information for {name}")
                             profile.container_config = docker_config
+                            profile.config_hash = config_hash
                             self.controller.restart(profile)
                             self.log.info(f"Deployment information for {name} replaced")
 
