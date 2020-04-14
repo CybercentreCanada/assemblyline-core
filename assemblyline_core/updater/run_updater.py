@@ -259,10 +259,19 @@ class KubernetesUpdateInterface:
             self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace, propagation_policy='Background')
 
     def restart(self, service_name):
-        name = (self.prefix + service_name.lower()).replace('_', '-')
-        scale = self.apps_api.read_namespaced_deployment_scale(name=name, namespace=self.namespace)
-        scale.spec.replicas = 0
-        self.apps_api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
+        try:
+            name = (self.prefix + service_name.lower()).replace('_', '-')
+            scale = self.apps_api.read_namespaced_deployment_scale(name=name, namespace=self.namespace)
+            scale.spec.replicas = 0
+            self.apps_api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
+        except ApiException as error:
+            # If the error is a 404, it means the resource we want to restart
+            # doesn't exist, which means we don't need to restart it, so we can
+            # safely ignore this error
+            if error.status == 404:
+                return
+            raise
+
 
 
 class ServiceUpdater(CoreBase):
