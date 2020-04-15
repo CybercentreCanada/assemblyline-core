@@ -24,7 +24,8 @@ import docker
 import yaml
 from assemblyline.remote.datatypes.lock import Lock
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
-    V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements
+    V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
+    V1ConfigMapVolumeSource
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
@@ -53,6 +54,8 @@ UPDATE_FOLDER_LIMIT = 5
 NAMESPACE = os.getenv('NAMESPACE', None)
 UI_SERVER = os.getenv('UI_SERVER', 'https://nginx')
 INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
+ASSEMBLYLINE_CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
+ASSEMBLYLINE_CLASSIFICATION_CONFIGMAP = os.getenv('CLASSIFICATION_CONFIGMAP', None)
 
 
 @contextmanager
@@ -118,13 +121,24 @@ class DockerUpdateInterface:
 
     def launch(self, name, docker_config: DockerConfig, mounts, env, network, blocking: bool = True):
         """Run a container to completion."""
+        # Add the classification file if path is given
+        if ASSEMBLYLINE_CLASSIFICATION_HOST_PATH:
+            mounts.append({
+                'volume': ASSEMBLYLINE_CLASSIFICATION_HOST_PATH,
+                'source_path': '',
+                'bind': '/etc/assemblyline/classification.yml',
+                'mode': 'ro'
+            })
+
+        # Launch container
         container = self.client.containers.run(
             image=docker_config.image,
             name='update_' + name + '_' + uuid.uuid4().hex,
             network=network,
             restart_policy={'Name': 'no'},
             command=docker_config.command,
-            volumes={os.path.join(row['volume'], row['source_path']): {'bind': row['dest_path'], 'mode': 'rw'}
+            volumes={os.path.join(row['volume'], row['source_path']): {'bind': row['dest_path'],
+                                                                       'mode': row.get('mode', 'rw')}
                      for row in mounts},
             environment=[f'{_e.name}={_e.value}' for _e in docker_config.environment] +
                         [f'{k}={v}' for k, v in env.items()] +
@@ -132,9 +146,11 @@ class DockerUpdateInterface:
             detach=True,
         )
 
+        # Connect to extra networks
         if docker_config.allow_internet_access:
             self.external_network.connect(container)
 
+        # Wait for the container to terminate
         if blocking:
             container.wait()
 
@@ -146,7 +162,7 @@ class DockerUpdateInterface:
 class KubernetesUpdateInterface:
     def __init__(self, prefix, namespace, priority_class):
         # Try loading a kubernetes connection from either the fact that we are running
-        # inside of a cluster,
+        # inside of a cluster, or we have a configuration in the normal location
         try:
             config.load_incluster_config()
         except config.config_exception.ConfigException:
@@ -200,6 +216,21 @@ class KubernetesUpdateInterface:
                 mount_path=mnt['dest_path'],
                 sub_path=mnt['source_path'],
                 read_only=False,
+            ))
+
+        if ASSEMBLYLINE_CLASSIFICATION_CONFIGMAP:
+            volumes.append(V1Volume(
+                name=f'mount-classification',
+                persistent_volume_claim=V1ConfigMapVolumeSource(
+                    name=ASSEMBLYLINE_CLASSIFICATION_CONFIGMAP
+                ),
+            ))
+
+            volume_mounts.append(V1VolumeMount(
+                name=f'mount-classification',
+                mount_path='/etc/assemblyline/classification.yml',
+                sub_path='classification.yml',
+                read_only=True,
             ))
 
         metadata = V1ObjectMeta(
