@@ -54,8 +54,9 @@ UPDATE_FOLDER_LIMIT = 5
 NAMESPACE = os.getenv('NAMESPACE', None)
 UI_SERVER = os.getenv('UI_SERVER', 'https://nginx')
 INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
-ASSEMBLYLINE_CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
-ASSEMBLYLINE_CLASSIFICATION_CONFIGMAP = os.getenv('CLASSIFICATION_CONFIGMAP', None)
+CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
+CLASSIFICATION_CONFIGMAP = os.getenv('CLASSIFICATION_CONFIGMAP', None)
+CLASSIFICATION_CONFIGMAP_KEY = os.getenv('CLASSIFICATION_CONFIGMAP_KEY', 'classification.yml')
 
 
 @contextmanager
@@ -122,9 +123,9 @@ class DockerUpdateInterface:
     def launch(self, name, docker_config: DockerConfig, mounts, env, network, blocking: bool = True):
         """Run a container to completion."""
         # Add the classification file if path is given
-        if ASSEMBLYLINE_CLASSIFICATION_HOST_PATH:
+        if CLASSIFICATION_HOST_PATH:
             mounts.append({
-                'volume': ASSEMBLYLINE_CLASSIFICATION_HOST_PATH,
+                'volume': CLASSIFICATION_HOST_PATH,
                 'source_path': '',
                 'bind': '/etc/assemblyline/classification.yml',
                 'mode': 'ro'
@@ -218,18 +219,18 @@ class KubernetesUpdateInterface:
                 read_only=False,
             ))
 
-        if ASSEMBLYLINE_CLASSIFICATION_CONFIGMAP:
+        if CLASSIFICATION_CONFIGMAP:
             volumes.append(V1Volume(
                 name=f'mount-classification',
                 persistent_volume_claim=V1ConfigMapVolumeSource(
-                    name=ASSEMBLYLINE_CLASSIFICATION_CONFIGMAP
+                    name=CLASSIFICATION_CONFIGMAP
                 ),
             ))
 
             volume_mounts.append(V1VolumeMount(
                 name=f'mount-classification',
                 mount_path='/etc/assemblyline/classification.yml',
-                sub_path='classification.yml',
+                sub_path=CLASSIFICATION_CONFIGMAP_KEY,
                 read_only=True,
             ))
 
