@@ -354,14 +354,14 @@ class ServiceUpdater(CoreBase):
             if not service.enabled:
                 continue
 
-            # Stringify and hash the the current update configuration
-            config_hash = hash(json.dumps(service.update_config.as_primitives()))
-
             # Ensure that any enabled services with an update config are being updated
             stage = self.get_service_stage(service.name)
             record = self.services.get(service.name)
 
             if stage in UPDATE_STAGES and service.update_config:
+                # Stringify and hash the the current update configuration
+                config_hash = hash(json.dumps(service.update_config.as_primitives()))
+
                 # If we can update, but there is no record, create one
                 if not record:
                     self.log.info(f"Service updates enabled for {service.name}")
