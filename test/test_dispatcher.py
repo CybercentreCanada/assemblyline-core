@@ -11,7 +11,8 @@ from assemblyline.common.metrics import MetricsFactory
 from assemblyline_core.dispatching.dispatcher import Dispatcher, DispatchHash, FileTask, \
     SubmissionTask, depths_from_tree, Scheduler as RealScheduler
 
-from .mocking import MockDatastore
+# noinspection PyUnresolvedReferences
+from .mocking import MockDatastore, clean_redis
 from .test_scheduler import dummy_service
 
 
