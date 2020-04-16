@@ -84,7 +84,7 @@ class DockerController(ControllerInterface):
 
                 # If it does return, find the new service server
                 self.service_server = self.find_service_server()
-            except:
+            except Exception:
                 self.log.exception("An error occurred while watching the service server.")
 
     def stop(self):
@@ -338,4 +338,3 @@ class DockerController(ControllerInterface):
 
     def prepare_network(self, service_name, internet):
         self._get_network(service_name)
-

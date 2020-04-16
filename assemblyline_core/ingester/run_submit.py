@@ -8,7 +8,7 @@ import time
 
 from assemblyline.datastore.exceptions import DataStoreException
 from assemblyline.filestore import CorruptedFileStoreException, FileStoreException
-from assemblyline.common import forge, log, exceptions
+from assemblyline.common import forge, exceptions
 
 from assemblyline_core.ingester.ingester import Ingester, IngestTask, _dup_prefix
 from assemblyline_core.server_base import ServerBase
@@ -107,7 +107,8 @@ class IngesterSubmitter(ServerBase):
                 # rewritten properly if we are going to run it again
                 if previous:
                     if not task.submission.params.services.resubmit and not pprevious:
-                        logger.warning(f"No psid for what looks like a resubmission of {task.submission.files[0].sha256}: {scan_key}")
+                        logger.warning(f"No psid for what looks like a resubmission of "
+                                       f"{task.submission.files[0].sha256}: {scan_key}")
                     ingester.finalize(pprevious, previous, score, task)
                     # End of ingest message (finalized)
                     if self.apm_client:

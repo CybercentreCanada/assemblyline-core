@@ -128,4 +128,3 @@ class IngesterInput(ServerBase):
 
 if __name__ == '__main__':
     IngesterInput().serve_forever()
-

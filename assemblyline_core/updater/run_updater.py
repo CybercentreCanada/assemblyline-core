@@ -305,7 +305,6 @@ class KubernetesUpdateInterface:
             raise
 
 
-
 class ServiceUpdater(CoreBase):
     def __init__(self, redis_persist=None, redis=None, logger=None, datastore=None):
         super().__init__('assemblyline.service.updater', logger=logger, datastore=datastore,
@@ -539,7 +538,7 @@ class ServiceUpdater(CoreBase):
                         # noinspection PyBroadException
                         try:
                             shutil.rmtree(os.path.join(service_dir, extra_folder))
-                        except:
+                        except Exception:
                             self.log.exception('Failed to delete update folder')
 
                 return update_hash

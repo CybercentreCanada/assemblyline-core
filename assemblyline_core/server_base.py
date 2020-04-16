@@ -179,4 +179,3 @@ class CoreBase(ServerBase):
         # TODO should we add an option to just return off/running based on the service
         #      enabled/disabled flag when doing development
         return self.service_info[service_name].enabled and self.get_service_stage(service_name) == ServiceStage.Running
-

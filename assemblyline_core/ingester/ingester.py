@@ -252,7 +252,8 @@ class Ingester:
             value = task.submission.metadata[key]
             meta_size = len(value)
             if meta_size > self.config.submission.max_metadata_length:
-                self.log.info(f'[{task.ingest_id} :: {task.sha256}] Removing {key} from metadata because value is too big')
+                self.log.info(f'[{task.ingest_id} :: {task.sha256}] '
+                              f'Removing {key} from metadata because value is too big')
                 task.submission.metadata.pop(key)
 
         if task.file_size > max_file_size and not task.params.ignore_size and not task.params.never_drop:
@@ -516,7 +517,7 @@ class Ingester:
             completed_queue=_completeq_name,
         )
 
-        self.timeout_queue.push(now(_max_time), task.scan_key)
+        self.timeout_queue.push(int(now(_max_time)), task.scan_key)
         self.log.info(f"[{task.ingest_id} :: {task.sha256}] Submitted to dispatcher for analysis")
 
     def retry(self, task, scan_key, ex):
@@ -536,7 +537,7 @@ class Ingester:
         else:
             self.log.info(f'[{task.ingest_id} :: {task.sha256}] Requeuing ({ex or "unknown"})')
             task.retries = retries
-            self.retry_queue.push(now(_retry_delay), task.json())
+            self.retry_queue.push(int(now(_retry_delay)), task.json())
 
     def finalize(self, psid, sid, score, task: IngestTask):
         self.log.info(f"[{task.ingest_id} :: {task.sha256}] Completed")

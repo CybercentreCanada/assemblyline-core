@@ -56,4 +56,3 @@ class Collection:
             'instances': len(hosts),
             'duty_cycle': sum(_v.busy for _v in hosts.values())/(len(hosts) * self.period),
         }
-

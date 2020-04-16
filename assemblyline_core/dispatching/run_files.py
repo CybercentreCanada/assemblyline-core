@@ -53,7 +53,6 @@ class FileDispatchServer(ServerBase):
                     self.apm_client.begin_transaction('Process dispatcher message')
 
                 if 'service_timeout' in message:
-                    self.dispatcher.service_timeout()
                     continue
 
                 message = FileTask(message)

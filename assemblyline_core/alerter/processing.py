@@ -41,6 +41,7 @@ AV_TO_BEAVIOR = (
     'Malformed container violation',
 )
 
+
 def service_name_from_key(key):
     # noinspection PyBroadException
     try:

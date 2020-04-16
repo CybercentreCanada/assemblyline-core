@@ -309,7 +309,7 @@ class ScalerServer(CoreBase):
                             profile._max_instances = float('inf')
                         else:
                             profile._max_instances = service.licence_count
-            except:
+            except Exception:
                 self.log.exception(f"Error applying service settings from: {service.name}")
                 self.handle_service_error(service.name)
 
@@ -481,6 +481,7 @@ class ScalerServer(CoreBase):
             message = self.scaler_timeout_queue.pop(blocking=False)
             if not message:
                 break
+            # noinspection PyBroadException
             try:
                 self.log.info(f"Killing service container: {message['container']} running: {message['service']}")
                 self.controller.stop_container(message['service'], message['container'])
@@ -533,4 +534,3 @@ class ScalerServer(CoreBase):
 
         for message in self.controller.new_events():
             self.log.warning("Container Event :: " + message)
-

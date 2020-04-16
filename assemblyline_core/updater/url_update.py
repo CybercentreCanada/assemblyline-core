@@ -15,7 +15,7 @@ from assemblyline.common.isotime import iso_to_epoch
 
 al_log.init_logging('service_updater')
 
-LOGGER = logging.getLogger('assemblyline.service_updater')
+LOGGER = logging.getLogger('assemblyline.updater.service')
 
 
 UPDATE_CONFIGURATION_PATH = os.environ.get('UPDATE_CONFIGURATION_PATH', None)

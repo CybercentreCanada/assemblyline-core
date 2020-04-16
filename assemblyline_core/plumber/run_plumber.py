@@ -6,8 +6,6 @@ emptied. The status of all the services will be periodically checked and any ser
 disabled or deleted for which a service queue exists, the dispatcher will be informed that the task(s)
 had an error.
 """
-import hashlib
-import json
 import time
 
 from assemblyline.odm.models.error import Error

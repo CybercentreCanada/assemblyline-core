@@ -222,4 +222,3 @@ class SubmissionClient:
             if local_path and cleanup:
                 if os.path.exists(local_path):
                     os.unlink(local_path)
-

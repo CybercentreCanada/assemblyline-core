@@ -60,7 +60,7 @@ def create_ilm_policy(es, name, ilm_config):
 
     conn = es.transport.get_connection()
     pol_req = conn.session.put(f"{conn.base_url}/_ilm/policy/{name}",
-                           headers={"Content-Type": "application/json"}, data=json.dumps(data_base))
+                               headers={"Content-Type": "application/json"}, data=json.dumps(data_base))
     if not pol_req.ok:
         raise ILMException(f"ERROR: Failed to create ILM policy: {name}")
 

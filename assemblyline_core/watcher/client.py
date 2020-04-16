@@ -55,4 +55,3 @@ class WatcherClient:
     def clear(self, key: str):
         self.queue.remove(key)
         self.hash.pop(key)
-
