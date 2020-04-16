@@ -355,7 +355,7 @@ class ServiceUpdater(CoreBase):
                 continue
 
             # Stringify and hash the the current update configuration
-            config_hash = hash(json.dumps(service.update_config.as_primatives()))
+            config_hash = hash(json.dumps(service.update_config.as_primitives()))
 
             # Ensure that any enabled services with an update config are being updated
             stage = self.get_service_stage(service.name)
