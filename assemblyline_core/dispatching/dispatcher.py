@@ -423,9 +423,6 @@ class Dispatcher:
         # Count the submission as 'complete' either way
         self.counter.increment('submissions_completed')
 
-    def task_timeout(self, task: ServiceTask):
-        raise NotImplementedError()
-
     def cancel_submission(self, task: SubmissionTask, errors, file_list):
         """The submission is being abandoned, delete everything, write failed state."""
         submission = task.submission
