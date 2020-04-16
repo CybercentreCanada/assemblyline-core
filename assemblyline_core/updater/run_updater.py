@@ -9,6 +9,7 @@ TODO:
 from collections import defaultdict
 
 import os
+import json
 import uuid
 import random
 import sched
@@ -353,21 +354,36 @@ class ServiceUpdater(CoreBase):
             if not service.enabled:
                 continue
 
+            # Stringify and hash the the current update configuration
+            config_hash = hash(json.dumps(service.update_config.as_primatives()))
+
             # Ensure that any enabled services with an update config are being updated
             stage = self.get_service_stage(service.name)
-            if stage in UPDATE_STAGES and service.update_config and not self.services.exists(service.name):
-                self.log.info(f"Service updates enabled for {service.name}")
-                self.services.add(
-                    service.name,
-                    dict(
-                        next_update=now_as_iso(),
-                        previous_update=now_as_iso(-10**10),
-                        sha256=None,
+            record = self.services.get(service.name)
+
+            if stage in UPDATE_STAGES and service.update_config:
+                # If we can update, but there is no record, create one
+                if not record:
+                    self.log.info(f"Service updates enabled for {service.name}")
+                    self.services.add(
+                        service.name,
+                        dict(
+                            next_update=now_as_iso(),
+                            previous_update=now_as_iso(-10**10),
+                            config_hash=config_hash,
+                            sha256=None,
+                        )
                     )
-                )
+                else:
+                    # If there is a record, check that its configuration hash is still good
+                    # If an update is in progress, it may overwrite this, but we will just come back
+                    # and reapply this again in the iteration after that
+                    if record.get('config_hash', None) != config_hash:
+                        record['next_update'] = now_as_iso()
+                        record['config_hash'] = config_hash
+                        self.services.set(service.name, record)
 
             if stage == ServiceStage.Update:
-                record = self.services.get(service.name)
                 if (record and record.get('sha256', None) is not None) or not service.update_config:
                     self._service_stage_hash.set(service.name, ServiceStage.Running)
 
@@ -431,7 +447,8 @@ class ServiceUpdater(CoreBase):
                     update_hash = None
 
             finally:
-                # Update the next service update check time
+                # Update the next service update check time, don't update the config_hash,
+                # as we don't want to disrupt being re-run if our config has changed during this run
                 update_data['next_update'] = now_as_iso(service.update_config.update_interval_seconds)
                 self.services.set(service_name, update_data)
 
