@@ -1,7 +1,4 @@
 import pytest
-from assemblyline.remote.datatypes import get_client
-
-from assemblyline.common import forge
 
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.config import Config, DEFAULT_CONFIG
@@ -35,6 +32,7 @@ def dummy_service(name, stage, category='static', accepts='', rejects=None):
     })
 
 
+# noinspection PyUnusedLocal,PyMethodMayBeStatic
 class FakeDatastore:
     def __init__(self):
         self.service = self

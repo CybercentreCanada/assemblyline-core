@@ -1,5 +1,3 @@
-from easydict import EasyDict
-
 
 class MockCollection:
     def __init__(self, schema=None):

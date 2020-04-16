@@ -8,10 +8,10 @@ from assemblyline.odm.randomizer import random_model_obj, get_random_hash
 from assemblyline.odm import models
 from assemblyline.common.metrics import MetricsFactory
 
-from assemblyline_core.dispatching.dispatcher import Dispatcher, DispatchHash, FileTask, NamedQueue, \
+from assemblyline_core.dispatching.dispatcher import Dispatcher, DispatchHash, FileTask, \
     SubmissionTask, depths_from_tree, Scheduler as RealScheduler
 
-from .mocking import MockDatastore, clean_redis
+from .mocking import MockDatastore
 from .test_scheduler import dummy_service
 
 
@@ -21,7 +21,7 @@ def test_depth_calculation():
         'b': ['a'],  # Second layer, extracted by the root
         'c': ['b'],  # Third layer, extracted by b
         'd': ['b', 'a'],  # Second layer, extracted by root, but also its peer b,
-                          # but being a child of root should trump that
+        # but being a child of root should trump that
         'x': ['y'],  # orphan files, shouldn't stop the results from being calculated, though they shouldn't exist
     }
     depths = depths_from_tree(tree)
@@ -59,7 +59,6 @@ class Scheduler(RealScheduler):
 @mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', Scheduler)
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
 def test_dispatch_file(clean_redis):
-
     service_queue = lambda name: get_service_queue(name, clean_redis)
 
     ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file', 'filescore'])
@@ -187,7 +186,7 @@ def test_dispatch_submission(clean_redis):
 
     disp.dispatch_submission(task)
     assert ds.submission.get(submission.sid).state == 'completed'
-    assert ds.submission.get(submission.sid).errors == ['error-code']*len(disp.scheduler.services)
+    assert ds.submission.get(submission.sid).errors == ['error-code'] * len(disp.scheduler.services)
 
 
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
@@ -256,4 +255,4 @@ def test_dispatch_extracted(clean_redis):
     submission = ds.submission.get(submission.sid)
     assert submission.state == 'completed'
     assert submission.errors == []
-    assert len(submission.results) == 2*len(disp.scheduler.services)
+    assert len(submission.results) == 2 * len(disp.scheduler.services)
