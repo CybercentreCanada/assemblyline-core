@@ -223,7 +223,7 @@ class KubernetesUpdateInterface:
         if CLASSIFICATION_CONFIGMAP:
             volumes.append(V1Volume(
                 name=f'mount-classification',
-                persistent_volume_claim=V1ConfigMapVolumeSource(
+                config_map=V1ConfigMapVolumeSource(
                     name=CLASSIFICATION_CONFIGMAP
                 ),
             ))
