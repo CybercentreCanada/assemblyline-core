@@ -38,7 +38,7 @@ setup(
     keywords="assemblyline automated malware analysis gc canada cse-cst cse cst cyber cccs",
     packages=find_packages(exclude=['deployment/*', 'test/*']),
     install_requires=[
-        'urllib3<1.25',
+        'urllib3',
         'assemblyline',
         'docker',
     ],
