@@ -590,7 +590,9 @@ def test_max_extracted_in_one(core):
     )).as_primitives())
 
     notification_queue = NamedQueue('nq-test-extracted-in-one', core.redis)
-    task = IngestTask(notification_queue.pop(timeout=10))
+    task = notification_queue.pop(timeout=20)
+    assert task is not None
+    task = IngestTask(task)
     sub: Submission = core.ds.submission.get(task.submission.sid)
     assert len(sub.files) == 1
     # We should only get results for each file up to the max depth
