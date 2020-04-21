@@ -554,7 +554,9 @@ def test_depth_limit(core):
     )).as_primitives())
 
     notification_queue = NamedQueue('nq-test-depth-limit', core.redis)
-    task = notification_queue.pop(timeout=20)
+    start = time.time()
+    task = notification_queue.pop(timeout=10)
+    print("notification time waited", time.time() - start)
     assert task is not None
     task = IngestTask(task)
     sub: Submission = core.ds.submission.get(task.submission.sid)
@@ -590,7 +592,9 @@ def test_max_extracted_in_one(core):
     )).as_primitives())
 
     notification_queue = NamedQueue('nq-test-extracted-in-one', core.redis)
-    task = notification_queue.pop(timeout=20)
+    start = time.time()
+    task = notification_queue.pop(timeout=10)
+    print("notification time waited", time.time() - start)
     assert task is not None
     task = IngestTask(task)
     sub: Submission = core.ds.submission.get(task.submission.sid)
