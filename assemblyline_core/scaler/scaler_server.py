@@ -219,22 +219,25 @@ class ScalerServer(CoreBase):
         default_settings = self.config.core.scaler.service_defaults
         image_variables = defaultdict(str)
         image_variables.update(self.config.services.image_variables)
+        current_services = set(self.profiles.keys())
+        discovered_services = []
 
         # Get all the service data
         for service in self.datastore.list_all_services(full=True):
             service: Service = service
             name = service.name
             stage = self.get_service_stage(service.name)
+            discovered_services.append(name)
 
             # noinspection PyBroadException
             try:
                 if service.enabled and stage == ServiceStage.Off:
                     # Enable this service's dependencies
                     self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
-                    for name, dependency in service.dependencies.items():
+                    for _n, dependency in service.dependencies.items():
                         self.controller.start_stateful_container(
                             service_name=service.name,
-                            container_name=name,
+                            container_name=_n,
                             spec=dependency,
                             labels={'dependency_for': service.name}
                         )
@@ -246,21 +249,8 @@ class ScalerServer(CoreBase):
                         self._service_stage_hash.set(name, ServiceStage.Running)
 
                 if not service.enabled:
-                    if stage != ServiceStage.Off:
-                        # Disable this service's dependencies
-                        self.controller.stop_containers(labels={
-                            'dependency_for': service.name
-                        })
-
-                        #
-                        self._service_stage_hash.set(name, ServiceStage.Off)
-
-                    # Stop any running disabled services
-                    if name in self.profiles or self.controller.get_target(name) > 0:
-                        self.log.info(f'Removing {service.name} from scaling')
-                        self.profiles.pop(name, None)
-                        self.controller.set_target(name, 0)
-                        continue
+                    self.stop_service(service.name, stage)
+                    continue
 
                 # Check that all enabled services are enabled
                 if service.enabled and stage == ServiceStage.Running:
@@ -312,6 +302,28 @@ class ScalerServer(CoreBase):
             except Exception:
                 self.log.exception(f"Error applying service settings from: {service.name}")
                 self.handle_service_error(service.name)
+
+        # Find any services we have running, that are no longer in the database and remove them
+        for stray_service in current_services - set(discovered_services):
+            stage = self.get_service_stage(stray_service)
+            self.stop_service(stray_service, stage)
+
+    def stop_service(self, name, current_stage):
+
+        if current_stage != ServiceStage.Off:
+            # Disable this service's dependencies
+            self.controller.stop_containers(labels={
+                'dependency_for': name
+            })
+
+            # Mark this service as not running in the shared record
+            self._service_stage_hash.set(name, ServiceStage.Off)
+
+        # Stop any running disabled services
+        if name in self.profiles or self.controller.get_target(name) > 0:
+            self.log.info(f'Removing {name} from scaling')
+            self.controller.set_target(name, 0)
+            self.profiles.pop(name, None)
 
     def update_scaling(self):
         """Check if we need to scale any services up or down."""
