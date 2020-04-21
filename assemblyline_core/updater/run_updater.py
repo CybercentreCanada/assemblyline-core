@@ -342,9 +342,12 @@ class ServiceUpdater(CoreBase):
     def sync_services(self):
         """Download the service list and make sure our settings are up to date"""
         self.scheduler.enter(SERVICE_SYNC_INTERVAL, 0, self.sync_services)
+        existing_services = set(self.services.keys())
+        discovered_services = []
 
         # Get all the service data
         for service in self.datastore.list_all_services(full=True):
+            discovered_services.append(service.name)
 
             # Ensure that any disabled services are not being updated
             if not service.enabled and self.services.exists(service.name):
@@ -386,6 +389,11 @@ class ServiceUpdater(CoreBase):
             if stage == ServiceStage.Update:
                 if (record and record.get('sha256', None) is not None) or not service.update_config:
                     self._service_stage_hash.set(service.name, ServiceStage.Running)
+
+        # Remove services we have locally, that have no registration any more
+        for stray_service in existing_services - set(discovered_services):
+            self.log.info(f"Service updates disabled for {stray_service}")
+            self.services.pop(stray_service)
 
     def try_run(self):
         """Run the scheduler loop until told to stop."""
