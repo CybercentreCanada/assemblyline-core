@@ -605,10 +605,12 @@ class Dispatcher:
 
             # If there are no outstanding ANYTHING for this submission,
             # send a message to the submission dispatcher to finalize
-            self.log.info(f"[{task.sid}] Finished processing file '{file_hash}'")
             self.counter.increment('files_completed')
             if dispatch_table.all_finished():
+                self.log.info(f"[{task.sid}] Finished processing file '{file_hash}' starting submission finalization.")
                 self.submission_queue.push({'sid': submission.sid})
+            else:
+                self.log.info(f"[{task.sid}] Finished processing file '{file_hash}'")
 
     def build_schedule(self, dispatch_hash: DispatchHash, submission: Submission,
                        file_hash: str, file_type: str) -> List[List[str]]:
