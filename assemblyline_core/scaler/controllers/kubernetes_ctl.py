@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Dict, Tuple, List
 
@@ -6,7 +7,7 @@ from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1Depl
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1KeyToPath, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
-    V1NetworkPolicyIngressRule
+    V1NetworkPolicyIngressRule, V1Secret, V1LocalObjectReference
 from kubernetes.client.rest import ApiException
 
 from assemblyline_core.scaler.controllers.interface import ControllerInterface
@@ -267,6 +268,40 @@ class KubernetesController(ControllerInterface):
             if dep.metadata.name == deployment_name:
                 replace = True
 
+        # If we have been given a username or password for the registry, we have to
+        # update it, if we haven't been, make sure its been cleaned up in the system
+        # so we don't leave passwords lying around
+        pull_secret_name = f'{deployment_name}-container-pull-secret'
+        use_pull_secret = False
+        try:
+            current_pull_secret = self.api.read_namespaced_secret(pull_secret_name, self.namespace)
+        except ApiException as error:
+            if error.status != 404:
+                raise
+            current_pull_secret = None
+
+        if docker_config.registry_username or docker_config.registry_password:
+            use_pull_secret = True
+            # Build the secret we want to make
+            new_pull_secret = V1Secret(
+                metadata=V1ObjectMeta(name=pull_secret_name, namespace=self.namespace),
+                type='kubernetes.io/dockerconfigjson',
+                string_data={
+                    '.dockerconfigjson': json.dumps({
+                        'username': docker_config.registry_username,
+                        'password': docker_config.registry_password,
+                    })
+                }
+            )
+
+            # Send it to the server
+            if current_pull_secret:
+                self.api.replace_namespaced_secret(pull_secret_name, namespace=self.namespace, body=new_pull_secret)
+            else:
+                self.api.create_namespaced_secret(namespace=self.namespace, body=new_pull_secret)
+        elif current_pull_secret:
+            self.api.delete_namespaced_secret(pull_secret_name, self.namespace)
+
         all_labels = dict(self._labels)
         all_labels['component'] = service_name
         all_labels.update(labels or {})
@@ -282,6 +317,9 @@ class KubernetesController(ControllerInterface):
             priority_class_name=self.priority,
             termination_grace_period_seconds=shutdown_seconds,
         )
+
+        if use_pull_secret:
+            pod.image_pull_secrets = [V1LocalObjectReference(name=pull_secret_name)]
 
         template = V1PodTemplateSpec(
             metadata=metadata,
