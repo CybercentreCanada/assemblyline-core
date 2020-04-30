@@ -81,10 +81,27 @@ def get_summary(datastore, srecord):
         'network.static.ip': set(),
         'network.dynamic.ip': set(),
         'technique.config': set(),
-        'attribution.actor': set()
+        'attribution.actor': set(),
+        'heuristic.name': set(),
+        'attack.pattern': set(),
+        'attack.category': set()
     }
 
-    for t in datastore.get_tag_list_from_keys(srecord.get('results', [])):
+    submission_summary = datastore.get_summary_from_keys(srecord.get('results', []))
+
+    # Process Att&cks
+    for attack in submission_summary['attack_matrix']:
+        summary['attack.pattern'].add(attack['name'])
+        for cat in attack['categories']:
+            summary['attack.category'].add(cat)
+
+    # Process Heuristics
+    for heur_list in submission_summary['heuristics'].values():
+        for heur in heur_list:
+            summary['heuristic.name'].add(heur['name'])
+
+    # Process Tags
+    for t in submission_summary['tags']:
         tag_value = t['value']
         tag_type = t['type']
 
@@ -236,6 +253,14 @@ def get_alert_update_parts(counter, datastore, alert_data, logger):
                 'ip_static': list(parsed_record['summary']['network.static.ip']),
                 'request_end_time': parsed_record['srecord']['times']['completed'],
                 'yara': list(parsed_record['summary']['file.rule.yara']),
+            },
+            'attack': {
+                'pattern': list(parsed_record['summary']['attack.pattern']),
+                'category': list(parsed_record['summary']['attack.category'])
+
+            },
+            'heuristic': {
+                'name': list(parsed_record['summary']['heuristic.name'])
             }
         }
         alert_update_p2 = {
