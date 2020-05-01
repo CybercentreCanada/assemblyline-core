@@ -72,3 +72,5 @@ jobs:
     - script: python -m codecov
       displayName: Upload Coverage
       workingDirectory: $(Pipeline.Workspace)/s/assemblyline-core
+      env:
+        CODECOV_TOKEN: $(CODECOV_TOKEN)
