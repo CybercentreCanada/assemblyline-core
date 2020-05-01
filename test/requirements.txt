@@ -1,3 +1,5 @@
 # Only used in test files
 fakeredis[lua]
 pytest
+pytest-cov
+codecov
