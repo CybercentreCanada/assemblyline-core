@@ -57,8 +57,12 @@ jobs:
       workingDirectory: $(Pipeline.Workspace)/s/assemblyline-core
       displayName: Setup Environment
     - script: |
+        # Try to find the matching branch, first check for pull requst data, then fall back to build data
+        # The parsed name isn't available in the pull request data, so use basename to parse it out
+        export BRANCH_NAME=$(basename -- "$[variables['System.PullRequest.SourceBranch']]")
+        export BRANCH_NAME=${BRANCH_NAME:-"$(Build.SourceBranchName)"}
         # Try to checkout the matching branch, if the command fails, don't care.
-        git checkout -b $(Build.SourceBranchName) -t origin/$(Build.SourceBranchName) || true
+        git checkout -b $BRANCH_NAME -t origin/$BRANCH_NAME || true
         sudo env "PATH=$PATH" python -m pip install --no-cache-dir -e .
       displayName: Install assemblyline
       workingDirectory: $(Pipeline.Workspace)/s/assemblyline-base
