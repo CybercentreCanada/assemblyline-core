@@ -57,7 +57,7 @@ jobs:
       workingDirectory: $(Pipeline.Workspace)/s/assemblyline-core
       displayName: Setup Environment
     - script: |
-        set -x  
+        set -xv
         # Try to find the matching branch, first check for pull requst data, then fall back to build data
         # The parsed name isn't available in the pull request data, so use basename to parse it out
         export BRANCH_NAME=$(basename -- "$[variables['System.PullRequest.SourceBranch']]")
