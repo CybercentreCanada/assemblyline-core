@@ -323,7 +323,6 @@ class Dispatcher:
 
         # Track information about the results as we hit them
         file_scores: Dict[str, int] = {}
-        result_classifications = []
 
         # # Load the current state of the dispatch table in one go rather than one at a time in the loop
         prior_dispatches = dispatch_table.all_dispatches()
@@ -365,7 +364,6 @@ class Dispatcher:
 
                     # Collect information about the result
                     file_scores[sha] = file_scores.get(sha, 0) + result_row.score
-                    result_classifications.append(result_row.classification)
 
         # Using the file tree find the most shallow parent of the given file
         def lowest_parent(_sha):
@@ -391,7 +389,7 @@ class Dispatcher:
         else:
             self.log.debug(f"[{sid}] Finalizing submission.")
             max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
-            self.finalize_submission(task, result_classifications, max_score, file_scores.keys())
+            self.finalize_submission(task, max_score, file_scores.keys())
 
     def _cleanup_submission(self, task: SubmissionTask, file_list: List[str]):
         """Clean up code that is the same for canceled and finished submissions"""
@@ -442,18 +440,13 @@ class Dispatcher:
         self._cleanup_submission(task, file_list)
         self.log.error(f"[{sid}] Failed")
 
-    def finalize_submission(self, task: SubmissionTask, result_classifications, max_score, file_list):
+    def finalize_submission(self, task: SubmissionTask, max_score, file_list):
         """All of the services for all of the files in this submission have finished or failed.
 
         Update the records in the datastore, and flush the working data from redis.
         """
         submission = task.submission
         sid = submission.sid
-
-        # Pull in the classifications of results/produced by services
-        classification = submission.params.classification
-        for c12n in result_classifications:
-            classification = classification.max(ClassificationObject(classification.engine, c12n))
 
         # Pull down the dispatch table and clear it from redis
         dispatch_table = DispatchHash(submission.sid, self.redis)
@@ -472,8 +465,7 @@ class Dispatcher:
                 else:
                     self.log.warning(f"[{sid}] Unexpected service output bucket: {status.bucket}/{status.key}")
 
-        # submission['original_classification'] = submission['classification']
-        submission.classification = classification
+        submission.classification = submission.params.classification
         submission.error_count = len(errors)
         submission.errors = errors
         submission.file_count = len(file_list)
