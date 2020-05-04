@@ -63,7 +63,7 @@ def get_submission_record(counter, datastore, sid):
     return srecord
 
 
-def get_summary(datastore, srecord):
+def get_summary(datastore, srecord, user_classification):
     max_classification = srecord['classification']
 
     summary = {
@@ -87,7 +87,8 @@ def get_summary(datastore, srecord):
         'attack.category': set()
     }
 
-    submission_summary = datastore.get_summary_from_keys(srecord.get('results', []))
+    submission_summary = datastore.get_summary_from_keys(srecord.get('results', []), cl_engine=Classification,
+                                                         user_classification=user_classification)
 
     # Process Att&cks
     for attack in submission_summary['attack_matrix']:
@@ -121,7 +122,7 @@ def get_summary(datastore, srecord):
         if summary_values is not None:
             summary_values.add(tag_value)
 
-    return max_classification, summary
+    return max_classification, summary, submission_summary['filtered']
 
 
 def generate_alert_id(alert_data):
@@ -133,12 +134,12 @@ def generate_alert_id(alert_data):
 
 
 # noinspection PyBroadException
-def parse_submission_record(counter, datastore, alert_data, logger):
+def parse_submission_record(counter, datastore, alert_data, logger, user_classification):
     sid = alert_data['submission']['sid']
     psid = alert_data['submission']['params']['psid']
     srecord = get_submission_record(counter, datastore, sid)
 
-    max_classification, summary = get_summary(datastore, srecord)
+    max_classification, summary, filtered = get_summary(datastore, srecord, user_classification)
     behaviors = list(summary['file.behavior'])
 
     extended_scan = alert_data['extended_scan']
@@ -165,7 +166,8 @@ def parse_submission_record(counter, datastore, alert_data, logger):
         'ips': ips,
         'summary': summary,
         'srecord': srecord,
-        'max_classification': max_classification
+        'max_classification': max_classification,
+        'filtered': filtered
     }
 
 
@@ -231,16 +233,17 @@ def save_alert(datastore, counter, logger, alert, psid):
 
 
 # noinspection PyTypeChecker
-def get_alert_update_parts(counter, datastore, alert_data, logger):
+def get_alert_update_parts(counter, datastore, alert_data, logger, user_classification):
     global cache
     # Check cache
     alert_file = alert_data['submission']['files'][0]
     alert_update_p1, alert_update_p2 = cache.get(alert_data['submission']['sid'], (None, None))
     if alert_update_p1 is None or alert_update_p2 is None:
-        parsed_record = parse_submission_record(counter, datastore, alert_data, logger)
+        parsed_record = parse_submission_record(counter, datastore, alert_data, logger, user_classification)
         file_record = datastore.file.get(alert_file['sha256'], as_obj=False)
         alert_update_p1 = {
             'extended_scan': parsed_record['extended_scan'],
+            'filtered': parsed_record['filtered'],
             'al': {
                 'attrib': list(parsed_record['summary']['attribution']),
                 'av': list(parsed_record['summary']['av.virus_name']),
@@ -296,6 +299,11 @@ def process_alert_message(counter, datastore, logger, alert_data):
     # Additional init goes here
     ###############################
 
+    user = datastore.user.get(alert_data.get('submission', {}).get('params', {}).get('submitter', None), as_obj=False)
+    if user:
+        user_classification = user['classification']
+    else:
+        user_classification = Classification.UNRESTRICTED
     a_type = alert_data.get('submission', {}).get('metadata', {}).pop('type', None)
     a_ts = alert_data.get('submission', {}).get('metadata', {}).pop('ts', None)
 
@@ -320,7 +328,9 @@ def process_alert_message(counter, datastore, logger, alert_data):
     ###############################
 
     # Get update parts
-    alert_update_p1, alert_update_p2 = get_alert_update_parts(counter, datastore, alert_data, logger)
+    alert_update_p1, alert_update_p2 = get_alert_update_parts(counter, datastore,
+                                                              alert_data, logger,
+                                                              user_classification)
 
     # Update alert with default values
     alert = recursive_update(alert, alert_update_p1)
