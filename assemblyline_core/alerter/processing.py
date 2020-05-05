@@ -89,6 +89,7 @@ def get_summary(datastore, srecord, user_classification):
 
     submission_summary = datastore.get_summary_from_keys(srecord.get('results', []), cl_engine=Classification,
                                                          user_classification=user_classification)
+    max_classification = Classification.max_classification(max_classification, submission_summary['classification'])
 
     # Process Att&cks
     for attack in submission_summary['attack_matrix']:
