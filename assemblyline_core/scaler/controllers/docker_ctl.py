@@ -104,6 +104,7 @@ class DockerController(ControllerInterface):
 
     def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
+        self._pull_image(profile)
         self._profiles[profile.name] = profile
 
     def _start(self, service_name):
@@ -289,6 +290,7 @@ class DockerController(ControllerInterface):
             container.kill()
 
     def restart(self, service):
+        self._pull_image(service)
         for container in self.client.containers.list(filters={'label': f'component={service.name}'}):
             container.kill()
 
@@ -338,3 +340,27 @@ class DockerController(ControllerInterface):
 
     def prepare_network(self, service_name, internet):
         self._get_network(service_name)
+
+    def _pull_image(self, service):
+        """Pull the image before we try to use it locally.
+
+        This lets us override the auth_config on a per image basis.
+        """
+        # Split the image string into "[registry/]image_name" and "tag"
+        repository, _, tag = service.container_config.image.rpartition(':')
+        if '/' in tag:
+            # if there is a '/' in the tag it is invalid. We have split ':' on a registry
+            # port not a tag, there can't be a tag in this image string. Put the registry
+            # string back together, and use a default tag
+            repository += ':' + tag
+            tag = 'latest'
+
+        # Add auth info if we have it
+        auth_config = None
+        if service.container_config.registry_username or service.container_config.registry_password:
+            auth_config = {
+                'username': service.container_config.registry_username,
+                'password': service.container_config.registry_password
+            }
+
+        self.client.images.pull(repository, tag, auth_config=auth_config)

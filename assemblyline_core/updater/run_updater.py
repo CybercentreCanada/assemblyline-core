@@ -26,7 +26,7 @@ import yaml
 from assemblyline.remote.datatypes.lock import Lock
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
     V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
-    V1ConfigMapVolumeSource
+    V1ConfigMapVolumeSource, V1Secret, V1LocalObjectReference
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
@@ -132,6 +132,27 @@ class DockerUpdateInterface:
                 'mode': 'ro'
             })
 
+        # Pull the image before we try to use it locally.
+        # This lets us override the auth_config on a per image basis.
+        # Split the image string into "[registry/]image_name" and "tag"
+        repository, _, tag = docker_config.image.rpartition(':')
+        if '/' in tag:
+            # if there is a '/' in the tag it is invalid. We have split ':' on a registry
+            # port not a tag, there can't be a tag in this image string. Put the registry
+            # string back together, and use a default tag
+            repository += ':' + tag
+            tag = 'latest'
+
+        # Add auth info if we have it
+        auth_config = None
+        if docker_config.registry_username or docker_config.registry_password:
+            auth_config = {
+                'username': docker_config.registry_username,
+                'password': docker_config.registry_password
+            }
+
+        self.client.images.pull(repository, tag, auth_config=auth_config)
+
         # Launch container
         container = self.client.containers.run(
             image=docker_config.image,
@@ -192,6 +213,40 @@ class KubernetesUpdateInterface:
 
     def launch(self, name, docker_config: DockerConfig, mounts, env, network, blocking: bool = True):
         name = (self.prefix + 'update-' + name.lower()).replace('_', '-')
+
+        # If we have been given a username or password for the registry, we have to
+        # update it, if we haven't been, make sure its been cleaned up in the system
+        # so we don't leave passwords lying around
+        pull_secret_name = f'{name}-job-pull-secret'
+        use_pull_secret = False
+        try:
+            current_pull_secret = self.api.read_namespaced_secret(pull_secret_name, self.namespace)
+        except ApiException as error:
+            if error.status != 404:
+                raise
+            current_pull_secret = None
+
+        if docker_config.registry_username or docker_config.registry_password:
+            use_pull_secret = True
+            # Build the secret we want to make
+            new_pull_secret = V1Secret(
+                metadata=V1ObjectMeta(name=pull_secret_name, namespace=self.namespace),
+                type='kubernetes.io/dockerconfigjson',
+                string_data={
+                    '.dockerconfigjson': json.dumps({
+                        'username': docker_config.registry_username,
+                        'password': docker_config.registry_password,
+                    })
+                }
+            )
+
+            # Send it to the server
+            if current_pull_secret:
+                self.api.replace_namespaced_secret(pull_secret_name, namespace=self.namespace, body=new_pull_secret)
+            else:
+                self.api.create_namespaced_secret(namespace=self.namespace, body=new_pull_secret)
+        elif current_pull_secret:
+            self.api.delete_namespaced_secret(pull_secret_name, self.namespace)
 
         try:
             self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace, propagation_policy='Background')
@@ -269,6 +324,9 @@ class KubernetesUpdateInterface:
             containers=[container],
             priority_class_name=self.priority_class,
         )
+
+        if use_pull_secret:
+            pod.image_pull_secrets = [V1LocalObjectReference(name=pull_secret_name)]
 
         job = V1Job(
             metadata=metadata,
