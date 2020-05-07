@@ -12,7 +12,6 @@ from assemblyline.common.metrics import MetricsFactory
 from assemblyline.datastore import Collection
 from assemblyline.datastore.exceptions import MultiKeyError
 from assemblyline.datastore.helper import AssemblylineDatastore
-from assemblyline.odm import ClassificationObject
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.models.config import Config
@@ -45,6 +44,7 @@ class SubmissionTask(odm.Model):
 class FileTask(odm.Model):
     """Dispatcher internal model for tracking each file in a submission."""
     sid = odm.Keyword()
+    min_classification = odm.Classification()  # Minimum classification of the file being scanned
     parent_hash = odm.Optional(odm.Keyword())
     file_info: FileInfo = odm.Compound(FileInfo)
     depth = odm.Integer()
@@ -284,6 +284,7 @@ class Dispatcher:
             for sha, file_data in self.files.multiget(unchecked_hashes).items():
                 unchecked_files.append(FileTask(dict(
                     sid=sid,
+                    min_classification=task.submission.classification,
                     file_info=dict(
                         magic=file_data.magic,
                         md5=file_data.md5,
@@ -573,6 +574,7 @@ class Dispatcher:
                 config = self.build_service_config(service, submission)
                 service_task = ServiceTask(dict(
                     sid=task.sid,
+                    min_classification=task.min_classification,
                     service_name=service_name,
                     service_config=config,
                     fileinfo=task.file_info,

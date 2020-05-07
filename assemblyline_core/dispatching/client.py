@@ -315,6 +315,7 @@ class DispatchClient:
                 file_data = self.files.get(extracted_data.sha256)
                 self.file_queue.push(FileTask(dict(
                     sid=task.sid,
+                    min_classification=task.min_classification.max(extracted_data.classification).value,
                     file_info=dict(
                         magic=file_data.magic,
                         md5=file_data.md5,
@@ -350,6 +351,7 @@ class DispatchClient:
         if remaining <= 0:
             self.file_queue.push(FileTask(dict(
                 sid=task.sid,
+                min_classification=task.min_classification.value,
                 file_info=task.fileinfo,
                 depth=task.depth,
                 max_files=task.max_files
@@ -393,6 +395,7 @@ class DispatchClient:
         if remaining <= 0:
             self.file_queue.push(FileTask(dict(
                 sid=task.sid,
+                min_classification=task.min_classification,
                 file_info=task.fileinfo,
                 depth=task.depth,
                 max_files=task.max_files
