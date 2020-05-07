@@ -395,6 +395,7 @@ class DispatchClient:
         if remaining <= 0:
             self.file_queue.push(FileTask(dict(
                 sid=task.sid,
+                min_classification=task.min_classification,
                 file_info=task.fileinfo,
                 depth=task.depth,
                 max_files=task.max_files
