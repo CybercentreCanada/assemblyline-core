@@ -316,6 +316,7 @@ class DispatchClient:
                 self.file_queue.push(FileTask(dict(
                     sid=task.sid,
                     file_info=dict(
+                        classification=task.fileinfo.classification,
                         magic=file_data.magic,
                         md5=file_data.md5,
                         mime=file_data.mime,

@@ -3,7 +3,7 @@ from unittest import mock
 
 import assemblyline.odm.models.file
 import assemblyline.odm.models.submission
-from assemblyline.common.forge import get_service_queue
+from assemblyline.common.forge import get_service_queue, get_classification
 from assemblyline.odm.randomizer import random_model_obj, get_random_hash
 from assemblyline.odm import models
 from assemblyline.common.metrics import MetricsFactory
@@ -77,7 +77,8 @@ def test_dispatch_file(clean_redis):
     file_task = FileTask({
         'sid': 'first-submission',
         'file_info': dict(sha256=file_hash, type='unknown', magic='a', md5=get_random_hash(32),
-                          mime='a', sha1=get_random_hash(40), size=10),
+                          mime='a', sha1=get_random_hash(40), size=10,
+                          classification=get_classification().UNRESTRICTED),
         'depth': 0,
         'max_files': 5
     })

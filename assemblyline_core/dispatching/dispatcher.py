@@ -12,7 +12,6 @@ from assemblyline.common.metrics import MetricsFactory
 from assemblyline.datastore import Collection
 from assemblyline.datastore.exceptions import MultiKeyError
 from assemblyline.datastore.helper import AssemblylineDatastore
-from assemblyline.odm import ClassificationObject
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.models.config import Config
@@ -285,6 +284,7 @@ class Dispatcher:
                 unchecked_files.append(FileTask(dict(
                     sid=sid,
                     file_info=dict(
+                        classification=task.submission.classification,
                         magic=file_data.magic,
                         md5=file_data.md5,
                         mime=file_data.mime,
