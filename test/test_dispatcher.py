@@ -76,9 +76,9 @@ def test_dispatch_file(clean_redis):
     # and the right service queues
     file_task = FileTask({
         'sid': 'first-submission',
+        'min_classification': get_classification().UNRESTRICTED,
         'file_info': dict(sha256=file_hash, type='unknown', magic='a', md5=get_random_hash(32),
-                          mime='a', sha1=get_random_hash(40), size=10,
-                          classification=get_classification().UNRESTRICTED),
+                          mime='a', sha1=get_random_hash(40), size=10),
         'depth': 0,
         'max_files': 5
     })
