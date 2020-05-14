@@ -540,6 +540,8 @@ class Dispatcher:
                     continue
 
                 # Load the results, if there are no results, then the service must be dispatched later
+                # Don't look at if it has been dispatched, as multiple dispatches are fine,
+                # but missing a dispatch isn't.
                 finished = dispatch_table.finished(file_hash, service_name)
                 if not finished:
                     outstanding[service_name] = service
