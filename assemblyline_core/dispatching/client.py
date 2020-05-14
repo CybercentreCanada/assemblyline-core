@@ -177,7 +177,13 @@ class DispatchClient:
             finished = process_table.finished(file_hash=task.fileinfo.sha256, service=task.service_name) is not None
 
             if abandoned or finished:
-                self.log.info(f"[{task.sid}/{task.fileinfo.sha256}] {service_name}:{worker_id} task already complete")
+                why = 'abandoned and finished'
+                if not abandoned:
+                    why = 'finished'
+                elif not finished:
+                    why = 'abandoned'
+                self.log.info(f"[{task.sid}/{task.fileinfo.sha256}] {service_name}:{worker_id} "
+                              f"task already complete ({why})")
                 self.running_tasks.pop(task.key())
                 raise RetryRequestWork()
 
