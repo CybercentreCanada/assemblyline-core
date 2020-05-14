@@ -120,6 +120,11 @@ class DispatchHash:
         if retry_call(self.client.hset, self._dispatch_key, f"{file_hash}-{service}", time.time()):
             self._outstanding_service_count.increment(file_hash, 1)
 
+    def drop_dispatch(self, file_hash: str, service: str):
+        """If a dispatch has been found to be un-needed remove the counters."""
+        if retry_call(self.client.hdel, self._dispatch_key, f"{file_hash}-{service}"):
+            self._outstanding_service_count.increment(file_hash, -1)
+
     def dispatch_count(self):
         """How many tasks have been dispatched for this submission."""
         return retry_call(self.client.hlen, self._dispatch_key)

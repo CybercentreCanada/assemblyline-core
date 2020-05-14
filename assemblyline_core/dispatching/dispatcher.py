@@ -540,6 +540,8 @@ class Dispatcher:
                     continue
 
                 # Load the results, if there are no results, then the service must be dispatched later
+                # Don't look at if it has been dispatched, as multiple dispatches are fine,
+                # but missing a dispatch isn't.
                 finished = dispatch_table.finished(file_hash, service_name)
                 if not finished:
                     outstanding[service_name] = service
@@ -604,7 +606,7 @@ class Dispatcher:
                 self.log.info(f"[{task.sid}] Finished processing file '{file_hash}' starting submission finalization.")
                 self.submission_queue.push({'sid': submission.sid})
             else:
-                self.log.info(f"[{task.sid}] Finished processing file '{file_hash}'")
+                self.log.info(f"[{task.sid}] Finished processing file '{file_hash}'. Other files are not finished.")
 
     def build_schedule(self, dispatch_hash: DispatchHash, submission: Submission,
                        file_hash: str, file_type: str) -> List[List[str]]:

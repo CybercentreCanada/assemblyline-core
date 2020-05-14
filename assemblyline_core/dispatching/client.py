@@ -176,6 +176,11 @@ class DispatchClient:
             abandoned = process_table.dispatch_time(file_hash=task.fileinfo.sha256, service=task.service_name) == 0
             finished = process_table.finished(file_hash=task.fileinfo.sha256, service=task.service_name) is not None
 
+            # A service might be re-dispatched as it finishes, when that is the case it can be marked as
+            # both finished and dispatched, if that is the case, drop the dispatch from the table
+            if finished and not abandoned:
+                process_table.drop_dispatch(file_hash=task.fileinfo.sha256, service=task.service_name)
+
             if abandoned or finished:
                 self.log.info(f"[{task.sid}/{task.fileinfo.sha256}] {service_name}:{worker_id} task already complete")
                 self.running_tasks.pop(task.key())

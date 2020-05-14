@@ -17,7 +17,7 @@ resources:
   - container: elasticsearch
     image: cccs/elasticsearch:7.6.0
     env:
-      ES_JAVA_OPTS: "-Xms256m -Xmx512m"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
       DISCOVERY_TYPE: 'single-node'
     ports:
       - 9200:9200
