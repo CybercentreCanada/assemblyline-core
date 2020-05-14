@@ -606,12 +606,7 @@ class Dispatcher:
                 self.log.info(f"[{task.sid}] Finished processing file '{file_hash}' starting submission finalization.")
                 self.submission_queue.push({'sid': submission.sid})
             else:
-                # Generate a message about what things are in the dispatch table for debugging
-                debug_list = []
-                for file, service_set in dispatch_table.all_dispatches().items():
-                    debug_list.append('[' + ', '.join(service_set.keys()) + '] for file ' + file)
-
-                self.log.info(f"[{task.sid}] Finished processing file '{file_hash}'. Waiting on {';'.join(debug_list)}")
+                self.log.info(f"[{task.sid}] Finished processing file '{file_hash}'. Other files are not finished.")
 
     def build_schedule(self, dispatch_hash: DispatchHash, submission: Submission,
                        file_hash: str, file_type: str) -> List[List[str]]:
