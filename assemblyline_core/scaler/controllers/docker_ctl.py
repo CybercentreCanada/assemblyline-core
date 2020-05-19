@@ -1,6 +1,8 @@
 import os
 import threading
 import time
+from typing import List, Tuple
+
 from assemblyline.odm.models.service import DockerConfig
 from .interface import ControllerInterface, ServiceControlError
 
@@ -28,8 +30,8 @@ class DockerController(ControllerInterface):
         import docker
         self.client = docker.from_env()
         self.log = logger
-        self.global_mounts = []
-        self._prefix = prefix
+        self.global_mounts: List[Tuple[str, str]] = []
+        self._prefix: str = prefix
         self._labels = labels
 
         for network in self.client.networks.list(names=['external']):
@@ -123,6 +125,11 @@ class DockerController(ControllerInterface):
         if not os.path.exists(os.path.join(FILE_UPDATE_DIRECTORY, service_name)):
             os.makedirs(os.path.join(FILE_UPDATE_DIRECTORY, service_name), 0x777)
 
+        # Define environment variables
+        env = [f'{_e.name}={_e.value}' for _e in cfg.environment]
+        env += ['UPDATE_PATH=/mount/updates/']
+        env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
+
         container = self.client.containers.run(
             image=cfg.image,
             name=container_name,
@@ -134,8 +141,7 @@ class DockerController(ControllerInterface):
             command=cfg.command,
             volumes=volumes,
             network=self._get_network(service_name).name,
-            environment=[f'{_e.name}={_e.value}' for _e in cfg.environment] + ['UPDATE_PATH=/mount/updates/'] +
-                        [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ],
+            environment=env,
             detach=True,
         )
 
@@ -163,6 +169,10 @@ class DockerController(ControllerInterface):
 
             self.log.warning(f"Not sure how to parse port string {port_string} for container {name} not using it...")
 
+        # Put together the environment variables
+        env = [f'{_e.name}={_e.value}' for _e in cfg.environment]
+        env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
+
         container = self.client.containers.run(
             image=cfg.image,
             name=name,
@@ -174,8 +184,7 @@ class DockerController(ControllerInterface):
             command=cfg.command,
             volumes=volumes,
             network=network,
-            environment=[f'{_e.name}={_e.value}' for _e in cfg.environment] +
-                        [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ],
+            environment=env,
             detach=True,
             ports=ports,
         )

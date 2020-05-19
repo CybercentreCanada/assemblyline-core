@@ -1,10 +1,10 @@
 import json
 import os
-from typing import Dict, Tuple, List
+from typing import Dict
 
 from kubernetes import client, config
 from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
-    V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1KeyToPath, V1ConfigMapVolumeSource, \
+    V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
     V1NetworkPolicyIngressRule, V1Secret, V1LocalObjectReference
@@ -60,7 +60,7 @@ def parse_cpu(string):
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace, prefix, priority, labels=None):
         # Try loading a kubernetes connection from either the fact that we are running
-        # inside of a cluster,
+        # inside of a cluster, or have a config file that tells us how
         try:
             config.load_incluster_config()
         except config.config_exception.ConfigException:
@@ -68,7 +68,7 @@ class KubernetesController(ControllerInterface):
             config.load_kube_config()
 
             # Now we can actually apply any changes we want to make
-            cfg = client.configuration.Configuration()
+            cfg = client.configuration.Configuration(client.configuration.Configuration)
 
             if 'HTTPS_PROXY' in os.environ:
                 cfg.proxy = os.environ['HTTPS_PROXY']
@@ -88,7 +88,8 @@ class KubernetesController(ControllerInterface):
         self.net_api = client.NetworkingV1Api()
         self.auto_cloud = False  # TODO draw from config
         self.namespace = namespace
-        self.config_mounts: List[Tuple[V1Volume, V1VolumeMount]] = []
+        self.config_volumes: Dict[str, V1Volume] = {}
+        self.config_mounts: Dict[str, V1VolumeMount] = {}
 
         # A record of previously reported events so that we don't report the same message repeatedly, fill it with
         # existing messages so we don't have a huge dump of duplicates on restart
@@ -103,23 +104,22 @@ class KubernetesController(ControllerInterface):
     def _deployment_name(self, service_name):
         return (self.prefix + service_name).lower().replace('_', '-')
 
-    def config_mount(self, name, config_map, key, file_name, target_path):
-        volume = V1Volume(
-            name=name,
-            config_map=V1ConfigMapVolumeSource(
-                name=config_map,
-                items=[V1KeyToPath(key=key, path=file_name)],
-                optional=False
-            ),
-        )
+    def config_mount(self, name, config_map, key, target_path):
+        if name not in self.config_volumes:
+            self.config_volumes[name] = V1Volume(
+                name=name,
+                config_map=V1ConfigMapVolumeSource(
+                    name=config_map,
+                    optional=False
+                )
+            )
 
-        mount = V1VolumeMount(
+        self.config_mounts[target_path] = V1VolumeMount(
             name=name,
             mount_path=target_path,
+            sub_path=key,
             read_only=True,
         )
-
-        self.config_mounts.append((volume, mount))
 
     def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
@@ -211,9 +211,8 @@ class KubernetesController(ControllerInterface):
         volumes, mounts = [], []
 
         # Attach the mount that provides the config file
-        for _v, _m in self.config_mounts:
-            volumes.append(_v)
-            mounts.append(_m)
+        volumes.extend(self.config_volumes.values())
+        mounts.extend(self.config_mounts.values())
 
         # Attach the mount that provides the update
         volumes.append(V1Volume(

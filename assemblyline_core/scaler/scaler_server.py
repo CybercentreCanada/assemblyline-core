@@ -53,6 +53,9 @@ KUBERNETES_AL_CONFIG = os.environ.get('KUBERNETES_AL_CONFIG')
 
 HOSTNAME = os.getenv('HOSTNAME', platform.node())
 NAMESPACE = os.getenv('NAMESPACE', 'al')
+CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
+CLASSIFICATION_CONFIGMAP = os.getenv('CLASSIFICATION_CONFIGMAP', None)
+CLASSIFICATION_CONFIGMAP_KEY = os.getenv('CLASSIFICATION_CONFIGMAP_KEY', 'classification.yml')
 
 
 class ServiceProfile:
@@ -170,12 +173,20 @@ class ScalerServer(CoreBase):
             self.log.info(f"Loading Kubernetes cluster interface on namespace: {NAMESPACE}")
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
                                                    namespace=NAMESPACE, priority='al-service-priority')
+            # If we know where to find it, mount the classification into the service containers
+            if CLASSIFICATION_CONFIGMAP:
+                self.controller.config_mount('classification-config', config_map=CLASSIFICATION_CONFIGMAP,
+                                             key=CLASSIFICATION_CONFIGMAP_KEY,
+                                             target_path='/etc/assemblyline/classification.yml')
         else:
             self.log.info("Loading Docker cluster interface.")
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
                                                cpu_overallocation=self.config.core.scaler.cpu_overallocation,
                                                memory_overallocation=self.config.core.scaler.memory_overallocation,
                                                labels=labels)
+            # If we know where to find it, mount the classification into the service containers
+            if CLASSIFICATION_HOST_PATH:
+                self.controller.global_mounts.append((CLASSIFICATION_HOST_PATH, '/etc/assemblyline/classification.yml'))
 
         self.profiles: Dict[str, ServiceProfile] = {}
 
