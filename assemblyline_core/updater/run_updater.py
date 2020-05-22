@@ -45,10 +45,10 @@ SERVICE_SYNC_INTERVAL = 30  # How many seconds between checking for new services
 UPDATE_CHECK_INTERVAL = 60  # How many seconds per check for outstanding updates
 UPDATE_STAGES = [ServiceStage.Update, ServiceStage.Running]
 
-# How to identify the update volume as a whole, in a way that the underlying container system recognizes.
-FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
 # Where to find the update directory inside this container.
 FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
+# How to identify the update volume as a whole, in a way that the underlying container system recognizes.
+FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', FILE_UPDATE_DIRECTORY)
 
 # How many past updates to keep for file based updates
 UPDATE_FOLDER_LIMIT = 5
