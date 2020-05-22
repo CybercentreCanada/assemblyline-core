@@ -128,7 +128,7 @@ class DockerUpdateInterface:
             mounts.append({
                 'volume': CLASSIFICATION_HOST_PATH,
                 'source_path': '',
-                'bind': '/etc/assemblyline/classification.yml',
+                'dest_path': '/etc/assemblyline/classification.yml',
                 'mode': 'ro'
             })
 
