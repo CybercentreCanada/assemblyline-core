@@ -576,6 +576,7 @@ class Dispatcher:
                 config = self.build_service_config(service, submission)
                 service_task = ServiceTask(dict(
                     sid=task.sid,
+                    metadata=submission.metadata,
                     min_classification=task.min_classification,
                     service_name=service_name,
                     service_config=config,
