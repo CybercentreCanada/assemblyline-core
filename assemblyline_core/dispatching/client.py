@@ -17,7 +17,7 @@ from assemblyline.odm.messages.service_heartbeat import Metrics
 
 from assemblyline.common import forge
 from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, FILE_QUEUE, SUBMISSION_QUEUE, \
-    make_watcher_list_name, get_temporary_submission_data_name, get_tag_set_name
+    make_watcher_list_name, get_temporary_submission_data_name, get_tag_set_name, DISPATCH_TASK_HASH
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
@@ -64,6 +64,7 @@ class DispatchClient:
         self.results = datastore.result
         self.errors = datastore.error
         self.files = datastore.file
+        self.active_submissions = ExpiringHash(DISPATCH_TASK_HASH, host=redis_persist)
         self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
         self.service_data = cast(Dict[str, Service], CachedObject(self._get_services))
 
@@ -239,6 +240,16 @@ class DispatchClient:
                              f"task in its set of running tasks while processing successful results.")
             return
         task = ServiceTask(task)
+
+        # Check if the service is a candidate for dynamic recursion prevention
+        if not task.ignore_dynamic_recursion_prevention:
+            service_info = self.service_data.get(result.response.service_name, None)
+            if service_info and service_info.category == "Dynamic Analysis":
+                # TODO: This should be done in lua because it can introduce race condition in the future
+                #       but in the meantime it will remain this way while we can confirm it work as expected
+                submission = self.active_submissions.get(sid)
+                submission['submission']['params']['services']['runtime_excluded'].append(result.response.service_name)
+                self.active_submissions.set(sid, submission)
 
         # Save or freshen the result, the CONTENT of the result shouldn't change, but we need to keep the
         # most distant expiry time to prevent pulling it out from under another submission too early

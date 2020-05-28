@@ -73,6 +73,7 @@ class Scheduler:
 
         # Load the selected and excluded services by category
         excluded = self.expand_categories(submission.params.services.excluded)
+        runtime_excluded = self.expand_categories(submission.params.services.runtime_excluded)
         if not submission.params.services.selected:
             selected = [s for s in all_services.keys()]
         else:
@@ -80,7 +81,7 @@ class Scheduler:
 
         # Add all selected, accepted, and not rejected services to the schedule
         schedule: List[Dict[str, Service]] = [{} for _ in self.config.services.stages]
-        services = list(set(selected) - set(excluded))
+        services = list(set(selected) - set(excluded) - set(runtime_excluded))
         selected = []
         skipped = []
         for name in services:
@@ -586,6 +587,7 @@ class Dispatcher:
                     max_files=task.max_files,
                     ttl=submission.params.ttl,
                     ignore_cache=submission.params.ignore_cache,
+                    ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
                     tags=file_tags_data,
                     temporary_submission_data=temporary_data,
                     deep_scan=submission.params.deep_scan,
