@@ -70,13 +70,12 @@ def ensure_indexes(log, es, config, indexes):
         try:
             index = f"al_metrics_{index_type}"
             policy = f"{index}_policy"
-            ok = False
-            while not ok:
+            while True:
                 try:
                     while not ilm_policy_exists(es, policy):
                         log.debug(f"ILM Policy {policy.upper()} does not exists. Creating it now...")
                         create_ilm_policy(es, policy, config.as_primitives())
-                    ok = True
+                    break
                 except ILMException as e:
                     log.warning(str(e))
                     time.sleep(1)
@@ -106,12 +105,21 @@ def ensure_indexes(log, es, config, indexes):
 
                 index_body = {"aliases": {index: {"is_write_index": True}}}
 
-                try:
-                    with_retries(log, es.indices.create, f"{index}-000001", index_body)
-                except elasticsearch.exceptions.RequestError as e:
-                    if "resource_already_exists_exception" not in str(e):
-                        raise
-                    log.warning(f"Tried to create an index template that already exists: {index.upper()}-000001")
+                while True:
+                    try:
+                        with_retries(log, es.indices.create, f"{index}-000001", index_body)
+                        break
+                    except elasticsearch.exceptions.RequestError as e:
+                        if "resource_already_exists_exception" in str(e):
+                            log.warning(f"Tried to create an index template that "
+                                        f"already exists: {index.upper()}-000001")
+                            break
+                        elif "invalid_alias_name_exception" in str(e):
+                            with_retries(log, es.indices.delete, index)
+                            log.warning(str(e))
+                            time.sleep(1)
+                        else:
+                            raise
 
         except Exception as e:
             log.exception(e)
