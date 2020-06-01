@@ -23,7 +23,7 @@ SHUTDOWN_SECONDS_LIMIT = 10
 
 
 class ServerBase(threading.Thread):
-    """Utility class for Assmblyline server processes.
+    """Utility class for Assemblyline server processes.
 
     Inheriting from thread so that the main work is done off the main thread.
     This lets the main thread handle interrupts properly, even when the workload
