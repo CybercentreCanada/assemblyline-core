@@ -14,6 +14,7 @@ import uuid
 import random
 import sched
 import shutil
+import socket
 import string
 import tempfile
 import time
@@ -22,7 +23,9 @@ from threading import Thread
 from typing import Dict
 
 import docker
+import requests
 import yaml
+
 from assemblyline.remote.datatypes.lock import Lock
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
     V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
@@ -43,6 +46,7 @@ from assemblyline_core.server_base import CoreBase, ServiceStage
 
 SERVICE_SYNC_INTERVAL = 30  # How many seconds between checking for new services, or changes in service status
 UPDATE_CHECK_INTERVAL = 60  # How many seconds per check for outstanding updates
+CONTAINER_CHECK_INTERVAL = 60 * 60  # How many seconds to wait for checking for new service versions
 UPDATE_STAGES = [ServiceStage.Update, ServiceStage.Running]
 
 # Where to find the update directory inside this container.
@@ -382,9 +386,10 @@ class ServiceUpdater(CoreBase):
         # be a singleton anyway.
         self.temporary_directory = os.path.join(FILE_UPDATE_DIRECTORY, '.tmp')
         shutil.rmtree(self.temporary_directory, ignore_errors=True)
-        os.mkdir(self.temporary_directory)
+        os.makedirs(self.temporary_directory)
 
         self.services = Hash('service-updates', self.redis_persist)
+        self.latest_service_tags = Hash('service-tags', self.redis_persist)
         self.running_updates: Dict[str, Thread] = {}
 
         # Prepare a single threaded scheduler
@@ -453,11 +458,84 @@ class ServiceUpdater(CoreBase):
             self.log.info(f"Service updates disabled for {stray_service}")
             self.services.pop(stray_service)
 
+    def container_versions(self):
+        """Go through the list of services and check what are the latest tags for it"""
+        self.scheduler.enter(CONTAINER_CHECK_INTERVAL, 0, self.container_versions)
+        for service in self.datastore.list_all_services(full=True):
+            if not service.enabled:
+                continue
+
+            tag_map = {}
+
+            # Get image name
+            image = service.docker_config.image
+
+            # Get authentication
+            if service.docker_config.registry_username or service.docker_config.registry_password:
+                # TODO: we are not using this yet, we need to figure out how...
+                auth_config = {
+                    'username': service.docker_config.registry_username,
+                    'password': service.docker_config.registry_password
+                }
+
+            # Find which server to search in
+            server = image.split("/")[0]
+            if server != "cccs":
+                if ":" in server:
+                    name = image[len(server) + 1:]
+                else:
+                    try:
+                        socket.gethostbyname_ex(server)
+                        name = image[len(server) + 1:]
+                    except socket.gaierror:
+                        server = "registry.hub.docker.com:443"
+                        name = image
+            else:
+                server = "registry.hub.docker.com:443"
+                name = image
+
+            # Split repo name without the tag
+            name = name.rsplit(":", 1)[0]
+
+            # Find latest tag for each types
+            for tag_type in [None, "stable", "rc", "beta", "dev"]:
+                url = f"https://{server}/v2/repositories/{name}/tags?ordering=last_updated"
+                if tag_type:
+                    url += f"&name={tag_type}"
+
+                # Get tag list
+                resp = requests.get(url)
+
+                # Test for valid response
+                tag_name = None
+                if not resp.ok:
+                    self.log.warning(f"Updater is having trouble fetching tags for "
+                                     f"docker image: {service.docker_config.image} "
+                                     f"[server: {server}, name: {name}, tag_query: {tag_type}]")
+                else:
+                    # Test for positive list of tags
+                    resp_data = resp.json()
+                    if not resp_data['results']:
+                        self.log.info(f"Updater could not find any tags for the following "
+                                      f"docker image: {service.docker_config.image} "
+                                      f"[server: {server}, name: {name}, tag_query: {tag_type}]")
+                    else:
+                        # Find latest tag
+                        tag_name = resp_data['results'][0]['name']
+                        self.log.info(f"Updater found the '{tag_name}' to be the newset tag for "
+                                      f"docker image: {service.docker_config.image} "
+                                      f"[server: {server}, name: {name}, tag_query: {tag_type}]")
+
+                tag_map[tag_type] = tag_name
+
+            self.latest_service_tags.set(service.name, tag_map)
+
     def try_run(self):
         """Run the scheduler loop until told to stop."""
         # Do an initial call to the main methods, who will then be registered with the scheduler
         self.sync_services()
         self.update_services()
+        self.container_versions()
 
         # Run as long as we need to
         while self.running:
