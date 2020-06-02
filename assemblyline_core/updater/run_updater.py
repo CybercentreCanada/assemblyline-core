@@ -464,7 +464,8 @@ class ServiceUpdater(CoreBase):
         self.scheduler.enter(UPDATE_CHECK_INTERVAL, 0, self.container_updates)
         for service_name in self.container_update.items():
             image = self.container_update.get(service_name)
-            self.log.info(f"Service {service_name} is being updated to version {image.rsplit(':', 1)[1]}...")
+            service_tag = image.rsplit(':', 1)[1]
+            self.log.info(f"Service {service_name} is being updated to version {service_tag}...")
 
             try:
                 self.controller.launch(
@@ -479,17 +480,26 @@ class ServiceUpdater(CoreBase):
                     )),
                     mounts=[],
                     env={
+                        "SERVICE_TAG": service_tag,
                         "SERVICE_API_HOST": os.environ.get('SERVICE_API_HOST', "http://al_service_server:5003"),
                         "REGISTER_ONLY": True
                     },
                     network='default',
-                    blocking=True,
+                    blocking=True
                 )
 
-                # TODO: Switching active service version
+                service_key = f"{service_name}_{service_tag}"
 
-                # Update completed, cleanup
-                self.log.info(f"Service {service_name} update successful!")
+                if self.datastore.service.get_if_exists(service_key):
+                    operation = self.datastore.service_delta.UPDATE_SET, 'version', service_tag
+                    self.datastore.service_delta.update(service_name, [operation])
+
+                    # Update completed, cleanup
+                    self.log.info(f"Service {service_name} update successful!")
+                else:
+                    self.log.error(f"Service {service_name} has failed to update because resulting "
+                                   f"service key ({service_key}) does not exist. Update procedure cancelled...")
+
                 self.container_update.pop(service_name)
             except Exception as e:
                 self.log.error(f"Service {service_name} has failed to update: {str(e)}")
