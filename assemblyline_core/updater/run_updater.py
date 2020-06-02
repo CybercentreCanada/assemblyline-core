@@ -388,6 +388,7 @@ class ServiceUpdater(CoreBase):
         shutil.rmtree(self.temporary_directory, ignore_errors=True)
         os.makedirs(self.temporary_directory)
 
+        self.container_update = Hash('container-update', self.redis_persist)
         self.services = Hash('service-updates', self.redis_persist)
         self.latest_service_tags = Hash('service-tags', self.redis_persist)
         self.running_updates: Dict[str, Thread] = {}
@@ -458,6 +459,41 @@ class ServiceUpdater(CoreBase):
             self.log.info(f"Service updates disabled for {stray_service}")
             self.services.pop(stray_service)
 
+    def container_updates(self):
+        """Go through the list of services and check what are the latest tags for it"""
+        self.scheduler.enter(UPDATE_CHECK_INTERVAL, 0, self.container_updates)
+        for service_name in self.container_update.items():
+            image = self.container_update.get(service_name)
+            self.log.info(f"Service {service_name} is being updated to version {image.rsplit(':', 1)[1]}...")
+
+            try:
+                self.controller.launch(
+                    name=service_name,
+                    docker_config=DockerConfig(dict(
+                        allow_internet_access=True,
+                        cpu_cores=1,
+                        environment=[],
+                        image=image,
+                        ports=[],
+                        ram_mb=1024
+                    )),
+                    mounts=[],
+                    env={
+                        "SERVICE_API_HOST": os.environ.get('SERVICE_API_HOST', "http://al_service_server:5003"),
+                        "REGISTER_ONLY": True
+                    },
+                    network='default',
+                    blocking=True,
+                )
+
+                # TODO: Switching active service version
+
+                # Update completed, cleanup
+                self.log.info(f"Service {service_name} update successful!")
+                self.container_update.pop(service_name)
+            except Exception as e:
+                self.log.error(f"Service {service_name} has failed to update: {str(e)}")
+
     def container_versions(self):
         """Go through the list of services and check what are the latest tags for it"""
         self.scheduler.enter(CONTAINER_CHECK_INTERVAL, 0, self.container_versions)
@@ -496,6 +532,11 @@ class ServiceUpdater(CoreBase):
 
             # Split repo name without the tag
             name = name.rsplit(":", 1)[0]
+
+            if server == "registry.hub.docker.com:443":
+                tag_map['image'] = name
+            else:
+                tag_map['image'] = "/".join([server, name])
 
             # Find latest tag for each types
             for tag_type in [None, "stable", "rc", "beta", "dev"]:
@@ -536,6 +577,7 @@ class ServiceUpdater(CoreBase):
         self.sync_services()
         self.update_services()
         self.container_versions()
+        self.container_updates()
 
         # Run as long as we need to
         while self.running:
