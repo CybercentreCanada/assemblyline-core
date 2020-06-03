@@ -558,7 +558,7 @@ class ServiceUpdater(CoreBase):
                 tag_map['image'] = "/".join([server, name])
 
             # Find latest tag for each types
-            for tag_type in [None, "stable", "rc", "beta", "dev"]:
+            for tag_type in ["stable", "rc", "beta", "dev"]:
                 url = f"https://{server}/v2/repositories/{name}/tags?ordering=last_updated"
                 if tag_type:
                     url += f"&name={tag_type}"
