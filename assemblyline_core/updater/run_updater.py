@@ -482,7 +482,7 @@ class ServiceUpdater(CoreBase):
                     env={
                         "SERVICE_TAG": service_tag,
                         "SERVICE_API_HOST": os.environ.get('SERVICE_API_HOST', "http://al_service_server:5003"),
-                        "REGISTER_ONLY": True
+                        "REGISTER_ONLY": 'true'
                     },
                     network='default',
                     blocking=True
