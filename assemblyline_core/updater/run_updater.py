@@ -491,12 +491,10 @@ class ServiceUpdater(CoreBase):
                 service_key = f"{service_name}_{service_tag}"
 
                 if self.datastore.service.get_if_exists(service_key):
-                    operations = [
-                        (self.datastore.service_delta.UPDATE_SET, 'version', service_tag),
-                        (self.datastore.service_delta.UPDATE_SET, 'docker_config.image', image)
-                    ]
-                    self.datastore.service_delta.update(service_name, operations)
-
+                    bulkplan = self.datastore.service_delta.get_bulk_plan()
+                    bulkplan.add_upsert_operation(service_name, {'version': service_tag,
+                                                                 'docker_config': {'image': image}})
+                    self.datastore.service_delta.bulk(bulkplan)
                     # Update completed, cleanup
                     self.log.info(f"Service {service_name} update successful!")
                 else:
