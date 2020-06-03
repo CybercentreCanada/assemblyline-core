@@ -507,11 +507,17 @@ class ServiceUpdater(CoreBase):
     def container_versions(self):
         """Go through the list of services and check what are the latest tags for it"""
         self.scheduler.enter(CONTAINER_CHECK_INTERVAL, 0, self.container_versions)
+        image_variables = defaultdict(str)
+        image_variables.update(self.config.services.image_variables)
+
         for service in self.datastore.list_all_services(full=True):
             if not service.enabled:
                 continue
 
             tag_map = {}
+
+            # Fix service image
+            service.docker_config.image = string.Template(service.docker_config.image).safe_substitute(image_variables)
 
             # Get image name
             image = service.docker_config.image
