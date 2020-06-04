@@ -46,7 +46,7 @@ from assemblyline_core.server_base import CoreBase, ServiceStage
 
 SERVICE_SYNC_INTERVAL = 30  # How many seconds between checking for new services, or changes in service status
 UPDATE_CHECK_INTERVAL = 60  # How many seconds per check for outstanding updates
-CONTAINER_CHECK_INTERVAL = 60 * 60  # How many seconds to wait for checking for new service versions
+CONTAINER_CHECK_INTERVAL = 60 * 5  # How many seconds to wait for checking for new service versions
 UPDATE_STAGES = [ServiceStage.Update, ServiceStage.Running]
 
 # Where to find the update directory inside this container.
@@ -463,9 +463,10 @@ class ServiceUpdater(CoreBase):
         """Go through the list of services and check what are the latest tags for it"""
         self.scheduler.enter(UPDATE_CHECK_INTERVAL, 0, self.container_updates)
         for service_name in self.container_update.items():
-            image = self.container_update.get(service_name)
-            service_tag = image.rsplit(':', 1)[1]
-            self.log.info(f"Service {service_name} is being updated to version {service_tag}...")
+            update_data = self.container_update.get(service_name)
+
+            # TODO: We need to figure out what to do with update_date['auth']
+            self.log.info(f"Service {service_name} is being updated to version {update_data['latest_tag']}...")
 
             try:
                 self.controller.launch(
@@ -474,13 +475,13 @@ class ServiceUpdater(CoreBase):
                         allow_internet_access=True,
                         cpu_cores=1,
                         environment=[],
-                        image=image,
+                        image=update_data['image'],
                         ports=[],
                         ram_mb=1024
                     )),
                     mounts=[],
                     env={
-                        "SERVICE_TAG": service_tag,
+                        "SERVICE_TAG": update_data['latest_tag'],
                         "SERVICE_API_HOST": os.environ.get('SERVICE_API_HOST', "http://al_service_server:5003"),
                         "REGISTER_ONLY": 'true'
                     },
@@ -488,22 +489,23 @@ class ServiceUpdater(CoreBase):
                     blocking=True
                 )
 
-                service_key = f"{service_name}_{service_tag}"
+                service_key = f"{service_name}_{update_data['latest_tag']}"
 
                 if self.datastore.service.get_if_exists(service_key):
-                    bulkplan = self.datastore.service_delta.get_bulk_plan()
-                    bulkplan.add_upsert_operation(service_name, {'version': service_tag,
-                                                                 'docker_config': {'image': image}})
-                    self.datastore.service_delta.bulk(bulkplan)
-                    # Update completed, cleanup
-                    self.log.info(f"Service {service_name} update successful!")
+                    operations = [(self.datastore.service_delta.UPDATE_SET, 'version', update_data['latest_tag'])]
+                    if self.datastore.service_delta.update(service_name, operations):
+                        # Update completed, cleanup
+                        self.log.info(f"Service {service_name} update successful!")
+                    else:
+                        self.log.error(f"Service {service_name} has failed to update because it cannot set "
+                                       f"{update_data['latest_tag']} as the new version. Update procedure cancelled...")
                 else:
                     self.log.error(f"Service {service_name} has failed to update because resulting "
                                    f"service key ({service_key}) does not exist. Update procedure cancelled...")
-
-                self.container_update.pop(service_name)
             except Exception as e:
-                self.log.error(f"Service {service_name} has failed to update: {str(e)}")
+                self.log.error(f"Service {service_name} has failed to update. Update procedure cancelled... [{str(e)}]")
+
+            self.container_update.pop(service_name)
 
     def container_versions(self):
         """Go through the list of services and check what are the latest tags for it"""
@@ -524,12 +526,11 @@ class ServiceUpdater(CoreBase):
             image = service.docker_config.image
 
             # Get authentication
+            auth_config = {}
             if service.docker_config.registry_username or service.docker_config.registry_password:
-                # TODO: we are not using this yet, we need to figure out how...
-                auth_config = {
-                    'username': service.docker_config.registry_username,
-                    'password': service.docker_config.registry_password
-                }
+                auth_config['username'] = service.docker_config.registry_username,
+                auth_config['password'] = service.docker_config.registry_password
+            tag_map['auth'] = auth_config
 
             # Find which server to search in
             server = image.split("/")[0]
@@ -556,35 +557,29 @@ class ServiceUpdater(CoreBase):
                 tag_map['image'] = "/".join([server, name])
 
             # Find latest tag for each types
-            for tag_type in ["stable", "rc", "beta", "dev"]:
-                url = f"https://{server}/v2/repositories/{name}/tags?ordering=last_updated"
-                if tag_type:
-                    url += f"&name={tag_type}"
+            url = f"https://{server}/v2/repositories/{name}/tags?ordering=last_updated"
+            if service.update_channel:
+                url += f"&name={service.update_channel}"
 
-                # Get tag list
-                resp = requests.get(url)
+            # Get tag list
+            resp = requests.get(url)
 
-                # Test for valid response
-                tag_name = None
-                if not resp.ok:
-                    self.log.warning(f"Updater is having trouble fetching tags for "
-                                     f"docker image: {service.docker_config.image} "
-                                     f"[server: {server}, name: {name}, tag_query: {tag_type}]")
-                else:
-                    # Test for positive list of tags
-                    resp_data = resp.json()
-                    if not resp_data['results']:
-                        self.log.info(f"Updater could not find any tags for the following "
-                                      f"docker image: {service.docker_config.image} "
-                                      f"[server: {server}, name: {name}, tag_query: {tag_type}]")
-                    else:
-                        # Find latest tag
-                        tag_name = resp_data['results'][0]['name']
-                        self.log.info(f"Updater found the '{tag_name}' to be the newset tag for "
-                                      f"docker image: {service.docker_config.image} "
-                                      f"[server: {server}, name: {name}, tag_query: {tag_type}]")
+            # Test for valid response
+            tag_name = None
+            if not resp.ok:
+                self.log.warning(f"Updater is having trouble fetching tags for "
+                                 f"service {service.name} - {service.docker_config.image} => [server: {server}, "
+                                 f"repo_name: {name}, channel: {service.update_channel}]")
+            else:
+                # Test for positive list of tags
+                resp_data = resp.json()
+                if resp_data['results']:
+                    # Find latest tag
+                    tag_name = resp_data['results'][0]['name']
 
-                tag_map[tag_type] = tag_name
+                self.log.info(f"Latest {service.name} tag on {service.update_channel.upper()} channel is: {tag_name}")
+
+            tag_map[service.update_channel] = tag_name
 
             self.latest_service_tags.set(service.name, tag_map)
 
