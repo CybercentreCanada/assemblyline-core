@@ -476,6 +476,8 @@ class ServiceUpdater(CoreBase):
                     name=service_name,
                     docker_config=DockerConfig(dict(
                         allow_internet_access=True,
+                        registry_username=update_data['auth'].get('username', None),
+                        registry_password=update_data['auth'].get('password', None),
                         cpu_cores=1,
                         environment=[],
                         image=update_data['image'],

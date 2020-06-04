@@ -2,7 +2,46 @@
 import requests
 import socket
 import string
+
+from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
 from collections import defaultdict
+from base64 import b64encode
+
+DEFAULT_DOCKER_REGISTRY = "registry.hub.docker.com"
+
+
+def _get_proprietary_registry_tags(server, image_name, auth):
+    # Find latest tag for each types
+    url = f"https://{server}/v2/{image_name}/tags/list"
+
+    # Get tag list
+    headers = {}
+    if auth:
+        headers["Authorization"] = auth
+    resp = requests.get(url, headers=headers)
+
+    # Test for valid response
+    if resp.ok:
+        # Test for positive list of tags
+        resp_data = resp.json()
+        return resp_data['tags']
+    return []
+
+
+def _get_dockerhub_tags(image_name):
+    # Find latest tag for each types
+    url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/repositories/{image_name}/tags?page_size=5&page=1&name=dev"
+
+    # Get tag list
+    resp = requests.get(url)
+
+    # Test for valid response
+    if resp.ok:
+        # Test for positive list of tags
+        resp_data = resp.json()
+        return [x['name'] for x in resp_data['results']]
+
+    return []
 
 
 def get_latest_tag_for_service(service_config, system_config, logger):
@@ -17,10 +56,15 @@ def get_latest_tag_for_service(service_config, system_config, logger):
     image = string.Template(image).safe_substitute(image_variables)
 
     # Get authentication
-    auth = {}
-    if service_config.docker_config.registry_username or service_config.docker_config.registry_password:
-        auth['username'] = service_config.docker_config.registry_username,
-        auth['password'] = service_config.docker_config.registry_password
+    auth = None
+    auth_config = None
+    if service_config.docker_config.registry_username and service_config.docker_config.registry_password:
+        auth_config = {
+            'username': service_config.docker_config.registry_username,
+            'password': service_config.docker_config.registry_password
+        }
+        upass = f"{service_config.docker_config.registry_username}:{service_config.docker_config.registry_password}"
+        auth = f"Basic {b64encode(upass.encode()).decode()}"
 
     # Find which server to search in
     server = image.split("/")[0]
@@ -32,40 +76,39 @@ def get_latest_tag_for_service(service_config, system_config, logger):
                 socket.gethostbyname_ex(server)
                 image_name = image[len(server) + 1:]
             except socket.gaierror:
-                server = "registry.hub.docker.com:443"
+                server = DEFAULT_DOCKER_REGISTRY
                 image_name = image
     else:
-        server = "registry.hub.docker.com:443"
+        server = DEFAULT_DOCKER_REGISTRY
         image_name = image
 
     # Split repo name without the tag
     image_name = image_name.rsplit(":", 1)[0]
 
-    # Find latest tag for each types
-    url = f"https://{server}/v2/repositories/{image_name}/tags?ordering=last_updated"
-    if update_channel:
-        url += f"&name={update_channel}"
-
-    if server == "registry.hub.docker.com:443":
-        image_name = image_name
+    if server == DEFAULT_DOCKER_REGISTRY:
+        tags = _get_dockerhub_tags(image_name)
     else:
-        image_name = "/".join([server, image_name])
+        tags = _get_proprietary_registry_tags(server, image_name, auth)
 
-    # Get tag list
-    resp = requests.get(url)
-
-    # Test for valid response
     tag_name = None
-    if not resp.ok:
+    if not tags:
         logger.warning(f"Cannot fetch latest tag for service {service_name} - {image}"
                        f" => [server: {server}, repo_name: {image_name}, channel: {update_channel}]")
     else:
-        # Test for positive list of tags
-        resp_data = resp.json()
-        if resp_data['results']:
-            # Find latest tag
-            tag_name = resp_data['results'][0]['name']
+        build_no = 0
+        for t in tags:
+            if update_channel in t:
+                parts = t.split(update_channel)
+                if len(parts) == 2 and \
+                        parts[0].startswith(f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}") and \
+                        int(parts[1]) >= build_no:
+                    build_no = int(parts[1])
+                    tag_name = t
 
         logger.info(f"Latest {service_name} tag on {update_channel.upper()} channel is: {tag_name}")
 
-    return image_name, tag_name, auth
+    # Append server to image if not the default server
+    if server != "registry.hub.docker.com":
+        image_name = "/".join([server, image_name])
+
+    return image_name, tag_name, auth_config
