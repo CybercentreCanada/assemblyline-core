@@ -293,12 +293,16 @@ class KubernetesUpdateInterface:
                 read_only=True,
             ))
 
+        section = 'core'
+        if network == 'al_registration':
+            section = 'service'
+
         metadata = V1ObjectMeta(
             name=name,
             labels={
                 'app': 'assemblyline',
-                'section': 'core',
-                'component': 'update-script'
+                'section': section,
+                'component': 'update-script',
             }
         )
 
