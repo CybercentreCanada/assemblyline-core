@@ -14,7 +14,6 @@ import uuid
 import random
 import sched
 import shutil
-import socket
 import string
 import tempfile
 import time
@@ -23,7 +22,6 @@ from threading import Thread
 from typing import Dict
 
 import docker
-import requests
 import yaml
 
 from assemblyline.remote.datatypes.lock import Lock
@@ -43,6 +41,7 @@ from assemblyline.odm.models.user import User
 from assemblyline.odm.models.user_settings import UserSettings
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline_core.server_base import CoreBase, ServiceStage
+from assemblyline_core.updater.helper import get_latest_tag_for_service
 
 SERVICE_SYNC_INTERVAL = 30  # How many seconds between checking for new services, or changes in service status
 UPDATE_CHECK_INTERVAL = 60  # How many seconds per check for outstanding updates
@@ -510,78 +509,15 @@ class ServiceUpdater(CoreBase):
     def container_versions(self):
         """Go through the list of services and check what are the latest tags for it"""
         self.scheduler.enter(CONTAINER_CHECK_INTERVAL, 0, self.container_versions)
-        image_variables = defaultdict(str)
-        image_variables.update(self.config.services.image_variables)
 
         for service in self.datastore.list_all_services(full=True):
             if not service.enabled:
                 continue
 
-            tag_map = {}
+            image_name, tag_name, auth = get_latest_tag_for_service(service, self.config, self.log)
 
-            # Fix service image
-            service.docker_config.image = string.Template(service.docker_config.image).safe_substitute(image_variables)
-
-            # Get image name
-            image = service.docker_config.image
-
-            # Get authentication
-            auth_config = {}
-            if service.docker_config.registry_username or service.docker_config.registry_password:
-                auth_config['username'] = service.docker_config.registry_username,
-                auth_config['password'] = service.docker_config.registry_password
-            tag_map['auth'] = auth_config
-
-            # Find which server to search in
-            server = image.split("/")[0]
-            if server != "cccs":
-                if ":" in server:
-                    name = image[len(server) + 1:]
-                else:
-                    try:
-                        socket.gethostbyname_ex(server)
-                        name = image[len(server) + 1:]
-                    except socket.gaierror:
-                        server = "registry.hub.docker.com:443"
-                        name = image
-            else:
-                server = "registry.hub.docker.com:443"
-                name = image
-
-            # Split repo name without the tag
-            name = name.rsplit(":", 1)[0]
-
-            if server == "registry.hub.docker.com:443":
-                tag_map['image'] = name
-            else:
-                tag_map['image'] = "/".join([server, name])
-
-            # Find latest tag for each types
-            url = f"https://{server}/v2/repositories/{name}/tags?ordering=last_updated"
-            if service.update_channel:
-                url += f"&name={service.update_channel}"
-
-            # Get tag list
-            resp = requests.get(url)
-
-            # Test for valid response
-            tag_name = None
-            if not resp.ok:
-                self.log.warning(f"Updater is having trouble fetching tags for "
-                                 f"service {service.name} - {service.docker_config.image} => [server: {server}, "
-                                 f"repo_name: {name}, channel: {service.update_channel}]")
-            else:
-                # Test for positive list of tags
-                resp_data = resp.json()
-                if resp_data['results']:
-                    # Find latest tag
-                    tag_name = resp_data['results'][0]['name']
-
-                self.log.info(f"Latest {service.name} tag on {service.update_channel.upper()} channel is: {tag_name}")
-
-            tag_map[service.update_channel] = tag_name
-
-            self.latest_service_tags.set(service.name, tag_map)
+            self.latest_service_tags.set(service.name,
+                                         {'auth': auth, 'image': image_name, service.update_channel: tag_name})
 
     def try_run(self):
         """Run the scheduler loop until told to stop."""
