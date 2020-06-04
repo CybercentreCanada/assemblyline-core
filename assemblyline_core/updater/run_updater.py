@@ -468,16 +468,23 @@ class ServiceUpdater(CoreBase):
         for service_name in self.container_update.items():
             update_data = self.container_update.get(service_name)
 
-            # TODO: We need to figure out what to do with update_date['auth']
             self.log.info(f"Service {service_name} is being updated to version {update_data['latest_tag']}...")
+
+            # Load authentication params
+            username = None
+            password = None
+            auth = update_data['auth'] or {}
+            if auth:
+                username = auth.get('username', None)
+                password = auth.get('password', None)
 
             try:
                 self.controller.launch(
                     name=service_name,
                     docker_config=DockerConfig(dict(
                         allow_internet_access=True,
-                        registry_username=update_data['auth'].get('username', None),
-                        registry_password=update_data['auth'].get('password', None),
+                        registry_username=username,
+                        registry_password=password,
                         cpu_cores=1,
                         environment=[],
                         image=update_data['image'],
@@ -490,7 +497,7 @@ class ServiceUpdater(CoreBase):
                         "SERVICE_API_HOST": os.environ.get('SERVICE_API_HOST', "http://al_service_server:5003"),
                         "REGISTER_ONLY": 'true'
                     },
-                    network='default',
+                    network='al_registration',
                     blocking=True
                 )
 
