@@ -224,6 +224,7 @@ class KubernetesUpdateInterface:
         pull_secret_name = f'{name}-job-pull-secret'
         use_pull_secret = False
         try:
+            # Check if there is already a username/password defined for this job
             current_pull_secret = self.api.read_namespaced_secret(pull_secret_name, self.namespace)
         except ApiException as error:
             if error.status != 404:
@@ -251,6 +252,7 @@ class KubernetesUpdateInterface:
             else:
                 self.api.create_namespaced_secret(namespace=self.namespace, body=new_pull_secret)
         elif current_pull_secret:
+            # If there is a password set in kubernetes, but not in our configuration clear it out
             self.api.delete_namespaced_secret(pull_secret_name, self.namespace)
 
         try:
