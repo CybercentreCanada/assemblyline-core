@@ -42,7 +42,8 @@ def create_docker_auth_config(image, username, password):
         server_name = 'https://index.docker.io/v1/'
 
     # The docker auth string is the base64'd username and password with a : to separate them
-    auth_string = base64.b64encode(username + ':' + password)
+    bin_u_pass = f"{username}:{password}".encode()
+    auth_string = base64.b64encode(bin_u_pass).decode()
 
     # Return a string form that matches docker's config.json format
     return json.dumps({
