@@ -40,6 +40,7 @@ from assemblyline.odm.models.service import DockerConfig
 from assemblyline.odm.models.user import User
 from assemblyline.odm.models.user_settings import UserSettings
 from assemblyline.remote.datatypes.hash import Hash
+from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config
 from assemblyline_core.server_base import CoreBase, ServiceStage
 from assemblyline_core.updater.helper import get_latest_tag_for_service
 
@@ -236,10 +237,11 @@ class KubernetesUpdateInterface:
                 metadata=V1ObjectMeta(name=pull_secret_name, namespace=self.namespace),
                 type='kubernetes.io/dockerconfigjson',
                 string_data={
-                    '.dockerconfigjson': json.dumps({
-                        'username': docker_config.registry_username,
-                        'password': docker_config.registry_password,
-                    })
+                    '.dockerconfigjson': create_docker_auth_config(
+                        image=docker_config.image,
+                        username=docker_config.registry_username,
+                        password=docker_config.registry_password,
+                    )
                 }
             )
 

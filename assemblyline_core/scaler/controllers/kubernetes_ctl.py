@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 from typing import Dict
@@ -29,6 +30,28 @@ _exponents = {
     'Ti': 2**40,
     'Pi': 2**50,
 }
+
+
+def create_docker_auth_config(image, username, password):
+    # Take the registry part of the image if set, use the default registry if no registry component is in the string
+    if '/' in image:
+        server_name = image.rpartition('/')[0]
+        if not server_name.startswith('http://') and not server_name.startswith('https://'):
+            server_name = 'https://' + server_name
+    else:
+        server_name = 'https://index.docker.io/v1/'
+
+    # The docker auth string is the base64'd username and password with a : to separate them
+    auth_string = base64.b64encode(username + ':' + password)
+
+    # Return a string form that matches docker's config.json format
+    return json.dumps({
+        "auths": {
+            server_name: {
+                "auth": auth_string
+            }
+        }
+    })
 
 
 def parse_memory(string):
@@ -286,10 +309,11 @@ class KubernetesController(ControllerInterface):
                 metadata=V1ObjectMeta(name=pull_secret_name, namespace=self.namespace),
                 type='kubernetes.io/dockerconfigjson',
                 string_data={
-                    '.dockerconfigjson': json.dumps({
-                        'username': docker_config.registry_username,
-                        'password': docker_config.registry_password,
-                    })
+                    '.dockerconfigjson': create_docker_auth_config(
+                        image=docker_config.image,
+                        username=docker_config.registry_username,
+                        password=docker_config.registry_password,
+                    )
                 }
             )
 
