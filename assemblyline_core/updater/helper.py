@@ -28,9 +28,10 @@ def _get_proprietary_registry_tags(server, image_name, auth):
     return []
 
 
-def _get_dockerhub_tags(image_name):
+def _get_dockerhub_tags(image_name, update_channel):
     # Find latest tag for each types
-    url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/repositories/{image_name}/tags?page_size=5&page=1&name=dev"
+    url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/repositories/{image_name}/tags" \
+        f"?page_size=5&page=1&name={update_channel}"
 
     # Get tag list
     resp = requests.get(url)
@@ -86,7 +87,7 @@ def get_latest_tag_for_service(service_config, system_config, logger):
     image_name = image_name.rsplit(":", 1)[0]
 
     if server == DEFAULT_DOCKER_REGISTRY:
-        tags = _get_dockerhub_tags(image_name)
+        tags = _get_dockerhub_tags(image_name, update_channel)
     else:
         tags = _get_proprietary_registry_tags(server, image_name, auth)
 
