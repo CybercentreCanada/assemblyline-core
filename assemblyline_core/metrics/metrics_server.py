@@ -47,6 +47,73 @@ def cleanup_metrics(input_dict):
     return output_dict
 
 
+class StatisticsAggregator(ServerBase):
+    """
+    There's no need to be more then one of these since it's job is
+    only to cache statistics about signatures and heuristics once per day
+    """
+    def __init__(self, config=None):
+        super().__init__('assemblyline.statistics_aggregator')
+        self.config = config or forge.get_config()
+        self.cache = forge.get_statistics_cache(config=self.config)
+        self.datastore = forge.get_datastore(archive_access=True)
+        self.scheduler = BackgroundScheduler(daemon=True)
+
+        if self.config.core.metrics.apm_server.server_url is not None:
+            self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
+            elasticapm.instrument()
+            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
+                                                service_name="metrics_aggregator")
+        else:
+            self.apm_client = None
+
+    def try_run(self):
+        # Run once
+        self._aggregated_statistics()
+
+        # Start a scheduled job
+        self.scheduler.add_job(self._aggregated_statistics, 'interval', seconds=60*60*24)
+        self.scheduler.start()
+
+        while self.running:
+            # Wait forever...
+            time.sleep(1)
+
+    def _heuristics_stats(self):
+        self.log.info("Computing heuristics statistics")
+
+        # APM Transaction start
+        if self.apm_client:
+            self.apm_client.begin_transaction('statistics')
+
+        stats = self.datastore.calculate_heuristic_stats()
+        self.cache.set('heuristics', stats)
+
+        # APM Transaction end
+        if self.apm_client:
+            self.apm_client.end_transaction('heuristics_statistics', 'success')
+
+    def _signature_stats(self):
+        self.log.info("Computing signature statistics")
+
+        # APM Transaction start
+        if self.apm_client:
+            self.apm_client.begin_transaction('statistics')
+
+        stats = self.datastore.calculate_signature_stats()
+        self.cache.set('signatures', stats)
+
+        # APM Transaction end
+        if self.apm_client:
+            self.apm_client.end_transaction('signature_statistics', 'success')
+
+    def _aggregated_statistics(self):
+        self.log.info("Start statistic colletion run")
+        self._heuristics_stats()
+        self._signature_stats()
+        self.log.info("Statistics generated successfully, waiting for next run")
+
+
 class MetricsServer(ServerBase):
     """
     There can only be one of these type of metrics server running because it runs of a pubsub queue.
