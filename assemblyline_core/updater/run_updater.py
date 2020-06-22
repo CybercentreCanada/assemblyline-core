@@ -490,8 +490,7 @@ class ServiceUpdater(CoreBase):
                         cpu_cores=1,
                         environment=[],
                         image=update_data['image'],
-                        ports=[],
-                        ram_mb=1024
+                        ports=[]
                     )),
                     mounts=[],
                     env={
