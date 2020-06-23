@@ -470,9 +470,7 @@ class ServiceUpdater(CoreBase):
     def container_updates(self):
         """Go through the list of services and check what are the latest tags for it"""
         self.scheduler.enter(UPDATE_CHECK_INTERVAL, 0, self.container_updates)
-        for service_name in self.container_update.items():
-            update_data = self.container_update.get(service_name)
-
+        for service_name, update_data in self.container_update.items().items():
             self.log.info(f"Service {service_name} is being updated to version {update_data['latest_tag']}...")
 
             # Load authentication params
