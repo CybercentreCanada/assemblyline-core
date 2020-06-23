@@ -315,6 +315,7 @@ class KubernetesUpdateInterface:
 
         cores = docker_config.cpu_cores
         memory = docker_config.ram_mb
+        memory_min = min(docker_config.ram_mb_min, memory)
 
         container = V1Container(
             name=name,
@@ -325,7 +326,7 @@ class KubernetesUpdateInterface:
             volume_mounts=volume_mounts,
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
-                requests={'cpu': cores / 4, 'memory': f'{int(memory / 4)}Mi'},
+                requests={'cpu': cores / 4, 'memory': f'{memory_min}Mi'},
             )
         )
 

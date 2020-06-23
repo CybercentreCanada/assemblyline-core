@@ -260,7 +260,7 @@ class KubernetesController(ControllerInterface):
     def _create_containers(deployment_name, container_config, mounts):
         cores = container_config.cpu_cores
         memory = container_config.ram_mb
-        min_memory = max(int(memory/4), min(64, memory))
+        min_memory = min(container_config.ram_mb_min, container_config.ram_mb)
         environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]
         environment_variables += [
             V1EnvVar(name='UPDATE_PATH', value=CONTAINER_UPDATE_DIRECTORY),
