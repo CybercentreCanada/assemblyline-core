@@ -503,16 +503,18 @@ class ServiceUpdater(CoreBase):
                     blocking=True
                 )
 
-                service_key = f"{service_name}_{update_data['latest_tag']}"
+                latest_tag = update_data['latest_tag'].replace('stable', '')
+
+                service_key = f"{service_name}_{latest_tag}"
 
                 if self.datastore.service.get_if_exists(service_key):
-                    operations = [(self.datastore.service_delta.UPDATE_SET, 'version', update_data['latest_tag'])]
+                    operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
                     if self.datastore.service_delta.update(service_name, operations):
                         # Update completed, cleanup
                         self.log.info(f"Service {service_name} update successful!")
                     else:
                         self.log.error(f"Service {service_name} has failed to update because it cannot set "
-                                       f"{update_data['latest_tag']} as the new version. Update procedure cancelled...")
+                                       f"{latest_tag} as the new version. Update procedure cancelled...")
                 else:
                     self.log.error(f"Service {service_name} has failed to update because resulting "
                                    f"service key ({service_key}) does not exist. Update procedure cancelled...")
