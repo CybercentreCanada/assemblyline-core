@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 
-import elasticapm
-import elasticsearch
+import tempfile
 import sys
 import time
-
-from apscheduler.schedulers.background import BackgroundScheduler
 from collections import Counter
 from threading import Lock
+
+import elasticapm
+import elasticsearch
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from assemblyline_core.metrics.heartbeat_formatter import HeartbeatFormatter
 from assemblyline_core.metrics.helper import ensure_indexes, with_retries
@@ -142,9 +143,17 @@ class MetricsServer(ServerBase):
             self.apm_client = None
 
     def try_run(self):
+        # If our connection to the metrics database requires a custom ca cert, prepare it
+        ca_certs = None
+        if self.config.core.metrics.elasticsearch.host_certificates:
+            with tempfile.NamedTemporaryFile(delete=False) as ca_certs_file:
+                ca_certs = ca_certs_file.name
+                ca_certs_file.write(self.config.core.metrics.elasticsearch.host_certificates)
+
         self.metrics_queue = CommsQueue(METRICS_QUEUE)
         self.es = elasticsearch.Elasticsearch(hosts=self.elastic_hosts,
-                                              connection_class=elasticsearch.RequestsHttpConnection)
+                                              connection_class=elasticsearch.RequestsHttpConnection,
+                                              ca_certs=ca_certs)
 
         self.scheduler.add_job(self._create_aggregated_metrics, 'interval', seconds=60)
         self.scheduler.start()
