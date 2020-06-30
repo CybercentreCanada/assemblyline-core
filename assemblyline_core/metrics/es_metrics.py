@@ -1,4 +1,5 @@
 import json
+import tempfile
 
 import elasticapm
 import sys
@@ -503,12 +504,21 @@ class ESMetricsServer(ServerBase):
                 self.apm_client.end_transaction('gather_index_metrics', 'success')
 
     def try_run(self):
+        # If our connection to the metrics database requires a custom ca cert, prepare it
+        ca_certs = None
+        if self.config.core.metrics.elasticsearch.host_certificates:
+            with tempfile.NamedTemporaryFile(delete=False) as ca_certs_file:
+                ca_certs = ca_certs_file.name
+                ca_certs_file.write(self.config.core.metrics.elasticsearch.host_certificates)
+
+        # Open connections to the input and output databases
         self.input_es = elasticsearch.Elasticsearch(hosts=self.config.datastore.hosts,
                                                     connection_class=elasticsearch.RequestsHttpConnection,
                                                     max_retries=0)
         self.target_es = elasticsearch.Elasticsearch(hosts=self.target_hosts,
                                                      connection_class=elasticsearch.RequestsHttpConnection,
-                                                     max_retries=0)
+                                                     max_retries=0,
+                                                     ca_certs=ca_certs)
         ensure_indexes(self.log, self.target_es, self.config.core.metrics.elasticsearch,
                        ['es_cluster', 'es_nodes', 'es_indices'])
 
