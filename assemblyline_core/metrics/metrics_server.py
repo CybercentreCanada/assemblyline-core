@@ -148,7 +148,7 @@ class MetricsServer(ServerBase):
         if self.config.core.metrics.elasticsearch.host_certificates:
             with tempfile.NamedTemporaryFile(delete=False) as ca_certs_file:
                 ca_certs = ca_certs_file.name
-                ca_certs_file.write(self.config.core.metrics.elasticsearch.host_certificates)
+                ca_certs_file.write(self.config.core.metrics.elasticsearch.host_certificates.encode())
 
         self.metrics_queue = CommsQueue(METRICS_QUEUE)
         self.es = elasticsearch.Elasticsearch(hosts=self.elastic_hosts,

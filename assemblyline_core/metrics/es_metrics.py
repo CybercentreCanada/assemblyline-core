@@ -509,7 +509,7 @@ class ESMetricsServer(ServerBase):
         if self.config.core.metrics.elasticsearch.host_certificates:
             with tempfile.NamedTemporaryFile(delete=False) as ca_certs_file:
                 ca_certs = ca_certs_file.name
-                ca_certs_file.write(self.config.core.metrics.elasticsearch.host_certificates)
+                ca_certs_file.write(self.config.core.metrics.elasticsearch.host_certificates.encode())
 
         # Open connections to the input and output databases
         self.input_es = elasticsearch.Elasticsearch(hosts=self.config.datastore.hosts,
