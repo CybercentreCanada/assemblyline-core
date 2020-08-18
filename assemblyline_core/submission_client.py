@@ -143,6 +143,9 @@ class SubmissionClient:
                             if os.path.exists(temporary_path):
                                 os.unlink(temporary_path)
 
+            # Clearing runtime_excluded on initial submit or resubmit
+            submission_obj.params.services.runtime_excluded = []
+
             # We should now have all the information we need to construct a submission object
             sub = Submission(dict(
                 archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
