@@ -10,8 +10,9 @@ be created.
 """
 
 import threading
+import time
 from random import random
-from typing import Iterable
+from typing import Iterable, List
 
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.str_utils import dotdump, safe_str
@@ -43,6 +44,7 @@ _min_priority = 1
 _max_retries = 10
 _retry_delay = 180
 _max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
+HOUR_IN_SECONDS = 60 * 60
 
 
 ###############################################################################
@@ -155,6 +157,7 @@ class Ingester:
         # Cache the user groups
         self.cache_lock = threading.RLock()  # TODO are middle man instances single threaded now?
         self._user_groups = {}
+        self._user_groups_reset = time.time()//HOUR_IN_SECONDS
         self.cache = {}
         self.notification_queues = {}
         self.whitelisted = {}
@@ -233,6 +236,21 @@ class Ingester:
         # Utility object to help submit tasks to dispatching
         self.submit_client = SubmissionClient(datastore=self.datastore, redis=self.redis)
 
+    def get_groups_from_user(self, username: str) -> List[str]:
+        # Reset the group cache at the top of each hour
+        if time.time()//HOUR_IN_SECONDS > self._user_groups_reset:
+            self._user_groups = {}
+            self._user_groups_reset = time.time()//HOUR_IN_SECONDS
+
+        # Get the groups for this user if not known
+        if username not in self._user_groups:
+            user_data = self.datastore.user.get(username)
+            if user_data:
+                self._user_groups[username] = user_data.groups
+            else:
+                self._user_groups[username] = []
+        return self._user_groups[username]
+
     def ingest(self, task: IngestTask):
         self.log.info(f"[{task.ingest_id} :: {task.sha256}] Task received for processing")
         # Load a snapshot of ingest parameters as of right now.
@@ -263,6 +281,11 @@ class Ingester:
             self.log.error(f"[{task.ingest_id} :: {task.sha256}] {task.failure}")
             return
 
+        # Set the groups from the user, if they aren't already set
+        if not task.params.groups:
+            task.params.groups = self.get_groups_from_user(task.params.submitter)
+
+        # Check if this file is already being processed
         pprevious, previous, score = None, False, None
         if not param.ignore_cache:
             pprevious, previous, score, _ = self.check(task)

@@ -4,6 +4,8 @@ import time
 
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.common.metrics import MetricsFactory
+from assemblyline.odm.models.user import User
+from assemblyline.odm.randomizer import random_minimal_obj
 
 from assemblyline_core.ingester.run_ingest import IngesterInput
 from assemblyline_core.ingester.ingester import IngestTask
@@ -32,7 +34,7 @@ def make_message(message=None, files=None, params=None):
     )
     send.update(**(message or {}))
     send['files'][0].update(files or {})
-    send.update(**(params or {}))
+    send['params'].update(**(params or {}))
     return send
 
 
@@ -55,6 +57,13 @@ def ingest_harness(clean_redis):
 
 def test_ingest_simple(ingest_harness):
     datastore, ingester, in_queue = ingest_harness
+
+    user = random_minimal_obj(User)
+    user.name = 'user'
+    custom_user_groups = ['users', 'the_user']
+    user.groups = list(custom_user_groups)
+    datastore.user.save('user', user)
+
     # Let the ingest loop run an extra time because we send two messages
     ingester.running.counter += 1
 
@@ -73,7 +82,7 @@ def test_ingest_simple(ingest_harness):
             'tobig': 'a' * (ingester.ingester.config.submission.max_metadata_length + 2),
             'small': '100'
         }
-    )))
+    ), params={'submitter': 'user', 'groups': []}))
 
     # Process those ok message
     ingester.try_run(volatile=True)
@@ -86,6 +95,8 @@ def test_ingest_simple(ingest_harness):
     assert task.submission.files[0].sha256 == '0' * 64  # Only the valid sha passed through
     assert 'tobig' not in task.submission.metadata  # The bad metadata was stripped
     assert task.submission.metadata['small'] == '100'  # The valid metadata is unchanged
+    assert task.submission.params.submitter == 'user'
+    assert task.submission.params.groups == custom_user_groups
 
     # None of the other tasks should reach the end
     assert mm.unique_queue.length() == 0
@@ -97,7 +108,9 @@ def test_ingest_stale_score_exists(ingest_harness):
 
     # Add a stale file score to the database for every file always
     from assemblyline.odm.models.filescore import FileScore
-    datastore.filescore.get = mock.MagicMock(return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=0)))
+    datastore.filescore.get = mock.MagicMock(
+        return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=0))
+    )
 
     # Process a message that hits the stale score
     in_queue.push(make_message())
@@ -122,7 +135,9 @@ def test_ingest_score_exists(ingest_harness):
 
     # Add a valid file score for all files
     from assemblyline.odm.models.filescore import FileScore
-    datastore.filescore.get = mock.MagicMock(return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=time.time())))
+    datastore.filescore.get = mock.MagicMock(
+        return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=time.time()))
+    )
 
     # Ingest a file
     in_queue.push(make_message())
@@ -134,16 +149,24 @@ def test_ingest_score_exists(ingest_harness):
     assert ingester.ingester.ingest_queue.length() == 0
 
 
-def test_ingest_groups_error(ingest_harness):
+def test_ingest_groups_custom(ingest_harness):
     datastore, ingester, in_queue = ingest_harness
 
-    # Send a message with invalid group parameter, and user data missing
-    in_queue.push(make_message(params={'groups': []}))
+    user = random_minimal_obj(User)
+    user.name = 'user'
+    custom_user_groups = ['users', 'the_user']
+    user.groups = list(custom_user_groups)
+    datastore.user.save('user', user)
+
+    in_queue.push(make_message(params={'submitter': 'user', 'groups': ['group_b']}))
     ingester.try_run()
 
-    # dropped file with no known user
-    assert ingester.ingester.unique_queue.length() == 0
-    assert ingester.ingester.ingest_queue.length() == 0
+    mm = ingester.ingester
+    task = mm.unique_queue.pop()
+    assert task
+    task = IngestTask(task)
+    assert task.submission.params.submitter == 'user'
+    assert task.submission.params.groups == ['group_b']
 
 
 def test_ingest_size_error(ingest_harness):
