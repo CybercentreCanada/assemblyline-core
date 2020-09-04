@@ -47,38 +47,27 @@ _max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
 HOUR_IN_SECONDS = 60 * 60
 
 
-###############################################################################
-#
-# To calculate the probability of dropping an incoming submission we compare
-# the number returned by random() which will be in the range [0,1) and the
-# number returned by tanh() which will be in the range (-1,1).
-#
-# If length is less than maximum the number returned by tanh will be negative
-# and so drop will always return False since the value returned by random()
-# cannot be less than 0.
-#
-# If length is greater than maximum, drop will return False with a probability
-# that increases as the distance between maximum and length increases:
-#
-#     Length           Chance of Dropping
-#
-#     <= maximum       0
-#     1.5 * maximum    0.76
-#     2 * maximum      0.96
-#     3 * maximum      0.999
-#
-###############################################################################
 def must_drop(length, maximum):
-    return random() < drop_chance(length, maximum)
+    """
+    To calculate the probability of dropping an incoming submission we compare
+    the number returned by random() which will be in the range [0,1) and the
+    number returned by tanh() which will be in the range (-1,1).
 
-# def seconds(t, default=0):
-#     try:
-#         try:
-#             return float(t)
-#         except ValueError:
-#             return iso_to_epoch(t)
-#     except:
-#         return default
+    If length is less than maximum the number returned by tanh will be negative
+    and so drop will always return False since the value returned by random()
+    cannot be less than 0.
+
+    If length is greater than maximum, drop will return False with a probability
+    that increases as the distance between maximum and length increases:
+
+        Length           Chance of Dropping
+
+        <= maximum       0
+        1.5 * maximum    0.76
+        2 * maximum      0.96
+        3 * maximum      0.999
+    """
+    return random() < drop_chance(length, maximum)
 
 
 def determine_resubmit_selected(selected, resubmit_to):
