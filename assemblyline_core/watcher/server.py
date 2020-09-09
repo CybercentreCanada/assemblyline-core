@@ -51,6 +51,8 @@ class WatcherServer(CoreBase):
         apm_client = self.apm_client
 
         while self.running:
+            self.heartbeat()
+
             # Download all messages from the queue that have expired
             seconds, _ = retry_call(self.redis.time)
             messages = self.queue.dequeue_range(0, seconds)

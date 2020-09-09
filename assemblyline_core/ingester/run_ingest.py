@@ -50,6 +50,7 @@ class IngesterInput(ServerBase):
         # entries at a time and move unique entries to uniqueq / queued and
         # duplicates to their own queues / waiting.
         while self.running:
+            self.heartbeat()
             while True:
                 result = ingester.complete_queue.pop(blocking=False)
                 if not result:

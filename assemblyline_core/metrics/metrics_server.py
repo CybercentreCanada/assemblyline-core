@@ -109,7 +109,8 @@ class StatisticsAggregator(ServerBase):
             self.apm_client.end_transaction('signature_statistics', 'success')
 
     def _aggregated_statistics(self):
-        self.log.info("Start statistic colletion run")
+        self.heartbeat()
+        self.log.info("Start statistic collection run")
         self._heuristics_stats()
         self._signature_stats()
         self.log.info("Statistics generated successfully, waiting for next run")
@@ -189,6 +190,7 @@ class MetricsServer(ServerBase):
                     self.apm_client.end_transaction('process_message', 'success')
 
     def _create_aggregated_metrics(self):
+        self.heartbeat()
         self.log.info("Copying counters ...")
         # APM Transaction start
         if self.apm_client:
@@ -294,6 +296,7 @@ class HeartbeatManager(ServerBase):
 
     def _export_hearbeats(self):
         try:
+            self.heartbeat()
             self.log.info("Expiring unused counters...")
             # APM Transaction start
             if self.apm_client:
