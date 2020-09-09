@@ -523,6 +523,7 @@ class ESMetricsServer(ServerBase):
                        ['es_cluster', 'es_nodes', 'es_indices'])
 
         while self.running:
+            self.heartbeat()
             start_time = time.time()
 
             # CLUSTER
