@@ -148,6 +148,7 @@ class ExpiryManager(ServerBase):
             except Exception as e:
                 self.log.exception(str(e))
 
+            self.heartbeat()
             time.sleep(self.config.core.expiry.sleep_time)
 
 

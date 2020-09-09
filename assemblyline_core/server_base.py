@@ -12,16 +12,14 @@ import io
 import os
 from typing import cast, Dict
 
-from assemblyline.remote.datatypes.hash import Hash
-
-from assemblyline.odm.models.service import Service
-
 from assemblyline.remote.datatypes import get_client
-
+from assemblyline.remote.datatypes.hash import Hash
+from assemblyline.odm.models.service import Service
 from assemblyline.common import forge, log as al_log
 
 
 SHUTDOWN_SECONDS_LIMIT = 10
+HEARTBEAT_TIME_LIMIT = 3
 
 
 class ServerBase(threading.Thread):
@@ -32,9 +30,10 @@ class ServerBase(threading.Thread):
     makes a blocking call that would normally stop this.
     """
     def __init__(self, component_name: str, logger: logging.Logger = None,
-                 shutdown_timeout: float = SHUTDOWN_SECONDS_LIMIT):
+                 shutdown_timeout: float = SHUTDOWN_SECONDS_LIMIT, config=None):
         super().__init__(name=component_name)
         al_log.init_logging(component_name)
+        self.config = config or forge.get_config()
 
         self.running = None
         self.log = logger or logging.getLogger(component_name)
@@ -44,6 +43,7 @@ class ServerBase(threading.Thread):
         self._old_sigint = None
         self._old_sigterm = None
         self._stopped = False
+        self._last_heartbeat = 0
 
     def __enter__(self):
         self.log.info(f"Initialized")
@@ -119,6 +119,22 @@ class ServerBase(threading.Thread):
     def try_run(self):
         pass
 
+    def heartbeat(self):
+        """Touch a special file on disk to indicate this service is responsive.
+
+        This should be called in the main processing loop of a component, calling it in
+        a background thread defeats the purpose.
+        """
+        if self.config.logging.heartbeat_file:
+            # Only do the heartbeat every few seconds at most. If a fast component is
+            # calling this for every message processed we don't want to slow it down
+            # by doing a "disk" system call every few milliseconds
+            now = time.time()
+            if now - self._last_heartbeat < HEARTBEAT_TIME_LIMIT:
+                return
+            self._last_heartbeat = now
+            with io.open(self.config.logging.heartbeat_file, 'ab'):
+                os.utime(self.config.logging.heartbeat_file, None)
 
 # This table in redis tells us about the current stage of operation a service is in.
 # This is complementary to the 'enabled' flag in the service spec.
@@ -149,9 +165,7 @@ class CoreBase(ServerBase):
     def __init__(self, component_name: str, logger: logging.Logger = None,
                  shutdown_timeout: float = None, config=None, datastore=None,
                  redis=None, redis_persist=None):
-        super().__init__(component_name=component_name, logger=logger, shutdown_timeout=shutdown_timeout)
-
-        self.config = config or forge.get_config()
+        super().__init__(component_name=component_name, logger=logger, shutdown_timeout=shutdown_timeout, config=config)
         self.datastore = datastore or forge.get_datastore(self.config)
 
         # Connect to all of our persistent redis structures
@@ -182,11 +196,3 @@ class CoreBase(ServerBase):
         #      enabled/disabled flag when doing development
         return self.service_info[service_name].enabled and self.get_service_stage(service_name) == ServiceStage.Running
 
-    def heartbeat(self):
-        """Touch a special file on disk to indicate this service is responsive.
-
-        This should be called in the main processing loop of a component,
-        """
-        if self.config.logging.heartbeat_file:
-            with io.open(self.config.logging.heartbeat_file, 'ab'):
-                os.utime(self.config.logging.heartbeat_file, None)

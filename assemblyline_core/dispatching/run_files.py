@@ -37,6 +37,7 @@ class FileDispatchServer(ServerBase):
 
         while self.running:
             try:
+                self.heartbeat()
                 self.dispatcher.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
                 self.dispatcher.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 

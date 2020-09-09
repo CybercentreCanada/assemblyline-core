@@ -16,7 +16,6 @@ MAX_RETRIES = 10
 class Alerter(ServerBase):
     def __init__(self):
         super().__init__('assemblyline.alerter')
-        self.config = forge.get_config()
         # Publish counters to the metrics sink.
         self.counter = MetricsFactory('alerter', Metrics)
         self.datastore = forge.get_datastore(self.config)
@@ -77,6 +76,7 @@ class Alerter(ServerBase):
 
     def try_run(self):
         while self.running:
+            self.heartbeat()
             self.run_once()
 
 

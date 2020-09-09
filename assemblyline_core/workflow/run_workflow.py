@@ -61,6 +61,7 @@ class WorkflowManager(ServerBase):
     def try_run(self):
         self.datastore.alert.commit()
         while self.running:
+            self.heartbeat()
             end_ts = self.get_last_reporting_ts(self.start_ts)
             if self.start_ts != end_ts:
                 # Start of transaction

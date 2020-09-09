@@ -98,6 +98,8 @@ class IngesterInternals(ServerBase):
 
     def try_run(self):
         while self.running:
+            self.heartbeat()
+
             time_mark = time.time()
             cpu_mark = time.process_time()
 

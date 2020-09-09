@@ -31,6 +31,7 @@ class Plumber(CoreBase):
                           for queue in self.redis.keys(service_queue_name('*'))}
 
         while self.running:
+            self.heartbeat()
             # Reset the status of the service queues
             service_queues = {service_name: None for service_name in service_queues}
 

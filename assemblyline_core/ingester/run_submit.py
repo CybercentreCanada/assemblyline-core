@@ -47,6 +47,7 @@ class IngesterSubmitter(ServerBase):
         while self.running:
             # noinspection PyBroadException
             try:
+                self.heartbeat()
                 ingester.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
                 ingester.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
