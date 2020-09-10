@@ -109,7 +109,6 @@ class StatisticsAggregator(ServerBase):
             self.apm_client.end_transaction('signature_statistics', 'success')
 
     def _aggregated_statistics(self):
-        self.heartbeat()
         self.log.info("Start statistic collection run")
         self._heuristics_stats()
         self._signature_stats()
@@ -190,7 +189,6 @@ class MetricsServer(ServerBase):
                     self.apm_client.end_transaction('process_message', 'success')
 
     def _create_aggregated_metrics(self):
-        self.heartbeat()
         self.log.info("Copying counters ...")
         # APM Transaction start
         if self.apm_client:
