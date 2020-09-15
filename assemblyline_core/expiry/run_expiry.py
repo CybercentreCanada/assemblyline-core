@@ -103,6 +103,9 @@ class ExpiryManager(ServerBase):
                 self.apm_client.end_transaction(collection.name, 'deleted')
 
     def run_archive_once(self):
+        if not self.config.datastore.ilm.enabled:
+            return
+
         now = now_as_iso()
         # Archive data
         for collection in self.archiveable_collections:
