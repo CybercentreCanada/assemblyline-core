@@ -462,10 +462,13 @@ class ServiceUpdater(CoreBase):
                 if (record and record.get('sha256', None) is not None) or not service.update_config:
                     self._service_stage_hash.set(service.name, ServiceStage.Running)
 
-        # Remove services we have locally, that have no registration any more
+        # Remove services we have locally or in redis that have been deleted from the database
         for stray_service in existing_services - set(discovered_services):
             self.log.info(f"Service updates disabled for {stray_service}")
             self.services.pop(stray_service)
+            self._service_stage_hash.pop(stray_service)
+            self.container_update.pop(stray_service)
+            self.latest_service_tags.pop(stray_service)
 
     def container_updates(self):
         """Go through the list of services and check what are the latest tags for it"""
