@@ -414,7 +414,9 @@ class ServiceUpdater(CoreBase):
     def sync_services(self):
         """Download the service list and make sure our settings are up to date"""
         self.scheduler.enter(SERVICE_SYNC_INTERVAL, 0, self.sync_services)
-        existing_services = set(self.services.keys())
+        existing_services = (set(self.services.keys()) |
+                             set(self.container_update.keys()) |
+                             set(self.latest_service_tags.keys()))
         discovered_services = []
 
         # Get all the service data
