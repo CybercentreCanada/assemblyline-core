@@ -130,6 +130,6 @@ stages:
         export VERSION=${TAG/stable}
         export VERSION=${VERSION/beta/b}
         until sudo env "PATH=$PATH" python -m pip download "assemblyline-core==$VERSION" --pre --no-deps &> /dev/null; do sleep 2; done
-        docker build --build-arg version=VERSION -t cccs/assemblyline-core:$TAG -t cccs/assemblyline-core:latest deployment
+        docker build --build-arg version=$VERSION -t cccs/assemblyline-core:$TAG -t cccs/assemblyline-core:latest deployment
         docker push cccs/assemblyline-core
       displayName: Deploy to Docker Hub
