@@ -6,6 +6,7 @@ import time
 
 from copy import deepcopy
 
+import certifi
 import requests
 import yaml
 
@@ -81,8 +82,18 @@ def url_update(test_func=test_file) -> None:
         username = source.get('username', None)
         password = source.get('password', None)
         auth = (username, password) if username and password else None
+        ca_cert = source.get('ca_cert', None)
+        ignore_ssl_errors = source.get('ssl_ignore_errors', False)
 
         headers = source.get('headers', None)
+
+        if ca_cert:
+            # Add certificate to requests
+            cafile = certifi.where()
+            with open(cafile, 'a') as ca_editor:
+                ca_editor.write(f"\n{ca_cert}")
+
+        session.verify = not ignore_ssl_errors
 
         try:
             # Check the response header for the last modified date
