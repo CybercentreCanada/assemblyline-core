@@ -47,6 +47,7 @@ from assemblyline_core.updater.helper import get_latest_tag_for_service
 SERVICE_SYNC_INTERVAL = 30  # How many seconds between checking for new services, or changes in service status
 UPDATE_CHECK_INTERVAL = 60  # How many seconds per check for outstanding updates
 CONTAINER_CHECK_INTERVAL = 60 * 5  # How many seconds to wait for checking for new service versions
+API_TIMEOUT = 90
 UPDATE_STAGES = [ServiceStage.Update, ServiceStage.Running]
 
 # Where to find the update directory inside this container.
@@ -225,7 +226,8 @@ class KubernetesUpdateInterface:
         use_pull_secret = False
         try:
             # Check if there is already a username/password defined for this job
-            current_pull_secret = self.api.read_namespaced_secret(pull_secret_name, self.namespace)
+            current_pull_secret = self.api.read_namespaced_secret(pull_secret_name, self.namespace,
+                                                                  _request_timeout=API_TIMEOUT)
         except ApiException as error:
             if error.status != 404:
                 raise
@@ -248,17 +250,21 @@ class KubernetesUpdateInterface:
 
             # Send it to the server
             if current_pull_secret:
-                self.api.replace_namespaced_secret(pull_secret_name, namespace=self.namespace, body=new_pull_secret)
+                self.api.replace_namespaced_secret(pull_secret_name, namespace=self.namespace,
+                                                   body=new_pull_secret, _request_timeout=API_TIMEOUT)
             else:
-                self.api.create_namespaced_secret(namespace=self.namespace, body=new_pull_secret)
+                self.api.create_namespaced_secret(namespace=self.namespace, body=new_pull_secret,
+                                                  _request_timeout=API_TIMEOUT)
         elif current_pull_secret:
             # If there is a password set in kubernetes, but not in our configuration clear it out
-            self.api.delete_namespaced_secret(pull_secret_name, self.namespace)
+            self.api.delete_namespaced_secret(pull_secret_name, self.namespace, _request_timeout=API_TIMEOUT)
 
         try:
-            self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace, propagation_policy='Background')
+            self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace,
+                                                 propagation_policy='Background', _request_timeout=API_TIMEOUT)
             while True:
-                self.batch_api.read_namespaced_job(namespace=self.namespace, name=name)
+                self.batch_api.read_namespaced_job(namespace=self.namespace, name=name,
+                                                   _request_timeout=API_TIMEOUT)
                 time.sleep(1)
         except ApiException:
             pass
@@ -352,21 +358,26 @@ class KubernetesUpdateInterface:
             )
         )
 
-        status = self.batch_api.create_namespaced_job(namespace=self.namespace, body=job).status
+        status = self.batch_api.create_namespaced_job(namespace=self.namespace, body=job,
+                                                      _request_timeout=API_TIMEOUT).status
 
         if blocking:
             while not (status.failed or status.succeeded):
                 time.sleep(3)
-                status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name).status
+                status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name,
+                                                            _request_timeout=API_TIMEOUT).status
 
-            self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace, propagation_policy='Background')
+            self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace,
+                                                 propagation_policy='Background', _request_timeout=API_TIMEOUT)
 
     def restart(self, service_name):
         try:
             name = (self.prefix + service_name.lower()).replace('_', '-')
-            scale = self.apps_api.read_namespaced_deployment_scale(name=name, namespace=self.namespace)
+            scale = self.apps_api.read_namespaced_deployment_scale(name=name, namespace=self.namespace,
+                                                                   _request_timeout=API_TIMEOUT)
             scale.spec.replicas = 0
-            self.apps_api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
+            self.apps_api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale,
+                                                              _request_timeout=API_TIMEOUT)
         except ApiException as error:
             # If the error is a 404, it means the resource we want to restart
             # doesn't exist, which means we don't need to restart it, so we can

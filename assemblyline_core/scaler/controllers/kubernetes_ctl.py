@@ -22,6 +22,7 @@ CONTAINER_UPDATE_DIRECTORY = '/mount/updates/'
 FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 # RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
 
+API_TIMEOUT = 90
 
 _exponents = {
     'Ki': 2**10,
@@ -119,7 +120,8 @@ class KubernetesController(ControllerInterface):
         # existing messages so we don't have a huge dump of duplicates on restart
         self.events_window = {}
         response = self.api.list_namespaced_event(namespace='al', pretty='false',
-                                                  field_selector='type=Warning', watch=False)
+                                                  field_selector='type=Warning', watch=False,
+                                                  _request_timeout=API_TIMEOUT)
         for event in response.items:
             # Keep the scaler related events in case it helps us know why scaler was restarting
             if 'scaler' not in event.involved_object.name:
@@ -156,7 +158,8 @@ class KubernetesController(ControllerInterface):
         max_cpu = parse_cpu('inf')
         used = 0
         found = False
-        for limit in self.api.list_namespaced_resource_quota(namespace=self.namespace).items:
+        resources = self.api.list_namespaced_resource_quota(namespace=self.namespace, _request_timeout=API_TIMEOUT)
+        for limit in resources.items:
             # Don't worry about specific quotas, just look for namespace wide ones
             if limit.spec.scope_selector or limit.spec.scopes:
                 continue
@@ -178,10 +181,10 @@ class KubernetesController(ControllerInterface):
 
         # Try to get the limit by looking at the host list
         cpu = 0
-        for node in self.api.list_node().items:
+        for node in self.api.list_node(_request_timeout=API_TIMEOUT).items:
             cpu += parse_cpu(node.status.allocatable['cpu'])
         max_cpu = cpu
-        for pod in self.api.list_pod_for_all_namespaces().items:
+        for pod in self.api.list_pod_for_all_namespaces(_request_timeout=API_TIMEOUT).items:
             for container in pod.spec.containers:
                 requests = container.resources.requests or {}
                 limits = container.resources.limits or {}
@@ -196,7 +199,8 @@ class KubernetesController(ControllerInterface):
         # that over any other options.
         used = 0
         found = False
-        for limit in self.api.list_namespaced_resource_quota(namespace=self.namespace).items:
+        resources = self.api.list_namespaced_resource_quota(namespace=self.namespace, _request_timeout=API_TIMEOUT)
+        for limit in resources.items:
             # Don't worry about specific quotas, just look for namespace wide ones
             if limit.spec.scope_selector or limit.spec.scopes:
                 continue
@@ -217,10 +221,10 @@ class KubernetesController(ControllerInterface):
 
         # Read the memory that is free from the node list
         memory = 0
-        for node in self.api.list_node().items:
+        for node in self.api.list_node(_request_timeout=API_TIMEOUT).items:
             memory += parse_memory(node.status.allocatable['memory'])
         max_memory = memory
-        for pod in self.api.list_pod_for_all_namespaces().items:
+        for pod in self.api.list_pod_for_all_namespaces(_request_timeout=API_TIMEOUT).items:
             for container in pod.spec.containers:
                 requests = container.resources.requests or {}
                 limits = container.resources.limits or {}
@@ -287,7 +291,8 @@ class KubernetesController(ControllerInterface):
         if not os.path.exists(os.path.join(FILE_UPDATE_DIRECTORY, service_name)):
             os.makedirs(os.path.join(FILE_UPDATE_DIRECTORY, service_name), 0x777)
 
-        for dep in self.apps_api.list_namespaced_deployment(namespace=self.namespace).items:
+        resources = self.apps_api.list_namespaced_deployment(namespace=self.namespace, _request_timeout=API_TIMEOUT)
+        for dep in resources.items:
             if dep.metadata.name == deployment_name:
                 replace = True
 
@@ -297,7 +302,8 @@ class KubernetesController(ControllerInterface):
         pull_secret_name = f'{deployment_name}-container-pull-secret'
         use_pull_secret = False
         try:
-            current_pull_secret = self.api.read_namespaced_secret(pull_secret_name, self.namespace)
+            current_pull_secret = self.api.read_namespaced_secret(pull_secret_name, self.namespace,
+                                                                  _request_timeout=API_TIMEOUT)
         except ApiException as error:
             if error.status != 404:
                 raise
@@ -320,11 +326,13 @@ class KubernetesController(ControllerInterface):
 
             # Send it to the server
             if current_pull_secret:
-                self.api.replace_namespaced_secret(pull_secret_name, namespace=self.namespace, body=new_pull_secret)
+                self.api.replace_namespaced_secret(pull_secret_name, namespace=self.namespace, body=new_pull_secret,
+                                                   _request_timeout=API_TIMEOUT)
             else:
-                self.api.create_namespaced_secret(namespace=self.namespace, body=new_pull_secret)
+                self.api.create_namespaced_secret(namespace=self.namespace, body=new_pull_secret,
+                                                  _request_timeout=API_TIMEOUT)
         elif current_pull_secret:
-            self.api.delete_namespaced_secret(pull_secret_name, self.namespace)
+            self.api.delete_namespaced_secret(pull_secret_name, self.namespace, _request_timeout=API_TIMEOUT)
 
         all_labels = dict(self._labels)
         all_labels['component'] = service_name
@@ -364,16 +372,19 @@ class KubernetesController(ControllerInterface):
 
         if replace:
             self.logger.info("Requesting kubernetes replace deployment info for: " + metadata.name)
-            self.apps_api.replace_namespaced_deployment(namespace=self.namespace, body=deployment, name=metadata.name)
+            self.apps_api.replace_namespaced_deployment(namespace=self.namespace, body=deployment,
+                                                        name=metadata.name, _request_timeout=API_TIMEOUT)
         else:
             self.logger.info("Requesting kubernetes create deployment info for: " + metadata.name)
-            self.apps_api.create_namespaced_deployment(namespace=self.namespace, body=deployment)
+            self.apps_api.create_namespaced_deployment(namespace=self.namespace, body=deployment,
+                                                       _request_timeout=API_TIMEOUT)
 
     def get_target(self, service_name: str) -> int:
         """Get the target for running instances of a service."""
         try:
             scale = self.apps_api.read_namespaced_deployment_scale(self._deployment_name(service_name),
-                                                                   namespace=self.namespace)
+                                                                   namespace=self.namespace,
+                                                                   _request_timeout=API_TIMEOUT)
             return int(scale.spec.replicas or 0)
         except ApiException as error:
             # If we get a 404 it means the resource doesn't exist, which we treat the same as
@@ -385,15 +396,19 @@ class KubernetesController(ControllerInterface):
     def set_target(self, service_name: str, target: int):
         """Set the target for running instances of a service."""
         name = self._deployment_name(service_name)
-        scale = self.apps_api.read_namespaced_deployment_scale(name=name, namespace=self.namespace)
+        scale = self.apps_api.read_namespaced_deployment_scale(name=name, namespace=self.namespace,
+                                                               _request_timeout=API_TIMEOUT)
         scale.spec.replicas = target
-        self.apps_api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale)
+        self.apps_api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale,
+                                                          _request_timeout=API_TIMEOUT)
 
     def stop_container(self, service_name, container_id):
-        pods = self.api.list_namespaced_pod(namespace=self.namespace, label_selector=f'component={service_name}')
+        pods = self.api.list_namespaced_pod(namespace=self.namespace, label_selector=f'component={service_name}',
+                                            _request_timeout=API_TIMEOUT)
         for pod in pods.items:
             if pod.metadata.name == container_id:
-                self.api.delete_namespaced_pod(name=container_id, namespace=self.namespace)
+                self.api.delete_namespaced_pod(name=container_id, namespace=self.namespace,
+                                               _request_timeout=API_TIMEOUT)
                 return
 
     def restart(self, service):
@@ -401,12 +416,14 @@ class KubernetesController(ControllerInterface):
                                 service.shutdown_seconds, self.get_target(service.name))
 
     def get_running_container_names(self):
-        pods = self.api.list_pod_for_all_namespaces(field_selector='status.phase==Running')
+        pods = self.api.list_pod_for_all_namespaces(field_selector='status.phase==Running',
+                                                    _request_timeout=API_TIMEOUT)
         return [pod.metadata.name for pod in pods.items]
 
     def new_events(self):
         response = self.api.list_namespaced_event(namespace='al', pretty='false',
-                                                  field_selector='type=Warning', watch=False)
+                                                  field_selector='type=Warning', watch=False,
+                                                  _request_timeout=API_TIMEOUT)
 
         # Pull out events that are new, or have occurred again since last reporting
         new = []
@@ -447,20 +464,24 @@ class KubernetesController(ControllerInterface):
         claim_spec = V1PersistentVolumeClaimSpec(storage_class_name=storage_class, resources=request)
         metadata = V1ObjectMeta(namespace=self.namespace, name=name)
         claim = V1PersistentVolumeClaim(metadata=metadata, spec=claim_spec)
-        self.api.create_namespaced_persistent_volume_claim(namespace=self.namespace, body=claim)
+        self.api.create_namespaced_persistent_volume_claim(namespace=self.namespace, body=claim,
+                                                           _request_timeout=API_TIMEOUT)
 
     def stop_containers(self, labels):
         label_selector = ','.join(f'{_n}={_v}' for _n, _v in labels.items())
-        deployments = self.apps_api.list_namespaced_deployment(namespace=self.namespace, label_selector=label_selector)
+        deployments = self.apps_api.list_namespaced_deployment(namespace=self.namespace, label_selector=label_selector,
+                                                               _request_timeout=API_TIMEOUT)
         for dep in deployments.items:
-            self.apps_api.delete_namespaced_deployment(name=dep.metadata.name, namespace=self.namespace)
+            self.apps_api.delete_namespaced_deployment(name=dep.metadata.name, namespace=self.namespace,
+                                                       _request_timeout=API_TIMEOUT)
 
     def prepare_network(self, service_name, internet):
         safe_name = service_name.lower().replace('_', '-')
 
         # Allow access to containers with dependency_for
         try:
-            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-to-dep')
+            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-to-dep',
+                                                          _request_timeout=API_TIMEOUT)
         except ApiException as error:
             if error.status != 404:
                 raise
@@ -481,10 +502,11 @@ class KubernetesController(ControllerInterface):
                     )]
                 )],
             )
-        ))
+        ), _request_timeout=API_TIMEOUT)
 
         try:
-            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-dep-from-{safe_name}')
+            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-dep-from-{safe_name}',
+                                                          _request_timeout=API_TIMEOUT)
         except ApiException as error:
             if error.status != 404:
                 raise
@@ -505,11 +527,12 @@ class KubernetesController(ControllerInterface):
                     )]
                 )],
             )
-        ))
+        ), _request_timeout=API_TIMEOUT)
 
         # Allow outgoing
         try:
-            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-outgoing')
+            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-outgoing',
+                                                          _request_timeout=API_TIMEOUT)
         except ApiException as error:
             if error.status != 404:
                 raise
@@ -524,4 +547,4 @@ class KubernetesController(ControllerInterface):
                     }),
                     egress=[V1NetworkPolicyEgressRule(to=[])],
                 )
-            ))
+            ), _request_timeout=API_TIMEOUT)
