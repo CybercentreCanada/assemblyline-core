@@ -405,6 +405,8 @@ class KubernetesController(ControllerInterface):
                                                                   _request_timeout=API_TIMEOUT)
                 return
             except client.ApiException as error:
+                # If the error is a conflict, it means multiple attempts to scale a deployment
+                # were made at the same time and conflicted, we can retry
                 if error.reason == 'Conflict':
                     self.logger.info(f"Conflict scaling {service_name} retrying.")
                     continue
