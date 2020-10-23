@@ -395,12 +395,20 @@ class KubernetesController(ControllerInterface):
 
     def set_target(self, service_name: str, target: int):
         """Set the target for running instances of a service."""
-        name = self._deployment_name(service_name)
-        scale = self.apps_api.read_namespaced_deployment_scale(name=name, namespace=self.namespace,
-                                                               _request_timeout=API_TIMEOUT)
-        scale.spec.replicas = target
-        self.apps_api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale,
-                                                          _request_timeout=API_TIMEOUT)
+        for _ in range(10):
+            try:
+                name = self._deployment_name(service_name)
+                scale = self.apps_api.read_namespaced_deployment_scale(name=name, namespace=self.namespace,
+                                                                       _request_timeout=API_TIMEOUT)
+                scale.spec.replicas = target
+                self.apps_api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale,
+                                                                  _request_timeout=API_TIMEOUT)
+                return
+            except client.ApiException as error:
+                if error.reason == 'Conflict':
+                    self.logger.info(f"Conflict scaling {service_name} retrying.")
+                    continue
+                raise
 
     def stop_container(self, service_name, container_id):
         pods = self.api.list_namespaced_pod(namespace=self.namespace, label_selector=f'component={service_name}',
