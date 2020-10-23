@@ -371,20 +371,26 @@ class KubernetesUpdateInterface:
                                                  propagation_policy='Background', _request_timeout=API_TIMEOUT)
 
     def restart(self, service_name):
-        try:
-            name = (self.prefix + service_name.lower()).replace('_', '-')
-            scale = self.apps_api.read_namespaced_deployment_scale(name=name, namespace=self.namespace,
-                                                                   _request_timeout=API_TIMEOUT)
-            scale.spec.replicas = 0
-            self.apps_api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale,
-                                                              _request_timeout=API_TIMEOUT)
-        except ApiException as error:
-            # If the error is a 404, it means the resource we want to restart
-            # doesn't exist, which means we don't need to restart it, so we can
-            # safely ignore this error
-            if error.status == 404:
+        for _ in range(10):
+            try:
+                name = (self.prefix + service_name.lower()).replace('_', '-')
+                scale = self.apps_api.read_namespaced_deployment_scale(name=name, namespace=self.namespace,
+                                                                       _request_timeout=API_TIMEOUT)
+                scale.spec.replicas = 0
+                self.apps_api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale,
+                                                                  _request_timeout=API_TIMEOUT)
                 return
-            raise
+            except ApiException as error:
+                # If the error is a 404, it means the resource we want to restart
+                # doesn't exist, which means we don't need to restart it, so we can
+                # safely ignore this error
+                if error.status == 404:
+                    return
+                # Conflict means two different servers were trying to replace the
+                # deployment at the same time, we should retry
+                if error.reason == 'Conflict':
+                    continue
+                raise
 
 
 class ServiceUpdater(CoreBase):
