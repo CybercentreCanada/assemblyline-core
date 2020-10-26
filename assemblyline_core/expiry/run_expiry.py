@@ -59,6 +59,12 @@ class ExpiryManager(ServerBase):
 
         # Expire data
         for collection in self.expirable_collections:
+            # Call heartbeat pre-dated by 5 minutes. If a collection takes more than
+            # 5 minutes to expire, this container could be seen as unhealthy. The down
+            # side is if it is stuck on something it will be more than 5 minutes before
+            # the container is restarted.
+            self.heartbeat(int(time.time() + 5 * 60))
+
             # Start of expiry transaction
             if self.apm_client:
                 self.apm_client.begin_transaction("Delete expired documents")
@@ -148,7 +154,7 @@ class ExpiryManager(ServerBase):
             except Exception as e:
                 self.log.exception(str(e))
 
-            time.sleep(self.config.core.expiry.sleep_time)
+            self.sleep_with_heartbeat(self.config.core.expiry.sleep_time)
 
 
 if __name__ == "__main__":
