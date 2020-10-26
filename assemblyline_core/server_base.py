@@ -136,6 +136,7 @@ class ServerBase(threading.Thread):
             with io.open(self.config.logging.heartbeat_file, 'ab'):
                 os.utime(self.config.logging.heartbeat_file, None)
 
+
 # This table in redis tells us about the current stage of operation a service is in.
 # This is complementary to the 'enabled' flag in the service spec.
 # If the service is marked as enabled=true, each component should take steps needed to move it to the 'Running' stage.
