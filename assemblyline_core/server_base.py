@@ -8,6 +8,8 @@ import threading
 import logging
 import signal
 import sys
+import io
+import os
 from typing import cast, Dict
 
 from assemblyline.remote.datatypes.hash import Hash
@@ -179,3 +181,12 @@ class CoreBase(ServerBase):
         # TODO should we add an option to just return off/running based on the service
         #      enabled/disabled flag when doing development
         return self.service_info[service_name].enabled and self.get_service_stage(service_name) == ServiceStage.Running
+
+    def heartbeat(self):
+        """Touch a special file on disk to indicate this service is responsive.
+
+        This should be called in the main processing loop of a component,
+        """
+        if self.config.logging.heartbeat_file:
+            with io.open(self.config.logging.heartbeat_file, 'ab'):
+                os.utime(self.config.logging.heartbeat_file, None)

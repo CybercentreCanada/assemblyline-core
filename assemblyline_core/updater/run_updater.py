@@ -48,6 +48,7 @@ SERVICE_SYNC_INTERVAL = 30  # How many seconds between checking for new services
 UPDATE_CHECK_INTERVAL = 60  # How many seconds per check for outstanding updates
 CONTAINER_CHECK_INTERVAL = 60 * 5  # How many seconds to wait for checking for new service versions
 API_TIMEOUT = 90
+HEARTBEAT_INTERVAL = 5
 UPDATE_STAGES = [ServiceStage.Update, ServiceStage.Running]
 
 # Where to find the update directory inside this container.
@@ -565,11 +566,22 @@ class ServiceUpdater(CoreBase):
         self.update_services()
         self.container_versions()
         self.container_updates()
+        self.heartbeat()
 
         # Run as long as we need to
         while self.running:
             delay = self.scheduler.run(False)
             time.sleep(min(delay, 0.1))
+
+    def heartbeat(self):
+        """Periodically touch a file on disk.
+
+        Since tasks are run serially, the delay between touches will be the maximum of
+        HEARTBEAT_INTERVAL and the longest running task.
+        """
+        if self.config.logging.heartbeat_file:
+            self.scheduler.enter(HEARTBEAT_INTERVAL, 0, self.heartbeat)
+            super().heartbeat()
 
     def update_services(self):
         """Check if we need to update any services.

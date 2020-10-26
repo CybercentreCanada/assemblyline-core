@@ -41,6 +41,7 @@ SCALE_INTERVAL = 5
 METRIC_SYNC_INTERVAL = 0.5
 SERVICE_STATUS_FLUSH = 5
 CONTAINER_EVENTS_LOG_INTERVAL = 2
+HEARTBEAT_INTERVAL = 5
 
 # How many times to let a service generate an error in this module before we disable it.
 # This is only for analysis services, core services we keep retrying forever
@@ -213,6 +214,7 @@ class ScalerServer(CoreBase):
         self.export_metrics()
         self.flush_service_status()
         self.log_container_events()
+        self.heartbeat()
 
         # Run as long as we need to
         while self.running:
@@ -224,6 +226,16 @@ class ScalerServer(CoreBase):
         super().stop()
         self.scheduler_stopped.wait(5)
         self.controller.stop()
+
+    def heartbeat(self):
+        """Periodically touch a file on disk.
+
+        Since tasks are run serially, the delay between touches will be the maximum of
+        HEARTBEAT_INTERVAL and the longest running task.
+        """
+        if self.config.logging.heartbeat_file:
+            self.scheduler.enter(HEARTBEAT_INTERVAL, 0, self.heartbeat)
+            super().heartbeat()
 
     def sync_services(self):
         self.scheduler.enter(SERVICE_SYNC_INTERVAL, 0, self.sync_services)
