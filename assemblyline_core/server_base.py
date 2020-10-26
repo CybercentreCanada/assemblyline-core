@@ -19,6 +19,8 @@ from assemblyline.common import forge, log as al_log
 
 
 SHUTDOWN_SECONDS_LIMIT = 10
+
+# Don't write to the heartbeat file if it hasn't been at least this many seconds since the last write.
 HEARTBEAT_TIME_LIMIT = 3
 
 
