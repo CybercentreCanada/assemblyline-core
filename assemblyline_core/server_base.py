@@ -121,12 +121,16 @@ class ServerBase(threading.Thread):
     def try_run(self):
         pass
 
-    def heartbeat(self):
+    def heartbeat(self, timestamp: int = None):
         """Touch a special file on disk to indicate this service is responsive.
 
         This should be called in the main processing loop of a component, calling it in
-        a background thread defeats the purpose.
+        a background thread defeats the purpose. Ideally it should be called at least a couple
+        times a minute.
         """
+        if timestamp is not None:
+            timestamp = (timestamp, timestamp)
+
         if self.config.logging.heartbeat_file:
             # Only do the heartbeat every few seconds at most. If a fast component is
             # calling this for every message processed we don't want to slow it down
@@ -136,7 +140,15 @@ class ServerBase(threading.Thread):
                 return
             self._last_heartbeat = now
             with io.open(self.config.logging.heartbeat_file, 'ab'):
-                os.utime(self.config.logging.heartbeat_file, None)
+                os.utime(self.config.logging.heartbeat_file, times=timestamp)
+
+    def sleep_with_heartbeat(self, duration):
+        """Sleep while calling heartbeat periodically."""
+        while duration > 0:
+            self.heartbeat()
+            sleep_time = min(duration, HEARTBEAT_TIME_LIMIT * 2)
+            time.sleep(sleep_time)
+            duration -= sleep_time
 
 
 # This table in redis tells us about the current stage of operation a service is in.
