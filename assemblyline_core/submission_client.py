@@ -201,9 +201,7 @@ class SubmissionClient:
             # eg. files that are packaged, and the contained file (not the package
             # that local_path points to) should be passed into the system.
             extracted_path, fileinfo, al_meta = decode_file(local_path, fileinfo)
-            al_meta['classification'] = Classification.max_classification(classification,
-                                                                          al_meta.get('classification', classification),
-                                                                          long_format=False)
+            al_meta['classification'] = al_meta.get('classification', classification)
 
             if extracted_path:
                 local_path = extracted_path
