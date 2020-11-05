@@ -27,6 +27,7 @@ from typing import Tuple, List
 from assemblyline.common import forge
 from assemblyline.common import identify
 from assemblyline.common.codec import decode_file
+from assemblyline.common.constants import get_temporary_submission_data_name
 from assemblyline.common.dict_utils import flatten
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.str_utils import safe_str
@@ -34,6 +35,7 @@ from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.messages.submission import Submission as SubmissionObject
 from assemblyline.odm.models.submission import Submission, File
 from assemblyline.filestore import CorruptedFileStoreException, FileStore
+from assemblyline.remote.datatypes.hash import ExpiringHash
 
 from assemblyline_core.dispatching.client import DispatchClient
 
@@ -142,6 +144,12 @@ class SubmissionClient:
                         if temporary_path:
                             if os.path.exists(temporary_path):
                                 os.unlink(temporary_path)
+
+            # Initialize the temporary data from the submission parameter
+            temp_hash_name = get_temporary_submission_data_name(submission_obj.sid, submission_obj.files[0].sha256)
+            temporary_submission_data = ExpiringHash(temp_hash_name, host=self.redis)
+            if len(submission_obj.params.initial_data) > 0:
+                temporary_submission_data.multi_set(submission_obj.params.initial_data)
 
             # Clearing runtime_excluded on initial submit or resubmit
             submission_obj.params.services.runtime_excluded = []
