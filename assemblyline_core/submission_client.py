@@ -18,7 +18,7 @@ client from copying the file again. Once the client has copied the file
 (if required) it then issues a final 'submit'.
 
 """
-
+import json
 import logging
 import tempfile
 import os
@@ -146,10 +146,14 @@ class SubmissionClient:
                                 os.unlink(temporary_path)
 
             # Initialize the temporary data from the submission parameter
-            temp_hash_name = get_temporary_submission_data_name(submission_obj.sid, submission_obj.files[0].sha256)
-            temporary_submission_data = ExpiringHash(temp_hash_name, host=self.redis)
             if len(submission_obj.params.initial_data) > 0:
-                temporary_submission_data.multi_set(submission_obj.params.initial_data)
+                try:
+                    temp_hash_name = get_temporary_submission_data_name(submission_obj.sid,
+                                                                        submission_obj.files[0].sha256)
+                    temporary_submission_data = ExpiringHash(temp_hash_name, host=self.redis)
+                    temporary_submission_data.multi_set(json.loads(submission_obj.params.initial_data))
+                except ValueError as err:
+                    self.log.warning(f"[{submission_obj.sid}] could not process initialization data: {err}")
 
             # Clearing runtime_excluded on initial submit or resubmit
             submission_obj.params.services.runtime_excluded = []
