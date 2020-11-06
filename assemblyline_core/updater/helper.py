@@ -96,10 +96,12 @@ def get_latest_tag_for_service(service_config, system_config, logger):
         logger.warning(f"Cannot fetch latest tag for service {service_name} - {image}"
                        f" => [server: {server}, repo_name: {image_name}, channel: {update_channel}]")
     else:
-        tag_name = f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.0{update_channel}0"
+        tag_name = f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.0.{update_channel}0"
         for t in tags:
             if update_channel in t:
-                if parse(t) > parse(tag_name):
+                t_version = parse(t.replace(update_channel, ""))
+                if t_version.major == FRAMEWORK_VERSION and t_version.minor == SYSTEM_VERSION and \
+                        t_version > parse(tag_name.replace(update_channel, "")):
                     tag_name = t
 
         logger.info(f"Latest {service_name} tag on {update_channel.upper()} channel is: {tag_name}")
