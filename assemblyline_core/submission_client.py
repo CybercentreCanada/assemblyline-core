@@ -146,7 +146,7 @@ class SubmissionClient:
                                 os.unlink(temporary_path)
 
             # Initialize the temporary data from the submission parameter
-            if len(submission_obj.params.initial_data) > 0:
+            if submission_obj.params.initial_data:
                 try:
                     temp_hash_name = get_temporary_submission_data_name(submission_obj.sid,
                                                                         submission_obj.files[0].sha256)
