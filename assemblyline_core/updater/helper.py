@@ -1,4 +1,3 @@
-
 import requests
 import socket
 import string
@@ -6,6 +5,7 @@ import string
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
 from collections import defaultdict
 from base64 import b64encode
+from packaging.version import parse
 
 DEFAULT_DOCKER_REGISTRY = "registry.hub.docker.com"
 
@@ -31,7 +31,7 @@ def _get_proprietary_registry_tags(server, image_name, auth):
 def _get_dockerhub_tags(image_name, update_channel):
     # Find latest tag for each types
     url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/repositories/{image_name}/tags" \
-        f"?page_size=5&page=1&name={update_channel}"
+          f"?page_size=5&page=1&name={update_channel}"
 
     # Get tag list
     resp = requests.get(url)
@@ -96,14 +96,12 @@ def get_latest_tag_for_service(service_config, system_config, logger):
         logger.warning(f"Cannot fetch latest tag for service {service_name} - {image}"
                        f" => [server: {server}, repo_name: {image_name}, channel: {update_channel}]")
     else:
-        build_no = 0
+        tag_name = f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.0.{update_channel}0"
         for t in tags:
             if update_channel in t:
-                parts = t.split(update_channel)
-                if len(parts) == 2 and \
-                        parts[0].startswith(f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}") and \
-                        int(parts[1]) >= build_no:
-                    build_no = int(parts[1])
+                t_version = parse(t.replace(update_channel, ""))
+                if t_version.major == FRAMEWORK_VERSION and t_version.minor == SYSTEM_VERSION and \
+                        t_version > parse(tag_name.replace(update_channel, "")):
                     tag_name = t
 
         logger.info(f"Latest {service_name} tag on {update_channel.upper()} channel is: {tag_name}")
