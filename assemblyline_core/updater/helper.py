@@ -99,7 +99,7 @@ def get_latest_tag_for_service(service_config, system_config, logger):
     else:
         tag_name = f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.0.{update_channel}0"
         for t in tags:
-            if re.search(f"\d+[.]\d+[.]\d+[.]({update_channel})\d+", t):
+            if re.match(f"({FRAMEWORK_VERSION})[.]({SYSTEM_VERSION})[.]\d+[.]({update_channel})\d+", t):
                 t_version = parse(t.replace(update_channel, ""))
                 if t_version.major == FRAMEWORK_VERSION and t_version.minor == SYSTEM_VERSION and \
                         t_version > parse(tag_name.replace(update_channel, "")):
