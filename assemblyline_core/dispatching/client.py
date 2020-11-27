@@ -174,7 +174,7 @@ class DispatchClient:
 
             process_table = DispatchHash(task.sid, self.redis)
 
-            abandoned = process_table.dispatch_time(file_hash=task.fileinfo.sha256, service=task.service_name) == 0
+            abandoned = process_table.dispatch_key(file_hash=task.fileinfo.sha256, service=task.service_name) is None
             finished = process_table.finished(file_hash=task.fileinfo.sha256, service=task.service_name) is not None
 
             # A service might be re-dispatched as it finishes, when that is the case it can be marked as

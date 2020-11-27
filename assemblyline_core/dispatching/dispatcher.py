@@ -565,6 +565,12 @@ class Dispatcher:
             self.log.info(f"[{task.sid}] File {file_hash} sent to services : {', '.join(list(outstanding.keys()))}")
 
             for service_name, service in outstanding.items():
+                queue = get_service_queue(service_name, self.redis)
+
+                # Check if this task is already sitting in queue
+                dispatch_key = dispatch_table.dispatch_key(file_hash, service_name)
+                if dispatch_key is not None and queue.rank(dispatch_key) is not None:
+                    continue
 
                 # Find the actual file name from the list of files in submission
                 filename = None
@@ -593,9 +599,8 @@ class Dispatcher:
                     deep_scan=submission.params.deep_scan,
                     priority=submission.params.priority,
                 ))
-                dispatch_table.dispatch(file_hash, service_name)
-                queue = get_service_queue(service_name, self.redis)
-                queue.push(service_task.priority, service_task.as_primitives())
+                queue_key = queue.push(service_task.priority, service_task.as_primitives())
+                dispatch_table.dispatch(file_hash, service_name, queue_key)
 
         else:
             # There are no outstanding services, this file is done

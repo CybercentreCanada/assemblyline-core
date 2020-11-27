@@ -13,7 +13,7 @@ from assemblyline.remote.datatypes import retry_call
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline.remote.datatypes.set import ExpiringSet
 
-dispatch_tail = '-dispatch'
+dispatch_tail = '-dispatch-keys'
 finished_tail = '-finished'
 
 finish_script = f"""
@@ -115,9 +115,9 @@ class DispatchHash:
         """
         return self._other_errors.add(error_key) > 0
 
-    def dispatch(self, file_hash: str, service: str):
+    def dispatch(self, file_hash: str, service: str, dispatched_key: bytes):
         """Mark that a service has been dispatched for the given sha."""
-        if retry_call(self.client.hset, self._dispatch_key, f"{file_hash}-{service}", time.time()):
+        if retry_call(self.client.hset, self._dispatch_key, f"{file_hash}-{service}", dispatched_key):
             self._outstanding_service_count.increment(file_hash, 1)
 
     def drop_dispatch(self, file_hash: str, service: str):
@@ -129,12 +129,9 @@ class DispatchHash:
         """How many tasks have been dispatched for this submission."""
         return retry_call(self.client.hlen, self._dispatch_key)
 
-    def dispatch_time(self, file_hash: str, service: str) -> float:
-        """When was dispatch called for this sha/service pair."""
-        result = retry_call(self.client.hget, self._dispatch_key, f"{file_hash}-{service}")
-        if result is None:
-            return 0
-        return float(result)
+    def dispatch_key(self, file_hash: str, service: str) -> bytes:
+        """What key was used to enqueue the task for this sha/service pair."""
+        return retry_call(self.client.hget, self._dispatch_key, f"{file_hash}-{service}")
 
     def all_dispatches(self) -> Dict[str, Dict[str, float]]:
         """Load the entire table of things that should currently be running."""

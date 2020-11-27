@@ -84,8 +84,8 @@ def test_dispatch_file(clean_redis):
     })
     disp.dispatch_file(file_task)
 
-    assert dh.dispatch_time(file_hash, 'extract') > 0
-    assert dh.dispatch_time(file_hash, 'wrench') > 0
+    assert dh.dispatch_key(file_hash, 'extract') is not None
+    assert dh.dispatch_key(file_hash, 'wrench') is not None
     assert service_queue('extract').length() == 1
     assert service_queue('wrench').length() == 1
 
@@ -93,10 +93,10 @@ def test_dispatch_file(clean_redis):
     print('==== second dispatch')
     disp.dispatch_file(file_task)
 
-    assert dh.dispatch_time(file_hash, 'extract') > 0
-    assert dh.dispatch_time(file_hash, 'wrench') > 0
-    assert service_queue('extract').length() == 2
-    assert service_queue('wrench').length() == 2
+    assert dh.dispatch_key(file_hash, 'extract') is not None
+    assert dh.dispatch_key(file_hash, 'wrench') is not None
+    assert service_queue('extract').length() == 1  # the queue doesn't pile up
+    assert service_queue('wrench').length() == 1
     # assert len(mq) == 4
 
     # Push back the timestamp in the dispatch hash to simulate a timeout,
@@ -107,8 +107,8 @@ def test_dispatch_file(clean_redis):
 
     disp.dispatch_file(file_task)
 
-    assert dh.dispatch_time(file_hash, 'extract') > 0
-    assert dh.dispatch_time(file_hash, 'wrench') > 0
+    assert dh.dispatch_key(file_hash, 'extract') is not None
+    assert dh.dispatch_key(file_hash, 'wrench') is not None
     assert service_queue('extract').length() == 1
     # assert len(mq) == 1
 
