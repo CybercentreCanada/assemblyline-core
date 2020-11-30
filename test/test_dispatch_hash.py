@@ -19,7 +19,9 @@ def test_single(clean_redis):
         assert not disp.all_finished()
 
         # If we call dispatch, the key should be set
-        disp.dispatch(file_hash, service, b'abc123')
+        disp.dispatch(file_hash, service)
+        assert disp.dispatch_key(file_hash, service) is not None
+        disp.set_dispatch_key(file_hash, service, b'abc123')
         assert disp.dispatch_key(file_hash, service) == b'abc123'
         assert not disp.finished(file_hash, service)
         assert disp.dispatch_count() == 1
@@ -33,8 +35,9 @@ def test_single(clean_redis):
         assert not disp.all_finished()
 
         # Try dispatching again
-        now = time.time()
-        disp.dispatch(file_hash, service, b'abc123')
+        disp.dispatch(file_hash, service)
+        assert disp.dispatch_key(file_hash, service) is not None
+        disp.set_dispatch_key(file_hash, service, b'abc123')
         assert disp.dispatch_key(file_hash, service) == b'abc123'
         assert not disp.finished(file_hash, service)
         assert disp.dispatch_count() == 1

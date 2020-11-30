@@ -34,6 +34,13 @@ end
 return {{redis.call('hlen', sid .. '{dispatch_tail}'), 1}}
 """
 
+# Write to a hash, but only if the field already exists
+_write_field = """
+local exists = redis.call('hexists', KEYS[1], ARGV[1])
+if exists then redis.call('hset', KEYS[1], ARGV[1], ARGV[2]) end
+return exists
+"""
+
 
 class DispatchRow(collections.namedtuple('DispatchRow', ['bucket', 'key', 'score', 'drop', 'classification'])):
     @property
@@ -54,6 +61,7 @@ class DispatchHash:
         self._dispatch_key = f'{sid}{dispatch_tail}'
         self._finish_key = f'{sid}{finished_tail}'
         self._finish = self.client.register_script(finish_script)
+        self._write_field = self.client.register_script(_write_field)
 
         # cache the schedules calculated for the dispatcher, used to prevent rebuilding the
         # schedule repeatedly, and for telling the UI what services are pending
@@ -115,10 +123,13 @@ class DispatchHash:
         """
         return self._other_errors.add(error_key) > 0
 
-    def dispatch(self, file_hash: str, service: str, dispatched_key: bytes):
+    def dispatch(self, file_hash: str, service: str):
         """Mark that a service has been dispatched for the given sha."""
-        if retry_call(self.client.hset, self._dispatch_key, f"{file_hash}-{service}", dispatched_key):
+        if retry_call(self.client.hset, self._dispatch_key, f"{file_hash}-{service}", b"true"):
             self._outstanding_service_count.increment(file_hash, 1)
+
+    def set_dispatch_key(self, file_hash: str, service: str, dispatched_key: bytes):
+        retry_call(self._write_field, keys=[self._dispatch_key], args=[f"{file_hash}-{service}", dispatched_key])
 
     def drop_dispatch(self, file_hash: str, service: str):
         """If a dispatch has been found to be un-needed remove the counters."""

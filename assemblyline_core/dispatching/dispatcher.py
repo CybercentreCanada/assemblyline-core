@@ -599,8 +599,9 @@ class Dispatcher:
                     deep_scan=submission.params.deep_scan,
                     priority=submission.params.priority,
                 ))
+                dispatch_table.dispatch(file_hash, service_name)
                 queue_key = queue.push(service_task.priority, service_task.as_primitives())
-                dispatch_table.dispatch(file_hash, service_name, queue_key)
+                dispatch_table.set_dispatch_key(file_hash, service_name, queue_key)
 
         else:
             # There are no outstanding services, this file is done

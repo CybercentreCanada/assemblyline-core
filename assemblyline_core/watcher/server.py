@@ -113,8 +113,9 @@ class WatcherServer(CoreBase):
         # Mark the previous attempt as invalid and redispatch it
         dispatch_table = DispatchHash(task.sid, self.redis)
         dispatch_table.fail_recoverable(task.fileinfo.sha256, task.service_name)
+        dispatch_table.dispatch(task.fileinfo.sha256, task.service_name)
         key = get_service_queue(task.service_name, self.redis).push(task.priority, task.as_primitives())
-        dispatch_table.dispatch(task.fileinfo.sha256, task.service_name, key)
+        dispatch_table.set_dispatch_key(task.fileinfo.sha256, task.service_name, key)
 
         # We push the task of killing the container off on the scaler, which already has root access
         # the scaler can also double check that the service name and container id match, to be sure

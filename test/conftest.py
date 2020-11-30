@@ -30,7 +30,9 @@ pytest.skip = skip_or_fail
 
 @pytest.fixture(scope='session')
 def config():
-    return forge.get_config()
+    config = forge.get_config()
+    config.logging.log_as_json = False
+    return config
 
 
 @pytest.fixture(scope='module')
