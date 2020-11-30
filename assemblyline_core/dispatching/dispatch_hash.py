@@ -129,6 +129,7 @@ class DispatchHash:
             self._outstanding_service_count.increment(file_hash, 1)
 
     def set_dispatch_key(self, file_hash: str, service: str, dispatched_key: bytes):
+        """After a job has been pushed to a dispatch queue, the key used in the queue is saved with this method."""
         retry_call(self._write_field, keys=[self._dispatch_key], args=[f"{file_hash}-{service}", dispatched_key])
 
     def drop_dispatch(self, file_hash: str, service: str):
