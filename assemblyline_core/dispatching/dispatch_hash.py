@@ -13,7 +13,7 @@ from assemblyline.remote.datatypes import retry_call
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline.remote.datatypes.set import ExpiringSet
 
-dispatch_tail = '-dispatch'
+dispatch_tail = '-dispatch-keys'
 finished_tail = '-finished'
 
 finish_script = f"""
@@ -32,6 +32,13 @@ if redis.call('hdel', sid .. '{dispatch_tail}', key) then
     return {{redis.call('hincrby', 'dispatch-hash-files-' .. sid, file_hash, -1), 0}}
 end
 return {{redis.call('hlen', sid .. '{dispatch_tail}'), 1}}
+"""
+
+# Write to a hash, but only if the field already exists
+_write_field = """
+local exists = redis.call('hexists', KEYS[1], ARGV[1])
+if exists then redis.call('hset', KEYS[1], ARGV[1], ARGV[2]) end
+return exists
 """
 
 
@@ -54,6 +61,7 @@ class DispatchHash:
         self._dispatch_key = f'{sid}{dispatch_tail}'
         self._finish_key = f'{sid}{finished_tail}'
         self._finish = self.client.register_script(finish_script)
+        self._write_field = self.client.register_script(_write_field)
 
         # cache the schedules calculated for the dispatcher, used to prevent rebuilding the
         # schedule repeatedly, and for telling the UI what services are pending
@@ -117,8 +125,12 @@ class DispatchHash:
 
     def dispatch(self, file_hash: str, service: str):
         """Mark that a service has been dispatched for the given sha."""
-        if retry_call(self.client.hset, self._dispatch_key, f"{file_hash}-{service}", time.time()):
+        if retry_call(self.client.hset, self._dispatch_key, f"{file_hash}-{service}", b"true"):
             self._outstanding_service_count.increment(file_hash, 1)
+
+    def set_dispatch_key(self, file_hash: str, service: str, dispatched_key: bytes):
+        """After a job has been pushed to a dispatch queue, the key used in the queue is saved with this method."""
+        retry_call(self._write_field, keys=[self._dispatch_key], args=[f"{file_hash}-{service}", dispatched_key])
 
     def drop_dispatch(self, file_hash: str, service: str):
         """If a dispatch has been found to be un-needed remove the counters."""
@@ -129,12 +141,9 @@ class DispatchHash:
         """How many tasks have been dispatched for this submission."""
         return retry_call(self.client.hlen, self._dispatch_key)
 
-    def dispatch_time(self, file_hash: str, service: str) -> float:
-        """When was dispatch called for this sha/service pair."""
-        result = retry_call(self.client.hget, self._dispatch_key, f"{file_hash}-{service}")
-        if result is None:
-            return 0
-        return float(result)
+    def dispatch_key(self, file_hash: str, service: str) -> bytes:
+        """What key was used to enqueue the task for this sha/service pair."""
+        return retry_call(self.client.hget, self._dispatch_key, f"{file_hash}-{service}")
 
     def all_dispatches(self) -> Dict[str, Dict[str, float]]:
         """Load the entire table of things that should currently be running."""

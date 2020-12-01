@@ -73,7 +73,7 @@ class MockService(ServerBase):
 
     def try_run(self):
         while self.running:
-            task = self.dispatch_client.request_work('worker', self.service_name, '0', timeout=1)
+            task = self.dispatch_client.request_work('worker', self.service_name, '0', timeout=3)
             if not task:
                 continue
             print(self.service_name, 'has received a job', task.sid)
@@ -270,7 +270,6 @@ def test_deduplication(core):
 
     notification_queue = NamedQueue('nq-output-queue-one', core.redis)
     first_task = notification_queue.pop(timeout=5)
-    second_task = notification_queue.pop(timeout=5)
 
     # One of the submission will get processed fully
     assert first_task is not None
@@ -283,6 +282,7 @@ def test_deduplication(core):
 
     # The other will get processed as a duplicate
     # (Which one is the 'real' one and which is the duplicate isn't important for our purposes)
+    second_task = notification_queue.pop(timeout=5)
     second_task = IngestTask(second_task)
     assert second_task.submission.sid == first_task.submission.sid
 
