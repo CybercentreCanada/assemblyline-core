@@ -129,13 +129,23 @@ stages:
       inputs:
         command: login
         containerRegistry: dockerhub
+    - task: Docker@2
+      displayName: Login to github packages
+      inputs:
+        command: login
+        containerRegistry: github-packages-sa
     - script: |
         set -xv  # Echo commands before they are run
         export TAG=${BUILD_SOURCEBRANCH#"refs/tags/v"}
         if [[ "$TAG" == *stable* ]]; then export BUILD_TYPE=stable; else export BUILD_TYPE=latest; fi
         export VERSION=${TAG/stable}
         export VERSION=${VERSION/beta/b}
+        export SERIES="`expr $TAG : '\([0-9]\+\.[0-9]\+\.\)'`${BUILD_TYPE}"
         until sudo env "PATH=$PATH" python -m pip download "assemblyline-core==$VERSION" --pre --no-deps &> /dev/null; do sleep 2; done
-        docker build --build-arg version=$VERSION --build-arg branch=$BUILD_TYPE -t cccs/assemblyline-core:$TAG -t cccs/assemblyline-core:$BUILD_TYPE deployment
-        docker push cccs/assemblyline-core
+
+        for IMAGE in "cccs/assemblyline-core" "docker.pkg.github.com/cybercentrecanada/assemblyline/assemblyline-core"
+        do
+          docker build --build-arg version=$VERSION --build-arg branch=$BUILD_TYPE -t $IMAGE:$TAG -t $IMAGE:$BUILD_TYPE -t $IMAGE:$SERIES deployment
+          docker push $IMAGE
+        done
       displayName: Deploy to Docker Hub
