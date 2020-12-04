@@ -145,17 +145,17 @@ class DispatchHash:
         """What key was used to enqueue the task for this sha/service pair."""
         return retry_call(self.client.hget, self._dispatch_key, f"{file_hash}-{service}")
 
-    def all_dispatches(self) -> Dict[str, Dict[str, float]]:
+    def all_dispatches(self) -> Dict[str, Dict[str, bytes]]:
         """Load the entire table of things that should currently be running."""
         rows = retry_call(self.client.hgetall, self._dispatch_key)
         output = {}
-        for key, timestamp in rows.items():
+        for key, key in rows.items():
             file_hash, service = key.split(b'-', maxsplit=1)
             file_hash = file_hash.decode()
             service = service.decode()
             if file_hash not in output:
                 output[file_hash] = {}
-            output[file_hash][service] = float(timestamp)
+            output[file_hash][service] = key
         return output
 
     def fail_recoverable(self, file_hash: str, service: str, error_key: str = None):
