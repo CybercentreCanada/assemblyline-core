@@ -326,7 +326,7 @@ class Dispatcher:
         # Track information about the results as we hit them
         file_scores: Dict[str, int] = {}
 
-        # # Load the current state of the dispatch table in one go rather than one at a time in the loop
+        # Load the current state of the dispatch table in one go rather than one at a time in the loop
         prior_dispatches = dispatch_table.all_dispatches()
 
         # found should be added to the unchecked files if they haven't been encountered already
@@ -334,7 +334,7 @@ class Dispatcher:
             sha = file_task.file_info.sha256
             schedule = self.build_schedule(dispatch_table, submission, sha, file_task.file_info.type)
 
-            while schedule:
+            while schedule and sha not in pending_files:
                 stage = schedule.pop(0)
                 for service_name in stage:
                     # Only active services should be in this dict, so if a service that was placed in the
@@ -343,11 +343,11 @@ class Dispatcher:
                     if not service:
                         continue
 
-                    # If the service is still marked as 'in progress'
-                    runtime = time.time() - prior_dispatches.get(sha, {}).get(service_name, 0)
-                    if runtime < service.timeout:
+                    # If the service is still queued or in progress this key will still be set
+                    queue_key = prior_dispatches.get(sha, {}).get(service_name, None)
+                    if queue_key is not None:
                         pending_files[sha] = file_task
-                        continue
+                        break
 
                     # It hasn't started, has timed out, or is finished, see if we have a result
                     result_row = dispatch_table.finished(sha, service_name)
@@ -355,7 +355,7 @@ class Dispatcher:
                     # No result found, mark the file as incomplete
                     if not result_row:
                         pending_files[sha] = file_task
-                        continue
+                        break
 
                     if not submission.params.ignore_filtering and result_row.drop:
                         schedule.clear()
