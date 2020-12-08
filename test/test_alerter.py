@@ -15,7 +15,6 @@ from assemblyline.odm.randomizer import random_model_obj, get_random_tags
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
-
 NUM_SUBMISSIONS = 2
 all_submissions = []
 
@@ -149,3 +148,4 @@ def test_update_single_alert(config, datastore):
     assert updated_alert is not None
 
     assert updated_alert != original_alert
+    assert updated_alert['ts'] == original_alert['ts']

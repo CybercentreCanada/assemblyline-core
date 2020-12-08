@@ -194,6 +194,9 @@ def perform_alert_update(datastore, logger, alert):
         if old_alert is None:
             raise KeyError(f"{alert_id} is missing from the alert collection.")
 
+        # Ensure alert keeps original timestamp
+        alert['ts'] = old_alert['ts']
+
         # Merge fields...
         merged = {
             x: list(set(old_alert.get('al', {}).get(x, [])).union(set(alert['al'].get(x, [])))) for x in AL_FIELDS
