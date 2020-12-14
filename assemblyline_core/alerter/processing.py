@@ -194,9 +194,6 @@ def perform_alert_update(datastore, logger, alert):
         if old_alert is None:
             raise KeyError(f"{alert_id} is missing from the alert collection.")
 
-        # Ensure alert keeps original timestamp
-        alert['ts'] = old_alert['ts']
-
         # Merge fields...
         merged = {
             x: list(set(old_alert.get('al', {}).get(x, [])).union(set(alert['al'].get(x, [])))) for x in AL_FIELDS
@@ -342,4 +339,12 @@ def process_alert_message(counter, datastore, logger, alert_data):
     # Update alert with computed values
     alert = recursive_update(alert, alert_update_p2)
 
-    return save_alert(datastore, counter, logger, alert, alert_data['submission']['params']['psid'])
+    # Update alert with parent values of constant fields
+    psid = alert_data['submission']['params']['psid']
+    if psid and datastore.alert.search(f"sid:{psid}", rows=1)['items']:
+        parent_alert = datastore.alert.get(datastore.alert.search(f"sid:{psid}", rows=1)['items'][0]['alert_id'],
+                                           as_obj=False)
+        for x in config.core.alerter.constant_alert_fields:
+            alert[x] = parent_alert[x]
+
+    return save_alert(datastore, counter, logger, alert, psid)

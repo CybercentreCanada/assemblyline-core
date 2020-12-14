@@ -148,4 +148,4 @@ def test_update_single_alert(config, datastore):
     assert updated_alert is not None
 
     assert updated_alert != original_alert
-    assert updated_alert['ts'] == original_alert['ts']
+    assert all([original_alert[x] == updated_alert[x] for x in config.core.alerter.constant_alert_fields])
