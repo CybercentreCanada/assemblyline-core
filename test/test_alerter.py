@@ -137,6 +137,7 @@ def test_update_single_alert(config, datastore):
     child_ingest_msg.submission.params = child_submission.params
     child_ingest_msg.submission.files = child_submission.files
     child_ingest_msg.submission.time = ingest_msg.submission.time
+    child_ingest_msg.ingest_id = ingest_msg.ingest_id
 
     alert_queue.push(child_ingest_msg.as_primitives())
     alert_type = alerter.run_once()
@@ -148,4 +149,3 @@ def test_update_single_alert(config, datastore):
     assert updated_alert is not None
 
     assert updated_alert != original_alert
-    assert updated_alert['ts'] == original_alert['ts']

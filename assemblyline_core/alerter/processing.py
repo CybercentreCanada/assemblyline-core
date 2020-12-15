@@ -126,12 +126,12 @@ def get_summary(datastore, srecord, user_classification):
     return max_classification, summary, submission_summary['filtered']
 
 
-def generate_alert_id(alert_data):
-    parts = [
-        alert_data['submission']['params']['psid'] or alert_data['submission']['sid'],
-        alert_data['submission']['time']
-    ]
-    return hashlib.md5("-".join(parts).encode("utf-8")).hexdigest()
+def generate_alert_id(logger, alert_data):
+    if alert_data['ingest_id']:
+        return alert_data['ingest_id']
+    sid = alert_data['submission']['params']['psid'] or alert_data['submission']['sid']
+    logger.info(f"ingest_id not found for sid={sid}")
+    return sid
 
 
 # noinspection PyBroadException
@@ -315,7 +315,7 @@ def process_alert_message(counter, datastore, logger, alert_data):
         'al': {
             'score': alert_data['score']
         },
-        'alert_id': generate_alert_id(alert_data),
+        'alert_id': generate_alert_id(logger, alert_data),
         'archive_ts': now_as_iso(config.datastore.ilm.days_until_archive * 24 * 60 * 60),
         'metadata': {safe_str(key): value for key, value in alert_data['submission']['metadata'].items()},
         'sid': alert_data['submission']['sid'],
