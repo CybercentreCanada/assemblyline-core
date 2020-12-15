@@ -225,6 +225,7 @@ class ScalerServer(CoreBase):
     def log_crashes(self, fn):
         @functools.wraps(fn)
         def with_logs(*args, **kwargs):
+            # noinspection PyBroadException
             try:
                 fn(*args, **kwargs)
             except ServiceControlError as error:
@@ -245,13 +246,13 @@ class ScalerServer(CoreBase):
 
     def try_run(self):
         expected_threads = {
-            'Log Container Events': self.log_crashes(self.log_container_events),  #
-            'Process Timeouts': self.log_crashes(self.process_timeouts),  #
-            'Flush Service Status': self.log_crashes(self.flush_service_status),  #
-            'Service Configuration Sync': self.log_crashes(self.sync_services),  #
-            'Service Adjuster': self.log_crashes(self.update_scaling),  #
-            'Import Metrics': self.log_crashes(self.sync_metrics),  #
-            'Export Metrics': self.log_crashes(self.export_metrics),  #
+            'Log Container Events': self.log_crashes(self.log_container_events),
+            'Process Timeouts': self.log_crashes(self.process_timeouts),
+            'Flush Service Status': self.log_crashes(self.flush_service_status),
+            'Service Configuration Sync': self.log_crashes(self.sync_services),
+            'Service Adjuster': self.log_crashes(self.update_scaling),
+            'Import Metrics': self.log_crashes(self.sync_metrics),
+            'Export Metrics': self.log_crashes(self.export_metrics),
         }
         threads = {}
 
@@ -355,7 +356,8 @@ class ScalerServer(CoreBase):
                                     max_instances=service.licence_count,
                                     container_config=docker_config,
                                     queue=get_service_queue(name, self.redis),
-                                    shutdown_seconds=service.timeout + 30,  # Give service an extra 30 seconds to upload results
+                                    # Give service an extra 30 seconds to upload results
+                                    shutdown_seconds=service.timeout + 30,
                                 ))
 
                             # Update RAM, CPU, licence requirements for running services
@@ -531,7 +533,8 @@ class ScalerServer(CoreBase):
                         )
 
                     # Check if we expect no messages, if so pull the queue length ourselves since there is no heartbeat
-                    if self.controller.get_target(profile_name) == 0 and profile.desired_instances == 0 and profile.queue:
+                    if self.controller.get_target(profile_name) == 0 and \
+                            profile.desired_instances == 0 and profile.queue:
                         queue_length = profile.queue.length()
                         if queue_length > 0:
                             self.log.info(f"Service at zero instances has messages: "
