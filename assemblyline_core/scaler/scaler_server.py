@@ -54,6 +54,11 @@ CLASSIFICATION_CONFIGMAP_KEY = os.getenv('CLASSIFICATION_CONFIGMAP_KEY', 'classi
 
 
 class Pool:
+    """
+    This is a light wrapper around ThreadPoolExecutor to run batches of
+    jobs as a context manager, and wait for the batch to finish after
+    the context ends.
+    """
     def __init__(self, size=10):
         self.pool = concurrent.futures.ThreadPoolExecutor(size)
         self.futures = []
