@@ -211,7 +211,6 @@ class ScalerServer(CoreBase):
         # Information about services
         self.profiles: Dict[str, ServiceProfile] = {}
         self.profiles_lock = threading.RLock()
-        self.service_threads: Dict[str, threading.Thread] = {}
 
         # Prepare a single threaded scheduler
         self.state = collection.Collection(period=self.config.core.metrics.export_interval)
