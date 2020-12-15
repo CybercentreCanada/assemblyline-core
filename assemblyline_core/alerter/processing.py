@@ -126,12 +126,12 @@ def get_summary(datastore, srecord, user_classification):
     return max_classification, summary, submission_summary['filtered']
 
 
-def generate_alert_id(alert_data):
-    parts = [
-        alert_data['submission']['params']['psid'] or alert_data['submission']['sid'],
-        alert_data['submission']['time']
-    ]
-    return hashlib.md5("-".join(parts).encode("utf-8")).hexdigest()
+def generate_alert_id(logger, alert_data):
+    if alert_data['ingest_id']:
+        return alert_data['ingest_id']
+    sid = alert_data['submission']['params']['psid'] or alert_data['submission']['sid']
+    logger.info(f"ingest_id not found for sid={sid}")
+    return sid
 
 
 # noinspection PyBroadException
@@ -193,6 +193,9 @@ def perform_alert_update(datastore, logger, alert):
         old_alert = datastore.alert.get(alert_id, as_obj=False)
         if old_alert is None:
             raise KeyError(f"{alert_id} is missing from the alert collection.")
+
+        # Ensure alert keeps original timestamp
+        alert['ts'] = old_alert['ts']
 
         # Merge fields...
         merged = {
@@ -312,7 +315,7 @@ def process_alert_message(counter, datastore, logger, alert_data):
         'al': {
             'score': alert_data['score']
         },
-        'alert_id': generate_alert_id(alert_data),
+        'alert_id': generate_alert_id(logger, alert_data),
         'archive_ts': now_as_iso(config.datastore.ilm.days_until_archive * 24 * 60 * 60),
         'metadata': {safe_str(key): value for key, value in alert_data['submission']['metadata'].items()},
         'sid': alert_data['submission']['sid'],
@@ -339,12 +342,4 @@ def process_alert_message(counter, datastore, logger, alert_data):
     # Update alert with computed values
     alert = recursive_update(alert, alert_update_p2)
 
-    # Update alert with parent values of constant fields
-    psid = alert_data['submission']['params']['psid']
-    if psid and datastore.alert.search(f"sid:{psid}", rows=1)['items']:
-        parent_alert = datastore.alert.get(datastore.alert.search(f"sid:{psid}", rows=1)['items'][0]['alert_id'],
-                                           as_obj=False)
-        for x in config.core.alerter.constant_alert_fields:
-            alert[x] = parent_alert[x]
-
-    return save_alert(datastore, counter, logger, alert, psid)
+    return save_alert(datastore, counter, logger, alert, alert_data['submission']['params']['psid'])
