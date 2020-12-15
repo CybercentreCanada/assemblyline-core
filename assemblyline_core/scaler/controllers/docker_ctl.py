@@ -33,6 +33,7 @@ class DockerController(ControllerInterface):
         self.global_mounts: List[Tuple[str, str]] = []
         self._prefix: str = prefix
         self._labels = labels
+        self.prune_lock = threading.Lock()
 
         for network in self.client.networks.list(names=['external']):
             self.external_network = network
@@ -93,16 +94,17 @@ class DockerController(ControllerInterface):
         self._flush_containers()
 
     def _flush_containers(self):
-        from docker.errors import APIError
-        labels = [f'{name}={value}' for name, value in self._labels.items()]
-        if labels:
-            for container in self.client.containers.list(filters={'label': labels}):
-                try:
-                    container.kill()
-                except APIError:
-                    pass
-        self.client.containers.prune()
-        self.client.volumes.prune()
+        with self.prune_lock:
+            from docker.errors import APIError
+            labels = [f'{name}={value}' for name, value in self._labels.items()]
+            if labels:
+                for container in self.client.containers.list(filters={'label': labels}):
+                    try:
+                        container.kill()
+                    except APIError:
+                        pass
+            self.client.containers.prune()
+            self.client.volumes.prune()
 
     def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
@@ -279,8 +281,9 @@ class DockerController(ControllerInterface):
                     self._start(service_name)
 
             # Every time we change our container allocation do a little clean up to keep things fresh
-            self.client.containers.prune()
-            self.client.volumes.prune()
+            with self.prune_lock:
+                self.client.containers.prune()
+                self.client.volumes.prune()
         except Exception as error:
             raise ServiceControlError(str(error), service_name)
 
