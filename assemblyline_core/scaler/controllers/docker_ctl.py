@@ -33,6 +33,7 @@ class DockerController(ControllerInterface):
         self.global_mounts: List[Tuple[str, str]] = []
         self._prefix: str = prefix
         self._labels = labels
+        self.prune_lock = threading.Lock()
 
         for network in self.client.networks.list(names=['external']):
             self.external_network = network
@@ -93,16 +94,17 @@ class DockerController(ControllerInterface):
         self._flush_containers()
 
     def _flush_containers(self):
-        from docker.errors import APIError
-        labels = [f'{name}={value}' for name, value in self._labels.items()]
-        if labels:
-            for container in self.client.containers.list(filters={'label': labels}):
-                try:
-                    container.kill()
-                except APIError:
-                    pass
-        self.client.containers.prune()
-        self.client.volumes.prune()
+        with self.prune_lock:
+            from docker.errors import APIError
+            labels = [f'{name}={value}' for name, value in self._labels.items()]
+            if labels:
+                for container in self.client.containers.list(filters={'label': labels}, ignore_removed=True):
+                    try:
+                        container.kill()
+                    except APIError:
+                        pass
+            self.client.containers.prune()
+            self.client.volumes.prune()
 
     def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
@@ -200,7 +202,7 @@ class DockerController(ControllerInterface):
         """
         # Load all container names on the system now
         used_names = []
-        for container in self.client.containers.list(all=True):
+        for container in self.client.containers.list(all=True, ignore_removed=True):
             used_names.append(container.name)
 
         # Try names until one works
@@ -220,7 +222,7 @@ class DockerController(ControllerInterface):
         NOTE: There is probably a better way to do this.
         """
         total_cpu = cpu = self._info['NCPU'] * self.cpu_overallocation - self._reserved_cpu
-        for container in self.client.containers.list():
+        for container in self.client.containers.list(ignore_removed=True):
             if container.attrs['HostConfig']['CpuPeriod']:
                 cpu -= container.attrs['HostConfig']['CpuQuota']/container.attrs['HostConfig']['CpuPeriod']
         self.log.debug(f'Total CPU available {cpu}/{self._info["NCPU"]}')
@@ -233,7 +235,7 @@ class DockerController(ControllerInterface):
         """
         mega = 2**20
         total_mem = mem = self._info['MemTotal']/mega * self.memory_overallocation - self._reserved_mem
-        for container in self.client.containers.list():
+        for container in self.client.containers.list(ignore_removed=True):
             mem -= container.attrs['HostConfig']['Memory']/mega
         self.log.debug(f'Total Memory available {mem}/{self._info["MemTotal"]/mega}')
         return mem, total_mem
@@ -245,7 +247,8 @@ class DockerController(ControllerInterface):
         docker is currently trying to keep running.
         """
         running = 0
-        for container in self.client.containers.list(filters={'label': f'component={service_name}'}):
+        filters = {'label': f'component={service_name}'}
+        for container in self.client.containers.list(filters=filters, ignore_removed=True):
             if container.status in {'restarting', 'running'}:
                 running += 1
             elif container.status in {'created', 'removing', 'paused', 'exited', 'dead'}:
@@ -267,7 +270,7 @@ class DockerController(ControllerInterface):
             if delta < 0:
                 # Kill off delta instances of of the service
                 filters = {'label': f'component={service_name}'}
-                running = [container for container in self.client.containers.list(filters=filters)
+                running = [container for container in self.client.containers.list(filters=filters, ignore_removed=True)
                            if container.status in {'restarting', 'running'}]
                 running = running[0:-delta]
                 for container in running:
@@ -279,8 +282,9 @@ class DockerController(ControllerInterface):
                     self._start(service_name)
 
             # Every time we change our container allocation do a little clean up to keep things fresh
-            self.client.containers.prune()
-            self.client.volumes.prune()
+            with self.prune_lock:
+                self.client.containers.prune()
+                self.client.volumes.prune()
         except Exception as error:
             raise ServiceControlError(str(error), service_name)
 
@@ -291,7 +295,8 @@ class DockerController(ControllerInterface):
             # First try the given container id in case its actually correct
             container = self.client.containers.get(container_id)
         except docker.errors.NotFound:
-            for possible_container in self.client.containers.list(filters={'label': f'component={service_name}'}):
+            filters = {'label': f'component={service_name}'}
+            for possible_container in self.client.containers.list(filters=filters, ignore_removed=True):
                 if possible_container.id.startswith(container_id) or possible_container.name == container_id:
                     container = possible_container
                     break
@@ -301,12 +306,13 @@ class DockerController(ControllerInterface):
 
     def restart(self, service):
         self._pull_image(service)
-        for container in self.client.containers.list(filters={'label': f'component={service.name}'}):
+        filters = {'label': f'component={service.name}'}
+        for container in self.client.containers.list(filters=filters, ignore_removed=True):
             container.kill()
 
     def get_running_container_names(self):
         out = []
-        for container in self.client.containers.list():
+        for container in self.client.containers.list(ignore_removed=True):
             out.append(container.id)
             out.append(container.id[:12])
             out.append(container.name)
@@ -325,7 +331,7 @@ class DockerController(ControllerInterface):
 
     def stop_containers(self, labels):
         label_strings = [f'{name}={value}' for name, value in labels.items()]
-        for container in self.client.containers.list(filters={'label': label_strings}):
+        for container in self.client.containers.list(filters={'label': label_strings}, ignore_removed=True):
             container.stop()
 
     def _get_network(self, service_name):
