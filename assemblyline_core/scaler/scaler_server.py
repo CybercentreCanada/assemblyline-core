@@ -5,12 +5,14 @@ import functools
 import threading
 from collections import defaultdict
 from string import Template
-from typing import Dict, List
+from typing import Dict, List, Optional
 import os
 import math
 import time
 import platform
 import concurrent.futures
+
+import copy
 
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue
@@ -83,7 +85,7 @@ class ServiceProfile:
     This includes how the service should be run, and conditions related to the scaling of the service.
     """
     def __init__(self, name, container_config: DockerConfig, config_hash=0, min_instances=0, max_instances=None,
-                 growth=600, shrink=None, backlog=500, queue=None, shutdown_seconds=30):
+                 growth: float = 600, shrink: Optional[float] = None, backlog=500, queue=None, shutdown_seconds=30):
         """
         :param name: Name of the service to manage
         :param container_config: Instructions on how to start this service
@@ -173,6 +175,27 @@ class ServiceProfile:
             self.desired_instances = max(self.min_instances, self.desired_instances - 1)
             self.pressure = 0
 
+    def __deepcopy__(self, memodict=None):
+        """Copy properly, since the redis objects don't copy well."""
+        prof = ServiceProfile(
+            name=self.name,
+            container_config=DockerConfig(self.container_config.as_primitives()),
+            config_hash=self.config_hash,
+            min_instances=self.min_instances,
+            max_instances=self.max_instances,
+            growth=self.growth_threshold,
+            shrink=self.shrink_threshold,
+            backlog=self.backlog,
+            shutdown_seconds=self.shutdown_seconds,
+        )
+        prof.desired_instances = self.desired_instances
+        prof.running_instances = self.running_instances
+        prof.pressure = self.pressure
+        prof.queue_length = self.queue_length
+        prof.duty_cycle = self.duty_cycle
+        prof.last_update = self.last_update
+        return prof
+
 
 class ScalerServer(CoreBase):
     def __init__(self, config=None, datastore=None, redis=None, redis_persist=None):
@@ -228,13 +251,16 @@ class ScalerServer(CoreBase):
             try:
                 fn(*args, **kwargs)
             except ServiceControlError as error:
-                self.log.exception(f"Error while from service: {error.service_name}")
+                self.log.exception(f"Error while managing service: {error.service_name}")
                 self.handle_service_error(error.service_name)
             except Exception:
                 self.log.exception(f'Crash in scaler: {fn.__name__}')
         return with_logs
 
     def add_service(self, profile: ServiceProfile):
+        # We need to hold the lock the whole time we add the service,
+        # we don't want the scaling thread trying to adjust the scale of a
+        # deployment we haven't added to the system yet
         with self.profiles_lock:
             profile.desired_instances = max(self.controller.get_target(profile.name), profile.min_instances)
             profile.running_instances = profile.desired_instances
@@ -363,6 +389,11 @@ class ScalerServer(CoreBase):
                             else:
                                 profile = self.profiles[name]
 
+                                if service.licence_count == 0:
+                                    profile._max_instances = float('inf')
+                                else:
+                                    profile._max_instances = service.licence_count
+
                                 if profile.container_config != docker_config or profile.config_hash != config_hash:
                                     self.log.info(f"Updating deployment information for {name}")
                                     profile.container_config = docker_config
@@ -370,18 +401,15 @@ class ScalerServer(CoreBase):
                                     self.controller.restart(profile)
                                     self.log.info(f"Deployment information for {name} replaced")
 
-                                if service.licence_count == 0:
-                                    profile._max_instances = float('inf')
-                                else:
-                                    profile._max_instances = service.licence_count
                 except Exception:
                     self.log.exception(f"Error applying service settings from: {service.name}")
                     self.handle_service_error(service.name)
 
-                # Find any services we have running, that are no longer in the database and remove them
-                for stray_service in current_services - set(discovered_services):
-                    stage = self.get_service_stage(stray_service)
-                    self.stop_service(stray_service, stage)
+            # Find any services we have running, that are no longer in the database and remove them
+            for stray_service in current_services - set(discovered_services):
+                self.log.info(f'Service appears to be deleted, removing {stray_service}')
+                stage = self.get_service_stage(stray_service)
+                self.stop_service(stray_service, stage)
 
             self.sleep(SERVICE_SYNC_INTERVAL)
 
@@ -396,11 +424,11 @@ class ScalerServer(CoreBase):
             self._service_stage_hash.set(name, ServiceStage.Off)
 
         # Stop any running disabled services
-        with self.profiles_lock:
-            if name in self.profiles or self.controller.get_target(name) > 0:
-                self.log.info(f'Removing {name} from scaling')
-                self.controller.set_target(name, 0)
+        if name in self.profiles or self.controller.get_target(name) > 0:
+            self.log.info(f'Removing {name} from scaling')
+            with self.profiles_lock:
                 self.profiles.pop(name, None)
+            self.controller.set_target(name, 0)
 
     def update_scaling(self):
         """Check if we need to scale any services up or down."""
@@ -408,78 +436,78 @@ class ScalerServer(CoreBase):
         while self.sleep(SCALE_INTERVAL):
             # Figure out what services are expected to be running and how many
             with self.profiles_lock:
-                targets = {_p.name: self.controller.get_target(_p.name) for _p in self.profiles.values()}
+                all_profiles: Dict[str, ServiceProfile] = copy.deepcopy(self.profiles)
+            targets = {_p.name: self.controller.get_target(_p.name) for _p in all_profiles.values()}
 
-                for name, profile in self.profiles.items():
-                    self.log.debug(f'{name}')
-                    self.log.debug(f'Instances \t{profile.min_instances} < {profile.desired_instances} | '
-                                   f'{targets[name]} < {profile.max_instances}')
-                    self.log.debug(
-                        f'Pressure \t{profile.shrink_threshold} < {profile.pressure} < {profile.growth_threshold}')
+            for name, profile in all_profiles.items():
+                self.log.debug(f'{name}')
+                self.log.debug(f'Instances \t{profile.min_instances} < {profile.desired_instances} | '
+                               f'{targets[name]} < {profile.max_instances}')
+                self.log.debug(f'Pressure \t{profile.shrink_threshold} < '
+                               f'{profile.pressure} < {profile.growth_threshold}')
 
-                #
-                #   1.  Any processes that want to release resources can always be approved first
-                #
-                with pool:
-                    for name, profile in self.profiles.items():
-                        if targets[name] > profile.desired_instances:
-                            self.log.info(f"{name} wants less resources changing allocation "
-                                          f"{targets[name]} -> {profile.desired_instances}")
-                            pool.call(self.controller.set_target, name, profile.desired_instances)
-                            targets[name] = profile.desired_instances
+            #
+            #   1.  Any processes that want to release resources can always be approved first
+            #
+            with pool:
+                for name, profile in all_profiles.items():
+                    if targets[name] > profile.desired_instances:
+                        self.log.info(f"{name} wants less resources changing allocation "
+                                      f"{targets[name]} -> {profile.desired_instances}")
+                        pool.call(self.controller.set_target, name, profile.desired_instances)
+                        targets[name] = profile.desired_instances
 
-                #
-                #   2.  Any processes that aren't reaching their min_instances target must be given
-                #       more resources before anyone else is considered.
-                #
-                    for name, profile in self.profiles.items():
-                        if targets[name] < profile.min_instances:
-                            self.log.info(f"{name} isn't meeting minimum allocation "
-                                          f"{targets[name]} -> {profile.min_instances}")
-                            pool.call(self.controller.set_target, name, profile.min_instances)
-                            targets[name] = profile.min_instances
+            #
+            #   2.  Any processes that aren't reaching their min_instances target must be given
+            #       more resources before anyone else is considered.
+            #
+                for name, profile in all_profiles.items():
+                    if targets[name] < profile.min_instances:
+                        self.log.info(f"{name} isn't meeting minimum allocation "
+                                      f"{targets[name]} -> {profile.min_instances}")
+                        pool.call(self.controller.set_target, name, profile.min_instances)
+                        targets[name] = profile.min_instances
 
-                #
-                #   3.  Try to estimate available resources, and based on some metric grant the
-                #       resources to each service that wants them. While this free memory
-                #       pool might be spread across many nodes, we are going to treat it like
-                #       it is one big one, and let the orchestration layer sort out the details.
-                #
-                free_cpu = self.controller.free_cpu()
-                free_memory = self.controller.free_memory()
+            #
+            #   3.  Try to estimate available resources, and based on some metric grant the
+            #       resources to each service that wants them. While this free memory
+            #       pool might be spread across many nodes, we are going to treat it like
+            #       it is one big one, and let the orchestration layer sort out the details.
+            #
+            free_cpu = self.controller.free_cpu()
+            free_memory = self.controller.free_memory()
 
-                #
-                def trim(prof: List[ServiceProfile]):
-                    prof = [_p for _p in prof if _p.desired_instances > targets[_p.name]]
-                    drop = [_p for _p in prof if _p.cpu > free_cpu or _p.ram > free_memory]
-                    if drop:
-                        drop = {_p.name: (_p.cpu, _p.ram) for _p in drop}
-                        self.log.debug(f"Can't make more because not enough resources {drop}")
-                    prof = [_p for _p in prof if _p.cpu <= free_cpu and _p.ram <= free_memory]
-                    return prof
+            #
+            def trim(prof: List[ServiceProfile]):
+                prof = [_p for _p in prof if _p.desired_instances > targets[_p.name]]
+                drop = [_p for _p in prof if _p.cpu > free_cpu or _p.ram > free_memory]
+                if drop:
+                    drop = {_p.name: (_p.cpu, _p.ram) for _p in drop}
+                    self.log.debug(f"Can't make more because not enough resources {drop}")
+                prof = [_p for _p in prof if _p.cpu <= free_cpu and _p.ram <= free_memory]
+                return prof
 
-                profiles = trim(list(self.profiles.values()))
+            remaining_profiles: List[ServiceProfile] = trim(list(all_profiles.values()))
 
-                while profiles:
-                    # TODO do we need to add balancing metrics other than 'least running' for this? probably
-                    profiles.sort(key=lambda _p: self.controller.get_target(_p.name))
+            while remaining_profiles:
+                # TODO do we need to add balancing metrics other than 'least running' for this? probably
+                remaining_profiles.sort(key=lambda _p: self.controller.get_target(_p.name))
 
-                    # Add one for the profile at the bottom
-                    free_memory -= profiles[0].container_config.ram_mb
-                    free_cpu -= profiles[0].container_config.cpu_cores
-                    targets[profiles[0].name] += 1
+                # Add one for the profile at the bottom
+                free_memory -= remaining_profiles[0].container_config.ram_mb
+                free_cpu -= remaining_profiles[0].container_config.cpu_cores
+                targets[remaining_profiles[0].name] += 1
 
-                    # profiles = [_p for _p in profiles if _p.desired_instances > targets[_p.name]]
-                    # profiles = [_p for _p in profiles if _p.cpu < free_cpu and _p.ram < free_memory]
-                    profiles = trim(profiles)
+                # Take out any services that should be happy now
+                remaining_profiles = trim(remaining_profiles)
 
-                # Apply those adjustments we have made back to the controller
-                with pool:
-                    for name, value in targets.items():
-                        old = self.controller.get_target(name)
-                        if value != old:
-                            self.log.info(f"Scaling service {name}: {old} -> {value}")
-                            pool.call(self.controller.set_target, name, value)
+            # Apply those adjustments we have made back to the controller
+            with pool:
+                for name, value in targets.items():
+                    old = self.controller.get_target(name)
+                    if value != old:
+                        self.log.info(f"Scaling service {name}: {old} -> {value}")
+                        pool.call(self.controller.set_target, name, value)
 
     def handle_service_error(self, service_name):
         """Handle an error occurring in the *analysis* service.
@@ -516,9 +544,15 @@ class ScalerServer(CoreBase):
                 if time.time() > time_limit + 600:
                     self.status_table.pop(host)
 
+            # Download the current targets in the orchestrator while not holding the lock
+            with self.profiles_lock:
+                service_names = list(self.profiles.keys())
+            targets = {name: self.controller.get_target(name) for name in service_names}
+
             # Check the set of services that might be sitting at zero instances, and if it is, we need to
             # manually check if it is offline
             export_interval = self.config.core.metrics.export_interval
+
             with self.profiles_lock:
                 for profile_name, profile in self.profiles.items():
                     # Pull out statistics from the metrics regularization
@@ -532,8 +566,7 @@ class ScalerServer(CoreBase):
                         )
 
                     # Check if we expect no messages, if so pull the queue length ourselves since there is no heartbeat
-                    if self.controller.get_target(profile_name) == 0 and \
-                            profile.desired_instances == 0 and profile.queue:
+                    if targets.get(profile_name) == 0 and profile.desired_instances == 0 and profile.queue:
                         queue_length = profile.queue.length()
                         if queue_length > 0:
                             self.log.info(f"Service at zero instances has messages: "
