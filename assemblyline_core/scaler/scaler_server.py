@@ -298,7 +298,6 @@ class ScalerServer(CoreBase):
 
             # Take a break before doing it again
             super().heartbeat()
-            self.export_metrics()
             self.sleep(2)
 
         for _t in threads.values():
