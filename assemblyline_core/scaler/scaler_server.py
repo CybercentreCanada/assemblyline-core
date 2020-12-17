@@ -598,7 +598,7 @@ class ScalerServer(CoreBase):
             while self.running:
                 # Process finished
                 finished = [_f for _f in futures if _f.done()]
-                futures = [_f for _f in futures if _f in finished]
+                futures = [_f for _f in futures if _f not in finished]
                 for _f in finished:
                     exception = _f.exception()
                     if exception is not None:
