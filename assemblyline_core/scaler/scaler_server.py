@@ -609,8 +609,8 @@ class ScalerServer(CoreBase):
                 if not message:
                     continue
                 self.log.info(f"Killing service container: {message['container']} running: {message['service']}")
-                futures.append(pool.submit(fn=self.controller.stop_container,
-                                           args=(message['service'], message['container'])))
+                futures.append(pool.submit(self.controller.stop_container,
+                                           message['service'], message['container']))
 
     def export_metrics(self):
         while self.sleep(self.config.logging.export_interval):
