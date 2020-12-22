@@ -149,13 +149,13 @@ class DispatchHash:
         """Load the entire table of things that should currently be running."""
         rows = retry_call(self.client.hgetall, self._dispatch_key)
         output = {}
-        for key, key in rows.items():
-            file_hash, service = key.split(b'-', maxsplit=1)
+        for hash_key, queue_key in rows.items():
+            file_hash, service = hash_key.split(b'-', maxsplit=1)
             file_hash = file_hash.decode()
             service = service.decode()
             if file_hash not in output:
                 output[file_hash] = {}
-            output[file_hash][service] = key
+            output[file_hash][service] = queue_key
         return output
 
     def fail_recoverable(self, file_hash: str, service: str, error_key: str = None):

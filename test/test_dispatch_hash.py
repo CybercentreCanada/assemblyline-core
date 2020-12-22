@@ -21,8 +21,11 @@ def test_single(clean_redis):
         # If we call dispatch, the key should be set
         disp.dispatch(file_hash, service)
         assert disp.dispatch_key(file_hash, service) is not None
+        assert disp.all_dispatches() == {file_hash: {service: b'true'}}
+
         disp.set_dispatch_key(file_hash, service, b'abc123')
         assert disp.dispatch_key(file_hash, service) == b'abc123'
+        assert disp.all_dispatches() == {file_hash: {service: b'abc123'}}
         assert not disp.finished(file_hash, service)
         assert disp.dispatch_count() == 1
         assert not disp.all_finished()
