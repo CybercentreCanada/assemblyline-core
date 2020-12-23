@@ -5,10 +5,11 @@ import time
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm.models.user import User
+from assemblyline.odm.models.file import File
 from assemblyline.odm.randomizer import random_minimal_obj
 
 from assemblyline_core.ingester.run_ingest import IngesterInput
-from assemblyline_core.ingester.ingester import IngestTask
+from assemblyline_core.ingester.ingester import IngestTask, _notification_queue_prefix
 from assemblyline_core.submission_client import SubmissionClient
 
 from .mocking import MockDatastore, TrueCountTimes, clean_redis
@@ -172,10 +173,24 @@ def test_ingest_groups_custom(ingest_harness):
 def test_ingest_size_error(ingest_harness):
     datastore, ingester, in_queue = ingest_harness
     mm = ingester.ingester
-    mm._notify_drop = mock.MagicMock()
+    # mm._notify_drop = mock.MagicMock()
 
     # Send a rather big file
-    in_queue.push(make_message(files={'size': 10**10}))
+    submission = make_message(
+        files={
+            'size': ingester.ingester.config.submission.max_file_size + 1,
+            # 'ascii': 'abc'
+        },
+        params={
+            'ignore_size': False,
+            'never_drop': False
+        }
+    )
+    fo = random_minimal_obj(File)
+    fo.sha256 = submission['files'][0]['sha256']
+    datastore.file.save(submission['files'][0]['sha256'], fo)
+    submission['notification'] = {'queue': 'drop_test'}
+    in_queue.push(submission)
     ingester.try_run(volatile=True)
 
     # No files in the internal buffer
@@ -183,4 +198,8 @@ def test_ingest_size_error(ingest_harness):
     assert mm.ingest_queue.length() == 0
 
     # A file was dropped
-    mm._notify_drop.assert_called_once()
+    queue_name = _notification_queue_prefix + submission['notification']['queue']
+    queue = ingester.ingester.notification_queues[queue_name]
+    message = queue.pop()
+    assert message is not None
+    print(message)
