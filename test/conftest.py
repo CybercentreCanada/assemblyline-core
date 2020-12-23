@@ -4,6 +4,17 @@ Pytest configuration file, setup global pytest fixtures and functions here.
 import os
 
 from assemblyline.common import forge
+original_classification = forge.get_classification
+
+
+def test_classification(yml_config=None):
+    path = os.path.join(os.path.dirname(__file__), 'classification.yml')
+    return original_classification(path)
+
+
+forge.get_classification = test_classification
+
+
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.datastore.stores.es_store import ESStore
 from redis.exceptions import ConnectionError
