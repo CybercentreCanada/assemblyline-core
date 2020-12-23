@@ -413,13 +413,17 @@ class KubernetesController(ControllerInterface):
                 raise
 
     def stop_container(self, service_name, container_id):
-        pods = self.api.list_namespaced_pod(namespace=self.namespace, label_selector=f'component={service_name}',
-                                            _request_timeout=API_TIMEOUT)
-        for pod in pods.items:
-            if pod.metadata.name == container_id:
-                self.api.delete_namespaced_pod(name=container_id, namespace=self.namespace,
-                                               _request_timeout=API_TIMEOUT)
-                return
+        try:
+            pods = self.api.list_namespaced_pod(namespace=self.namespace, label_selector=f'component={service_name}',
+                                                _request_timeout=API_TIMEOUT)
+            for pod in pods.items:
+                if pod.metadata.name == container_id:
+                    self.api.delete_namespaced_pod(name=container_id, namespace=self.namespace,
+                                                   _request_timeout=API_TIMEOUT)
+                    return
+        except ApiException as error:
+            if error.status != 404:
+                raise
 
     def restart(self, service):
         self._create_deployment(service.name, self._deployment_name(service.name), service.container_config,
