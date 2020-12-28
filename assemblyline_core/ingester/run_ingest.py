@@ -83,19 +83,23 @@ class IngesterInput(ServerBase):
                 self.apm_client.begin_transaction('ingest_msg')
 
             try:
-                sub = SubmissionInput(message)
-                # Write all input to the traffic queue
-                ingester.traffic_queue.publish(SubmissionMessage({
-                    'msg': sub,
-                    'msg_type': 'SubmissionIngested',
-                    'sender': 'ingester',
-                }).as_primitives())
-
-                task = IngestTask(dict(
-                    submission=sub,
-                    ingest_id=sub.sid,
-                ))
-                task.submission.sid = None  # Reset to new random uuid
+                if 'submission' in message:
+                    # A retried task
+                    task = IngestTask(message)
+                else:
+                    # A new submission
+                    sub = SubmissionInput(message)
+                    task = IngestTask(dict(
+                        submission=sub,
+                        ingest_id=sub.sid,
+                    ))
+                    task.submission.sid = None  # Reset to new random uuid
+                    # Write all input to the traffic queue
+                    ingester.traffic_queue.publish(SubmissionMessage({
+                        'msg': sub,
+                        'msg_type': 'SubmissionIngested',
+                        'sender': 'ingester',
+                    }).as_primitives())
 
             except (ValueError, TypeError) as error:
                 self.log.exception(f"Dropped ingest submission {message} because {str(error)}")

@@ -13,6 +13,7 @@ import threading
 
 from unittest import mock
 
+import assemblyline_core
 from assemblyline.common.forge import get_service_queue
 from assemblyline_core.plumber.run_plumber import Plumber
 from tempfile import NamedTemporaryFile
@@ -129,6 +130,7 @@ class CoreSession:
         self.filestore = None
         self.config: Config = None
         self.ingest: IngesterInput = None
+        self.ingest_submit: IngesterSubmitter = None
 
 
 def make_magic(*_, **__):
@@ -169,6 +171,7 @@ def core(request, redis, filestore, config):
     ingester_input_thread: IngesterInput = threads[0]
     fields.ingest = ingester_input_thread
     fields.ingest_queue = ingester_input_thread.ingester.ingest_queue
+    fields.ingest_submit = threads[1]
 
     ds.ds.service = MockCollection(Service)
     ds.ds.service_delta = MockCollection(Service)
@@ -319,6 +322,61 @@ def test_deduplication(core):
     assert first_submission.sid != third_submission.sid
     assert len(third_submission.files) == 1
     assert len(third_submission.results) == 4
+
+
+def test_ingest_retry(core):
+    # -------------------------------------------------------------------------------
+    #
+    sha, size = ready_body(core)
+    assemblyline_core.ingester.ingester._retry_delay = 1
+
+    attempts = []
+    failures = []
+    original_submit = core.ingest_submit.ingester.submit
+    def fail_once(task):
+        attempts.append(task)
+        if len(attempts) > 1:
+            original_submit(task)
+        else:
+            failures.append(task)
+            raise ValueError()
+    core.ingest_submit.ingester.submit = fail_once
+
+    try:
+        core.ingest_queue.push(SubmissionInput(dict(
+            metadata={},
+            params=dict(
+                description="file abc123",
+                services=dict(selected=''),
+                submitter='user',
+                groups=['user'],
+            ),
+            notification=dict(
+                queue='output-queue-one',
+                threshold=0
+            ),
+            files=[dict(
+                sha256=sha,
+                size=size,
+                name='abc123'
+            )]
+        )).as_primitives())
+
+        notification_queue = NamedQueue('nq-output-queue-one', core.redis)
+        first_task = notification_queue.pop(timeout=30)
+
+        # One of the submission will get processed fully
+        assert first_task is not None
+        first_task = IngestTask(first_task)
+        first_submission: Submission = core.ds.submission.get(first_task.submission.sid)
+        assert len(attempts) == 2
+        assert len(failures) == 1
+        assert first_submission.state == 'completed'
+        assert len(first_submission.files) == 1
+        assert len(first_submission.errors) == 0
+        assert len(first_submission.results) == 4
+    finally:
+        core.ingest_submit.ingester.submit = original_submit
 
 
 def test_watcher_recovery(core):

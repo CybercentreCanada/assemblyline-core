@@ -549,7 +549,7 @@ class Ingester:
         else:
             self.log.info(f'[{task.ingest_id} :: {task.sha256}] Requeuing ({ex or "unknown"})')
             task.retries = retries
-            self.retry_queue.push(int(now(_retry_delay)), task.json())
+            self.retry_queue.push(int(now(_retry_delay)), task.as_primitives())
 
     def finalize(self, psid, sid, score, task: IngestTask):
         self.log.info(f"[{task.ingest_id} :: {task.sha256}] Completed")
