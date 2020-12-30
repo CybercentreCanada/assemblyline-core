@@ -6,12 +6,10 @@ Needs the datastore and filestore to be running, otherwise these test are stand 
 
 import hashlib
 import json
-import os
 import pytest
 import time
 import threading
-
-from unittest import mock
+import logging
 
 import assemblyline_core
 from assemblyline.common.forge import get_service_queue
@@ -20,7 +18,6 @@ from tempfile import NamedTemporaryFile
 from typing import List
 
 from assemblyline.common import forge, identify
-from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.uid import get_random_id
 from assemblyline.datastore.helper import AssemblylineDatastore
@@ -30,7 +27,6 @@ from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.messages.submission import Submission as SubmissionInput
-from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from assemblyline_core.dispatching.client import DispatchClient
@@ -131,18 +127,20 @@ class CoreSession:
         self.config: Config = None
         self.ingest: IngesterInput = None
         self.ingest_submit: IngesterSubmitter = None
+        self.ingest_internals: IngesterInternals = None
 
 
-def make_magic(*_, **__):
-    return mock.MagicMock(spec=MetricsFactory)
+@pytest.fixture(autouse=True)
+def log_config(caplog):
+    caplog.set_level(logging.DEBUG, logger='assemblyline')
 
 
 @pytest.fixture(scope='module')
-@mock.patch('assemblyline_core.ingester.ingester.MetricsFactory', new=make_magic)
-@mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', new=make_magic)
 def core(request, redis, filestore, config):
+    # Block logs from being initialized, it breaks under pytest if you create new stream handlers
     from assemblyline.common import log as al_log
-    al_log.init_logging("simulation")
+    al_log.init_logging = lambda *args: None
+    # al_log.init_logging("simulation")
 
     fields = CoreSession()
     fields.redis = redis
@@ -172,6 +170,7 @@ def core(request, redis, filestore, config):
     fields.ingest = ingester_input_thread
     fields.ingest_queue = ingester_input_thread.ingester.ingest_queue
     fields.ingest_submit = threads[1]
+    fields.ingest_internals = threads[2]
 
     ds.ds.service = MockCollection(Service)
     ds.ds.service_delta = MockCollection(Service)
@@ -328,6 +327,7 @@ def test_ingest_retry(core):
     # -------------------------------------------------------------------------------
     #
     sha, size = ready_body(core)
+    original_retry_delay = assemblyline_core.ingester.ingester._retry_delay
     assemblyline_core.ingester.ingester._retry_delay = 1
 
     attempts = []
@@ -377,6 +377,82 @@ def test_ingest_retry(core):
         assert len(first_submission.results) == 4
     finally:
         core.ingest_submit.ingester.submit = original_submit
+        assemblyline_core.ingester.ingester._retry_delay = original_retry_delay
+
+
+def expect_metrics(channel, message_type, values):
+    found = {}
+    start_time = time.time()
+    for metric_message in channel.listen(blocking=False):
+        if time.time() - start_time > 10:
+            break
+        if metric_message is None:
+            time.sleep(0.1)
+            continue
+        if metric_message['type'] != message_type:
+            continue
+        for key in values:
+            found[key] = found.get(key, 0) + metric_message.get(key, 0)
+        if all(found[key] >= values[key] for key in values):
+            break
+    assert found == values
+
+
+def test_ingest_timeout(core):
+    # -------------------------------------------------------------------------------
+    #
+    sha, size = ready_body(core)
+    original_max_time = assemblyline_core.ingester.ingester._max_time
+    assemblyline_core.ingester.ingester._max_time = 1
+
+    attempts = []
+    original_submit = core.ingest_submit.ingester.submit_client.submit
+    def fail(**args):
+        attempts.append(args)
+    core.ingest_submit.ingester.submit_client.submit = fail
+
+    metric_channel = forge.get_metrics_sink(core.redis)
+    metric_channel.listen(blocking=False)
+
+    try:
+        si = SubmissionInput(dict(
+            metadata={},
+            params=dict(
+                description="file abc123",
+                services=dict(selected=''),
+                submitter='user',
+                groups=['user'],
+            ),
+            notification=dict(
+                queue='ingest-timeout',
+                threshold=0
+            ),
+            files=[dict(
+                sha256=sha,
+                size=size,
+                name='abc123'
+            )]
+        ))
+        core.ingest_queue.push(si.as_primitives())
+
+        sha256 = si.files[0].sha256
+        scan_key = si.params.create_filescore_key(sha256)
+
+        # Make sure the scanning table has been cleared
+        time.sleep(0.5)
+        for _ in range(60):
+            if not core.ingest.ingester.scanning.exists(scan_key):
+                break
+            time.sleep(0.1)
+        assert not core.ingest.ingester.scanning.exists(scan_key)
+        assert len(attempts) == 1
+
+        # Wait until we get feedback from the metrics channel
+        expect_metrics(metric_channel, 'ingester', {'timed_out': 1})
+
+    finally:
+        core.ingest_submit.ingester.submit_client.submit = original_submit
+        assemblyline_core.ingester.ingester._max_time = original_max_time
 
 
 def test_watcher_recovery(core):
@@ -700,13 +776,11 @@ def test_max_extracted_in_several(core):
 
 
 def test_caching(core: CoreSession):
-    counter = core.ingest.ingester.counter.increment
-
     sha, size = ready_body(core)
+    metric_channel = forge.get_metrics_sink(core.redis)
+    metric_channel.listen(blocking=False)
 
     def run_once():
-        counter.reset_mock()
-
         core.ingest_queue.push(SubmissionInput(dict(
             metadata={},
             params=dict(
@@ -740,22 +814,25 @@ def test_caching(core: CoreSession):
         return first_submission.sid
 
     sid1 = run_once()
-    assert (('cache_miss',), {}) in counter.call_args_list
-    assert (('cache_hit_local',), {}) not in counter.call_args_list
-    assert (('cache_hit',), {}) not in counter.call_args_list
+    expect_metrics(metric_channel, 'ingester', {'cache_miss': 1})
+    # assert (('cache_miss',), {}) in counter.call_args_list
+    # assert (('cache_hit_local',), {}) not in counter.call_args_list
+    # assert (('cache_hit',), {}) not in counter.call_args_list
 
     sid2 = run_once()
-    assert (('cache_miss',), {}) not in counter.call_args_list
-    assert (('cache_hit_local',), {}) in counter.call_args_list
-    assert (('cache_hit',), {}) not in counter.call_args_list
+    expect_metrics(metric_channel, 'ingester', {'cache_hit_local': 1})
+    # assert (('cache_miss',), {}) not in counter.call_args_list
+    # assert (('cache_hit_local',), {}) in counter.call_args_list
+    # assert (('cache_hit',), {}) not in counter.call_args_list
     assert sid1 == sid2
 
     core.ingest.ingester.cache = {}
 
     sid3 = run_once()
-    assert (('cache_miss',), {}) not in counter.call_args_list
-    assert (('cache_hit_local',), {}) not in counter.call_args_list
-    assert (('cache_hit',), {}) in counter.call_args_list
+    expect_metrics(metric_channel, 'ingester', {'cache_hit': 1})
+    # assert (('cache_miss',), {}) not in counter.call_args_list
+    # assert (('cache_hit_local',), {}) not in counter.call_args_list
+    # assert (('cache_hit',), {}) in counter.call_args_list
     assert sid1 == sid3
 
 

@@ -42,7 +42,7 @@ _dup_prefix = 'w-m-'
 _notification_queue_prefix = 'nq-'
 _min_priority = 1
 _max_retries = 10
-_retry_delay = 180
+_retry_delay = 60 * 4  # Wait 4 minutes to retry
 _max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
 HOUR_IN_SECONDS = 60 * 60
 

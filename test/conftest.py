@@ -43,6 +43,7 @@ pytest.skip = skip_or_fail
 def config():
     config = forge.get_config()
     config.logging.log_as_json = False
+    config.core.metrics.apm_server.server_url = None
     return config
 
 

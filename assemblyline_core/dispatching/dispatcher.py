@@ -570,6 +570,7 @@ class Dispatcher:
                 # Check if this task is already sitting in queue
                 dispatch_key = dispatch_table.dispatch_key(file_hash, service_name)
                 if dispatch_key is not None and queue.rank(dispatch_key) is not None:
+                    self.log.info(f"[{task.sid}] File {file_hash} already in queue for {service_name}")
                     continue
 
                 # Find the actual file name from the list of files in submission

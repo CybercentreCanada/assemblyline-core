@@ -61,7 +61,7 @@ class ServerBase(threading.Thread):
     def __stop(self):
         """Hard stop, can still be blocked in some cases, but we should try to avoid them."""
         time.sleep(self._shutdown_timeout)
-        self.log.error(f"Server has shutdown hard after waiting {self._shutdown_timeout} seconds to stop")
+        self.log.error(f"Server {self.__class__.__name__} has shutdown hard after waiting {self._shutdown_timeout} seconds to stop")
 
         if not self._stopped:
             self._stopped = True

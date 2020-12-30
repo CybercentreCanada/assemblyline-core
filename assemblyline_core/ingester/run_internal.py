@@ -38,6 +38,7 @@ class IngesterInternals(ServerBase):
             self.apm_client = None
 
     def close(self):
+        self.ingester.counter.stop()
         if self.apm_client:
             elasticapm.uninstrument()
 
@@ -85,7 +86,7 @@ class IngesterInternals(ServerBase):
                     dup = ingester.duplicate_queue.pop(_dup_prefix + scan_key, blocking=False)
 
                 if actual_timeout:
-                    ingester.counter.increment('ingest_timeout')
+                    ingester.counter.increment('timed_out')
             except Exception:
                 self.log.exception("Problem timing out %s:", scan_key)
 
