@@ -395,7 +395,7 @@ def expect_metrics(channel, message_type, values):
             found[key] = found.get(key, 0) + metric_message.get(key, 0)
         if all(found[key] >= values[key] for key in values):
             break
-    assert found == values
+    assert all(found[key] >= values[key] for key in values)
 
 
 def test_ingest_timeout(core):
