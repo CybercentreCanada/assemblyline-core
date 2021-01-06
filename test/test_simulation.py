@@ -132,7 +132,88 @@ class CoreSession:
 
 @pytest.fixture(autouse=True)
 def log_config(caplog):
-    caplog.set_level(logging.DEBUG, logger='assemblyline')
+    caplog.set_level(logging.INFO, logger='assemblyline')
+
+
+class MetricsCounter:
+    def __init__(self, redis):
+        self.redis = redis
+        self.channel = None
+        self.data = {}
+
+    def clear(self):
+        self.data = {}
+
+    def sync_messages(self):
+        read = 0
+        for metric_message in self.channel.listen(blocking=False):
+            if metric_message is None:
+                break
+            read += 1
+            try:
+                existing = self.data[metric_message['type']]
+            except KeyError:
+                existing = self.data[metric_message['type']] = {}
+
+            for key, value in metric_message.items():
+                if isinstance(value, (int, float)):
+                    existing[key] = existing.get(key, 0) + value
+        return read
+
+    def __enter__(self):
+        self.channel = forge.get_metrics_sink(self.redis)
+        self.sync_messages()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.sync_messages()
+        for key in list(self.data.keys()):
+            shortened = {k: v for k, v in self.data[key].items() if v > 0}
+            if shortened:
+                self.data[key] = shortened
+            else:
+                del self.data[key]
+
+        print("Metrics During Test")
+        for key, value in self.data.items():
+            print(key, value)
+
+    def expect(self, channel, name, value):
+        start_time = time.time()
+        while time.time() - start_time < 10:
+            if channel in self.data:
+                if self.data[channel].get(name, 0) >= value:
+                    # self.data[channel][name] -= value
+                    return
+
+            if self.sync_messages() == 0:
+                time.sleep(0.1)
+                continue
+        pytest.fail(f"Did not get expected metric {name}={value} on metrics channel {channel}")
+
+
+@pytest.fixture(scope='function')
+def metrics(redis):
+    with MetricsCounter(redis) as counter:
+        yield counter
+
+
+def expect_metrics(channel, message_type, values):
+    found = {}
+    start_time = time.time()
+    for metric_message in channel.listen(blocking=False):
+        if time.time() - start_time > 10:
+            break
+        if metric_message is None:
+            time.sleep(0.1)
+            continue
+        if metric_message['type'] != message_type:
+            continue
+        for key in values:
+            found[key] = found.get(key, 0) + metric_message.get(key, 0)
+        if all(found[key] >= values[key] for key in values):
+            break
+    assert all(found[key] >= values[key] for key in values), (found, values)
 
 
 @pytest.fixture(scope='module')
@@ -245,7 +326,7 @@ def ready_extract(core, children):
     return ready_body(core, body)
 
 
-def test_deduplication(core):
+def test_deduplication(core, metrics):
     # -------------------------------------------------------------------------------
     # Submit two identical jobs, check that they get deduped by ingester
     sha, size = ready_body(core)
@@ -322,8 +403,15 @@ def test_deduplication(core):
     assert len(third_submission.files) == 1
     assert len(third_submission.results) == 4
 
+    metrics.expect('ingester', 'submissions_ingested', 3)
+    metrics.expect('ingester', 'submissions_completed', 2)
+    metrics.expect('ingester', 'files_completed', 2)
+    metrics.expect('ingester', 'duplicates', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 2)
+    metrics.expect('dispatcher', 'files_completed', 2)
 
-def test_ingest_retry(core):
+
+def test_ingest_retry(core, metrics):
     # -------------------------------------------------------------------------------
     #
     sha, size = ready_body(core)
@@ -375,30 +463,20 @@ def test_ingest_retry(core):
         assert len(first_submission.files) == 1
         assert len(first_submission.errors) == 0
         assert len(first_submission.results) == 4
+
+        metrics.expect('ingester', 'submissions_ingested', 1)
+        metrics.expect('ingester', 'submissions_completed', 1)
+        metrics.expect('ingester', 'files_completed', 1)
+        metrics.expect('ingester', 'duplicates', 0)
+        metrics.expect('dispatcher', 'submissions_completed', 1)
+        metrics.expect('dispatcher', 'files_completed', 1)
+
     finally:
         core.ingest_submit.ingester.submit = original_submit
         assemblyline_core.ingester.ingester._retry_delay = original_retry_delay
 
 
-def expect_metrics(channel, message_type, values):
-    found = {}
-    start_time = time.time()
-    for metric_message in channel.listen(blocking=False):
-        if time.time() - start_time > 10:
-            break
-        if metric_message is None:
-            time.sleep(0.1)
-            continue
-        if metric_message['type'] != message_type:
-            continue
-        for key in values:
-            found[key] = found.get(key, 0) + metric_message.get(key, 0)
-        if all(found[key] >= values[key] for key in values):
-            break
-    assert all(found[key] >= values[key] for key in values), (found, values)
-
-
-def test_ingest_timeout(core):
+def test_ingest_timeout(core, metrics):
     # -------------------------------------------------------------------------------
     #
     sha, size = ready_body(core)
@@ -410,9 +488,6 @@ def test_ingest_timeout(core):
     def fail(**args):
         attempts.append(args)
     core.ingest_submit.ingester.submit_client.submit = fail
-
-    metric_channel = forge.get_metrics_sink(core.redis)
-    metric_channel.listen(blocking=False)
 
     try:
         si = SubmissionInput(dict(
@@ -448,14 +523,15 @@ def test_ingest_timeout(core):
         assert len(attempts) == 1
 
         # Wait until we get feedback from the metrics channel
-        expect_metrics(metric_channel, 'ingester', {'timed_out': 1})
+        metrics.expect('ingester', 'submissions_ingested', 1)
+        metrics.expect('ingester', 'timed_out', 1)
 
     finally:
         core.ingest_submit.ingester.submit_client.submit = original_submit
         assemblyline_core.ingester.ingester._max_time = original_max_time
 
 
-def test_watcher_recovery(core):
+def test_watcher_recovery(core, metrics):
     watch = WatcherServer(redis=core.redis, redis_persist=core.redis)
     watch.start()
     try:
@@ -493,12 +569,21 @@ def test_watcher_recovery(core):
         assert len(sub.results) == 4
         assert core.pre_service.drops[sha] == 1
         assert core.pre_service.hits[sha] == 2
+
+        # Wait until we get feedback from the metrics channel
+        metrics.expect('ingester', 'submissions_ingested', 1)
+        metrics.expect('ingester', 'submissions_completed', 1)
+        metrics.expect('watcher', 'expired', 1)
+        metrics.expect('service', 'fail_recoverable', 1)
+        metrics.expect('dispatcher', 'submissions_completed', 1)
+        metrics.expect('dispatcher', 'files_completed', 1)
+
     finally:
         watch.stop()
         watch.join()
 
 
-def test_service_retry_limit(core):
+def test_service_retry_limit(core, metrics):
     watch = WatcherServer(redis=core.redis, redis_persist=core.redis)
     watch.start()
     try:
@@ -536,12 +621,22 @@ def test_service_retry_limit(core):
         assert len(sub.results) == 3
         assert core.pre_service.drops[sha] == 3
         assert core.pre_service.hits[sha] == 3
+
+        # Wait until we get feedback from the metrics channel
+        metrics.expect('ingester', 'submissions_ingested', 1)
+        metrics.expect('ingester', 'submissions_completed', 1)
+        metrics.expect('watcher', 'expired', 3)
+        metrics.expect('service', 'fail_recoverable', 3)
+        metrics.expect('service', 'fail_nonrecoverable', 1)
+        metrics.expect('dispatcher', 'submissions_completed', 1)
+        metrics.expect('dispatcher', 'files_completed', 1)
+
     finally:
         watch.stop()
         watch.join()
 
 
-def test_dropping_early(core):
+def test_dropping_early(core, metrics):
     # -------------------------------------------------------------------------------
     # This time have a file get marked for dropping by a service
     sha, size = ready_body(core, {
@@ -575,8 +670,13 @@ def test_dropping_early(core):
     assert len(sub.files) == 1
     assert len(sub.results) == 1
 
+    metrics.expect('ingester', 'submissions_ingested', 1)
+    metrics.expect('ingester', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'files_completed', 1)
 
-def test_service_error(core):
+
+def test_service_error(core, metrics):
     # -------------------------------------------------------------------------------
     # Have a service produce an error
     # -------------------------------------------------------------------------------
@@ -626,8 +726,13 @@ def test_service_error(core):
     assert len(sub.results) == 3
     assert len(sub.errors) == 1
 
+    metrics.expect('ingester', 'submissions_ingested', 1)
+    metrics.expect('ingester', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'files_completed', 1)
 
-def test_extracted_file(core):
+
+def test_extracted_file(core, metrics):
     sha, size = ready_extract(core, ready_body(core)[0])
 
     core.ingest_queue.push(SubmissionInput(dict(
@@ -659,8 +764,13 @@ def test_extracted_file(core):
     assert len(sub.results) == 8
     assert len(sub.errors) == 0
 
+    metrics.expect('ingester', 'submissions_ingested', 1)
+    metrics.expect('ingester', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'files_completed', 2)
 
-def test_depth_limit(core):
+
+def test_depth_limit(core, metrics):
     # Make a nested set of files that goes deeper than the max depth by one
     sha, size = ready_body(core)
     for _ in range(core.config.submission.max_extraction_depth + 1):
@@ -699,11 +809,17 @@ def test_depth_limit(core):
     assert len(sub.results) == 4 * core.config.submission.max_extraction_depth
     assert len(sub.errors) == 1
 
+    metrics.expect('ingester', 'submissions_ingested', 1)
+    metrics.expect('ingester', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'files_completed', core.config.submission.max_extraction_depth)
 
-def test_max_extracted_in_one(core):
+
+def test_max_extracted_in_one(core, metrics):
     # Make a set of files that is bigger than max_extracted (3 in this case)
     children = [ready_body(core)[0] for _ in range(5)]
     sha, size = ready_extract(core, children)
+    max_extracted = 3
 
     core.ingest_queue.push(SubmissionInput(dict(
         metadata={},
@@ -712,7 +828,7 @@ def test_max_extracted_in_one(core):
             services=dict(selected=''),
             submitter='user',
             groups=['user'],
-            max_extracted=3
+            max_extracted=max_extracted
         ),
         notification=dict(
             queue='test-extracted-in-one',
@@ -737,8 +853,13 @@ def test_max_extracted_in_one(core):
     assert len(sub.results) == 4 * (1 + 3)
     assert len(sub.errors) == 2  # The number of children that errored out
 
+    metrics.expect('ingester', 'submissions_ingested', 1)
+    metrics.expect('ingester', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'files_completed', max_extracted + 1)
 
-def test_max_extracted_in_several(core):
+
+def test_max_extracted_in_several(core, metrics):
     # Make a set of in a non trivial tree, that add up to more than 3 (max_extracted) files
     children = [
         ready_extract(core, [ready_body(core)[0], ready_body(core)[0]])[0],
@@ -774,11 +895,14 @@ def test_max_extracted_in_several(core):
     assert len(sub.results) == 4 * (1 + 3)  # 4 services, 1 original file, 3 extracted files
     assert len(sub.errors) == 3  # The number of children that errored out
 
+    metrics.expect('ingester', 'submissions_ingested', 1)
+    metrics.expect('ingester', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'files_completed', 4)
 
-def test_caching(core: CoreSession):
+
+def test_caching(core: CoreSession, metrics):
     sha, size = ready_body(core)
-    metric_channel = forge.get_metrics_sink(core.redis)
-    metric_channel.listen(blocking=False)
 
     def run_once():
         core.ingest_queue.push(SubmissionInput(dict(
@@ -814,29 +938,23 @@ def test_caching(core: CoreSession):
         return first_submission.sid
 
     sid1 = run_once()
-    expect_metrics(metric_channel, 'ingester', {'cache_miss': 1})
-    # assert (('cache_miss',), {}) in counter.call_args_list
-    # assert (('cache_hit_local',), {}) not in counter.call_args_list
-    # assert (('cache_hit',), {}) not in counter.call_args_list
+    metrics.expect('ingester', 'cache_miss', 1)
+    metrics.clear()
 
     sid2 = run_once()
-    expect_metrics(metric_channel, 'ingester', {'cache_hit_local': 1})
-    # assert (('cache_miss',), {}) not in counter.call_args_list
-    # assert (('cache_hit_local',), {}) in counter.call_args_list
-    # assert (('cache_hit',), {}) not in counter.call_args_list
+    metrics.expect('ingester', 'cache_hit_local', 1)
+    metrics.clear()
     assert sid1 == sid2
 
     core.ingest.ingester.cache = {}
 
     sid3 = run_once()
-    expect_metrics(metric_channel, 'ingester', {'cache_hit': 1})
-    # assert (('cache_miss',), {}) not in counter.call_args_list
-    # assert (('cache_hit_local',), {}) not in counter.call_args_list
-    # assert (('cache_hit',), {}) in counter.call_args_list
+    metrics.expect('ingester', 'cache_hit', 1)
+    metrics.clear()
     assert sid1 == sid3
 
 
-def test_plumber_clearing(core):
+def test_plumber_clearing(core, metrics):
     global _global_semaphore
     _global_semaphore = threading.Semaphore(value=0)
 
@@ -889,6 +1007,14 @@ def test_plumber_clearing(core):
 
         error = core.ds.error.get(sub.errors[0])
         assert "disabled" in error.response.message
+
+        metrics.expect('ingester', 'submissions_ingested', 1)
+        metrics.expect('ingester', 'submissions_completed', 1)
+        metrics.expect('dispatcher', 'submissions_completed', 1)
+        metrics.expect('dispatcher', 'files_completed', 1)
+        metrics.expect('watcher', 'expired', 1)
+        metrics.expect('service', 'fail_recoverable', 1)
+
     finally:
         _global_semaphore.release()
         service_delta = core.ds.service_delta.get('pre')
