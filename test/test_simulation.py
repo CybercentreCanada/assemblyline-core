@@ -6,18 +6,17 @@ Needs the datastore and filestore to be running, otherwise these test are stand 
 
 import hashlib
 import json
-import pytest
+import typing
 import time
 import threading
 import logging
-
-import assemblyline_core
-from assemblyline.common.forge import get_service_queue
-from assemblyline_core.plumber.run_plumber import Plumber
 from tempfile import NamedTemporaryFile
 from typing import List
 
+import pytest
+
 from assemblyline.common import forge, identify
+from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.uid import get_random_id
 from assemblyline.datastore.helper import AssemblylineDatastore
@@ -29,6 +28,8 @@ from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.messages.submission import Submission as SubmissionInput
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
+import assemblyline_core
+from assemblyline_core.plumber.run_plumber import Plumber
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.dispatching.run_files import FileDispatchServer
 from assemblyline_core.dispatching.run_submissions import SubmissionDispatchServer
@@ -122,12 +123,14 @@ class MockService(ServerBase):
 
 class CoreSession:
     def __init__(self):
-        self.ds: AssemblylineDatastore = None
+        self.ds: typing.Optional[AssemblylineDatastore] = None
         self.filestore = None
-        self.config: Config = None
-        self.ingest: IngesterInput = None
-        self.ingest_submit: IngesterSubmitter = None
-        self.ingest_internals: IngesterInternals = None
+        self.redis = None
+        self.config: typing.Optional[Config] = None
+        self.ingest: typing.Optional[IngesterInput] = None
+        self.ingest_submit: typing.Optional[IngesterSubmitter] = None
+        self.ingest_internals: typing.Optional[IngesterInternals] = None
+        self.ingest_queue = None
 
 
 @pytest.fixture(autouse=True)
@@ -247,7 +250,7 @@ def core(request, redis, filestore, config):
     ]
 
     stages = get_service_stage_hash(redis)
-    ingester_input_thread: IngesterInput = threads[0]
+    ingester_input_thread = typing.cast(IngesterInput, threads[0])
     fields.ingest = ingester_input_thread
     fields.ingest_queue = ingester_input_thread.ingester.ingest_queue
     fields.ingest_submit = threads[1]
@@ -421,6 +424,7 @@ def test_ingest_retry(core, metrics):
     attempts = []
     failures = []
     original_submit = core.ingest_submit.ingester.submit
+
     def fail_once(task):
         attempts.append(task)
         if len(attempts) > 1:
@@ -485,9 +489,10 @@ def test_ingest_timeout(core, metrics):
 
     attempts = []
     original_submit = core.ingest_submit.ingester.submit_client.submit
-    def fail(**args):
+
+    def _fail(**args):
         attempts.append(args)
-    core.ingest_submit.ingester.submit_client.submit = fail
+    core.ingest_submit.ingester.submit_client.submit = _fail
 
     try:
         si = SubmissionInput(dict(
