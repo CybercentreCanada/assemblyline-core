@@ -5,7 +5,8 @@ class MockCollection:
         self.next_searches = []
         self.schema = schema
 
-    def get(self, key, as_obj=True):
+    # noinspection PyUnusedLocal
+    def get(self, key, as_obj=True, force_archive_access=False):
         if key not in self._docs:
             return None
         if not as_obj:
@@ -21,7 +22,8 @@ class MockCollection:
         print('exists', key, self._docs, key in self._docs)
         return key in self._docs
 
-    def save(self, key, doc):
+    # noinspection PyUnusedLocal
+    def save(self, key, doc, force_archive_access=False):
         if not self.schema or isinstance(doc, self.schema):
             self._docs[key] = doc
             return
