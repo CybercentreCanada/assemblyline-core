@@ -31,7 +31,7 @@ from assemblyline.remote.datatypes import get_client
 from assemblyline import odm
 from assemblyline.odm.models.submission import SubmissionParams
 from assemblyline.odm.models.alert import EXTENDED_SCAN_VALUES
-from assemblyline.odm.messages.submission import Submission
+from assemblyline.odm.messages.submission import Submission, SubmissionMessage
 
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from assemblyline_core.submission_client import SubmissionClient
@@ -307,6 +307,13 @@ class Ingester:
         if previous:
             self.counter.increment('duplicates')
             self.finalize(pprevious, previous, score, task)
+
+            # On cache hits of any kind we want to send out a completed message
+            self.traffic_queue.publish(SubmissionMessage({
+                'msg': task.submission,
+                'msg_type': 'SubmissionCompleted',
+                'sender': 'dispatcher',
+            }).as_primitives())
             return
 
         if self.drop(task):
