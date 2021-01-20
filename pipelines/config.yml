@@ -12,4 +12,6 @@ core:
       host: localhost
       port: 6379
 datastore:
+  ilm:
+    enabled: true
   hosts: ["localhost:9200"]
