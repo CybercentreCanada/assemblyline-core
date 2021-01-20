@@ -312,7 +312,7 @@ class Ingester:
             self.traffic_queue.publish(SubmissionMessage({
                 'msg': task.submission,
                 'msg_type': 'SubmissionCompleted',
-                'sender': 'dispatcher',
+                'sender': 'ingester',
             }).as_primitives())
             return
 
