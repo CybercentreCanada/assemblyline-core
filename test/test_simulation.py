@@ -201,24 +201,6 @@ def metrics(redis):
         yield counter
 
 
-def expect_metrics(channel, message_type, values):
-    found = {}
-    start_time = time.time()
-    for metric_message in channel.listen(blocking=False):
-        if time.time() - start_time > 10:
-            break
-        if metric_message is None:
-            time.sleep(0.1)
-            continue
-        if metric_message['type'] != message_type:
-            continue
-        for key in values:
-            found[key] = found.get(key, 0) + metric_message.get(key, 0)
-        if all(found[key] >= values[key] for key in values):
-            break
-    assert all(found[key] >= values[key] for key in values), (found, values)
-
-
 @pytest.fixture(scope='module')
 def core(request, redis, filestore, config):
     # Block logs from being initialized, it breaks under pytest if you create new stream handlers
