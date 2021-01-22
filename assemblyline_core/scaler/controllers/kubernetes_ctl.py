@@ -3,8 +3,7 @@ import json
 import os
 import time
 import threading
-from typing import Dict
-
+from typing import Dict, List
 
 from kubernetes import client, config
 from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
@@ -36,7 +35,7 @@ _exponents = {
 }
 
 
-def median(values):
+def median(values: List[float]) -> float:
     if len(values) == 0:
         return 0
     return values[len(values)//2]
