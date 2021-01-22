@@ -238,13 +238,13 @@ class KubernetesController(ControllerInterface):
                 if cpu_value is None:
                     cpu_unrestricted += 1
                 else:
-                    cpu_restrictions.append(cpu_value)
+                    cpu_restrictions.append(parse_cpu(cpu_value))
 
                 memory_value = requests.get('memory', limits.get('memory', None))
                 if memory_value is None:
                     memory_unrestricted += 1
                 else:
-                    memory_restrictions.append(memory_value)
+                    memory_restrictions.append(parse_memory(memory_value))
 
         cpu -= sum(cpu_restrictions) + median(cpu_restrictions) * cpu_unrestricted
         memory -= sum(memory_restrictions) + median(memory_restrictions) * memory_unrestricted
