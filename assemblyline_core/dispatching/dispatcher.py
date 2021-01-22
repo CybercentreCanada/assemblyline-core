@@ -1,7 +1,6 @@
 import logging
 import re
 import os
-import time
 from typing import Dict, List, cast
 
 from assemblyline.common import isotime, forge
@@ -19,10 +18,11 @@ from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.service import Service
 from assemblyline.remote.datatypes import get_client
-from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
+from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
+from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
 from assemblyline_core.dispatching.dispatch_hash import DispatchHash
 from assemblyline import odm
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
@@ -221,6 +221,8 @@ class Dispatcher:
         self.classification_engine = forge.get_classification()
         self.timeout_watcher = WatcherClient(self.redis_persist)
 
+        self.quota_tracker = UserQuotaTracker('submissions', timeout=60 * 60, host=self.redis_persist)
+        
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
         self.traffic_queue = CommsQueue('submissions', self.redis)
 
@@ -275,8 +277,7 @@ class Dispatcher:
 
         # Refresh the quota hold
         if submission.params.quota_item and submission.params.submitter:
-            self.log.info(f"[{sid}] Submission will count towards {submission.params.submitter.upper()} quota")
-            Hash('submissions-' + submission.params.submitter, self.redis_persist).add(sid, isotime.now_as_iso())
+            self.log.info(f"[{sid}] Submission counts towards {submission.params.submitter.upper()} quota")
 
         # Open up the file/service table for this submission
         dispatch_table = DispatchHash(submission.sid, self.redis, fetch_results=True)
@@ -418,7 +419,7 @@ class Dispatcher:
 
         if submission.params.quota_item and submission.params.submitter:
             self.log.info(f"[{sid}] Submission no longer counts toward {submission.params.submitter.upper()} quota")
-            Hash('submissions-' + submission.params.submitter, self.redis_persist).pop(sid)
+            self.quota_tracker.end(submission.params.submitter)
 
         if task.completed_queue:
             self.volatile_named_queue(task.completed_queue).push(submission.as_primitives())
