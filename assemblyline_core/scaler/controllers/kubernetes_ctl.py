@@ -1,7 +1,10 @@
 import base64
 import json
 import os
+import time
+import threading
 from typing import Dict
+
 
 from kubernetes import client, config
 from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
@@ -31,6 +34,12 @@ _exponents = {
     'Ti': 2**40,
     'Pi': 2**50,
 }
+
+
+def median(values):
+    if len(values) == 0:
+        return 0
+    return values[len(values)//2]
 
 
 def create_docker_auth_config(image, username, password):
@@ -127,6 +136,12 @@ class KubernetesController(ControllerInterface):
             if 'scaler' not in event.involved_object.name:
                 self.events_window[event.metadata.uid] = event.count
 
+        self._current_cpu = 0, 0
+        self._current_ram = 0, 0
+        self._get_system_info()
+        background = threading.Thread(target=self._monitor_system_info, daemon=True)
+        background.start()
+
     def _deployment_name(self, service_name):
         return (self.prefix + service_name).lower().replace('_', '-')
 
@@ -152,11 +167,25 @@ class KubernetesController(ControllerInterface):
         self._create_deployment(profile.name, self._deployment_name(profile.name),
                                 profile.container_config, profile.shutdown_seconds, 0)
 
-    def cpu_info(self):
-        """Number of cores available for reservation."""
+    def _monitor_system_info(self):
+        while True:
+            try:
+                start = time.time()
+                self._get_system_info()
+                remaining_sleep = 3 - (time.time() - start)
+                if remaining_sleep > 0:
+                    time.sleep(remaining_sleep)
+            except Exception:
+                self.logger.exception("Error in kubernetes system info loop:")
+
+    def _get_system_info(self):
         # Try to get the limit from the namespace
         max_cpu = parse_cpu('inf')
-        used = 0
+        used_cpu = 0
+        used_ram = 0
+
+        max_ram = float('inf')
+
         found = False
         resources = self.api.list_namespaced_resource_quota(namespace=self.namespace, _request_timeout=API_TIMEOUT)
         for limit in resources.items:
@@ -169,10 +198,18 @@ class KubernetesController(ControllerInterface):
                 max_cpu = min(max_cpu, parse_cpu(limit.status.hard['limits.cpu']))
 
             if 'limits.cpu' in limit.status.used:
-                used = max(used, parse_cpu(limit.status.used['limits.cpu']))
+                used_cpu = max(used_cpu, parse_cpu(limit.status.used['limits.cpu']))
+
+            if 'limits.memory' in limit.status.hard:
+                max_ram = min(max_ram, parse_memory(limit.status.hard['limits.memory']))
+
+            if 'limits.memory' in limit.status.used:
+                used_ram = max(used_ram, parse_memory(limit.status.used['limits.memory']))
 
         if found:
-            return max_cpu - used, max_cpu
+            self._current_cpu = max_cpu - used_cpu, max_cpu
+            self._current_ram = max_ram - used_ram, max_ram
+            return
 
         # If the limit isn't set by the user, and we are on a cloud with auto-scaling
         # we don't have a real memory limit
@@ -181,55 +218,46 @@ class KubernetesController(ControllerInterface):
 
         # Try to get the limit by looking at the host list
         cpu = 0
-        for node in self.api.list_node(_request_timeout=API_TIMEOUT).items:
-            cpu += parse_cpu(node.status.allocatable['cpu'])
-        max_cpu = cpu
-        for pod in self.api.list_pod_for_all_namespaces(_request_timeout=API_TIMEOUT).items:
-            for container in pod.spec.containers:
-                requests = container.resources.requests or {}
-                limits = container.resources.limits or {}
-                cpu -= parse_cpu(requests.get('cpu', limits.get('cpu', '0.1')))
-        return cpu, max_cpu
-
-    def memory_info(self):
-        """Megabytes of RAM that has not been reserved."""
-        max_ram = float('inf')
-
-        # Try to get the limit from the namespace, if a specific quota has been set use
-        # that over any other options.
-        used = 0
-        found = False
-        resources = self.api.list_namespaced_resource_quota(namespace=self.namespace, _request_timeout=API_TIMEOUT)
-        for limit in resources.items:
-            # Don't worry about specific quotas, just look for namespace wide ones
-            if limit.spec.scope_selector or limit.spec.scopes:
-                continue
-
-            found = True  # At least one limit has been found
-            if 'limits.memory' in limit.status.hard:
-                max_ram = min(max_ram, parse_memory(limit.status.hard['limits.memory']))
-
-            if 'limits.memory' in limit.status.used:
-                used = max(used, parse_memory(limit.status.used['limits.memory']))
-        if found:
-            return max_ram - used, max_ram
-
-        # If the limit isn't set by the user, and we are on a cloud with auto-scaling
-        # we don't have a real memory limit
-        if self.auto_cloud:
-            return float('inf'), float('inf')
-
-        # Read the memory that is free from the node list
         memory = 0
         for node in self.api.list_node(_request_timeout=API_TIMEOUT).items:
+            cpu += parse_cpu(node.status.allocatable['cpu'])
             memory += parse_memory(node.status.allocatable['memory'])
+        max_cpu = cpu
         max_memory = memory
+
+        memory_unrestricted = 0
+        cpu_unrestricted = 0
+        memory_restrictions = []
+        cpu_restrictions = []
+
         for pod in self.api.list_pod_for_all_namespaces(_request_timeout=API_TIMEOUT).items:
             for container in pod.spec.containers:
                 requests = container.resources.requests or {}
                 limits = container.resources.limits or {}
-                memory -= parse_memory(requests.get('memory', limits.get('memory', '16Mi')))
-        return memory, max_memory
+
+                cpu_value = requests.get('cpu', limits.get('cpu', None))
+                if cpu_value is None:
+                    cpu_unrestricted += 1
+                else:
+                    cpu_restrictions.append(cpu_value)
+
+                memory_value = requests.get('memory', limits.get('memory', None))
+                if memory_value is None:
+                    memory_unrestricted += 1
+                else:
+                    memory_restrictions.append(memory_value)
+
+        cpu -= sum(cpu_restrictions) + median(cpu_restrictions) * cpu_unrestricted
+        memory -= sum(memory_restrictions) + median(memory_restrictions) * memory_unrestricted
+
+        self._current_cpu = cpu, max_cpu
+        self._current_ram = memory, max_memory
+
+    def cpu_info(self):
+        return self._current_cpu
+
+    def memory_info(self):
+        return self._current_ram
 
     @staticmethod
     def _create_metadata(deployment_name: str, labels: Dict[str, str]):
