@@ -60,7 +60,7 @@ jobs:
         set -xv
         # Pull the target branch if this is a pull request, this way if there is no
         # matching branch in base for this core branch, we will end up on the target
-        if [[ -z "${SYSTEM_PULLREQUEST_TARGETBRANCH}" ]]; then
+        if [[ ! -z "${SYSTEM_PULLREQUEST_TARGETBRANCH}" ]]; then
           export BRANCH_NAME=${SYSTEM_PULLREQUEST_TARGETBRANCH}
           git checkout -b $BRANCH_NAME -t origin/$BRANCH_NAME || true
         fi
