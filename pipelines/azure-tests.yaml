@@ -58,12 +58,20 @@ jobs:
       displayName: Setup Environment
     - script: |
         set -xv
+        # Pull the target branch if this is a pull request, this way if there is no
+        # matching branch in base for this core branch, we will end up on the target
+        if [[ -z "${SYSTEM_PULLREQUEST_TARGETBRANCH}" ]]; then
+          export BRANCH_NAME=${SYSTEM_PULLREQUEST_TARGETBRANCH}
+          git checkout -b $BRANCH_NAME -t origin/$BRANCH_NAME || true
+        fi
+
         # Try to find the matching branch, first check for pull requst data, then fall back to build data
         # The parsed name isn't available in the pull request data, so use basename to parse it out
         export BRANCH_NAME=$(basename -- "$SYSTEM_PULLREQUEST_SOURCEBRANCH")
         export BRANCH_NAME=${BRANCH_NAME:-"$BUILD_SOURCEBRANCHNAME"}
         # Try to checkout the matching branch, if the command fails, don't care.
         git checkout -b $BRANCH_NAME -t origin/$BRANCH_NAME || true
+        git status
         sudo env "PATH=$PATH" python -m pip install --no-cache-dir -e .
       displayName: Install assemblyline
       workingDirectory: $(Pipeline.Workspace)/s/assemblyline-base
