@@ -13,11 +13,13 @@ from assemblyline.datastore.exceptions import MultiKeyError
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
+from assemblyline.odm.messages.submission import SubmissionMessage, from_datastore_submission
 from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.service import Service
 from assemblyline.remote.datatypes import get_client
-from assemblyline.remote.datatypes.hash import ExpiringHash
+from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
+from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
@@ -219,6 +221,8 @@ class Dispatcher:
         self.classification_engine = forge.get_classification()
         self.timeout_watcher = WatcherClient(self.redis_persist)
 
+        # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
+        self.traffic_queue = CommsQueue('submissions', self.redis)
         self.quota_tracker = UserQuotaTracker('submissions', timeout=60 * 60, host=self.redis_persist)
 
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
@@ -254,6 +258,14 @@ class Dispatcher:
         if not self.active_submissions.exists(sid):
             self.log.info(f"[{sid}] New submission received")
             self.active_submissions.add(sid, task.as_primitives())
+
+            # Write all new submissions to the traffic queue
+            self.traffic_queue.publish(SubmissionMessage({
+                'msg': from_datastore_submission(task.submission),
+                'msg_type': 'SubmissionStarted',
+                'sender': 'dispatcher',
+            }).as_primitives())
+
         else:
             self.log.info(f"[{sid}] Received a pre-existing submission, check if it is complete")
 
@@ -423,6 +435,13 @@ class Dispatcher:
 
         # Count the submission as 'complete' either way
         self.counter.increment('submissions_completed')
+
+        # Write all finished submissions to the traffic queue
+        self.traffic_queue.publish(SubmissionMessage({
+            'msg': from_datastore_submission(submission),
+            'msg_type': 'SubmissionCompleted',
+            'sender': 'dispatcher',
+        }).as_primitives())
 
     def cancel_submission(self, task: SubmissionTask, errors, file_list):
         """The submission is being abandoned, delete everything, write failed state."""
