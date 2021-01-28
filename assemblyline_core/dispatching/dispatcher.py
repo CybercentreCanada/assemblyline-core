@@ -221,8 +221,6 @@ class Dispatcher:
         self.classification_engine = forge.get_classification()
         self.timeout_watcher = WatcherClient(self.redis_persist)
 
-        # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
-        self.traffic_queue = CommsQueue('submissions', self.redis)
         self.quota_tracker = UserQuotaTracker('submissions', timeout=60 * 60, host=self.redis_persist)
         
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
