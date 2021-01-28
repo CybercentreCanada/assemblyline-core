@@ -18,7 +18,7 @@ from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.service import Service
 from assemblyline.remote.datatypes import get_client
-from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
+from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
@@ -224,6 +224,9 @@ class Dispatcher:
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
         self.traffic_queue = CommsQueue('submissions', self.redis)
         self.quota_tracker = UserQuotaTracker('submissions', timeout=60 * 60, host=self.redis_persist)
+        
+        # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
+        self.traffic_queue = CommsQueue('submissions', self.redis)
 
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
         self.file_queue = NamedQueue(FILE_QUEUE, self.redis)
