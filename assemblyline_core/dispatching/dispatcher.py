@@ -225,9 +225,6 @@ class Dispatcher:
         self.traffic_queue = CommsQueue('submissions', self.redis)
         self.quota_tracker = UserQuotaTracker('submissions', timeout=60 * 60, host=self.redis_persist)
         
-        # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
-        self.traffic_queue = CommsQueue('submissions', self.redis)
-
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
         self.file_queue = NamedQueue(FILE_QUEUE, self.redis)
         self._nonper_other_queues = {}
