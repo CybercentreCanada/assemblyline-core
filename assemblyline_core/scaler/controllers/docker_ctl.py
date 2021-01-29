@@ -181,7 +181,7 @@ class DockerController(ControllerInterface):
             cpu_period=100000,
             cpu_quota=int(100000*cfg.cpu_cores),
             mem_limit=f'{cfg.ram_mb}m',
-            mem_reservaction=f'{min(cfg.ram_mb_min, cfg.ram_mb)}m',
+            mem_reservation=f'{min(cfg.ram_mb_min, cfg.ram_mb)}m',
             labels=labels,
             restart_policy={'Name': 'always'},
             command=cfg.command,
