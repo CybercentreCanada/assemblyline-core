@@ -54,7 +54,7 @@ class IngesterInternals(ServerBase):
 
         # End of ingest message (success)
         if self.apm_client:
-            elasticapm.tag(retries=len(tasks))
+            elasticapm.label(retries=len(tasks))
             self.apm_client.end_transaction('ingest_retries', 'success')
 
         return len(tasks)
@@ -92,7 +92,7 @@ class IngesterInternals(ServerBase):
 
         # End of ingest message (success)
         if self.apm_client:
-            elasticapm.tag(timeouts=len(timeouts))
+            elasticapm.label(timeouts=len(timeouts))
             self.apm_client.end_transaction('ingest_timeouts', 'success')
 
         return len(timeouts)
