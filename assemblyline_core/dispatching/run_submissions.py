@@ -57,13 +57,13 @@ class SubmissionDispatchServer(ServerBase):
                 if 'submission' in message:
                     task = SubmissionTask(message)
                     if self.apm_client:
-                        elasticapm.tag(sid=task.submission.sid)
+                        elasticapm.label(sid=task.submission.sid)
                         
                 # This is just as sid nudge, this submission should already be running
                 elif 'sid' in message:
                     active_task = self.dispatcher.active_submissions.get(message['sid'])
                     if self.apm_client:
-                        elasticapm.tag(sid=message['sid'])
+                        elasticapm.label(sid=message['sid'])
                     if active_task is None:
                         self.log.warning(f"[{message['sid']}] Dispatcher was nudged for inactive submission.")
                         # End of process dispatcher transaction (success)
