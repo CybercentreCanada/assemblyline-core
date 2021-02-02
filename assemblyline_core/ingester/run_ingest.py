@@ -64,7 +64,7 @@ class IngesterInput(ServerBase):
 
                 # End of ingest message (success)
                 if self.apm_client:
-                    elasticapm.tag(sid=sub.sid)
+                    elasticapm.label(sid=sub.sid)
                     self.apm_client.end_transaction('ingest_complete', 'success')
 
             ingester.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)

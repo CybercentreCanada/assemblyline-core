@@ -58,8 +58,8 @@ class FileDispatchServer(ServerBase):
 
                 message = FileTask(message)
                 if self.apm_client:
-                    elasticapm.tag(sid=message.sid)
-                    elasticapm.tag(sha256=message.file_info.sha256)
+                    elasticapm.label(sid=message.sid)
+                    elasticapm.label(sha256=message.file_info.sha256)
                     
                 self.dispatcher.dispatch_file(message)
                 

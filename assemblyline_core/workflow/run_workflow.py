@@ -53,7 +53,7 @@ class WorkflowManager(ServerBase):
 
         # End of transaction
         if self.apm_client:
-            elasticapm.tag(start_ts=p_start_ts, reporting_ts=ret_val)
+            elasticapm.label(start_ts=p_start_ts, reporting_ts=ret_val)
             self.apm_client.end_transaction('get_last_reporting_ts', 'new_ts' if ret_val != p_start_ts else 'same_ts')
 
         return ret_val
@@ -94,24 +94,24 @@ class WorkflowManager(ServerBase):
 
                     # End of transaction
                     if self.apm_client:
-                        elasticapm.tag(number_of_workflows=len(workflow_queries))
+                        elasticapm.label(number_of_workflows=len(workflow_queries))
                         self.apm_client.end_transaction('loading_workflows', 'search_exception')
                     continue
 
                 # End of transaction
                 if self.apm_client:
-                    elasticapm.tag(number_of_workflows=len(workflow_queries))
+                    elasticapm.label(number_of_workflows=len(workflow_queries))
                     self.apm_client.end_transaction('loading_workflows', 'success')
 
                 for workflow in workflow_queries:
                     # Start of transaction
                     if self.apm_client:
                         self.apm_client.begin_transaction("Execute workflows")
-                        elasticapm.tag(query=workflow.query,
-                                       labels=workflow.labels,
-                                       status=workflow.status,
-                                       priority=workflow.priority,
-                                       user=workflow.creator)
+                        elasticapm.label(query=workflow.query,
+                                         labels=workflow.labels,
+                                         status=workflow.status,
+                                         priority=workflow.priority,
+                                         user=workflow.creator)
 
                     self.log.info(f'Executing workflow filter: {workflow.name}')
                     labels = workflow.labels or []
@@ -144,7 +144,7 @@ class WorkflowManager(ServerBase):
                     try:
                         count = self.datastore.alert.update_by_query(workflow.query, operations, filters=fq)
                         if self.apm_client:
-                            elasticapm.tag(affected_alerts=count)
+                            elasticapm.label(affected_alerts=count)
 
                         if count:
                             self.log.info("{count} Alert(s) were affected by this filter.".format(count=count))

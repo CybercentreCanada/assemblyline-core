@@ -77,8 +77,8 @@ class ExpiryManager(ServerBase):
             number_to_delete = collection.search(delete_query, rows=0, as_obj=False)['total']
 
             if self.apm_client:
-                elasticapm.tag(query=delete_query)
-                elasticapm.tag(number_to_delete=number_to_delete)
+                elasticapm.label(query=delete_query)
+                elasticapm.label(number_to_delete=number_to_delete)
 
             self.log.info(f"Processing collection: {collection.name}")
             if number_to_delete != 0:
@@ -124,8 +124,8 @@ class ExpiryManager(ServerBase):
             number_to_archive = collection.search(archive_query, rows=0, as_obj=False, use_archive=False)['total']
 
             if self.apm_client:
-                elasticapm.tag(query=archive_query)
-                elasticapm.tag(number_to_archive=number_to_archive)
+                elasticapm.label(query=archive_query)
+                elasticapm.label(number_to_archive=number_to_archive)
 
             self.log.info(f"Processing collection: {collection.name}")
             if number_to_archive != 0:
