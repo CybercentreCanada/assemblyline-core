@@ -189,7 +189,7 @@ class DockerUpdateInterface:
 
 
 class KubernetesUpdateInterface:
-    def __init__(self, prefix, namespace, priority_class):
+    def __init__(self, prefix, namespace, priority_class, extra_labels):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -216,6 +216,7 @@ class KubernetesUpdateInterface:
         self.batch_api = client.BatchV1Api()
         self.namespace = namespace
         self.priority_class = priority_class
+        self.extra_labels = extra_labels
 
     def launch(self, name, docker_config: DockerConfig, mounts, env, network, blocking: bool = True):
         name = (self.prefix + 'update-' + name.lower()).replace('_', '-')
@@ -308,13 +309,15 @@ class KubernetesUpdateInterface:
         if network == 'al_registration':
             section = 'service'
 
+        labels = {
+            'app': 'assemblyline',
+            'section': section,
+            'component': 'update-script',
+        }.update(self.extra_labels)
+
         metadata = V1ObjectMeta(
             name=name,
-            labels={
-                'app': 'assemblyline',
-                'section': section,
-                'component': 'update-script',
-            }
+            labels=labels
         )
 
         environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in docker_config.environment]
@@ -425,7 +428,8 @@ class ServiceUpdater(CoreBase):
         #
         if 'KUBERNETES_SERVICE_HOST' in os.environ and NAMESPACE:
             self.controller = KubernetesUpdateInterface(prefix='alsvc_', namespace=NAMESPACE,
-                                                        priority_class='al-core-priority')
+                                                        priority_class='al-core-priority',
+                                                        extra_labels=self.config.core.scaler.additional_labels)
         else:
             self.controller = DockerUpdateInterface()
 
