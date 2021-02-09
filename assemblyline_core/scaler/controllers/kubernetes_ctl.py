@@ -157,8 +157,7 @@ class KubernetesController(ControllerInterface):
         self.config_mounts[target_path] = V1VolumeMount(
             name=name,
             mount_path=target_path,
-            sub_path=key,
-            read_only=True,
+            sub_path=key
         )
 
     def add_profile(self, profile):
@@ -273,16 +272,14 @@ class KubernetesController(ControllerInterface):
         volumes.append(V1Volume(
             name='update-directory',
             persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
-                claim_name=FILE_UPDATE_VOLUME,
-                read_only=True
+                claim_name=FILE_UPDATE_VOLUME
             ),
         ))
 
         mounts.append(V1VolumeMount(
             name='update-directory',
             mount_path=CONTAINER_UPDATE_DIRECTORY,
-            sub_path=service_name,
-            read_only=True,
+            sub_path=service_name
         ))
 
         return volumes, mounts
