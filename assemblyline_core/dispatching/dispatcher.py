@@ -1,244 +1,237 @@
-import logging
-import re
-import os
-from typing import Dict, List, cast
+import bisect
+import functools
+import uuid
+import threading
+import time
+from collections import defaultdict
+from typing import Dict, List, Tuple, Set, Optional
 
-from assemblyline.common import isotime, forge
-from assemblyline.common.constants import SUBMISSION_QUEUE, FILE_QUEUE, DISPATCH_TASK_HASH, \
-    DISPATCH_RUNNING_TASK_HASH, get_temporary_submission_data_name, get_tag_set_name, make_watcher_list_name
-from assemblyline.common.forge import CachedObject, get_service_queue
+import elasticapm
+
+from assemblyline.common import isotime
+from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
+    DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE
+from assemblyline.common.forge import get_service_queue
+from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
-from assemblyline.datastore import Collection
-from assemblyline.datastore.exceptions import MultiKeyError
-from assemblyline.datastore.helper import AssemblylineDatastore
+from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
+from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage
 from assemblyline.odm.messages.submission import SubmissionMessage, from_datastore_submission
-from assemblyline.odm.models.config import Config
+from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.error import Error
+from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
-from assemblyline.remote.datatypes import get_client
-from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
+from assemblyline.odm.models.submission import Submission
+from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
+from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
-from assemblyline_core.dispatching.dispatch_hash import DispatchHash
-from assemblyline import odm
-from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
-from assemblyline.odm.models.submission import Submission
-from assemblyline_core.server_base import get_service_stage_hash, ServiceStage
-from assemblyline_core.watcher.client import WatcherClient
+from assemblyline_core.server_base import CoreBase
 
-# If you are doing development and you want the system to route jobs ignoring the service setup/teardown
-# set an environment variable SKIP_SERVICE_SETUP to true for all dispatcher containers
-SKIP_SERVICE_SETUP = os.environ.get('SKIP_SERVICE_SETUP', 'false').lower() in ['true', '1']
+from .schedules import Scheduler
 
 
-@odm.model()
-class SubmissionTask(odm.Model):
+class ResultSummary:
+    def __init__(self, key, drop, score, children):
+        self.key: str = key
+        self.drop: bool = drop
+        self.score: int = score
+        self.children: List[str] = children
+
+
+class SubmissionTask:
     """Dispatcher internal model for submissions"""
-    submission: Submission = odm.Compound(Submission)
-    completed_queue = odm.Optional(odm.Keyword())                     # Which queue to notify on completion
+    def __init__(self, submission, completed_queue):
+        self.submission: Submission = Submission(submission)
+        self.completed_queue = str(completed_queue)
+        self.lock = threading.Lock()
+
+        self.file_info: Dict[str, FileInfo] = {}
+        self.file_schedules: Dict[str, List[Dict[str, Service]]] = {}
+        self.file_tags = {}
+        self.file_depth: Dict[str, int] = {}
+        self.file_temporary_data = {}
+        self.extra_errors = []
+        self.dropped_files = set()
+
+        self.service_results: Dict[Tuple[str, str], ResultSummary] = {}
+        self.service_errors: Dict[Tuple[str, str], dict] = {}
+        self.service_attempts: Dict[Tuple[str, str], int] = defaultdict(int)
+        self.queue_keys: Dict[Tuple[str, str], bytes] = {}
+        self.running_services: Dict[Tuple[str, str], Tuple[int, str]] = {}
 
 
-@odm.model()
-class FileTask(odm.Model):
-    """Dispatcher internal model for tracking each file in a submission."""
-    sid = odm.Keyword()
-    min_classification = odm.Classification()  # Minimum classification of the file being scanned
-    parent_hash = odm.Optional(odm.Keyword())
-    file_info: FileInfo = odm.Compound(FileInfo)
-    depth = odm.Integer()
-    max_files = odm.Integer()
-
-    def get_tag_set_name(self) -> str:
-        """Get the name of a redis set where the task tags are collected."""
-        return get_tag_set_name(self.sid, self.file_info.sha256)
-
-    def get_temporary_submission_data_name(self) -> str:
-        """Get the name of a redis hash where tags for a submission are collected."""
-        return get_temporary_submission_data_name(self.sid, self.file_info.sha256)
+DISPATCH_TASK_ASSIGNMENT = 'dispatcher-tasks-assigned-to-'
+DISPATCH_START_EVENTS = 'dispatacher-start-events-'
+DISPATCH_RESULT_QUEUE = 'dispatacher-results-'
+DISPATCH_DIRECTORY = 'dispatchers-directory'
+QUEUE_EXPIRY = 60*60
+GUARD_TIMEOUT = 60*2
+SOFT_MAX_JOBS = 1000
+HARD_MAX_JOBS = 1500
+TIMEOUT_EXTRA_TIME = 30  # 30 seconds grace for message handling.
+TIMEOUT_TEST_INTERVAL = 5
 
 
-class Scheduler:
-    """This object encapsulates building the schedule for a given file type for a submission."""
+class Dispatcher(CoreBase):
 
-    def __init__(self, datastore: AssemblylineDatastore, config: Config, redis):
-        self.datastore = datastore
-        self.config = config
-        self.services = cast(Dict[str, Service], CachedObject(self._get_services))
-        self.service_stage = get_service_stage_hash(redis)
+    def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None,
+                 config=None, counter_name='dispatcher'):
+        super().__init__('assemblyline.dispatcher', config=config, datastore=datastore,
+                         redis=redis, redis_persist=redis_persist, logger=logger)
 
-    def build_schedule(self, submission: Submission, file_type: str) -> List[Dict[str, Service]]:
-        all_services = dict(self.services)
-
-        # Load the selected and excluded services by category
-        excluded = self.expand_categories(submission.params.services.excluded)
-        runtime_excluded = self.expand_categories(submission.params.services.runtime_excluded)
-        if not submission.params.services.selected:
-            selected = [s for s in all_services.keys()]
-        else:
-            selected = self.expand_categories(submission.params.services.selected)
-
-        # Add all selected, accepted, and not rejected services to the schedule
-        schedule: List[Dict[str, Service]] = [{} for _ in self.config.services.stages]
-        services = list(set(selected) - set(excluded) - set(runtime_excluded))
-        selected = []
-        skipped = []
-        for name in services:
-            service = all_services.get(name, None)
-
-            if not service:
-                skipped.append(name)
-                logging.warning(f"Service configuration not found: {name}")
-                continue
-
-            accepted = not service.accepts or re.match(service.accepts, file_type)
-            rejected = bool(service.rejects) and re.match(service.rejects, file_type)
-
-            if accepted and not rejected:
-                schedule[self.stage_index(service.stage)][name] = service
-                selected.append(name)
-            else:
-                skipped.append(name)
-
-        return schedule
-
-    def expand_categories(self, services: List[str]) -> List[str]:
-        """Expands the names of service categories found in the list of services.
-
-        Args:
-            services (list): List of service category or service names.
-        """
-        if services is None:
-            return []
-
-        services = list(services)
-        categories = self.categories()
-
-        found_services = []
-        seen_categories = set()
-        while services:
-            name = services.pop()
-
-            # If we found a new category mix in it's content
-            if name in categories:
-                if name not in seen_categories:
-                    # Add all of the items in this group to the list of
-                    # things that we need to evaluate, and mark this
-                    # group as having been seen.
-                    services.extend(categories[name])
-                    seen_categories.update(name)
-                continue
-
-            # If it isn't a category, its a service
-            found_services.append(name)
-
-        # Use set to remove duplicates, set is more efficient in batches
-        return list(set(found_services))
-
-    def categories(self) -> Dict[str, List[str]]:
-        all_categories = {}
-        for service in self.services.values():
-            try:
-                all_categories[service.category].append(service.name)
-            except KeyError:
-                all_categories[service.category] = [service.name]
-        return all_categories
-
-    def stage_index(self, stage):
-        return self.config.services.stages.index(stage)
-
-    def _get_services(self):
-        stages = self.service_stage.items()
-
-        # noinspection PyUnresolvedReferences
-        return {x.name: x for x in self.datastore.list_all_services(full=True)
-                if x.enabled and (stages.get(x.name) == ServiceStage.Running or SKIP_SERVICE_SETUP)}
-
-
-def depths_from_tree(file_tree: Dict[str, List[str]]) -> Dict[str, int]:
-    file_children: Dict[str, List[str]] = {}
-    depths: Dict[str, int] = {}
-    remaining_files = set()
-
-    for child, parents in file_tree.items():
-        remaining_files.add(child)
-        for parent in parents:
-            if parent:
-                remaining_files.add(parent)
-                file_children[parent] = file_children.get(parent, []) + [child]
-            else:
-                depths[child] = 0
-
-    next_round = dict(file_children)
-    change = True
-    while next_round and change:
-        file_children = next_round
-        next_round = dict()
-        change = False
-
-        for parent, children in file_children.items():
-            if parent in depths:
-                change = True
-                for child in children:
-                    depths[child] = min(depths[parent] + 1, depths.get(child, float('inf')))
-            else:
-                next_round[parent] = children
-
-    return depths
-
-
-class Dispatcher:
-
-    def __init__(self, datastore, redis, redis_persist, logger, counter_name='dispatcher'):
         # Load the datastore collections that we are going to be using
-        self.datastore: AssemblylineDatastore = datastore
-        self.log: logging.Logger = logger
-        self.submissions: Collection = datastore.submission
-        self.results: Collection = datastore.result
-        self.errors: Collection = datastore.error
-        self.files: Collection = datastore.file
+        self.instance_id = uuid.uuid4().hex
+        # self.submissions: Collection = datastore.submission
+        # self.results: Collection = datastore.result
+        # self.errors: Collection = datastore.error
+        # self.files: Collection = datastore.file
+        self._tasks: Dict[str, SubmissionTask] = {}
+        self._tasks_lock = threading.Lock()
 
-        # Create a config cache that will refresh config values periodically
-        self.config: Config = forge.get_config()
-
-        # Connect to all of our persistent redis structures
-        self.redis = redis or get_client(
-            host=self.config.core.redis.nonpersistent.host,
-            port=self.config.core.redis.nonpersistent.port,
-            private=False,
-        )
-        self.redis_persist = redis_persist or get_client(
-            host=self.config.core.redis.persistent.host,
-            port=self.config.core.redis.persistent.port,
-            private=False,
-        )
-
-        # Build some utility classes
+        #
+        # # Build some utility classes
         self.scheduler = Scheduler(datastore, self.config, self.redis)
-        self.classification_engine = forge.get_classification()
-        self.timeout_watcher = WatcherClient(self.redis_persist)
+        self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
+        self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
 
+        # self.classification_engine = forge.get_classification()
+        #
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
         self.traffic_queue = CommsQueue('submissions', self.redis)
         self.quota_tracker = UserQuotaTracker('submissions', timeout=60 * 60, host=self.redis_persist)
-
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
-        self.file_queue = NamedQueue(FILE_QUEUE, self.redis)
-        self._nonper_other_queues = {}
-        self.active_submissions = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
-        self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
+
+        # self.file_queue = NamedQueue(FILE_QUEUE, self.redis)
+        # self._nonper_other_queues = {}
+        self.dispatchers_directory = Hash(DISPATCH_DIRECTORY, host=self.redis_persist)
+        self.active_submissions = ExpiringHash(DISPATCH_TASK_ASSIGNMENT+self.instance_id, host=self.redis_persist)
+        self.start_queue = NamedQueue(DISPATCH_START_EVENTS+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
+        self.result_queue = NamedQueue(DISPATCH_RESULT_QUEUE+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
 
         # Publish counters to the metrics sink.
         self.counter = MetricsFactory(metrics_type='dispatcher', schema=Metrics, name=counter_name,
                                       redis=self.redis, config=self.config)
 
-    def volatile_named_queue(self, name: str) -> NamedQueue:
-        if name not in self._nonper_other_queues:
-            self._nonper_other_queues[name] = NamedQueue(name, self.redis)
-        return self._nonper_other_queues[name]
+        self.apm_client = None
+        if self.config.core.metrics.apm_server.server_url:
+            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
+                                                service_name="dispatcher")
+
+        # Thread events related to exiting
+        self.stopping = threading.Event()
+        self.main_loop_exit = threading.Event()
+
+        self.timeout_list_lock = threading.Lock()
+        self.timeout_list: List[Tuple[int, str, str, str]] = []
+
+    def add_task(self, task: SubmissionTask):
+        with self._tasks_lock:
+            self._tasks[task.submission.sid] = task
+
+    def get_task(self, sid: str) -> Optional[SubmissionTask]:
+        with self._tasks_lock:
+            return self._tasks.get(sid)
+
+    def sleep(self, timeout):
+        self.stopping.wait(timeout)
+        return self.running
+
+    def log_crashes(self, fn):
+        @functools.wraps(fn)
+        def with_logs(*args, **kwargs):
+            # noinspection PyBroadException
+            try:
+                fn(*args, **kwargs)
+            except Exception:
+                self.log.exception(f'Crash in dispatcher: {fn.__name__}')
+        return with_logs
+
+    def try_run(self):
+        expected_threads = {
+            # Pull in new submissions
+            'Pull Submissions': self.log_crashes(self.pull_submissions),
+            # Handle start messages
+            'Service Start': self.log_crashes(self.handle_service_starts),
+            # Process results
+            'Service Results': self.log_crashes(self.handle_service_results),
+            # Handle timeouts
+            'Process Timeouts': self.log_crashes(self.handle_timeouts),
+            # Work guard/thief
+            'Guard Work': self.log_crashes(self.work_guard),
+            'Work Thief': self.log_crashes(self.work_thief)
+        }
+        threads = {}
+
+        # Run as long as we need to
+        while self.running:
+            # Check for any crashed threads
+            for name, thread in list(threads.items()):
+                if not thread.is_alive():
+                    self.log.warning(f'Restarting thread: {name}')
+                    threads.pop(name)
+
+            # Start any missing threads
+            for name, function in expected_threads.items():
+                if name not in threads:
+                    self.log.info(f'Starting thread: {name}')
+                    threads[name] = thread = threading.Thread(target=function, name=name)
+                    thread.start()
+
+            # Take a break before doing it again
+            super().heartbeat()
+            self.sleep(2)
+
+        for _t in threads.values():
+            _t.join()
+
+        self.main_loop_exit.set()
+
+    def pull_submissions(self):
+        queue = self.submission_queue
+        cpu_mark = time.process_time()
+        time_mark = time.time()
+
+        while self.running:
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
+            if self.active_submissions.length() >= SOFT_MAX_JOBS:
+                time.sleep(1)
+                continue
+
+            message = queue.pop(timeout=1)
+
+            cpu_mark = time.process_time()
+            time_mark = time.time()
+
+            if not message:
+                continue
+
+            # Start of process dispatcher transaction
+            if self.apm_client:
+                self.apm_client.begin_transaction('Process dispatcher message')
+
+            try:
+                # This is probably a complete task
+                task = SubmissionTask(**message)
+                if self.apm_client:
+                    elasticapm.label(sid=task.submission.sid)
+
+                with task.lock:
+                    self.dispatch_submission(task)
+
+                # End of process dispatcher transaction (success)
+                if self.apm_client:
+                    self.apm_client.end_transaction('submission_message', 'success')
+            except Exception:
+                if self.apm_client:
+                    self.apm_client.end_transaction('submission_message', 'exception')
+                raise
 
     def dispatch_submission(self, task: SubmissionTask):
         """
@@ -257,7 +250,10 @@ class Dispatcher:
 
         if not self.active_submissions.exists(sid):
             self.log.info(f"[{sid}] New submission received")
-            self.active_submissions.add(sid, task.as_primitives())
+            self.active_submissions.add(sid, {
+                'completed_queue': task.completed_queue,
+                'submission': submission.as_primitives()
+            })
 
             # Write all new submissions to the traffic queue
             self.traffic_queue.publish(SubmissionMessage({
@@ -267,289 +263,53 @@ class Dispatcher:
             }).as_primitives())
 
         else:
-            self.log.info(f"[{sid}] Received a pre-existing submission, check if it is complete")
-
-        # Refresh the watch, this ensures that this function will be called again
-        # if something goes wrong with one of the files, and it never gets invoked by dispatch_file.
-        self.timeout_watcher.touch(key=sid, timeout=int(self.config.core.dispatcher.timeout),
-                                   queue=SUBMISSION_QUEUE, message={'sid': sid})
+            self.log.warning(f"[{sid}] Received a pre-existing submission, check if it is complete")
 
         # Refresh the quota hold
         if submission.params.quota_item and submission.params.submitter:
             self.log.info(f"[{sid}] Submission counts towards {submission.params.submitter.upper()} quota")
 
-        # Open up the file/service table for this submission
-        dispatch_table = DispatchHash(submission.sid, self.redis, fetch_results=True)
-        file_parents = dispatch_table.file_tree()  # Load the file tree data as well
+        self.add_task(task)
 
-        # All the submission files, and all the file_tree files, to be sure we don't miss any incomplete children
-        unchecked_hashes = [submission_file.sha256 for submission_file in submission.files]
-        unchecked_hashes = list(set(unchecked_hashes) | set(file_parents.keys()))
+        task.file_depth[submission.files[0].sha256] = 0
+        self.dispatch_file(task, submission.files[0].sha256)
 
-        # Using the file tree we can recalculate the depth of any file
-        depth_limit = self.config.submission.max_extraction_depth
-        file_depth = depths_from_tree(file_parents)
-
-        # Try to find all files, and extracted files, and create task objects for them
-        # (we will need the file data anyway for checking the schedule later)
-        max_files = len(submission.files) + submission.params.max_extracted
-        unchecked_files = []  # Files that haven't been checked yet
-        try:
-            for sha, file_data in self.files.multiget(unchecked_hashes).items():
-                unchecked_files.append(FileTask(dict(
-                    sid=sid,
-                    min_classification=task.submission.classification,
-                    file_info=dict(
-                        magic=file_data.magic,
-                        md5=file_data.md5,
-                        mime=file_data.mime,
-                        sha1=file_data.sha1,
-                        sha256=file_data.sha256,
-                        size=file_data.size,
-                        type=file_data.type,
-                    ),
-                    depth=file_depth.get(sha, 0),
-                    max_files=max_files
-                )))
-        except MultiKeyError as missing:
-            errors = []
-            for file_sha in missing.keys:
-                error = Error(dict(
-                    archive_ts=submission.archive_ts,
-                    expiry_ts=submission.expiry_ts,
-                    response=dict(
-                        message="Submission couldn't be completed due to missing file.",
-                        service_name="dispatcher",
-                        service_tool_version='4',
-                        service_version='4',
-                        status="FAIL_NONRECOVERABLE",
-                    ),
-                    sha256=file_sha,
-                    type='UNKNOWN'
-                ))
-                error_key = error.build_key(service_tool_version=sid)
-                self.datastore.error.save(error_key, error)
-                errors.append(error_key)
-            return self.cancel_submission(task, errors, file_parents)
-
-        # Files that have already been encountered, but may or may not have been processed yet
-        # encountered_files = {file.sha256 for file in submission.files}
-        pending_files = {}  # Files that have not yet been processed
-
-        # Track information about the results as we hit them
-        file_scores: Dict[str, int] = {}
-
-        # Load the current state of the dispatch table in one go rather than one at a time in the loop
-        prior_dispatches = dispatch_table.all_dispatches()
-
-        # found should be added to the unchecked files if they haven't been encountered already
-        for file_task in unchecked_files:
-            sha = file_task.file_info.sha256
-            schedule = self.build_schedule(dispatch_table, submission, sha, file_task.file_info.type)
-
-            while schedule and sha not in pending_files:
-                stage = schedule.pop(0)
-                for service_name in stage:
-                    # Only active services should be in this dict, so if a service that was placed in the
-                    # schedule is now missing it has been disabled or taken offline.
-                    service = self.scheduler.services.get(service_name)
-                    if not service:
-                        continue
-
-                    # If the service is still queued or in progress this key will still be set
-                    queue_key = prior_dispatches.get(sha, {}).get(service_name, None)
-                    if queue_key is not None:
-                        pending_files[sha] = file_task
-                        break
-
-                    # It hasn't started, has timed out, or is finished, see if we have a result
-                    result_row = dispatch_table.finished(sha, service_name)
-
-                    # No result found, mark the file as incomplete
-                    if not result_row:
-                        pending_files[sha] = file_task
-                        break
-
-                    if not submission.params.ignore_filtering and result_row.drop:
-                        schedule.clear()
-
-                    # The process table is marked that a service has been abandoned due to errors
-                    if result_row.is_error:
-                        continue
-
-                    # Collect information about the result
-                    file_scores[sha] = file_scores.get(sha, 0) + result_row.score
-
-        # Using the file tree find the most shallow parent of the given file
-        def lowest_parent(_sha):
-            # A root file won't have any parents in the dict
-            if _sha not in file_parents or None in file_parents[_sha]:
-                return None
-            return min((file_depth.get(parent, depth_limit), parent) for parent in file_parents[_sha])[1]
-
-        # Filter out things over the depth limit
-        pending_files = {sha: ft for sha, ft in pending_files.items() if ft.depth < depth_limit}
-
-        # Filter out files based on the extraction limits
-        pending_files = {sha: ft for sha, ft in pending_files.items()
-                         if dispatch_table.add_file(sha, max_files, lowest_parent(sha))}
-
-        # If there are pending files, then at least one service, on at least one
-        # file isn't done yet, and hasn't been filtered by any of the previous few steps
-        # poke those files
-        if pending_files:
-            self.log.debug(f"[{sid}] Dispatching {len(pending_files)} files: {list(pending_files.keys())}")
-            for file_task in pending_files.values():
-                self.file_queue.push(file_task.as_primitives())
-        else:
-            self.log.debug(f"[{sid}] Finalizing submission.")
-            max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
-            self.finalize_submission(task, max_score, file_scores.keys())
-
-    def _cleanup_submission(self, task: SubmissionTask, file_list: List[str]):
-        """Clean up code that is the same for canceled and finished submissions"""
+    def dispatch_file(self, task: SubmissionTask, sha256):
         submission = task.submission
         sid = submission.sid
 
-        # Erase the temporary data which may have accumulated during processing
-        for file_hash in file_list:
-            hash_name = get_temporary_submission_data_name(sid, file_hash=file_hash)
-            ExpiringHash(hash_name, host=self.redis).delete()
+        # If its the first time we've seen this file, we won't have a schedule for it
+        if sha256 not in task.file_schedules:
+            # # If we have hit the limit on number of files, don't process this one
+            # if len(task.file_schedules) > task.submission.params.max_extracted:
+            #     self.log.info(f'[{sid}] hit extraction limit, dropping {sha256}')
+            #     task.dropped_files.add(sha256)
+            #
+            # # If this file is being dropped stop here
+            # if sha256 in task.dropped_files:
+            #     if len(task.queue_keys) == 0 and len(task.running_services) == 0:
+            #         self.check_submission(task)
+            #     return
 
-        if submission.params.quota_item and submission.params.submitter:
-            self.log.info(f"[{sid}] Submission no longer counts toward {submission.params.submitter.upper()} quota")
-            self.quota_tracker.end(submission.params.submitter)
-
-        if task.completed_queue:
-            self.volatile_named_queue(task.completed_queue).push(submission.as_primitives())
-
-        # Send complete message to any watchers.
-        watcher_list = ExpiringSet(make_watcher_list_name(sid), host=self.redis)
-        for w in watcher_list.members():
-            NamedQueue(w).push(WatchQueueMessage({'status': 'STOP'}).as_primitives())
-
-        # Clear the timeout watcher
-        watcher_list.delete()
-        self.timeout_watcher.clear(sid)
-        self.active_submissions.pop(sid)
-
-        # Count the submission as 'complete' either way
-        self.counter.increment('submissions_completed')
-
-        # Write all finished submissions to the traffic queue
-        self.traffic_queue.publish(SubmissionMessage({
-            'msg': from_datastore_submission(submission),
-            'msg_type': 'SubmissionCompleted',
-            'sender': 'dispatcher',
-        }).as_primitives())
-
-    def cancel_submission(self, task: SubmissionTask, errors, file_list):
-        """The submission is being abandoned, delete everything, write failed state."""
-        submission = task.submission
-        sid = submission.sid
-
-        # Pull down the dispatch table and clear it from redis
-        dispatch_table = DispatchHash(submission.sid, self.redis)
-        dispatch_table.delete()
-
-        submission.classification = submission.params.classification
-        submission.error_count = len(errors)
-        submission.errors = errors
-        submission.state = 'failed'
-        submission.times.completed = isotime.now_as_iso()
-        self.submissions.save(sid, submission)
-
-        self._cleanup_submission(task, file_list)
-        self.log.error(f"[{sid}] Failed")
-
-    def finalize_submission(self, task: SubmissionTask, max_score, file_list):
-        """All of the services for all of the files in this submission have finished or failed.
-
-        Update the records in the datastore, and flush the working data from redis.
-        """
-        submission = task.submission
-        sid = submission.sid
-
-        # Pull down the dispatch table and clear it from redis
-        dispatch_table = DispatchHash(submission.sid, self.redis)
-        all_results = dispatch_table.all_results()
-        errors = dispatch_table.all_extra_errors()
-        dispatch_table.delete()
-
-        # Sort the errors out of the results
-        results = []
-        for row in all_results.values():
-            for status in row.values():
-                if status.is_error:
-                    errors.append(status.key)
-                elif status.bucket == 'result':
-                    results.append(status.key)
-                else:
-                    self.log.warning(f"[{sid}] Unexpected service output bucket: {status.bucket}/{status.key}")
-
-        submission.classification = submission.params.classification
-        submission.error_count = len(errors)
-        submission.errors = errors
-        submission.file_count = len(file_list)
-        submission.results = results
-        submission.max_score = max_score
-        submission.state = 'completed'
-        submission.times.completed = isotime.now_as_iso()
-        self.submissions.save(sid, submission)
-
-        self._cleanup_submission(task, file_list)
-        self.log.info(f"[{sid}] Completed; files: {len(file_list)} results: {len(results)} "
-                      f"errors: {len(errors)} score: {max_score}")
-
-    def dispatch_file(self, task: FileTask):
-        """ Handle a message describing a file to be processed.
-
-        This file may be:
-            - A new submission or extracted file.
-            - A file that has just completed a stage of processing.
-            - A file that has not completed a a stage of processing, but this
-              call has been triggered by a timeout or similar.
-
-        If the file is totally new, we will setup a dispatch table, and fill it in.
-
-        Once we make/load a dispatch table, we will dispatch whichever group the table
-        shows us hasn't been completed yet.
-
-        When we dispatch to a service, we check if the task is already in the dispatch
-        queue. If it isn't proceed normally. If it is, check that the service is still online.
-        """
-        # Read the message content
-        file_hash = task.file_info.sha256
-        active_task = self.active_submissions.get(task.sid)
-
-        if active_task is None:
-            self.log.warning(f"[{task.sid}] Untracked submission is being processed")
-            return
-
-        submission_task = SubmissionTask(active_task)
-        submission = submission_task.submission
-
-        # Refresh the watch on the submission, we are still working on it
-        self.timeout_watcher.touch(key=task.sid, timeout=int(self.config.core.dispatcher.timeout),
-                                   queue=SUBMISSION_QUEUE, message={'sid': task.sid})
-
-        # Open up the file/service table for this submission
-        dispatch_table = DispatchHash(task.sid, self.redis, fetch_results=True)
-
-        # Load things that we will need to fill out the
-        file_tags = ExpiringSet(task.get_tag_set_name(), host=self.redis)
-        file_tags_data = file_tags.members()
-        temporary_submission_data = ExpiringHash(task.get_temporary_submission_data_name(), host=self.redis)
-        temporary_data = [dict(name=row[0], value=row[1]) for row in temporary_submission_data.items().items()]
-
-        # Calculate the schedule for the file
-        schedule = self.build_schedule(dispatch_table, submission, file_hash, task.file_info.type)
-        started_stages = []
+            # We are processing this file, load the file info, and build the schedule
+            filestore_info = self.datastore.file.get(sha256)
+            file_info = task.file_info[sha256] = FileInfo(dict(
+                magic=filestore_info.magic,
+                md5=filestore_info.md5,
+                mime=filestore_info.mime,
+                sha1=filestore_info.sha1,
+                sha256=filestore_info.sha256,
+                size=filestore_info.size,
+                type=filestore_info.type,
+            ))
+            task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type)
+        file_info = task.file_info[sha256]
+        schedule = list(task.file_schedules[sha256])
 
         # Go through each round of the schedule removing complete/failed services
         # Break when we find a stage that still needs processing
         outstanding = {}
-        score = 0
+        started_stages = []
         errors = 0
         while schedule and not outstanding:
             stage = schedule.pop(0)
@@ -560,95 +320,151 @@ class Dispatcher:
                 if not service:
                     continue
 
-                # Load the results, if there are no results, then the service must be dispatched later
-                # Don't look at if it has been dispatched, as multiple dispatches are fine,
-                # but missing a dispatch isn't.
-                finished = dispatch_table.finished(file_hash, service_name)
-                if not finished:
-                    outstanding[service_name] = service
-                    continue
+                key = (sha256, service_name)
 
                 # If the service terminated in an error, count the error and continue
-                if finished.is_error:
+                if key in task.service_errors:
                     errors += 1
                     continue
 
+                # If we have no error, and no result, its not finished
+                result = task.service_results.get(key)
+                if not result:
+                    if task.service_attempts[key] >= 3:
+                        self.retry_error(task, sha256, service_name)
+                        errors += 1
+                        continue
+                    outstanding[service_name] = service
+                    continue
+
                 # if the service finished, count the score, and check if the file has been dropped
-                score += finished.score
-                if not submission.params.ignore_filtering and finished.drop:
+                if not submission.params.ignore_filtering and result.drop:
+                    # Clear out anything in the schedule after this stage
+                    task.file_schedules[sha256] = started_stages
                     schedule.clear()
-                    if schedule:  # If there are still stages in the schedule, over write them for next time
-                        dispatch_table.schedules.set(file_hash, started_stages)
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
-            self.log.info(f"[{task.sid}] File {file_hash} sent to services : {', '.join(list(outstanding.keys()))}")
+            self.log.info(f"[{sid}] File {sha256} sent to services : {', '.join(list(outstanding.keys()))}")
 
             for service_name, service in outstanding.items():
                 queue = get_service_queue(service_name, self.redis)
 
                 # Check if this task is already sitting in queue
-                dispatch_key = dispatch_table.dispatch_key(file_hash, service_name)
+                dispatch_key = task.queue_keys.get((sha256, service_name))
                 if dispatch_key is not None and queue.rank(dispatch_key) is not None:
-                    self.log.info(f"[{task.sid}] File {file_hash} already in queue for {service_name}")
+                    self.log.info(f"[{sid}] File {sha256} already in queue for {service_name}")
                     continue
+
+                task.service_attempts[(sha256, service_name)] += 1
 
                 # Find the actual file name from the list of files in submission
                 filename = None
                 for file in submission.files:
-                    if task.file_info.sha256 == file.sha256:
+                    if sha256 == file.sha256:
                         filename = file.name
                         break
 
                 # Build the actual service dispatch message
                 config = self.build_service_config(service, submission)
                 service_task = ServiceTask(dict(
-                    sid=task.sid,
+                    sid=sid,
+                    dispatcher=self.instance_id,
                     metadata=submission.metadata,
-                    min_classification=task.min_classification,
+                    min_classification=task.submission.classification,
                     service_name=service_name,
                     service_config=config,
-                    fileinfo=task.file_info,
-                    filename=filename or task.file_info.sha256,
-                    depth=task.depth,
-                    max_files=task.max_files,
+                    fileinfo=file_info,
+                    filename=filename or sha256,
+                    depth=task.file_depth[sha256],
+                    max_files=task.submission.params.max_extracted,
                     ttl=submission.params.ttl,
                     ignore_cache=submission.params.ignore_cache,
                     ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
-                    tags=file_tags_data,
-                    temporary_submission_data=temporary_data,
+                    tags=task.file_tags.get(sha256, []),
+                    temporary_submission_data=task.file_temporary_data.get(sha256, []),
                     deep_scan=submission.params.deep_scan,
                     priority=submission.params.priority,
                 ))
-                dispatch_table.dispatch(file_hash, service_name)
                 queue_key = queue.push(service_task.priority, service_task.as_primitives())
-                dispatch_table.set_dispatch_key(file_hash, service_name, queue_key)
+                task.queue_keys[(sha256, service_name)] = queue_key
 
         else:
-            # There are no outstanding services, this file is done
-            # clean up the tags
-            file_tags.delete()
-
-            # If there are no outstanding ANYTHING for this submission,
-            # send a message to the submission dispatcher to finalize
             self.counter.increment('files_completed')
-            if dispatch_table.all_finished():
-                self.log.info(f"[{task.sid}] Finished processing file '{file_hash}' starting submission finalization.")
-                self.submission_queue.push({'sid': submission.sid})
+            if len(task.queue_keys) > 0 or len(task.running_services) > 0:
+                self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete")
             else:
-                self.log.info(f"[{task.sid}] Finished processing file '{file_hash}'. Other files are not finished.")
+                self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
+                self.check_submission(task)
 
-    def build_schedule(self, dispatch_hash: DispatchHash, submission: Submission,
-                       file_hash: str, file_type: str) -> List[List[str]]:
-        """Rather than rebuilding the schedule every time we see a file, build it once and cache in redis."""
-        cached_schedule = dispatch_hash.schedules.get(file_hash)
-        if not cached_schedule:
-            # Get the schedule for that file type based on the submission parameters
-            obj_schedule = self.scheduler.build_schedule(submission, file_type)
-            # The schedule built by the scheduling tool has the service objects, we just want the names for now
-            cached_schedule = [list(stage.keys()) for stage in obj_schedule]
-            dispatch_hash.schedules.add(file_hash, cached_schedule)
-        return cached_schedule
+    def check_submission(self, task: SubmissionTask):
+        # Files that have not yet been processed
+        pending_files = []
+        started: Set[str] = set()
+        checked: Set[str] = set()
+        unchecked: List[str] = list(task.file_depth.keys())
+
+        # Track information about the results as we hit them
+        file_scores: Dict[str, int] = {}
+
+        # Make sure we have either a result or
+        while unchecked:
+            sha256 = unchecked.pop()
+            checked.add(sha256)
+
+            if sha256 in task.dropped_files:
+                continue
+
+            if sha256 not in task.file_schedules:
+                pending_files.append(sha256)
+                continue
+            else:
+                started.add(sha256)
+            schedule = list(task.file_schedules[sha256])
+
+            while schedule and sha256 not in pending_files:
+                stage = schedule.pop(0)
+                for service_name in stage:
+
+                    # Only active services should be in this dict, so if a service that was placed in the
+                    # schedule is now missing it has been disabled or taken offline.
+                    service = self.scheduler.services.get(service_name)
+                    if not service:
+                        continue
+
+                    # It hasn't started, has timed out, or is finished, see if we have a result
+                    key = sha256, service_name
+                    if key in task.service_errors:
+                        continue
+
+                    # No result found, mark the file as incomplete
+                    result = task.service_results.get(key)
+                    if not result:
+                        pending_files.append(sha256)
+                        break
+
+                    if not task.submission.params.ignore_filtering and result.drop:
+                        schedule.clear()
+
+                    # Collect information about the result
+                    file_scores[sha256] = file_scores.get(sha256, 0) + result.score
+                    unchecked += set(result.children) - checked
+
+        # Filter out things over the depth limit
+        depth_limit = self.config.submission.max_extraction_depth
+        pending_files = [sha for sha in pending_files if task.file_depth[sha] < depth_limit]
+
+        # If there are pending files, then at least one service, on at least one
+        # file isn't done yet, and hasn't been filtered by any of the previous few steps
+        # poke those files
+        if pending_files:
+            self.log.debug(f"[{task.submission.sid}] Dispatching {len(pending_files)} files: {list(pending_files)}")
+            for file_hash in pending_files:
+                self.dispatch_file(task, file_hash)
+        else:
+            self.log.debug(f"[{task.submission.sid}] Finalizing submission.")
+            max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
+            self.finalize_submission(task, max_score, checked)
 
     @classmethod
     def build_service_config(cls, service: Service, submission: Submission) -> Dict[str, str]:
@@ -663,3 +479,447 @@ class Dispatcher:
         if service.name in submission.params.service_spec:
             params.update(submission.params.service_spec[service.name])
         return params
+
+    def finalize_submission(self, task: SubmissionTask, max_score, file_list):
+        """All of the services for all of the files in this submission have finished or failed.
+
+        Update the records in the datastore, and flush the working data from redis.
+        """
+        submission = task.submission
+        sid = submission.sid
+
+        #
+        results = list(task.service_results.values())
+        errors = list(task.service_errors.values())
+        errors.extend(task.extra_errors)
+
+        submission.classification = submission.params.classification
+        submission.error_count = len(errors)
+        submission.errors = errors
+        submission.file_count = len(file_list)
+        submission.results = [r.key for r in results]
+        submission.max_score = max_score
+        submission.state = 'completed'
+        submission.times.completed = isotime.now_as_iso()
+        self.datastore.submission.save(sid, submission)
+
+        self._cleanup_submission(task)
+        self.log.info(f"[{sid}] Completed; files: {len(file_list)} results: {len(results)} "
+                      f"errors: {len(errors)} score: {max_score}")
+
+    def _watcher_list(self, sid):
+        return ExpiringSet(make_watcher_list_name(sid), host=self.redis)
+
+    def _cleanup_submission(self, task: SubmissionTask):
+        """Clean up code that is the same for canceled and finished submissions"""
+        submission = task.submission
+        sid = submission.sid
+
+        if submission.params.quota_item and submission.params.submitter:
+            self.log.info(f"[{sid}] Submission no longer counts toward {submission.params.submitter.upper()} quota")
+            self.quota_tracker.end(submission.params.submitter)
+
+        if task.completed_queue:
+            NamedQueue(task.completed_queue, self.redis).push(submission.as_primitives())
+
+        # Send complete message to any watchers.
+        watcher_list = self._watcher_list(sid)
+        for w in watcher_list.members():
+            NamedQueue(w).push(WatchQueueMessage({'status': 'STOP'}).as_primitives())
+
+        # Clear the timeout watcher
+        watcher_list.delete()
+        self.active_submissions.pop(sid)
+        with self._tasks_lock:
+            self._tasks.pop(sid)
+
+        # Count the submission as 'complete' either way
+        self.counter.increment('submissions_completed')
+
+        # Write all finished submissions to the traffic queue
+        self.traffic_queue.publish(SubmissionMessage({
+            'msg': from_datastore_submission(submission),
+            'msg_type': 'SubmissionCompleted',
+            'sender': 'dispatcher',
+        }).as_primitives())
+
+    def retry_error(self, task: SubmissionTask, sha256, service_name):
+        self.log.warning(f"[{task.submission.sid}/{sha256}] "
+                         f"{service_name} marking task failed: TASK PREEMPTED ")
+
+        ttl = task.submission.params.ttl
+        error = Error(dict(
+            archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
+            created='NOW',
+            expiry_ts=now_as_iso(ttl * 24 * 60 * 60) if ttl else None,
+            response=dict(
+                message=f'The number of retries has passed the limit.',
+                service_name=service_name,
+                service_version='0',
+                status='FAIL_NONRECOVERABLE',
+            ),
+            sha256=sha256,
+            type="TASK PRE-EMPTED",
+        ))
+
+        error_key = error.build_key()
+        self.datastore.error.save(error_key, error.as_primitives())
+        task.service_errors[(sha256, service_name)] = error_key
+
+        export_metrics_once(service_name, ServiceMetrics, dict(fail_nonrecoverable=1), counter_type='service')
+
+        # Send the result key to any watching systems
+        msg = {'status': 'FAIL', 'cache_key': error_key}
+        for w in self._watcher_list(task.submission.sid).members():
+            NamedQueue(w).push(msg)
+
+    def handle_service_results(self):
+        queue = self.result_queue
+        cpu_mark = time.process_time()
+        time_mark = time.time()
+
+        while self.running:
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
+            message = queue.pop(timeout=1)
+
+            cpu_mark = time.process_time()
+            time_mark = time.time()
+
+            if not message:
+                continue
+
+            sid = message['service_task']['sid']
+            task = self.get_task(sid)
+            if not task:
+                self.log.warning(f'[{sid}] Result returned for finished task.')
+                continue
+
+            with task.lock:
+                if 'result' in message:
+                    self.process_service_result(task, message['result_key'],
+                                                Result(message['result']), message['temporary_data'])
+                elif 'error' in message:
+                    self.process_service_error(task, message['error_key'], Error(message['error']))
+
+    def process_service_result(self, task: SubmissionTask, result_key, result, temporary_data):
+        submission: Submission = task.submission
+        sid = submission.sid
+        service_name = result.response.service_name
+        self.clear_timeout(task, result.sha256, service_name)
+
+        # Let the logs know we have received a result for this task
+        if result.drop_file:
+            self.log.debug(f"[{sid}/{result.sha256}] {service_name} succeeded. "
+                           f"Result will be stored in {result_key} but processing will stop after this service.")
+        else:
+            self.log.debug(f"[{sid}/{result.sha256}] {service_name} succeeded. "
+                           f"Result will be stored in {result_key}")
+
+        # Check if the service is a candidate for dynamic recursion prevention
+        if not submission.params.ignore_dynamic_recursion_prevention:
+            service_info = self.scheduler.services.get(result.response.service_name, None)
+            if service_info and service_info.category == "Dynamic Analysis":
+                submission.params.services.runtime_excluded.append(result.response.service_name)
+
+        # Save the tags
+        for section in result.result.sections:
+            task.file_tags[result.sha256].extend(tag_dict_to_list(section.tags.as_primitives()))
+
+        # Update the temporary data table for this file
+        for key, value in (temporary_data or {}).items():
+            task.file_temporary_data[key] = value
+
+        # Record the result as a summary
+        task.service_results[(result.sha256, service_name)] = ResultSummary(
+            key=result_key,
+            drop=result.drop_file,
+            score=result.result.score,
+            children=[r.sha256 for r in result.response.extracted]
+        )
+
+        # Set the depth of all extracted files, even if we won't be processing them
+        depth_limit = self.config.submission.max_extraction_depth
+        new_depth = task.file_depth[result.sha256] + 1
+        for extracted_data in result.response.extracted:
+            task.file_depth.setdefault(extracted_data.sha256, new_depth)
+
+        # Send the extracted files to the dispatcher
+        dispatched = 0
+        if new_depth < depth_limit:
+            # Prepare the temporary data from the parent to build the temporary data table for
+            # these newly extract files
+            parent_data = task.file_temporary_data.get(result.sha256, {})
+
+            for extracted_data in result.response.extracted:
+                if extracted_data.sha256 in task.dropped_files or extracted_data.sha256 in task.file_schedules:
+                    continue
+
+                if len(task.file_schedules) > submission.params.max_extracted:
+                    self.log.info(f'[{sid}] hit extraction limit, dropping {extracted_data.sha256}')
+                    task.dropped_files.add(extracted_data.sha256)
+                    self._dispatching_error(task, Error({
+                        'archive_ts': result.archive_ts,
+                        'expiry_ts': result.expiry_ts,
+                        'response': {
+                            'message': f"Too many files extracted for submission {sid} "
+                                       f"{extracted_data.sha256} extracted by "
+                                       f"{service_name} will be dropped",
+                            'service_name': service_name,
+                            'service_tool_version': result.response.service_tool_version,
+                            'service_version': result.response.service_version,
+                            'status': 'FAIL_NONRECOVERABLE'
+                        },
+                        'sha256': extracted_data.sha256,
+                        'type': 'MAX FILES REACHED'
+                    }))
+                    continue
+
+                dispatched += 1
+                task.file_temporary_data[extracted_data.sha256] = dict(parent_data)
+                self.dispatch_file(task, extracted_data.sha256)
+
+        else:
+            for extracted_data in result.response.extracted:
+                self._dispatching_error(task, Error({
+                    'archive_ts': result.archive_ts,
+                    'expiry_ts': result.expiry_ts,
+                    'response': {
+                        'message': f"{service_name} has extracted a file "
+                                   f"{extracted_data.sha256} beyond the depth limits",
+                        'service_name': result.response.service_name,
+                        'service_tool_version': result.response.service_tool_version,
+                        'service_version': result.response.service_version,
+                        'status': 'FAIL_NONRECOVERABLE'
+                    },
+                    'sha256': extracted_data.sha256,
+                    'type': 'MAX DEPTH REACHED'
+                }))
+
+        self.dispatch_file(task, result.sha256)
+
+    def _dispatching_error(self, task: SubmissionTask, error):
+        error_key = error.build_key()
+        task.extra_errors.append(error_key)
+        self.datastore.error.save(error_key, error)
+        msg = {'status': 'FAIL', 'cache_key': error_key}
+        for w in self._watcher_list(task.submission.sid).members():
+            NamedQueue(w).push(msg)
+
+    def process_service_error(self, task: SubmissionTask, error_key, error):
+        self.log.info(f'[{task.submission.sid}] Error from service {error.response.service_name} on {error.sha256}')
+        self.clear_timeout(task, error.sha256, error.response.service_name)
+        if error.response.status == "FAIL_NONRECOVERABLE":
+            task.service_errors[(error.sha256, error.response.service_name)] = error_key
+        self.dispatch_file(task, error.sha256)
+
+    def handle_service_starts(self):
+        queue = self.start_queue
+        cpu_mark = time.process_time()
+        time_mark = time.time()
+
+        while self.running:
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
+            message = queue.pop(timeout=1)
+
+            cpu_mark = time.process_time()
+            time_mark = time.time()
+
+            if not message:
+                continue
+
+            sid, sha256, service_name, worker_id = message
+            task = self.get_task(sid)
+            if not task:
+                self.log.warning(f'[{sid}] Service started for finished task.')
+                continue
+
+            with task.lock:
+                self.set_timeout(task, sha256, service_name, worker_id)
+                task.queue_keys.pop((sha256, service_name))
+
+    def set_timeout(self, task, sha256, service_name, worker_id):
+        sid = task.submission.sid
+        service = self.scheduler.services.get(service_name)
+        if not service:
+            return
+
+        timeout_at = int(time.time() + service.timeout + TIMEOUT_EXTRA_TIME)
+
+        task.running_services[(sha256, service_name)] = timeout_at, worker_id
+        with self.timeout_list_lock:
+            bisect.insort(self.timeout_list, (timeout_at, sid, sha256, service_name))
+
+    def clear_timeout(self, task, sha256, service_name):
+        sid = task.submission.sid
+        row = task.running_services.pop((sha256, service_name))
+        if row is None:
+            return
+        timeout_at, worker_id = row
+        with self.timeout_list_lock:
+            key = (timeout_at, sid, sha256, service_name)
+            index = bisect.bisect_left(self.timeout_list, key)
+            if index < len(self.timeout_list) and self.timeout_list[index] == key:
+                self.timeout_list.pop(index)
+
+    def handle_timeouts(self):
+        while self.running:
+            cpu_mark = time.process_time()
+            time_mark = time.time()
+
+            timeouts = []
+            with self.timeout_list_lock:
+                while self.timeout_list and self.timeout_list[0][0] < time_mark:
+                    timeouts.append(self.timeout_list.pop(0))
+            self.counter.increment('service_timeouts', len(timeouts))
+            for _, sid, sha, service_name in timeouts:
+                task = self.get_task(sid)
+                if not task:
+                    self.log.warning(f'[{sid}] timeout on task.')
+                    continue
+                with task.lock:
+                    self.timeout_service(task, sha, service_name)
+
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+            time.sleep(TIMEOUT_TEST_INTERVAL)
+
+    def timeout_service(self, task: SubmissionTask, sha256, service_name):
+        # We believe a service task has timed out, try and read it from running tasks
+        # If we can't find the task in running tasks, it finished JUST before timing out, let it go
+        sid = task.submission.sid
+        task_key = ServiceTask.make_key(sid=sid, service_name=service_name, sha=sha256)
+        service_task = self.running_tasks.pop(task_key)
+        if not service_task:
+            return
+
+        # We can confirm that the task is ours now, even if the worker finished, the result will be ignored
+        service_task = ServiceTask(service_task)
+        self.log.info(f"[{service_task.sid}] Service {service_task.service_name} "
+                      f"timed out on {service_task.fileinfo.sha256}.")
+
+        _, worker_id = task.running_services.pop((sha256, service_name))
+        self.dispatch_file(task, sha256)
+
+        # We push the task of killing the container off on the scaler, which already has root access
+        # the scaler can also double check that the service name and container id match, to be sure
+        # we aren't accidentally killing the wrong container
+        self.scaler_timeout_queue.push({
+            'service': service_task.service_name,
+            'container': worker_id
+        })
+
+        # Report to the metrics system that a recoverable error has occurred for that service
+        export_metrics_once(service_task.service_name, ServiceMetrics, dict(fail_recoverable=1),
+                            host=worker_id, counter_type='service')
+
+    def work_guard(self):
+        check_interval = GUARD_TIMEOUT/8
+        old_value = int(time.time())
+        self.dispatchers_directory.set(self.instance_id, old_value)
+
+        try:
+            while self.running:
+                cpu_mark = time.process_time()
+                time_mark = time.time()
+
+                # Increase the guard number
+                gap = int(time.time() - old_value)
+                updated_value = self.dispatchers_directory.increment(self.instance_id, gap)
+
+                # If for whatever reason, there was a moment between the previous increment
+                # and the one before that, that the gap reached the timeout, someone may have
+                # started stealing our work. We should just exit.
+                if time.time() - old_value > GUARD_TIMEOUT:
+                    self.log.warning(f'Dispatcher closing due to guard interval failure: '
+                                     f'{time.time() - old_value} > {GUARD_TIMEOUT}')
+                    self.stop()
+                    return
+
+                # Everything is fine, prepare for next round
+                old_value = updated_value
+
+                self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+                self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+                time.sleep(check_interval)
+        finally:
+            if not self.running:
+                self.dispatchers_directory.pop(self.instance_id)
+
+    def work_thief(self):
+
+        assignment_pattern = DISPATCH_TASK_ASSIGNMENT + '*'
+        last_seen = {}
+
+        try:
+            while self.running:
+                time.sleep(GUARD_TIMEOUT / 4)
+                cpu_mark = time.process_time()
+                time_mark = time.time()
+
+                # Load guards
+                last_seen.update(self.dispatchers_directory.items())
+
+                # List all dispatchers with jobs assigned
+                for raw_key in self.redis_persist.keys(assignment_pattern):
+                    key: str = raw_key.decode()
+                    key = key[len(DISPATCH_TASK_ASSIGNMENT):]
+                    if key not in last_seen:
+                        last_seen[key] = time.time()
+
+                self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+                self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
+                # Check if any of the dispatchers
+                if last_seen:
+                    oldest = min(last_seen.keys(), key=lambda _x: last_seen[_x])
+                    if time.time() - last_seen[oldest] > GUARD_TIMEOUT:
+                        self.steal_work(oldest)
+        finally:
+            if not self.running:
+                self.dispatchers_directory.pop(self.instance_id)
+
+    def steal_work(self, target):
+        target_jobs = ExpiringHash(DISPATCH_TASK_ASSIGNMENT+target, host=self.redis_persist)
+
+        keys = target_jobs.keys()
+
+        while self.running and keys:
+            if self.active_submissions.length() >= HARD_MAX_JOBS:
+                time.sleep(1)
+                continue
+
+            message = target_jobs.pop(keys.pop())
+
+            if not message:
+                continue
+
+            cpu_mark = time.process_time()
+            time_mark = time.time()
+
+            # Start of process dispatcher transaction
+            if self.apm_client:
+                self.apm_client.begin_transaction('Process dispatcher message')
+
+            try:
+                # This is probably a complete task
+                task = SubmissionTask(**message)
+                if self.apm_client:
+                    elasticapm.label(sid=task.submission.sid)
+
+                with task.lock:
+                    self.dispatch_submission(task)
+
+                # End of process dispatcher transaction (success)
+                if self.apm_client:
+                    self.apm_client.end_transaction('submission_message', 'success')
+            except Exception:
+                if self.apm_client:
+                    self.apm_client.end_transaction('submission_message', 'exception')
+                raise
+
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)

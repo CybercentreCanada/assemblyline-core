@@ -15,21 +15,20 @@ from assemblyline_core.server_base import ServerBase
 
 
 class IngesterSubmitter(ServerBase):
-    def __init__(self, logger=None, datastore=None, redis=None, persistent_redis=None):
-        super().__init__('assemblyline.ingester.submitter', logger=logger)
-        config = forge.get_config()
+    def __init__(self, logger=None, datastore=None, redis=None, persistent_redis=None, config=None):
+        super().__init__('assemblyline.ingester.submitter', logger=logger, config=config)
         # Connect to all sorts of things
-        datastore = datastore or forge.get_datastore(config)
+        datastore = datastore or forge.get_datastore(self.config)
         classification_engine = forge.get_classification()
 
         # Initialize the ingester specific resources
         self.ingester = Ingester(datastore=datastore, classification=classification_engine, logger=self.log,
                                  redis=redis, persistent_redis=persistent_redis)
 
-        if config.core.metrics.apm_server.server_url is not None:
-            self.log.info(f"Exporting application metrics to: {config.core.metrics.apm_server.server_url}")
+        if self.config.core.metrics.apm_server.server_url is not None:
+            self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
             elasticapm.instrument()
-            self.apm_client = elasticapm.Client(server_url=config.core.metrics.apm_server.server_url,
+            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
                                                 service_name="ingester")
         else:
             self.apm_client = None
