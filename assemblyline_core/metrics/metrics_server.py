@@ -56,7 +56,6 @@ class StatisticsAggregator(ServerBase):
     def __init__(self, config=None):
         super().__init__('assemblyline.statistics_aggregator')
         self.config = config or forge.get_config()
-        self.cache = forge.get_statistics_cache(config=self.config)
         self.datastore = forge.get_datastore(archive_access=True)
         self.scheduler = BackgroundScheduler(daemon=True)
 
@@ -87,8 +86,7 @@ class StatisticsAggregator(ServerBase):
         if self.apm_client:
             self.apm_client.begin_transaction('statistics')
 
-        stats = self.datastore.calculate_heuristic_stats()
-        self.cache.set('heuristics', stats)
+        self.datastore.calculate_heuristic_stats()
 
         # APM Transaction end
         if self.apm_client:
@@ -101,8 +99,7 @@ class StatisticsAggregator(ServerBase):
         if self.apm_client:
             self.apm_client.begin_transaction('statistics')
 
-        stats = self.datastore.calculate_signature_stats()
-        self.cache.set('signatures', stats)
+        self.datastore.calculate_signature_stats()
 
         # APM Transaction end
         if self.apm_client:
