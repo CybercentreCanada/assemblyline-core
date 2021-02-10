@@ -51,6 +51,7 @@ class SubmissionTask:
         self.lock = threading.Lock()
 
         self.file_info: Dict[str, FileInfo] = {}
+        self.file_names: Dict[str, str] = {}
         self.file_schedules: Dict[str, List[Dict[str, Service]]] = {}
         self.file_tags = {}
         self.file_depth: Dict[str, int] = {}
@@ -137,6 +138,10 @@ class Dispatcher(CoreBase):
         with self._tasks_lock:
             return self._tasks.get(sid)
 
+    def stop(self):
+        super().stop()
+        self.stopping.set()
+
     def sleep(self, timeout):
         self.stopping.wait(timeout)
         return self.running
@@ -201,7 +206,7 @@ class Dispatcher(CoreBase):
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
             if self.active_submissions.length() >= SOFT_MAX_JOBS:
-                time.sleep(1)
+                self.sleep(1)
                 continue
 
             message = queue.pop(timeout=1)
@@ -272,6 +277,7 @@ class Dispatcher(CoreBase):
         self.add_task(task)
 
         task.file_depth[submission.files[0].sha256] = 0
+        task.file_names[submission.files[0].sha256] = submission.files[0].name or submission.files[0].sha256
         self.dispatch_file(task, submission.files[0].sha256)
 
     def dispatch_file(self, task: SubmissionTask, sha256):
@@ -280,17 +286,6 @@ class Dispatcher(CoreBase):
 
         # If its the first time we've seen this file, we won't have a schedule for it
         if sha256 not in task.file_schedules:
-            # # If we have hit the limit on number of files, don't process this one
-            # if len(task.file_schedules) > task.submission.params.max_extracted:
-            #     self.log.info(f'[{sid}] hit extraction limit, dropping {sha256}')
-            #     task.dropped_files.add(sha256)
-            #
-            # # If this file is being dropped stop here
-            # if sha256 in task.dropped_files:
-            #     if len(task.queue_keys) == 0 and len(task.running_services) == 0:
-            #         self.check_submission(task)
-            #     return
-
             # We are processing this file, load the file info, and build the schedule
             filestore_info = self.datastore.file.get(sha256)
             file_info = task.file_info[sha256] = FileInfo(dict(
@@ -358,13 +353,6 @@ class Dispatcher(CoreBase):
 
                 task.service_attempts[(sha256, service_name)] += 1
 
-                # Find the actual file name from the list of files in submission
-                filename = None
-                for file in submission.files:
-                    if sha256 == file.sha256:
-                        filename = file.name
-                        break
-
                 # Build the actual service dispatch message
                 config = self.build_service_config(service, submission)
                 service_task = ServiceTask(dict(
@@ -375,7 +363,7 @@ class Dispatcher(CoreBase):
                     service_name=service_name,
                     service_config=config,
                     fileinfo=file_info,
-                    filename=filename or sha256,
+                    filename=task.file_names.get(sha256, sha256),
                     depth=task.file_depth[sha256],
                     max_files=task.submission.params.max_extracted,
                     ttl=submission.params.ttl,
@@ -392,7 +380,8 @@ class Dispatcher(CoreBase):
         else:
             self.counter.increment('files_completed')
             if len(task.queue_keys) > 0 or len(task.running_services) > 0:
-                self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete")
+                self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete "
+                              f"(queued: {len(task.queue_keys)} running: {len(task.running_services)})")
             else:
                 self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
                 self.check_submission(task)
@@ -644,6 +633,8 @@ class Dispatcher(CoreBase):
         new_depth = task.file_depth[result.sha256] + 1
         for extracted_data in result.response.extracted:
             task.file_depth.setdefault(extracted_data.sha256, new_depth)
+            if extracted_data.name and extracted_data.sha256 not in task.file_names:
+                task.file_names[extracted_data.sha256] = extracted_data.name
 
         # Send the extracted files to the dispatcher
         dispatched = 0
@@ -738,8 +729,13 @@ class Dispatcher(CoreBase):
                 continue
 
             with task.lock:
-                self.set_timeout(task, sha256, service_name, worker_id)
-                task.queue_keys.pop((sha256, service_name))
+                key = sha256, service_name
+                if task.queue_keys.pop(key, None) is not None:
+                    # If this task is already finished (result message processed before start
+                    # message) we can skip setting a timeout
+                    if key in task.service_errors or key in task.service_results:
+                        continue
+                    self.set_timeout(task, sha256, service_name, worker_id)
 
     def set_timeout(self, task, sha256, service_name, worker_id):
         sid = task.submission.sid
@@ -755,7 +751,8 @@ class Dispatcher(CoreBase):
 
     def clear_timeout(self, task, sha256, service_name):
         sid = task.submission.sid
-        row = task.running_services.pop((sha256, service_name))
+        task.queue_keys.pop((sha256, service_name), None)
+        row = task.running_services.pop((sha256, service_name), None)
         if row is None:
             return
         timeout_at, worker_id = row
@@ -785,7 +782,7 @@ class Dispatcher(CoreBase):
 
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
-            time.sleep(TIMEOUT_TEST_INTERVAL)
+            self.sleep(TIMEOUT_TEST_INTERVAL)
 
     def timeout_service(self, task: SubmissionTask, sha256, service_name):
         # We believe a service task has timed out, try and read it from running tasks
@@ -844,7 +841,7 @@ class Dispatcher(CoreBase):
 
                 self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
                 self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
-                time.sleep(check_interval)
+                self.sleep(check_interval)
         finally:
             if not self.running:
                 self.dispatchers_directory.pop(self.instance_id)
@@ -856,7 +853,7 @@ class Dispatcher(CoreBase):
 
         try:
             while self.running:
-                time.sleep(GUARD_TIMEOUT / 4)
+                self.sleep(GUARD_TIMEOUT / 4)
                 cpu_mark = time.process_time()
                 time_mark = time.time()
 
@@ -889,7 +886,7 @@ class Dispatcher(CoreBase):
 
         while self.running and keys:
             if self.active_submissions.length() >= HARD_MAX_JOBS:
-                time.sleep(1)
+                self.sleep(1)
                 continue
 
             message = target_jobs.pop(keys.pop())
