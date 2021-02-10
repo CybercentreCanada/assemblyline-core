@@ -516,7 +516,11 @@ class ScalerServer(CoreBase):
         For analysis services, ignore the error a few times, then disable the service.
         """
         with self.error_count_lock:
-            self.error_count[service_name].append(time.time())
+            try:
+                self.error_count[service_name].append(time.time())
+            except KeyError:
+                self.error_count[service_name] = [time.time()]
+
             self.error_count[service_name] = [
                 _t for _t in self.error_count[service_name]
                 if _t >= time.time() - ERROR_EXPIRY_TIME
