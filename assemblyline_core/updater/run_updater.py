@@ -313,7 +313,8 @@ class KubernetesUpdateInterface:
             'app': 'assemblyline',
             'section': section,
             'component': 'update-script',
-        }.update(self.extra_labels)
+        }
+        labels.update(self.extra_labels)
 
         metadata = V1ObjectMeta(
             name=name,
