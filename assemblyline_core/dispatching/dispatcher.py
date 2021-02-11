@@ -17,7 +17,8 @@ from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
-from assemblyline.odm.messages.dispatching import WatchQueueMessage
+from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch, DispatcherCommandMessage, \
+    CREATE_WATCH, LIST_OUTSTANDING, ListOutstanding
 from assemblyline.odm.messages.submission import SubmissionMessage, from_datastore_submission
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.error import Error
@@ -194,7 +195,9 @@ class Dispatcher(CoreBase):
             'Process Timeouts': self.log_crashes(self.handle_timeouts),
             # Work guard/thief
             'Guard Work': self.log_crashes(self.work_guard),
-            'Work Thief': self.log_crashes(self.work_thief)
+            'Work Thief': self.log_crashes(self.work_thief),
+            # Handle RPC commands
+            'Commands': self.log_crashes(self.handle_commands),
         }
         threads = {}
 
@@ -413,8 +416,6 @@ class Dispatcher(CoreBase):
             if len(task.queue_keys) > 0 or len(task.running_services) > 0:
                 self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete "
                               f"(queued: {len(task.queue_keys)} running: {len(task.running_services)})")
-                self.log.info(f'{task.queue_keys}')
-                self.log.info(f'{task.running_services}')
             else:
                 self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
                 self.check_submission(task)
@@ -964,3 +965,64 @@ class Dispatcher(CoreBase):
 
         self.log.info(f'Finished stealing work from {target}')
         self.dispatchers_directory.pop(target)
+
+    def handle_commands(self):
+        while self.running:
+
+            message = self.command_queue.pop(timeout=3)
+            if not message:
+                continue
+
+            cpu_mark = time.process_time()
+            time_mark = time.time()
+
+            # Start of process dispatcher transaction
+            if self.apm_client:
+                self.apm_client.begin_transaction('Process dispatcher message')
+
+            command = DispatcherCommandMessage(message)
+            if command.kind == CREATE_WATCH:
+                payload: CreateWatch = command.payload()
+                self.setup_watch_queue(payload.submission, payload.queue_name)
+            elif command.kind == LIST_OUTSTANDING:
+                payload: ListOutstanding = command.payload()
+                self.list_outstanding(payload.submission, payload.response_queue)
+            else:
+                self.log.warning(f"Unknown command code: {command.kind}")
+
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
+    def setup_watch_queue(self, sid, queue_name):
+        # Create a unique queue
+        watch_queue = NamedQueue(queue_name, ttl=30)
+        watch_queue.push(WatchQueueMessage({'status': 'START'}).as_primitives())
+
+        #
+        task = self.get_task(sid)
+        if not task:
+            watch_queue.push(WatchQueueMessage({"status": "STOP"}).as_primitives())
+            return
+
+        with task.lock:
+            # Add the newly created queue to the list of queues for the given submission
+            self._watcher_list(sid).add(queue_name)
+
+            # Push all current keys to the newly created queue (Queue should have a TTL of about 30 sec to 1 minute)
+            for result_data in task.service_results.values():
+                watch_queue.push(WatchQueueMessage({"status": "OK", "cache_key": result_data.key}).as_primitives())
+
+            for error_key in task.service_errors.values():
+                watch_queue.push(WatchQueueMessage({"status": "FAIL", "cache_key": error_key}).as_primitives())
+
+    def list_outstanding(self, sid: str, queue_name: str):
+        response_queue = NamedQueue(queue_name, host=self.redis)
+        outstanding = defaultdict(int)
+        task = self.get_task(sid)
+        if task:
+            with task.lock:
+                for sha, service_name in task.queue_keys.keys():
+                    outstanding[service_name] += 1
+                for sha, service_name in task.running_services.keys():
+                    outstanding[service_name] += 1
+        response_queue.push(outstanding)

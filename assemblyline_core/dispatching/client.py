@@ -8,6 +8,8 @@ import time
 from typing import Dict, Optional, Any, cast
 
 from assemblyline.common.forge import CachedObject, get_service_queue
+from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, CreateWatch, LIST_OUTSTANDING, \
+    ListOutstanding
 
 from assemblyline.odm.models.service import Service
 
@@ -55,7 +57,7 @@ class DispatchClient:
         self.results = datastore.result
         self.errors = datastore.error
         self.files = datastore.file
-        self.active_submissions = ExpiringHash(DISPATCH_TASK_HASH, host=redis_persist)
+        self.submission_assignments = ExpiringHash(DISPATCH_TASK_HASH, host=redis_persist)
         self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
         self.service_data = cast(Dict[str, Service], CachedObject(self._get_services))
 
@@ -78,44 +80,29 @@ class DispatchClient:
             completed_queue=completed_queue,
         ))
 
-    # def outstanding_services(self, sid) -> Dict[str, int]:
-    #     """
-    #     List outstanding services for a given submission and the number of file each
-    #     of them still have to process.
-    #
-    #     :param sid: Submission ID
-    #     :return: Dictionary of services and number of files
-    #              remaining per services e.g. {"SERVICE_NAME": 1, ... }
-    #     """
-    #     # Download the entire status table from redis
-    #     dispatch_hash = DispatchHash(sid, self.redis)
-    #     all_service_status = dispatch_hash.all_results()
-    #     all_files = dispatch_hash.all_files()
-    #     self.log.info(f"[{sid}] Listing outstanding services {len(all_files)} files "
-    #                   f"and {len(all_service_status)} entries found")
-    #
-    #     output: Dict[str, int] = {}
-    #
-    #     for file_hash in all_files:
-    #         # The schedule might not be in the cache if the submission or file was just issued,
-    #         # but it will be as soon as the file passes through the dispatcher
-    #         schedule = dispatch_hash.schedules.get(file_hash)
-    #         status_values = all_service_status.get(file_hash, {})
-    #
-    #         # Go through the schedule stage by stage so we can react to drops
-    #         # either we have a result and we don't need to count the file (but might drop it)
-    #         # or we don't have a result, and we need to count that file
-    #         while schedule:
-    #             stage = schedule.pop(0)
-    #             for service_name in stage:
-    #                 status = status_values.get(service_name)
-    #                 if status:
-    #                     if status.drop:
-    #                         schedule.clear()
-    #                 else:
-    #                     output[service_name] = output.get(service_name, 0) + 1
-    #
-    #     return output
+    def outstanding_services(self, sid) -> Dict[str, int]:
+        """
+        List outstanding services for a given submission and the number of file each
+        of them still have to process.
+
+        :param sid: Submission ID
+        :return: Dictionary of services and number of files
+                 remaining per services e.g. {"SERVICE_NAME": 1, ... }
+        """
+        dispatcher_id = self.submission_assignments.get(sid)
+        if dispatcher_id:
+            queue_name = reply_queue_name(prefix="D", suffix="WQ")
+            queue = NamedQueue(queue_name, host=self.redis, ttl=30)
+            command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+dispatcher_id)
+            command_queue.push(DispatcherCommandMessage({
+                'kind': LIST_OUTSTANDING,
+                'payload_data': ListOutstanding({
+                    'response_queue': queue_name,
+                    'submission': sid
+                })
+            }).as_primitives())
+            return queue.pop(timeout=30)
+        return {}
 
     def request_work(self, worker_id, service_name, service_version,
                      timeout: float = 60, blocking=True) -> Optional[ServiceTask]:
@@ -236,7 +223,7 @@ class DispatchClient:
             'error_key': error_key
         })
 
-    def setup_watch_queue(self, sid):
+    def setup_watch_queue(self, sid: str) -> Optional[str]:
         """
         This function takes a submission ID as a parameter and creates a unique queue where all service
         result keys for that given submission will be returned to as soon as they come in.
@@ -247,37 +234,18 @@ class DispatchClient:
         :param sid: Submission ID
         :return: The name of the watch queue that was created
         """
-        raise NotImplementedError()
-        # # Create a unique queue
-        # queue_name = reply_queue_name(prefix="D", suffix="WQ")
-        # watch_queue = NamedQueue(queue_name, ttl=30)
-        # watch_queue.push(WatchQueueMessage({'status': 'START'}).as_primitives())
-        #
-        # # Add the newly created queue to the list of queues for the given submission
-        # self._get_watcher_list(sid).add(queue_name)
-        #
-        # # Push all current keys to the newly created queue (Queue should have a TTL of about 30 sec to 1 minute)
-        # # Download the entire status table from redis
-        # dispatch_hash = DispatchHash(sid, self.redis)
-        # if dispatch_hash.dispatch_count() == 0 and dispatch_hash.finished_count() == 0:
-        #     # This table is empty? do we have this submission at all?
-        #     submission = self.ds.submission.get(sid)
-        #     if not submission or submission.state == 'completed':
-        #         watch_queue.push(WatchQueueMessage({"status": "STOP"}).as_primitives())
-        #     else:
-        #         # We do have a submission, remind the dispatcher to work on it
-        #         self.submission_queue.push({'sid': sid})
-        #
-        # else:
-        #     all_service_status = dispatch_hash.all_results()
-        #     for status_values in all_service_status.values():
-        #         for status in status_values.values():
-        #             if status.is_error:
-        #                 watch_queue.push(WatchQueueMessage({"status": "FAIL", "cache_key": status.key}).as_primitives())
-        #             else:
-        #                 watch_queue.push(WatchQueueMessage({"status": "OK", "cache_key": status.key}).as_primitives())
-        #
-        # return queue_name
+        dispatcher_id = self.submission_assignments.get(sid)
+        if dispatcher_id:
+            queue_name = reply_queue_name(prefix="D", suffix="WQ")
+            command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+dispatcher_id)
+            command_queue.push(DispatcherCommandMessage({
+                'kind': CREATE_WATCH,
+                'payload_data': CreateWatch({
+                    'queue_name': queue_name,
+                    'submission': sid
+                })
+            }).as_primitives())
+            return queue_name
 
     def _get_watcher_list(self, sid):
         return ExpiringSet(make_watcher_list_name(sid), host=self.redis)
