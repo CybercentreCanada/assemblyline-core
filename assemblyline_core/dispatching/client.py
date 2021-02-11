@@ -11,16 +11,10 @@ from assemblyline.common.forge import CachedObject, get_service_queue
 
 from assemblyline.odm.models.service import Service
 
-from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
-
-from assemblyline.odm.messages.service_heartbeat import Metrics
 
 from assemblyline.common import forge
-from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, FILE_QUEUE, SUBMISSION_QUEUE, \
-    make_watcher_list_name, get_temporary_submission_data_name, get_tag_set_name, DISPATCH_TASK_HASH
-from assemblyline.common.isotime import now_as_iso
-from assemblyline.common.tagging import tag_dict_to_list
-from assemblyline.odm.messages.dispatching import WatchQueueMessage
+from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SUBMISSION_QUEUE, \
+    make_watcher_list_name, DISPATCH_TASK_HASH
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.error import Error
@@ -29,9 +23,10 @@ from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline.remote.datatypes.lock import Lock
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
-from assemblyline_core.dispatching.dispatcher import DISPATCH_START_EVENTS, DISPATCH_RESULT_QUEUE
+from assemblyline_core.dispatching.dispatcher import DISPATCH_START_EVENTS, DISPATCH_RESULT_QUEUE, \
+    DISPATCH_COMMAND_QUEUE
 
-from assemblyline_core.dispatching.dispatcher import SubmissionTask, ServiceTask
+from assemblyline_core.dispatching.dispatcher import ServiceTask
 
 
 class RetryRequestWork(Exception):
@@ -55,7 +50,6 @@ class DispatchClient:
         )
 
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
-        self.file_queue = NamedQueue(FILE_QUEUE, self.redis)
         self.ds = datastore or forge.get_datastore(self.config)
         self.log = logger or logging.getLogger("assemblyline.dispatching.client")
         self.results = datastore.result
@@ -167,7 +161,8 @@ class DispatchClient:
 
         if self.running_tasks.add(task.key(), result):
             self.log.info(f"[{task.sid}/{task.fileinfo.sha256}] {service_name}:{worker_id} task found")
-            start_queue = NamedQueue(DISPATCH_START_EVENTS + task.dispatcher, host=self.redis)
+            dispatcher = task.metadata['dispatcher__']
+            start_queue = NamedQueue(DISPATCH_START_EVENTS + dispatcher, host=self.redis)
             start_queue.push((task.sid, task.fileinfo.sha256, service_name, worker_id))
             return task
         return None
@@ -205,7 +200,8 @@ class DispatchClient:
             NamedQueue(w).push(msg)
 
         #
-        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + task.dispatcher, host=self.redis)
+        dispatcher = task.metadata['dispatcher__']
+        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis)
         result_queue.push({
             'service_task': task.as_primitives(),
             'result': result.as_primitives(),
@@ -232,7 +228,8 @@ class DispatchClient:
             for w in self._get_watcher_list(task.sid).members():
                 NamedQueue(w).push(msg)
 
-        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + task.dispatcher, host=self.redis)
+        dispatcher = task.metadata['dispatcher__']
+        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis)
         result_queue.push({
             'service_task': task.as_primitives(),
             'error': error.as_primitives(),

@@ -10,7 +10,7 @@ import elasticapm
 
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
-    DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE
+    DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
 from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
@@ -53,7 +53,7 @@ class SubmissionTask:
         self.file_info: Dict[str, FileInfo] = {}
         self.file_names: Dict[str, str] = {}
         self.file_schedules: Dict[str, List[Dict[str, Service]]] = {}
-        self.file_tags = {}
+        self.file_tags = defaultdict(list)
         self.file_depth: Dict[str, int] = {}
         self.file_temporary_data = {}
         self.extra_errors = []
@@ -69,6 +69,7 @@ class SubmissionTask:
 DISPATCH_TASK_ASSIGNMENT = 'dispatcher-tasks-assigned-to-'
 DISPATCH_START_EVENTS = 'dispatacher-start-events-'
 DISPATCH_RESULT_QUEUE = 'dispatacher-results-'
+DISPATCH_COMMAND_QUEUE = 'dispatcher-commands-'
 DISPATCH_DIRECTORY = 'dispatchers-directory'
 QUEUE_EXPIRY = 60*60
 GUARD_TIMEOUT = 60*2
@@ -79,6 +80,24 @@ TIMEOUT_TEST_INTERVAL = 5
 
 
 class Dispatcher(CoreBase):
+    @staticmethod
+    def all_instances(persistent_redis):
+        return Hash(DISPATCH_DIRECTORY, host=persistent_redis).keys()
+
+    @staticmethod
+    def instance_assignment_size(persistent_redis, instance_id):
+        return Hash(DISPATCH_TASK_ASSIGNMENT + instance_id, host=persistent_redis).length()
+
+    @staticmethod
+    def all_queue_lengths(redis, instance_id):
+        return {
+            'start': NamedQueue(DISPATCH_START_EVENTS + instance_id, host=redis).length(),
+            'result': NamedQueue(DISPATCH_RESULT_QUEUE + instance_id, host=redis).length(),
+            'command': NamedQueue(DISPATCH_COMMAND_QUEUE + instance_id, host=redis).length()
+        }
+        # instances = Dispatcher.all_instances(self.redis_persist)
+        # inflight = {_i: Dispatcher.instance_assignment_size(self.redis_persist, _i) for _i in instances}
+        # queues = {_i: Dispatcher.all_queue_lengths(self.redis, _i) for _i in instances}
 
     def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None,
                  config=None, counter_name='dispatcher'):
@@ -96,7 +115,7 @@ class Dispatcher(CoreBase):
 
         #
         # # Build some utility classes
-        self.scheduler = Scheduler(datastore, self.config, self.redis)
+        self.scheduler = Scheduler(self.datastore, self.config, self.redis)
         self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
 
@@ -107,12 +126,17 @@ class Dispatcher(CoreBase):
         self.quota_tracker = UserQuotaTracker('submissions', timeout=60 * 60, host=self.redis_persist)
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
 
-        # self.file_queue = NamedQueue(FILE_QUEUE, self.redis)
-        # self._nonper_other_queues = {}
+        # Table to track the running dispatchers
         self.dispatchers_directory = Hash(DISPATCH_DIRECTORY, host=self.redis_persist)
+
+        # Tables to track what submissions are running where
         self.active_submissions = ExpiringHash(DISPATCH_TASK_ASSIGNMENT+self.instance_id, host=self.redis_persist)
+        self.submissions_assignments = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
+
+        # Communications queues
         self.start_queue = NamedQueue(DISPATCH_START_EVENTS+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
         self.result_queue = NamedQueue(DISPATCH_RESULT_QUEUE+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
+        self.command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
 
         # Publish counters to the metrics sink.
         self.counter = MetricsFactory(metrics_type='dispatcher', schema=Metrics, name=counter_name,
@@ -157,6 +181,8 @@ class Dispatcher(CoreBase):
         return with_logs
 
     def try_run(self):
+        self.log.info(f'Using dispatcher id {self.instance_id}')
+
         expected_threads = {
             # Pull in new submissions
             'Pull Submissions': self.log_crashes(self.pull_submissions),
@@ -259,6 +285,7 @@ class Dispatcher(CoreBase):
                 'completed_queue': task.completed_queue,
                 'submission': submission.as_primitives()
             })
+            self.submissions_assignments.set(sid, self.instance_id)
 
             # Write all new submissions to the traffic queue
             self.traffic_queue.publish(SubmissionMessage({
@@ -340,7 +367,7 @@ class Dispatcher(CoreBase):
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
-            self.log.info(f"[{sid}] File {sha256} sent to services : {', '.join(list(outstanding.keys()))}")
+            sent = []
 
             for service_name, service in outstanding.items():
                 queue = get_service_queue(service_name, self.redis)
@@ -348,7 +375,7 @@ class Dispatcher(CoreBase):
                 # Check if this task is already sitting in queue
                 dispatch_key = task.queue_keys.get((sha256, service_name))
                 if dispatch_key is not None and queue.rank(dispatch_key) is not None:
-                    self.log.info(f"[{sid}] File {sha256} already in queue for {service_name}")
+                    self.log.debug(f"[{sid}] File {sha256} already in queue for {service_name}")
                     continue
 
                 task.service_attempts[(sha256, service_name)] += 1
@@ -357,7 +384,6 @@ class Dispatcher(CoreBase):
                 config = self.build_service_config(service, submission)
                 service_task = ServiceTask(dict(
                     sid=sid,
-                    dispatcher=self.instance_id,
                     metadata=submission.metadata,
                     min_classification=task.submission.classification,
                     service_name=service_name,
@@ -374,14 +400,21 @@ class Dispatcher(CoreBase):
                     deep_scan=submission.params.deep_scan,
                     priority=submission.params.priority,
                 ))
+                service_task.metadata['dispatcher__'] = self.instance_id
                 queue_key = queue.push(service_task.priority, service_task.as_primitives())
                 task.queue_keys[(sha256, service_name)] = queue_key
+                sent.append(service_name)
+
+            if sent:
+                self.log.info(f"[{sid}] File {sha256} sent to services : {', '.join(sent)}")
 
         else:
             self.counter.increment('files_completed')
             if len(task.queue_keys) > 0 or len(task.running_services) > 0:
                 self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete "
                               f"(queued: {len(task.queue_keys)} running: {len(task.running_services)})")
+                self.log.info(f'{task.queue_keys}')
+                self.log.info(f'{task.running_services}')
             else:
                 self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
                 self.check_submission(task)
@@ -519,6 +552,7 @@ class Dispatcher(CoreBase):
         # Clear the timeout watcher
         watcher_list.delete()
         self.active_submissions.pop(sid)
+        self.submissions_assignments.pop(sid)
         with self._tasks_lock:
             self._tasks.pop(sid)
 
@@ -553,6 +587,9 @@ class Dispatcher(CoreBase):
 
         error_key = error.build_key()
         self.datastore.error.save(error_key, error.as_primitives())
+
+        task.queue_keys.pop((sha256, service_name), None)
+        task.running_services.pop((sha256, service_name), None)
         task.service_errors[(sha256, service_name)] = error_key
 
         export_metrics_once(service_name, ServiceMetrics, dict(fail_nonrecoverable=1), counter_type='service')
@@ -788,6 +825,7 @@ class Dispatcher(CoreBase):
         # We believe a service task has timed out, try and read it from running tasks
         # If we can't find the task in running tasks, it finished JUST before timing out, let it go
         sid = task.submission.sid
+        task.queue_keys.pop((sha256, service_name), None)
         task_key = ServiceTask.make_key(sid=sid, service_name=service_name, sha=sha256)
         service_task = self.running_tasks.pop(task_key)
         if not service_task:
@@ -875,21 +913,24 @@ class Dispatcher(CoreBase):
                     oldest = min(last_seen.keys(), key=lambda _x: last_seen[_x])
                     if time.time() - last_seen[oldest] > GUARD_TIMEOUT:
                         self.steal_work(oldest)
+                        last_seen.pop(oldest)
         finally:
             if not self.running:
                 self.dispatchers_directory.pop(self.instance_id)
 
     def steal_work(self, target):
         target_jobs = ExpiringHash(DISPATCH_TASK_ASSIGNMENT+target, host=self.redis_persist)
+        self.log.info(f'Starting to steal work from {target}')
 
         keys = target_jobs.keys()
-
         while self.running and keys:
             if self.active_submissions.length() >= HARD_MAX_JOBS:
                 self.sleep(1)
                 continue
 
             message = target_jobs.pop(keys.pop())
+            if not keys:
+                keys = target_jobs.keys()
 
             if not message:
                 continue
@@ -920,3 +961,6 @@ class Dispatcher(CoreBase):
 
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
+        self.log.info(f'Finished stealing work from {target}')
+        self.dispatchers_directory.pop(target)

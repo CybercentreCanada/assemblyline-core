@@ -1,7 +1,7 @@
 from typing import List, Dict, cast
 
 import logging
-
+import os
 import re
 
 from assemblyline.common.forge import CachedObject
@@ -10,6 +10,11 @@ from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
 from assemblyline_core.server_base import get_service_stage_hash, ServiceStage
+
+
+# If you are doing development and you want the system to route jobs ignoring the service setup/teardown
+# set an environment variable SKIP_SERVICE_SETUP to true for all dispatcher containers
+SKIP_SERVICE_SETUP = os.environ.get('SKIP_SERVICE_SETUP', 'false').lower() in ['true', '1']
 
 
 class Scheduler:
