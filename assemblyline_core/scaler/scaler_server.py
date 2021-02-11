@@ -212,6 +212,9 @@ class ScalerServer(CoreBase):
             'section': 'service',
         }
 
+        if self.config.core.scaler.additional_labels:
+            labels.update({k: v for k, v in (l.split("=") for l in self.config.core.scaler.additional_labels)})
+
         if KUBERNETES_AL_CONFIG:
             self.log.info(f"Loading Kubernetes cluster interface on namespace: {NAMESPACE}")
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
