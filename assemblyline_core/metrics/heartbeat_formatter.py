@@ -119,7 +119,6 @@ class HeartbeatFormatter(object):
                         "metrics": m_data,
                         "queues": {
                             "ingest": self.dispatcher_submission_queue.length(),
-                            "files": 0
                         },
                         "component": m_name,
                     }

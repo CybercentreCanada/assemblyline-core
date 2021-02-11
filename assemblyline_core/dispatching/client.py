@@ -91,7 +91,7 @@ class DispatchClient:
         """
         dispatcher_id = self.submission_assignments.get(sid)
         if dispatcher_id:
-            queue_name = reply_queue_name(prefix="D", suffix="WQ")
+            queue_name = reply_queue_name(prefix="D", suffix="ResponseQueue")
             queue = NamedQueue(queue_name, host=self.redis, ttl=30)
             command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+dispatcher_id)
             command_queue.push(DispatcherCommandMessage({
