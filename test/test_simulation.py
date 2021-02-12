@@ -30,15 +30,14 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 import assemblyline_core
 from assemblyline_core.plumber.run_plumber import Plumber
+from assemblyline_core.dispatching import dispatcher
 from assemblyline_core.dispatching.client import DispatchClient
-from assemblyline_core.dispatching.run_files import FileDispatchServer
-from assemblyline_core.dispatching.run_submissions import SubmissionDispatchServer
+from assemblyline_core.dispatching.dispatcher import Dispatcher
 from assemblyline_core.ingester.ingester import IngestTask
 from assemblyline_core.ingester.run_ingest import IngesterInput
 from assemblyline_core.ingester.run_internal import IngesterInternals
 from assemblyline_core.ingester.run_submit import IngesterSubmitter
 from assemblyline_core.server_base import ServerBase, get_service_stage_hash, ServiceStage
-from assemblyline_core.watcher.server import WatcherServer
 
 from .mocking import MockCollection
 from .test_scheduler import dummy_service
@@ -51,7 +50,7 @@ def redis(redis_connection):
     redis_connection.flushdb()
 
 
-_global_semaphore = threading.Semaphore()
+_global_semaphore = threading.Semaphore(value=1)
 
 
 class MockService(ServerBase):
@@ -83,8 +82,10 @@ class MockService(ServerBase):
             print(self.service_name, 'following instruction:', instructions)
             hits = self.hits[task.fileinfo.sha256] = self.hits.get(task.fileinfo.sha256, 0) + 1
 
-            if instructions.get('semaphore', False):
-                _global_semaphore.acquire(blocking=True, timeout=instructions['semaphore'])
+            if instructions.get('hold', False):
+                queue = get_service_queue(self.service_name, self.dispatch_client.redis)
+                queue.push(0, task.as_primitives())
+                _global_semaphore.acquire(blocking=True, timeout=instructions['hold'])
                 continue
 
             if 'drop' in instructions:
@@ -206,6 +207,8 @@ def core(request, redis, filestore, config):
     # Block logs from being initialized, it breaks under pytest if you create new stream handlers
     from assemblyline.common import log as al_log
     al_log.init_logging = lambda *args: None
+    dispatcher.TIMEOUT_EXTRA_TIME = 0
+    dispatcher.TIMEOUT_TEST_INTERVAL = 1
     # al_log.init_logging("simulation")
 
     fields = CoreSession()
@@ -219,16 +222,15 @@ def core(request, redis, filestore, config):
     fields.filestore = filestore
     threads: List[ServerBase] = [
         # Start the ingester components
-        IngesterInput(datastore=ds, redis=redis, persistent_redis=redis),
-        IngesterSubmitter(datastore=ds, redis=redis, persistent_redis=redis),
-        IngesterInternals(datastore=ds, redis=redis, persistent_redis=redis),
+        IngesterInput(datastore=ds, redis=redis, persistent_redis=redis, config=config),
+        IngesterSubmitter(datastore=ds, redis=redis, persistent_redis=redis, config=config),
+        IngesterInternals(datastore=ds, redis=redis, persistent_redis=redis, config=config),
 
         # Start the dispatcher
-        FileDispatchServer(datastore=ds, redis=redis, redis_persist=redis),
-        SubmissionDispatchServer(datastore=ds, redis=redis, redis_persist=redis),
+        Dispatcher(datastore=ds, redis=redis, redis_persist=redis, config=config),
 
         # Start plumber
-        Plumber(datastore=ds, redis=redis, redis_persist=redis, delay=0.5),
+        Plumber(datastore=ds, redis=redis, redis_persist=redis, delay=0.5, config=config),
     ]
 
     stages = get_service_stage_hash(redis)
@@ -518,109 +520,95 @@ def test_ingest_timeout(core, metrics):
         assemblyline_core.ingester.ingester._max_time = original_max_time
 
 
-def test_watcher_recovery(core, metrics):
-    watch = WatcherServer(redis=core.redis, redis_persist=core.redis)
-    watch.start()
-    try:
-        # This time have the service 'crash'
-        sha, size = ready_body(core, {
-            'pre': {'drop': 1}
-        })
+def test_service_crash_recovery(core, metrics):
+    # This time have the service 'crash'
+    sha, size = ready_body(core, {
+        'pre': {'drop': 1}
+    })
 
-        core.ingest_queue.push(SubmissionInput(dict(
-            metadata={},
-            params=dict(
-                description="file abc123",
-                services=dict(selected=''),
-                submitter='user',
-                groups=['user'],
-                max_extracted=10000
-            ),
-            notification=dict(
-                queue='watcher-recover',
-                threshold=0
-            ),
-            files=[dict(
-                sha256=sha,
-                size=size,
-                name='abc123'
-            )]
-        )).as_primitives())
+    core.ingest_queue.push(SubmissionInput(dict(
+        metadata={},
+        params=dict(
+            description="file abc123",
+            services=dict(selected=''),
+            submitter='user',
+            groups=['user'],
+            max_extracted=10000
+        ),
+        notification=dict(
+            queue='watcher-recover',
+            threshold=0
+        ),
+        files=[dict(
+            sha256=sha,
+            size=size,
+            name='abc123'
+        )]
+    )).as_primitives())
 
-        notification_queue = NamedQueue('nq-watcher-recover', core.redis)
-        dropped_task = notification_queue.pop(timeout=16)
-        assert dropped_task
-        dropped_task = IngestTask(dropped_task)
-        sub = core.ds.submission.get(dropped_task.submission.sid)
-        assert len(sub.errors) == 0
-        assert len(sub.results) == 4
-        assert core.pre_service.drops[sha] == 1
-        assert core.pre_service.hits[sha] == 2
+    notification_queue = NamedQueue('nq-watcher-recover', core.redis)
+    dropped_task = notification_queue.pop(timeout=30)
+    assert dropped_task
+    dropped_task = IngestTask(dropped_task)
+    sub = core.ds.submission.get(dropped_task.submission.sid)
+    assert len(sub.errors) == 0
+    assert len(sub.results) == 4
+    assert core.pre_service.drops[sha] == 1
+    assert core.pre_service.hits[sha] == 2
 
-        # Wait until we get feedback from the metrics channel
-        metrics.expect('ingester', 'submissions_ingested', 1)
-        metrics.expect('ingester', 'submissions_completed', 1)
-        metrics.expect('watcher', 'expired', 1)
-        metrics.expect('service', 'fail_recoverable', 1)
-        metrics.expect('dispatcher', 'submissions_completed', 1)
-        metrics.expect('dispatcher', 'files_completed', 1)
-
-    finally:
-        watch.stop()
-        watch.join()
+    # Wait until we get feedback from the metrics channel
+    metrics.expect('ingester', 'submissions_ingested', 1)
+    metrics.expect('ingester', 'submissions_completed', 1)
+    metrics.expect('service', 'fail_recoverable', 1)
+    metrics.expect('dispatcher', 'service_timeouts', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'files_completed', 1)
 
 
 def test_service_retry_limit(core, metrics):
-    watch = WatcherServer(redis=core.redis, redis_persist=core.redis)
-    watch.start()
-    try:
-        # This time have the service 'crash'
-        sha, size = ready_body(core, {
-            'pre': {'drop': 3}
-        })
+    # This time have the service 'crash'
+    sha, size = ready_body(core, {
+        'pre': {'drop': 3}
+    })
 
-        core.ingest_queue.push(SubmissionInput(dict(
-            metadata={},
-            params=dict(
-                description="file abc123",
-                services=dict(selected=''),
-                submitter='user',
-                groups=['user'],
-                max_extracted=10000
-            ),
-            notification=dict(
-                queue='watcher-recover',
-                threshold=0
-            ),
-            files=[dict(
-                sha256=sha,
-                size=size,
-                name='abc123'
-            )]
-        )).as_primitives())
+    core.ingest_queue.push(SubmissionInput(dict(
+        metadata={},
+        params=dict(
+            description="file abc123",
+            services=dict(selected=''),
+            submitter='user',
+            groups=['user'],
+            max_extracted=10000
+        ),
+        notification=dict(
+            queue='watcher-recover',
+            threshold=0
+        ),
+        files=[dict(
+            sha256=sha,
+            size=size,
+            name='abc123'
+        )]
+    )).as_primitives())
 
-        notification_queue = NamedQueue('nq-watcher-recover', core.redis)
-        dropped_task = notification_queue.pop(timeout=16)
-        assert dropped_task
-        dropped_task = IngestTask(dropped_task)
-        sub = core.ds.submission.get(dropped_task.submission.sid)
-        assert len(sub.errors) == 1
-        assert len(sub.results) == 3
-        assert core.pre_service.drops[sha] == 3
-        assert core.pre_service.hits[sha] == 3
+    notification_queue = NamedQueue('nq-watcher-recover', core.redis)
+    dropped_task = notification_queue.pop(timeout=16)
+    assert dropped_task
+    dropped_task = IngestTask(dropped_task)
+    sub = core.ds.submission.get(dropped_task.submission.sid)
+    assert len(sub.errors) == 1
+    assert len(sub.results) == 3
+    assert core.pre_service.drops[sha] == 3
+    assert core.pre_service.hits[sha] == 3
 
-        # Wait until we get feedback from the metrics channel
-        metrics.expect('ingester', 'submissions_ingested', 1)
-        metrics.expect('ingester', 'submissions_completed', 1)
-        metrics.expect('watcher', 'expired', 3)
-        metrics.expect('service', 'fail_recoverable', 3)
-        metrics.expect('service', 'fail_nonrecoverable', 1)
-        metrics.expect('dispatcher', 'submissions_completed', 1)
-        metrics.expect('dispatcher', 'files_completed', 1)
-
-    finally:
-        watch.stop()
-        watch.join()
+    # Wait until we get feedback from the metrics channel
+    metrics.expect('ingester', 'submissions_ingested', 1)
+    metrics.expect('ingester', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'service_timeouts', 3)
+    metrics.expect('service', 'fail_recoverable', 3)
+    metrics.expect('service', 'fail_nonrecoverable', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'files_completed', 1)
 
 
 def test_dropping_early(core, metrics):
@@ -944,15 +932,12 @@ def test_caching(core: CoreSession, metrics):
 def test_plumber_clearing(core, metrics):
     global _global_semaphore
     _global_semaphore = threading.Semaphore(value=0)
-
     start = time.time()
-    watch = WatcherServer(redis=core.redis, redis_persist=core.redis)
-    watch.start()
 
     try:
         # Have the plumber cancel tasks
         sha, size = ready_body(core, {
-            'pre': {'semaphore': 60}
+            'pre': {'hold': 60}
         })
 
         core.ingest_queue.push(SubmissionInput(dict(
@@ -975,9 +960,9 @@ def test_plumber_clearing(core, metrics):
             )]
         )).as_primitives())
 
+        metrics.expect('ingester', 'submissions_ingested', 1)
         service_queue = get_service_queue('pre', core.redis)
-        time.sleep(0.5)
-        while service_queue.length() == 0 and time.time() - start < 20:
+        while service_queue.length() != 1:
             time.sleep(0.1)
 
         service_delta = core.ds.service_delta.get('pre')
@@ -991,15 +976,12 @@ def test_plumber_clearing(core, metrics):
         assert len(sub.files) == 1
         assert len(sub.results) == 3
         assert len(sub.errors) == 1
-
         error = core.ds.error.get(sub.errors[0])
         assert "disabled" in error.response.message
 
-        metrics.expect('ingester', 'submissions_ingested', 1)
         metrics.expect('ingester', 'submissions_completed', 1)
         metrics.expect('dispatcher', 'submissions_completed', 1)
         metrics.expect('dispatcher', 'files_completed', 1)
-        metrics.expect('watcher', 'expired', 1)
         metrics.expect('service', 'fail_recoverable', 1)
 
     finally:
@@ -1007,5 +989,3 @@ def test_plumber_clearing(core, metrics):
         service_delta = core.ds.service_delta.get('pre')
         service_delta['enabled'] = True
         core.ds.service_delta.save('pre', service_delta)
-        watch.stop()
-        watch.join()

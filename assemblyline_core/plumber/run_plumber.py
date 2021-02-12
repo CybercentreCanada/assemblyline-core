@@ -62,7 +62,6 @@ class Plumber(CoreBase):
                         ))
 
                         error_key = error.build_key(task=task)
-
                         self.dispatch_client.service_failed(task.sid, error_key, error)
 
             # Wait a while before checking status of all services again
