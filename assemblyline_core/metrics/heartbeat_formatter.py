@@ -6,6 +6,7 @@ from assemblyline.common.forge import get_service_queue
 from assemblyline.odm.messages.scaler_heartbeat import ScalerMessage
 from assemblyline.odm.messages.scaler_status_heartbeat import ScalerStatusMessage
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
+from assemblyline_core.dispatching.dispatcher import Dispatcher
 from assemblyline_core.ingester import INGEST_QUEUE_NAME, drop_chance
 from assemblyline.common import forge, metrics
 from assemblyline.common.constants import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, \
@@ -108,17 +109,25 @@ class HeartbeatFormatter(object):
     def send_heartbeat(self, m_type, m_name, m_data, instances):
         if m_type == "dispatcher":
             try:
+                instances = sorted(Dispatcher.all_instances(self.redis_persist))
+                inflight = {_i: Dispatcher.instance_assignment_size(self.redis_persist, _i) for _i in instances}
+                queues = {_i: Dispatcher.all_queue_lengths(self.redis, _i) for _i in instances}
+
                 msg = {
                     "sender": self.sender,
                     "msg": {
                         "inflight": {
                             "max": self.config.core.dispatcher.max_inflight,
                             "outstanding": self.dispatch_active_hash.length(),
+                            "per_instance": [inflight[_i] for _i in instances]
                         },
-                        "instances": instances,
+                        "instances": len(instances),
                         "metrics": m_data,
                         "queues": {
                             "ingest": self.dispatcher_submission_queue.length(),
+                            "start": [queues[_i]['start'] for _i in instances],
+                            "result": [queues[_i]['result'] for _i in instances],
+                            "command": [queues[_i]['command'] for _i in instances]
                         },
                         "component": m_name,
                     }

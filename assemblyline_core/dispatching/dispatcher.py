@@ -74,8 +74,6 @@ DISPATCH_COMMAND_QUEUE = 'dispatcher-commands-'
 DISPATCH_DIRECTORY = 'dispatchers-directory'
 QUEUE_EXPIRY = 60*60
 GUARD_TIMEOUT = 60*2
-SOFT_MAX_JOBS = 1000
-HARD_MAX_JOBS = 1500
 TIMEOUT_EXTRA_TIME = 30  # 30 seconds grace for message handling.
 TIMEOUT_TEST_INTERVAL = 5
 
@@ -96,9 +94,6 @@ class Dispatcher(CoreBase):
             'result': NamedQueue(DISPATCH_RESULT_QUEUE + instance_id, host=redis).length(),
             'command': NamedQueue(DISPATCH_COMMAND_QUEUE + instance_id, host=redis).length()
         }
-        # instances = Dispatcher.all_instances(self.redis_persist)
-        # inflight = {_i: Dispatcher.instance_assignment_size(self.redis_persist, _i) for _i in instances}
-        # queues = {_i: Dispatcher.all_queue_lengths(self.redis, _i) for _i in instances}
 
     def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None,
                  config=None, counter_name='dispatcher'):
@@ -129,6 +124,7 @@ class Dispatcher(CoreBase):
 
         # Table to track the running dispatchers
         self.dispatchers_directory = Hash(DISPATCH_DIRECTORY, host=self.redis_persist)
+        self.running_dispatchers_estimate = 1
 
         # Tables to track what submissions are running where
         self.active_submissions = ExpiringHash(DISPATCH_TASK_ASSIGNMENT+self.instance_id, host=self.redis_persist)
@@ -234,7 +230,8 @@ class Dispatcher(CoreBase):
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
-            if self.active_submissions.length() >= SOFT_MAX_JOBS:
+            max_tasks = self.config.core.dispatcher.max_inflight / self.running_dispatchers_estimate
+            if self.active_submissions.length() >= max_tasks:
                 self.sleep(1)
                 continue
 
@@ -905,6 +902,7 @@ class Dispatcher(CoreBase):
                     key = key[len(DISPATCH_TASK_ASSIGNMENT):]
                     if key not in last_seen:
                         last_seen[key] = time.time()
+                self.running_dispatchers_estimate = len(last_seen)
 
                 self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
                 self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
@@ -925,7 +923,11 @@ class Dispatcher(CoreBase):
 
         keys = target_jobs.keys()
         while self.running and keys:
-            if self.active_submissions.length() >= HARD_MAX_JOBS:
+            # Don't load more than the proper portion of work. Let the thief
+            # go a fixed margin over the limit, so that recovering past work
+            # will continue even when max submissions are in progress.
+            max_tasks = self.config.core.dispatcher.max_inflight / self.running_dispatchers_estimate
+            if self.active_submissions.length() >= max_tasks + 500:
                 self.sleep(1)
                 continue
 
