@@ -94,9 +94,6 @@ class Dispatcher(CoreBase):
             'result': NamedQueue(DISPATCH_RESULT_QUEUE + instance_id, host=redis).length(),
             'command': NamedQueue(DISPATCH_COMMAND_QUEUE + instance_id, host=redis).length()
         }
-        # instances = Dispatcher.all_instances(self.redis_persist)
-        # inflight = {_i: Dispatcher.instance_assignment_size(self.redis_persist, _i) for _i in instances}
-        # queues = {_i: Dispatcher.all_queue_lengths(self.redis, _i) for _i in instances}
 
     def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None,
                  config=None, counter_name='dispatcher'):
