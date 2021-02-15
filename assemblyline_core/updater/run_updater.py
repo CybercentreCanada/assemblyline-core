@@ -109,9 +109,10 @@ class DockerUpdateInterface:
     it properly on new containers we launch. FILE_UPDATE_DIRECTORY gives us the path
     that it is mounted at in the update manager container.
     """
-    def __init__(self):
+    def __init__(self, log_level="INFO"):
         self.client = docker.from_env()
         self._external_network = None
+        self.log_level = log_level
 
     @property
     def external_network(self):
@@ -171,7 +172,8 @@ class DockerUpdateInterface:
                      for row in mounts},
             environment=[f'{_e.name}={_e.value}' for _e in docker_config.environment] +
                         [f'{k}={v}' for k, v in env.items()] +
-                        [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ],
+                        [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ] +
+                        [f'LOG_LEVEL={self.log_level}'],
             detach=True,
         )
 
@@ -189,7 +191,7 @@ class DockerUpdateInterface:
 
 
 class KubernetesUpdateInterface:
-    def __init__(self, prefix, namespace, priority_class, extra_labels):
+    def __init__(self, prefix, namespace, priority_class, extra_labels, log_level="INFO"):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -217,6 +219,7 @@ class KubernetesUpdateInterface:
         self.namespace = namespace
         self.priority_class = priority_class
         self.extra_labels = extra_labels
+        self.log_level = log_level
 
     def launch(self, name, docker_config: DockerConfig, mounts, env, network, blocking: bool = True):
         name = (self.prefix + 'update-' + name.lower()).replace('_', '-')
@@ -323,6 +326,8 @@ class KubernetesUpdateInterface:
 
         environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in docker_config.environment]
         environment_variables.extend([V1EnvVar(name=k, value=v) for k, v in env.items()])
+        environment_variables.append(V1EnvVar(name="LOG_LEVEL", value=self.log_level))
+
 
         cores = docker_config.cpu_cores
         memory = docker_config.ram_mb
@@ -431,9 +436,10 @@ class ServiceUpdater(CoreBase):
             extra_labels = {k: v for k, v in (l.split("=") for l in self.config.core.scaler.additional_labels)}
             self.controller = KubernetesUpdateInterface(prefix='alsvc_', namespace=NAMESPACE,
                                                         priority_class='al-core-priority',
-                                                        extra_labels=extra_labels)
+                                                        extra_labels=extra_labels,
+                                                        log_level=self.config.core.logging.log_level)
         else:
-            self.controller = DockerUpdateInterface()
+            self.controller = DockerUpdateInterface(log_level=self.config.core.logging.log_level)
 
     def sync_services(self):
         """Download the service list and make sure our settings are up to date"""
