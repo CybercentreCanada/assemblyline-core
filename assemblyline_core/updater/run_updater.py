@@ -437,9 +437,9 @@ class ServiceUpdater(CoreBase):
             self.controller = KubernetesUpdateInterface(prefix='alsvc_', namespace=NAMESPACE,
                                                         priority_class='al-core-priority',
                                                         extra_labels=extra_labels,
-                                                        log_level=self.config.core.logging.log_level)
+                                                        log_level=self.config.logging.log_level)
         else:
-            self.controller = DockerUpdateInterface(log_level=self.config.core.logging.log_level)
+            self.controller = DockerUpdateInterface(log_level=self.config.logging.log_level)
 
     def sync_services(self):
         """Download the service list and make sure our settings are up to date"""

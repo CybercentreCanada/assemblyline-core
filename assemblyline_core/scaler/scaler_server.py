@@ -219,7 +219,7 @@ class ScalerServer(CoreBase):
             self.log.info(f"Loading Kubernetes cluster interface on namespace: {NAMESPACE}")
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
                                                    namespace=NAMESPACE, priority='al-service-priority',
-                                                   log_level=self.config.core.logging.log_level)
+                                                   log_level=self.config.logging.log_level)
             # If we know where to find it, mount the classification into the service containers
             if CLASSIFICATION_CONFIGMAP:
                 self.controller.config_mount('classification-config', config_map=CLASSIFICATION_CONFIGMAP,
@@ -230,7 +230,7 @@ class ScalerServer(CoreBase):
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
                                                cpu_overallocation=self.config.core.scaler.cpu_overallocation,
                                                memory_overallocation=self.config.core.scaler.memory_overallocation,
-                                               labels=labels, log_level=self.config.core.logging.log_level)
+                                               labels=labels, log_level=self.config.logging.log_level)
             # If we know where to find it, mount the classification into the service containers
             if CLASSIFICATION_HOST_PATH:
                 self.controller.global_mounts.append((CLASSIFICATION_HOST_PATH, '/etc/assemblyline/classification.yml'))
