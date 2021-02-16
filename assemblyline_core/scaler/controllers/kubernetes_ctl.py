@@ -91,7 +91,7 @@ def parse_cpu(string):
 
 
 class KubernetesController(ControllerInterface):
-    def __init__(self, logger, namespace, prefix, priority, labels=None):
+    def __init__(self, logger, namespace, prefix, priority, labels=None, log_level="INFO"):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
         try:
@@ -115,6 +115,7 @@ class KubernetesController(ControllerInterface):
         self.prefix = prefix.lower()
         self.priority = priority
         self.logger = logger
+        self.log_level = log_level
         self._labels = labels
         self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
@@ -292,7 +293,8 @@ class KubernetesController(ControllerInterface):
         environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]
         environment_variables += [
             V1EnvVar(name='UPDATE_PATH', value=CONTAINER_UPDATE_DIRECTORY),
-            V1EnvVar(name='FILE_UPDATE_DIRECTORY', value=CONTAINER_UPDATE_DIRECTORY)
+            V1EnvVar(name='FILE_UPDATE_DIRECTORY', value=CONTAINER_UPDATE_DIRECTORY),
+            V1EnvVar(name='LOG_LEVEL', value=self.log_level)
         ]
         return [V1Container(
             name=deployment_name,
