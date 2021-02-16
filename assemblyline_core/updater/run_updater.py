@@ -328,7 +328,6 @@ class KubernetesUpdateInterface:
         environment_variables.extend([V1EnvVar(name=k, value=v) for k, v in env.items()])
         environment_variables.append(V1EnvVar(name="LOG_LEVEL", value=self.log_level))
 
-
         cores = docker_config.cpu_cores
         memory = docker_config.ram_mb
         memory_min = min(docker_config.ram_mb_min, memory)
