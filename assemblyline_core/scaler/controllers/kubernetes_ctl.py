@@ -285,8 +285,7 @@ class KubernetesController(ControllerInterface):
 
         return volumes, mounts
 
-    @staticmethod
-    def _create_containers(deployment_name, container_config, mounts):
+    def _create_containers(self, deployment_name, container_config, mounts):
         cores = container_config.cpu_cores
         memory = container_config.ram_mb
         min_memory = min(container_config.ram_mb_min, container_config.ram_mb)
