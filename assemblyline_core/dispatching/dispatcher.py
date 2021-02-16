@@ -74,8 +74,6 @@ DISPATCH_COMMAND_QUEUE = 'dispatcher-commands-'
 DISPATCH_DIRECTORY = 'dispatchers-directory'
 QUEUE_EXPIRY = 60*60
 GUARD_TIMEOUT = 60*2
-SOFT_MAX_JOBS = 1000
-HARD_MAX_JOBS = 1500
 TIMEOUT_EXTRA_TIME = 30  # 30 seconds grace for message handling.
 TIMEOUT_TEST_INTERVAL = 5
 
@@ -96,9 +94,6 @@ class Dispatcher(CoreBase):
             'result': NamedQueue(DISPATCH_RESULT_QUEUE + instance_id, host=redis).length(),
             'command': NamedQueue(DISPATCH_COMMAND_QUEUE + instance_id, host=redis).length()
         }
-        # instances = Dispatcher.all_instances(self.redis_persist)
-        # inflight = {_i: Dispatcher.instance_assignment_size(self.redis_persist, _i) for _i in instances}
-        # queues = {_i: Dispatcher.all_queue_lengths(self.redis, _i) for _i in instances}
 
     def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None,
                  config=None, counter_name='dispatcher'):
@@ -129,6 +124,7 @@ class Dispatcher(CoreBase):
 
         # Table to track the running dispatchers
         self.dispatchers_directory = Hash(DISPATCH_DIRECTORY, host=self.redis_persist)
+        self.running_dispatchers_estimate = 1
 
         # Tables to track what submissions are running where
         self.active_submissions = ExpiringHash(DISPATCH_TASK_ASSIGNMENT+self.instance_id, host=self.redis_persist)
@@ -234,7 +230,8 @@ class Dispatcher(CoreBase):
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
-            if self.active_submissions.length() >= SOFT_MAX_JOBS:
+            max_tasks = self.config.core.dispatcher.max_inflight / self.running_dispatchers_estimate
+            if self.active_submissions.length() >= max_tasks:
                 self.sleep(1)
                 continue
 
@@ -335,7 +332,6 @@ class Dispatcher(CoreBase):
         # Break when we find a stage that still needs processing
         outstanding = {}
         started_stages = []
-        errors = 0
         while schedule and not outstanding:
             stage = schedule.pop(0)
             started_stages.append(stage)
@@ -349,16 +345,11 @@ class Dispatcher(CoreBase):
 
                 # If the service terminated in an error, count the error and continue
                 if key in task.service_errors:
-                    errors += 1
                     continue
 
                 # If we have no error, and no result, its not finished
                 result = task.service_results.get(key)
                 if not result:
-                    if task.service_attempts[key] >= 3:
-                        self.retry_error(task, sha256, service_name)
-                        errors += 1
-                        continue
                     outstanding[service_name] = service
                     continue
 
@@ -370,18 +361,28 @@ class Dispatcher(CoreBase):
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
-            sent = []
+            sent, enqueued, running = [], [], []
 
             for service_name, service in outstanding.items():
                 queue = get_service_queue(service_name, self.redis)
 
                 # Check if this task is already sitting in queue
-                dispatch_key = task.queue_keys.get((sha256, service_name))
+                key = (sha256, service_name)
+                dispatch_key = task.queue_keys.get(key, None)
                 if dispatch_key is not None and queue.rank(dispatch_key) is not None:
-                    self.log.debug(f"[{sid}] File {sha256} already in queue for {service_name}")
+                    enqueued.append(service_name)
                     continue
 
-                task.service_attempts[(sha256, service_name)] += 1
+                # Check if the task is already running
+                if key in task.running_services:
+                    running.append(service_name)
+                    continue
+
+                # Check if we have attempted this too many times already.
+                task.service_attempts[key] += 1
+                if task.service_attempts[key] > 3:
+                    self.retry_error(task, sha256, service_name)
+                    continue
 
                 # Build the actual service dispatch message
                 config = self.build_service_config(service, submission)
@@ -408,8 +409,16 @@ class Dispatcher(CoreBase):
                 task.queue_keys[(sha256, service_name)] = queue_key
                 sent.append(service_name)
 
-            if sent:
-                self.log.info(f"[{sid}] File {sha256} sent to services : {', '.join(sent)}")
+            if sent or enqueued or running:
+                # If we have confirmed that we are waiting, or have taken an action, log that.
+                self.log.info(f"[{sid}] File {sha256} sent to: {sent} "
+                              f"already in queue for: {enqueued} "
+                              f"running on: {running}")
+            else:
+                # If we are not waiting, and have not taken an action, we must have hit the
+                # retry limit on the only service running. In that case, we can move directly
+                # onto the next stage of services, so recurse to trigger them.
+                self.dispatch_file(task, sha256)
 
         else:
             self.counter.increment('files_completed')
@@ -905,6 +914,7 @@ class Dispatcher(CoreBase):
                     key = key[len(DISPATCH_TASK_ASSIGNMENT):]
                     if key not in last_seen:
                         last_seen[key] = time.time()
+                self.running_dispatchers_estimate = len(last_seen)
 
                 self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
                 self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
@@ -925,7 +935,11 @@ class Dispatcher(CoreBase):
 
         keys = target_jobs.keys()
         while self.running and keys:
-            if self.active_submissions.length() >= HARD_MAX_JOBS:
+            # Don't load more than the proper portion of work. Let the thief
+            # go a fixed margin over the limit, so that recovering past work
+            # will continue even when max submissions are in progress.
+            max_tasks = self.config.core.dispatcher.max_inflight / self.running_dispatchers_estimate
+            if self.active_submissions.length() >= max_tasks + 500:
                 self.sleep(1)
                 continue
 
