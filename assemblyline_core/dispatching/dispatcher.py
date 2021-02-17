@@ -430,11 +430,13 @@ class Dispatcher(CoreBase):
                 self.check_submission(task)
 
     def check_submission(self, task: SubmissionTask):
-        # Files that have not yet been processed
-        pending_files = []
-        started: Set[str] = set()
+        # Track which files we have looked at already
         checked: Set[str] = set()
         unchecked: List[str] = list(task.file_depth.keys())
+
+        # Categorize files as pending/processing (can be both) all others are finished
+        pending_files = []  # Files where we are missing a service and it is not being processed
+        processing_files = []  # Files where at least one service is in progress/queued
 
         # Track information about the results as we hit them
         file_scores: Dict[str, int] = {}
@@ -450,11 +452,9 @@ class Dispatcher(CoreBase):
             if sha256 not in task.file_schedules:
                 pending_files.append(sha256)
                 continue
-            else:
-                started.add(sha256)
             schedule = list(task.file_schedules[sha256])
 
-            while schedule and sha256 not in pending_files:
+            while schedule and sha256 not in pending_files and sha256 not in processing_files:
                 stage = schedule.pop(0)
                 for service_name in stage:
 
@@ -464,12 +464,19 @@ class Dispatcher(CoreBase):
                     if not service:
                         continue
 
-                    # It hasn't started, has timed out, or is finished, see if we have a result
+                    # If there is an error we are finished with this service
                     key = sha256, service_name
                     if key in task.service_errors:
                         continue
 
-                    # No result found, mark the file as incomplete
+                    # If the file is in process, we may not need to dispatch it, but we aren't finished
+                    # with the submission.
+                    if key in task.running_services or key in task.queue_keys:
+                        processing_files.append(sha256)
+                        # another service may require us to dispatch it though so continue rather than break
+                        continue
+
+                    # No result found, mark the file for dispatching
                     result = task.service_results.get(key)
                     if not result:
                         pending_files.append(sha256)
@@ -488,11 +495,14 @@ class Dispatcher(CoreBase):
 
         # If there are pending files, then at least one service, on at least one
         # file isn't done yet, and hasn't been filtered by any of the previous few steps
-        # poke those files
+        # poke those files.
         if pending_files:
             self.log.debug(f"[{task.submission.sid}] Dispatching {len(pending_files)} files: {list(pending_files)}")
             for file_hash in pending_files:
                 self.dispatch_file(task, file_hash)
+        elif processing_files:
+            self.log.debug(f"[{task.submission.sid}] Not finished waiting on {len(processing_files)} "
+                           f"files: {list(processing_files)}")
         else:
             self.log.debug(f"[{task.submission.sid}] Finalizing submission.")
             max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
