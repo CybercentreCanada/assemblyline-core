@@ -892,7 +892,7 @@ class Dispatcher(CoreBase):
                     if sha and service_name:
                         self.timeout_service(task, sha, service_name)
                     else:
-                        self.log.warning(f'[{sid}] submission timeout, checking dispatch status...')
+                        self.log.info(f'[{sid}] submission timeout, checking dispatch status...')
                         self.check_submission(task)
 
                         # If we didn't finish the submission here, wait another 20 minutes
