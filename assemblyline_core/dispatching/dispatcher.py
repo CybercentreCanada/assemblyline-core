@@ -315,7 +315,15 @@ class Dispatcher(CoreBase):
         task.file_names[submission.files[0].sha256] = submission.files[0].name or submission.files[0].sha256
         self.dispatch_file(task, submission.files[0].sha256)
 
-    def dispatch_file(self, task: SubmissionTask, sha256):
+    def dispatch_file(self, task: SubmissionTask, sha256: str) -> bool:
+        """
+        Dispatch to any outstanding services for the given file.
+        If nothing can be dispatched, check if the submission is finished.
+
+        :param task: Submission task object.
+        :param sha256: hash of the file to check.
+        :return: true if submission is finished.
+        """
         submission = task.submission
         sid = submission.sid
 
@@ -426,7 +434,7 @@ class Dispatcher(CoreBase):
                 # If we are not waiting, and have not taken an action, we must have hit the
                 # retry limit on the only service running. In that case, we can move directly
                 # onto the next stage of services, so recurse to trigger them.
-                self.dispatch_file(task, sha256)
+                return self.dispatch_file(task, sha256)
 
         else:
             self.counter.increment('files_completed')
@@ -435,9 +443,16 @@ class Dispatcher(CoreBase):
                               f"(queued: {len(task.queue_keys)} running: {len(task.running_services)})")
             else:
                 self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
-                self.check_submission(task)
+                return self.check_submission(task)
+        return False
 
-    def check_submission(self, task: SubmissionTask):
+    def check_submission(self, task: SubmissionTask) -> bool:
+        """
+        Check if a submission is finished.
+
+        :param task: Task object for the submission in question.
+        :return: true if submission has been finished.
+        """
         # Track which files we have looked at already
         checked: Set[str] = set()
         unchecked: List[str] = list(task.file_depth.keys())
@@ -516,7 +531,8 @@ class Dispatcher(CoreBase):
         if pending_files:
             self.log.debug(f"[{task.submission.sid}] Dispatching {len(pending_files)} files: {list(pending_files)}")
             for file_hash in pending_files:
-                self.dispatch_file(task, file_hash)
+                if self.dispatch_file(task, file_hash):
+                    return True
         elif processing_files:
             self.log.debug(f"[{task.submission.sid}] Not finished waiting on {len(processing_files)} "
                            f"files: {list(processing_files)}")
@@ -524,6 +540,8 @@ class Dispatcher(CoreBase):
             self.log.debug(f"[{task.submission.sid}] Finalizing submission.")
             max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
             self.finalize_submission(task, max_score, checked)
+            return True
+        return False
 
     @classmethod
     def build_service_config(cls, service: Service, submission: Submission) -> Dict[str, str]:
@@ -746,7 +764,8 @@ class Dispatcher(CoreBase):
 
                 dispatched += 1
                 task.file_temporary_data[extracted_data.sha256] = dict(parent_data)
-                self.dispatch_file(task, extracted_data.sha256)
+                if self.dispatch_file(task, extracted_data.sha256):
+                    return
 
         else:
             for extracted_data in result.response.extracted:
