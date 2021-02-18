@@ -68,8 +68,8 @@ class SubmissionTask:
 
 
 DISPATCH_TASK_ASSIGNMENT = 'dispatcher-tasks-assigned-to-'
-DISPATCH_START_EVENTS = 'dispatacher-start-events-'
-DISPATCH_RESULT_QUEUE = 'dispatacher-results-'
+DISPATCH_START_EVENTS = 'dispatcher-start-events-'
+DISPATCH_RESULT_QUEUE = 'dispatcher-results-'
 DISPATCH_COMMAND_QUEUE = 'dispatcher-commands-'
 DISPATCH_DIRECTORY = 'dispatchers-directory'
 QUEUE_EXPIRY = 60*60
