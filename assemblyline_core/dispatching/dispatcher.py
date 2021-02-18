@@ -366,16 +366,16 @@ class Dispatcher(CoreBase):
             for service_name, service in outstanding.items():
                 queue = get_service_queue(service_name, self.redis)
 
-                # Check if this task is already sitting in queue
                 key = (sha256, service_name)
-                dispatch_key = task.queue_keys.get(key, None)
-                if dispatch_key is not None and queue.rank(dispatch_key) is not None:
-                    enqueued.append(service_name)
-                    continue
-
                 # Check if the task is already running
                 if key in task.running_services:
                     running.append(service_name)
+                    continue
+
+                # Check if this task is already sitting in queue
+                dispatch_key = task.queue_keys.get(key, None)
+                if dispatch_key is not None and queue.rank(dispatch_key) is not None:
+                    enqueued.append(service_name)
                     continue
 
                 # Check if we have attempted this too many times already.
@@ -469,25 +469,34 @@ class Dispatcher(CoreBase):
                     if key in task.service_errors:
                         continue
 
+                    # if there is a result, then the service finished already
+                    result = task.service_results.get(key)
+                    if result:
+                        if not task.submission.params.ignore_filtering and result.drop:
+                            schedule.clear()
+
+                        # Collect information about the result
+                        file_scores[sha256] = file_scores.get(sha256, 0) + result.score
+                        unchecked += set(result.children) - checked
+                        continue
+
                     # If the file is in process, we may not need to dispatch it, but we aren't finished
                     # with the submission.
-                    if key in task.running_services or key in task.queue_keys:
+                    if key in task.running_services:
                         processing_files.append(sha256)
                         # another service may require us to dispatch it though so continue rather than break
                         continue
 
-                    # No result found, mark the file for dispatching
-                    result = task.service_results.get(key)
-                    if not result:
-                        pending_files.append(sha256)
-                        break
+                    # Check if the service is in queue, and handle it the same as being in progress.
+                    # Check this one last, since it can require a remote call to redis rather than checking a dict.
+                    queue = get_service_queue(service_name, self.redis)
+                    if key in task.queue_keys and queue.rank(task.queue_keys[key]) is not None:
+                        processing_files.append(sha256)
+                        continue
 
-                    if not task.submission.params.ignore_filtering and result.drop:
-                        schedule.clear()
-
-                    # Collect information about the result
-                    file_scores[sha256] = file_scores.get(sha256, 0) + result.score
-                    unchecked += set(result.children) - checked
+                    # Since the service is not finished or in progress, it must still need to start
+                    pending_files.append(sha256)
+                    break
 
         # Filter out things over the depth limit
         depth_limit = self.config.submission.max_extraction_depth
