@@ -50,6 +50,7 @@ class SubmissionTask:
         self.submission: Submission = Submission(submission)
         self.completed_queue = str(completed_queue)
         self.lock = threading.Lock()
+        self.timeout_at: Optional[int] = None
 
         self.file_info: Dict[str, FileInfo] = {}
         self.file_names: Dict[str, str] = {}
@@ -68,14 +69,20 @@ class SubmissionTask:
 
 
 DISPATCH_TASK_ASSIGNMENT = 'dispatcher-tasks-assigned-to-'
-DISPATCH_START_EVENTS = 'dispatacher-start-events-'
-DISPATCH_RESULT_QUEUE = 'dispatacher-results-'
+DISPATCH_START_EVENTS = 'dispatcher-start-events-'
+DISPATCH_RESULT_QUEUE = 'dispatcher-results-'
 DISPATCH_COMMAND_QUEUE = 'dispatcher-commands-'
 DISPATCH_DIRECTORY = 'dispatchers-directory'
 QUEUE_EXPIRY = 60*60
 GUARD_TIMEOUT = 60*2
 TIMEOUT_EXTRA_TIME = 30  # 30 seconds grace for message handling.
 TIMEOUT_TEST_INTERVAL = 5
+
+# After 20 minutes, check if a submission is still making progress.
+# In the case of a crash somewhere else in the system, we may not have
+# gotten a message we are expecting. This should prompt a retry in most
+# cases.
+SUBMISSION_TOTAL_TIMEOUT = 60 * 20
 
 
 class Dispatcher(CoreBase):
@@ -302,6 +309,7 @@ class Dispatcher(CoreBase):
             self.log.info(f"[{sid}] Submission counts towards {submission.params.submitter.upper()} quota")
 
         self.add_task(task)
+        self.set_submission_timeout(task)
 
         task.file_depth[submission.files[0].sha256] = 0
         task.file_names[submission.files[0].sha256] = submission.files[0].name or submission.files[0].sha256
@@ -366,16 +374,16 @@ class Dispatcher(CoreBase):
             for service_name, service in outstanding.items():
                 queue = get_service_queue(service_name, self.redis)
 
-                # Check if this task is already sitting in queue
                 key = (sha256, service_name)
-                dispatch_key = task.queue_keys.get(key, None)
-                if dispatch_key is not None and queue.rank(dispatch_key) is not None:
-                    enqueued.append(service_name)
-                    continue
-
                 # Check if the task is already running
                 if key in task.running_services:
                     running.append(service_name)
+                    continue
+
+                # Check if this task is already sitting in queue
+                dispatch_key = task.queue_keys.get(key, None)
+                if dispatch_key is not None and queue.rank(dispatch_key) is not None:
+                    enqueued.append(service_name)
                     continue
 
                 # Check if we have attempted this too many times already.
@@ -469,25 +477,34 @@ class Dispatcher(CoreBase):
                     if key in task.service_errors:
                         continue
 
+                    # if there is a result, then the service finished already
+                    result = task.service_results.get(key)
+                    if result:
+                        if not task.submission.params.ignore_filtering and result.drop:
+                            schedule.clear()
+
+                        # Collect information about the result
+                        file_scores[sha256] = file_scores.get(sha256, 0) + result.score
+                        unchecked += set(result.children) - checked
+                        continue
+
                     # If the file is in process, we may not need to dispatch it, but we aren't finished
                     # with the submission.
-                    if key in task.running_services or key in task.queue_keys:
+                    if key in task.running_services:
                         processing_files.append(sha256)
                         # another service may require us to dispatch it though so continue rather than break
                         continue
 
-                    # No result found, mark the file for dispatching
-                    result = task.service_results.get(key)
-                    if not result:
-                        pending_files.append(sha256)
-                        break
+                    # Check if the service is in queue, and handle it the same as being in progress.
+                    # Check this one last, since it can require a remote call to redis rather than checking a dict.
+                    queue = get_service_queue(service_name, self.redis)
+                    if key in task.queue_keys and queue.rank(task.queue_keys[key]) is not None:
+                        processing_files.append(sha256)
+                        continue
 
-                    if not task.submission.params.ignore_filtering and result.drop:
-                        schedule.clear()
-
-                    # Collect information about the result
-                    file_scores[sha256] = file_scores.get(sha256, 0) + result.score
-                    unchecked += set(result.children) - checked
+                    # Since the service is not finished or in progress, it must still need to start
+                    pending_files.append(sha256)
+                    break
 
         # Filter out things over the depth limit
         depth_limit = self.config.submission.max_extraction_depth
@@ -556,6 +573,9 @@ class Dispatcher(CoreBase):
         """Clean up code that is the same for canceled and finished submissions"""
         submission = task.submission
         sid = submission.sid
+
+        # Now that a submission is finished, we can remove it from the timeout list
+        self.clear_submission_timeout(task)
 
         if submission.params.quota_item and submission.params.submitter:
             self.log.info(f"[{sid}] Submission no longer counts toward {submission.params.submitter.upper()} quota")
@@ -794,6 +814,21 @@ class Dispatcher(CoreBase):
                         continue
                     self.set_timeout(task, sha256, service_name, worker_id)
 
+    def set_submission_timeout(self, task: SubmissionTask):
+        sid = task.submission.sid
+        timeout_at = int(time.time() + SUBMISSION_TOTAL_TIMEOUT)
+        task.timeout_at = timeout_at
+        with self.timeout_list_lock:
+            bisect.insort(self.timeout_list, (timeout_at, sid, '', ''))
+
+    def clear_submission_timeout(self, task: SubmissionTask):
+        with self.timeout_list_lock:
+            key = (task.timeout_at, task.submission.sid, '', '')
+            task.timeout_at = None
+            index = bisect.bisect_left(self.timeout_list, key)
+            if index < len(self.timeout_list) and self.timeout_list[index] == key:
+                self.timeout_list.pop(index)
+
     def set_timeout(self, task, sha256, service_name, worker_id):
         sid = task.submission.sid
         service = self.scheduler.services.get(service_name)
@@ -832,10 +867,19 @@ class Dispatcher(CoreBase):
             for _, sid, sha, service_name in timeouts:
                 task = self.get_task(sid)
                 if not task:
-                    self.log.warning(f'[{sid}] timeout on task.')
+                    self.log.warning(f'[{sid}] timeout on finished task.')
                     continue
                 with task.lock:
-                    self.timeout_service(task, sha, service_name)
+                    if sha and service_name:
+                        self.timeout_service(task, sha, service_name)
+                    else:
+                        self.log.warning(f'[{sid}] submission timeout, checking dispatch status...')
+                        self.check_submission(task)
+
+                        # If we didn't finish the submission here, wait another 20 minutes
+                        task = self.get_task(sid)
+                        if task is not None:
+                            self.set_submission_timeout(task)
 
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
