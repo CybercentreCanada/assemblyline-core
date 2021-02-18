@@ -19,7 +19,7 @@ NETWORK_REFRESH_INTERVAL = 60 * 3
 
 class DockerController(ControllerInterface):
     """A controller for *non* swarm mode docker."""
-    def __init__(self, logger, prefix='', labels=None, cpu_overallocation=1, memory_overallocation=1):
+    def __init__(self, logger, prefix='', labels=None, cpu_overallocation=1, memory_overallocation=1, log_level="INFO"):
         """
         :param logger: A logger to report status and debug information.
         :param prefix: A prefix used to distinguish containers launched by this controller.
@@ -30,6 +30,7 @@ class DockerController(ControllerInterface):
         import docker
         self.client = docker.from_env()
         self.log = logger
+        self.log_level = log_level
         self.global_mounts: List[Tuple[str, str]] = []
         self._prefix: str = prefix
         self._labels = labels
@@ -112,7 +113,7 @@ class DockerController(ControllerInterface):
         self._profiles[profile.name] = profile
 
     def _start(self, service_name):
-        """Launch a docker container in a manner suitable for Assembylyline."""
+        """Launch a docker container in a manner suitable for Assemblyline."""
         container_name = self._name_container(service_name)
         prof = self._profiles[service_name]
         cfg = prof.container_config
@@ -131,6 +132,7 @@ class DockerController(ControllerInterface):
         env = [f'{_e.name}={_e.value}' for _e in cfg.environment]
         env += ['UPDATE_PATH=/mount/updates/']
         env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
+        env += [f'LOG_LEVEL={self.log_level}']
 
         container = self.client.containers.run(
             image=cfg.image,
@@ -174,6 +176,7 @@ class DockerController(ControllerInterface):
         # Put together the environment variables
         env = [f'{_e.name}={_e.value}' for _e in cfg.environment]
         env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
+        env += [f'LOG_LEVEL={self.log_level}']
 
         container = self.client.containers.run(
             image=cfg.image,
