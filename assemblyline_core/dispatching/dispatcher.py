@@ -50,6 +50,7 @@ class SubmissionTask:
         self.submission: Submission = Submission(submission)
         self.completed_queue = str(completed_queue)
         self.lock = threading.Lock()
+        self.timeout_at: Optional[int] = None
 
         self.file_info: Dict[str, FileInfo] = {}
         self.file_names: Dict[str, str] = {}
@@ -76,6 +77,12 @@ QUEUE_EXPIRY = 60*60
 GUARD_TIMEOUT = 60*2
 TIMEOUT_EXTRA_TIME = 30  # 30 seconds grace for message handling.
 TIMEOUT_TEST_INTERVAL = 5
+
+# After 20 minutes, check if a submission is still making progress.
+# In the case of a crash somewhere else in the system, we may not have
+# gotten a message we are expecting. This should prompt a retry in most
+# cases.
+SUBMISSION_TOTAL_TIMEOUT = 60 * 20
 
 
 class Dispatcher(CoreBase):
@@ -302,6 +309,7 @@ class Dispatcher(CoreBase):
             self.log.info(f"[{sid}] Submission counts towards {submission.params.submitter.upper()} quota")
 
         self.add_task(task)
+        self.set_submission_timeout(task)
 
         task.file_depth[submission.files[0].sha256] = 0
         task.file_names[submission.files[0].sha256] = submission.files[0].name or submission.files[0].sha256
@@ -566,6 +574,9 @@ class Dispatcher(CoreBase):
         submission = task.submission
         sid = submission.sid
 
+        # Now that a submission is finished, we can remove it from the timeout list
+        self.clear_submission_timeout(task)
+
         if submission.params.quota_item and submission.params.submitter:
             self.log.info(f"[{sid}] Submission no longer counts toward {submission.params.submitter.upper()} quota")
             self.quota_tracker.end(submission.params.submitter)
@@ -803,6 +814,21 @@ class Dispatcher(CoreBase):
                         continue
                     self.set_timeout(task, sha256, service_name, worker_id)
 
+    def set_submission_timeout(self, task: SubmissionTask):
+        sid = task.submission.sid
+        timeout_at = int(time.time() + SUBMISSION_TOTAL_TIMEOUT)
+        task.timeout_at = timeout_at
+        with self.timeout_list_lock:
+            bisect.insort(self.timeout_list, (timeout_at, sid, '', ''))
+
+    def clear_submission_timeout(self, task: SubmissionTask):
+        with self.timeout_list_lock:
+            key = (task.timeout_at, task.submission.sid, '', '')
+            task.timeout_at = None
+            index = bisect.bisect_left(self.timeout_list, key)
+            if index < len(self.timeout_list) and self.timeout_list[index] == key:
+                self.timeout_list.pop(index)
+
     def set_timeout(self, task, sha256, service_name, worker_id):
         sid = task.submission.sid
         service = self.scheduler.services.get(service_name)
@@ -841,10 +867,19 @@ class Dispatcher(CoreBase):
             for _, sid, sha, service_name in timeouts:
                 task = self.get_task(sid)
                 if not task:
-                    self.log.warning(f'[{sid}] timeout on task.')
+                    self.log.warning(f'[{sid}] timeout on finished task.')
                     continue
                 with task.lock:
-                    self.timeout_service(task, sha, service_name)
+                    if sha and service_name:
+                        self.timeout_service(task, sha, service_name)
+                    else:
+                        self.log.warning(f'[{sid}] submission timeout, checking dispatch status...')
+                        self.check_submission(task)
+
+                        # If we didn't finish the submission here, wait another 20 minutes
+                        task = self.get_task(sid)
+                        if task is not None:
+                            self.set_submission_timeout(task)
 
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
