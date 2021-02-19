@@ -1,38 +1,38 @@
 import logging
+import time
 from unittest import mock
+
+import pytest
 
 import assemblyline.odm.models.file
 import assemblyline.odm.models.submission
 from assemblyline.common.forge import get_service_queue, get_classification
-from assemblyline.odm.randomizer import random_model_obj, get_random_hash
+from assemblyline.odm.models.error import Error
+from assemblyline.odm.models.file import File
+from assemblyline.odm.models.result import Result
+from assemblyline.odm.randomizer import random_model_obj, random_minimal_obj, get_random_hash
 from assemblyline.odm import models
 from assemblyline.common.metrics import MetricsFactory
 
-from assemblyline_core.dispatching.dispatcher import Dispatcher, DispatchHash, FileTask, \
-    SubmissionTask, depths_from_tree, Scheduler as RealScheduler
+# from assemblyline_core.dispatching.dispatcher import Dispatcher, DispatchHash, FileTask, \
+#     SubmissionTask, depths_from_tree, Scheduler as RealScheduler
+from assemblyline_core.dispatching.client import DispatchClient
+from assemblyline_core.dispatching.dispatcher import Dispatcher, Submission, SubmissionTask
+from assemblyline_core.dispatching.schedules import Scheduler as RealScheduler
 
 # noinspection PyUnresolvedReferences
-from .mocking import MockDatastore, clean_redis
+from .mocking import MockDatastore, ToggleTrue
 from .test_scheduler import dummy_service
 
 
-def test_depth_calculation():
-    tree = {
-        'a': [None, 'c'],  # Root node, also gets extracted by c
-        'b': ['a'],  # Second layer, extracted by the root
-        'c': ['b'],  # Third layer, extracted by b
-        'd': ['b', 'a'],  # Second layer, extracted by root, but also its peer b,
-        # but being a child of root should trump that
-        'x': ['y'],  # orphan files, shouldn't stop the results from being calculated, though they shouldn't exist
-    }
-    depths = depths_from_tree(tree)
-    assert depths['a'] == 0
-    assert depths['b'] == 1
-    assert depths['d'] == 1
-    assert depths['c'] == 2
-    assert 'x' not in depths
-    assert 'y' not in depths
+@pytest.fixture(scope='module')
+def redis(redis_connection):
+    redis_connection.flushdb()
+    yield redis_connection
+    redis_connection.flushdb()
 
+
+logger = logging.getLogger('assemblyline.test')
 
 class Scheduler(RealScheduler):
     def __init__(self, *args, **kwargs):
@@ -57,143 +57,150 @@ class Scheduler(RealScheduler):
         }
 
 
+def make_result(file_hash, service):
+    new_result: Result = random_minimal_obj(Result)
+    new_result.sha256 = file_hash
+    new_result.response.service_name = service
+    return new_result
+
+
+def make_error(file_hash, service, recoverable=True):
+    new_error: Error = random_model_obj(Error)
+    new_error.response.service_name = service
+    new_error.sha256 = file_hash
+    if recoverable:
+        new_error.response.status = 'FAIL_RECOVERABLE'
+    else:
+        new_error.response.status = 'FAIL_NONRECOVERABLE'
+    return new_error
+
+
+def wait_result(task, file_hash, service):
+    for _ in range(10):
+        if (file_hash, service) in task.service_results:
+            return True
+        time.sleep(0.05)
+
+
+def wait_error(task, file_hash, service):
+    for _ in range(10):
+        if (file_hash, service) in task.service_errors:
+            return True
+        time.sleep(0.05)
+
+
+@pytest.fixture(autouse=True)
+def log_config(caplog):
+    caplog.set_level(logging.INFO, logger='assemblyline')
+    from assemblyline.common import log as al_log
+    al_log.init_logging = lambda *args: None
+
+
 @mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', Scheduler)
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
-def test_dispatch_file(clean_redis):
-    service_queue = lambda name: get_service_queue(name, clean_redis)
+def test_simple(redis):
+    service_queue = lambda name: get_service_queue(name, redis)
+    ds = MockDatastore(collections=['submission', 'result', 'emptyresult', 'service', 'error', 'file', 'filescore'])
 
-    ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file', 'filescore'])
-    file_hash = get_random_hash(64)
-    sub = random_model_obj(models.submission.Submission)
+    file = random_model_obj(File)
+    file_hash = file.sha256
+    file.type = 'unknown'
+    ds.file.save(file_hash, file)
+
+    sub: Submission = random_model_obj(models.submission.Submission)
     sub.sid = sid = 'first-submission'
     sub.params.ignore_cache = False
+    sub.params.max_extracted = 5
+    sub.params.classification = get_classification().UNRESTRICTED
+    sub.files = [dict(
+        sha256=file_hash,
+        name='file'
+    )]
 
-    disp = Dispatcher(ds, clean_redis, clean_redis, logging)
-    disp.active_submissions.add(sid, SubmissionTask(dict(submission=sub)).as_primitives())
-    dh = DispatchHash(sid=sid, client=clean_redis)
-    print('==== first dispatch')
+    disp = Dispatcher(ds, redis, redis)
+    disp.running = ToggleTrue()
+    client = DispatchClient(ds, redis, redis)
+
     # Submit a problem, and check that it gets added to the dispatch hash
     # and the right service queues
-    file_task = FileTask({
-        'sid': 'first-submission',
-        'min_classification': get_classification().UNRESTRICTED,
-        'file_info': dict(sha256=file_hash, type='unknown', magic='a', md5=get_random_hash(32),
-                          mime='a', sha1=get_random_hash(40), size=10),
-        'depth': 0,
-        'max_files': 5
-    })
-    disp.dispatch_file(file_task)
+    logger.info('==== first dispatch')
+    # task = SubmissionTask(sub.as_primitives(), 'some-completion-queue')
+    client.dispatch_submission(sub)
+    disp.pull_submissions()
+    task = disp.get_task(sid)
 
-    assert dh.dispatch_key(file_hash, 'extract') is not None
-    assert dh.dispatch_key(file_hash, 'wrench') is not None
+    assert task.queue_keys[(file_hash, 'extract')] is not None
+    assert task.queue_keys[(file_hash, 'wrench')] is not None
     assert service_queue('extract').length() == 1
     assert service_queue('wrench').length() == 1
 
     # Making the same call again will queue it up again
-    print('==== second dispatch')
-    disp.dispatch_file(file_task)
+    logger.info('==== second dispatch')
+    disp.dispatch_file(task, file_hash)
 
-    assert dh.dispatch_key(file_hash, 'extract') is not None
-    assert dh.dispatch_key(file_hash, 'wrench') is not None
+    assert task.queue_keys[(file_hash, 'extract')] is not None
+    assert task.queue_keys[(file_hash, 'wrench')] is not None
     assert service_queue('extract').length() == 1  # the queue doesn't pile up
     assert service_queue('wrench').length() == 1
-    # assert len(mq) == 4
 
-    # Push back the timestamp in the dispatch hash to simulate a timeout,
-    # make sure it gets pushed into that service queue again
-    print('==== third dispatch')
-    [service_queue(name).delete() for name in disp.scheduler.services]
-    dh.fail_recoverable(file_hash, 'extract')
+    logger.info('==== third dispatch')
+    client.request_work('0', 'extract', '0')
+    client.service_failed(sid, 'abc123', make_error(file_hash, 'extract'))
+    # Deliberately do in the wrong order to make sure that works
+    disp.handle_service_results()
 
-    disp.dispatch_file(file_task)
-
-    assert dh.dispatch_key(file_hash, 'extract') is not None
-    assert dh.dispatch_key(file_hash, 'wrench') is not None
+    assert task.queue_keys[(file_hash, 'extract')] is not None
+    assert task.queue_keys[(file_hash, 'wrench')] is not None
     assert service_queue('extract').length() == 1
-    # assert len(mq) == 1
 
     # Mark extract as finished, wrench as failed
-    print('==== fourth dispatch')
-    [service_queue(name).delete() for name in disp.scheduler.services]
-    dh.finish(file_hash, 'extract', 'result-key', 0, 'U')
-    dh.fail_nonrecoverable(file_hash, 'wrench', 'error-key')
+    logger.info('==== fourth dispatch')
+    client.request_work('0', 'extract', '0')
+    client.request_work('0', 'wrench', '0')
+    client.service_finished(sid, 'extract-result', make_result(file_hash, 'extract'))
+    client.service_failed(sid, 'wrench-error', make_error(file_hash, 'wrench', False))
+    disp.handle_service_results()
+    disp.handle_service_results()
 
-    disp.dispatch_file(file_task)
-
-    assert dh.finished(file_hash, 'extract')
-    assert dh.finished(file_hash, 'wrench')
+    assert wait_error(task, file_hash, 'wrench')
+    assert wait_result(task, file_hash, 'extract')
     assert service_queue('av-a').length() == 1
     assert service_queue('av-b').length() == 1
     assert service_queue('frankenstrings').length() == 1
 
     # Have the AVs fail, frankenstrings finishes
-    print('==== fifth dispatch')
-    [service_queue(name).delete() for name in disp.scheduler.services]
-    dh.fail_nonrecoverable(file_hash, 'av-a', 'error-a')
-    dh.fail_nonrecoverable(file_hash, 'av-b', 'error-b')
-    dh.finish(file_hash, 'frankenstrings', 'result-key', 0, 'U')
+    logger.info('==== fifth dispatch')
+    client.request_work('0', 'av-a', '0')
+    client.request_work('0', 'av-b', '0')
+    client.request_work('0', 'frankenstrings', '0')
+    client.service_failed(sid, 'av-a-error', make_error(file_hash, 'av-a', False))
+    client.service_failed(sid, 'av-b-error', make_error(file_hash, 'av-b', False))
+    client.service_finished(sid, 'f-result', make_result(file_hash, 'frankenstrings'))
+    disp.handle_service_results()
+    disp.handle_service_results()
+    disp.handle_service_results()
 
-    disp.dispatch_file(file_task)
-
-    assert dh.finished(file_hash, 'av-a')
-    assert dh.finished(file_hash, 'av-b')
-    assert dh.finished(file_hash, 'frankenstrings')
+    assert wait_result(task, file_hash, 'frankenstrings')
+    assert wait_error(task, file_hash, 'av-a')
+    assert wait_error(task, file_hash, 'av-b')
     assert service_queue('xerox').length() == 1
 
     # Finish the xerox service and check if the submission completion got checked
-    print('==== sixth dispatch')
-    [service_queue(name).delete() for name in disp.scheduler.services]
-    dh.finish(file_hash, 'xerox', 'result-key', 0, 'U')
+    logger.info('==== sixth dispatch')
+    client.request_work('0', 'xerox', '0')
+    client.service_finished(sid, 'xerox-result-key', make_result(file_hash, 'xerox'))
+    disp.handle_service_results()
 
-    disp.dispatch_file(file_task)
-
-    assert dh.finished(file_hash, 'xerox')
-    assert len(disp.submission_queue) == 1
-
-
-@mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
-@mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', Scheduler)
-def test_dispatch_submission(clean_redis):
-    ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
-    file_hash = get_random_hash(64)
-
-    ds.file.save(file_hash, random_model_obj(models.file.File))
-    ds.file.get(file_hash).sha256 = file_hash
-    # ds.file.get(file_hash).sha256 = ''
-
-    submission = random_model_obj(models.submission.Submission)
-    submission.files.clear()
-    submission.files.append(dict(
-        name='./file',
-        sha256=file_hash
-    ))
-
-    submission.sid = 'first-submission'
-
-    disp = Dispatcher(ds, logger=logging, redis=clean_redis, redis_persist=clean_redis)
-    # Submit a problem, and check that it gets added to the dispatch hash
-    # and the right service queues
-    task = SubmissionTask(dict(submission=submission))
-    disp.dispatch_submission(task)
-
-    file_task = FileTask(disp.file_queue.pop())
-    assert file_task.sid == submission.sid
-    assert file_task.file_info.sha256 == file_hash
-    assert file_task.depth == 0
-    assert file_task.file_info.type == ds.file.get(file_hash).type
-
-    dh = DispatchHash(submission.sid, clean_redis)
-    for service_name in disp.scheduler.services.keys():
-        dh.fail_nonrecoverable(file_hash, service_name, 'error-code')
-
-    disp.dispatch_submission(task)
-    assert ds.submission.get(submission.sid).state == 'completed'
-    assert ds.submission.get(submission.sid).errors == ['error-code'] * len(disp.scheduler.services)
+    assert wait_result(task, file_hash, 'xerox')
+    with task.lock:
+        assert disp.get_task(sid) is None
 
 
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
 @mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', Scheduler)
-def test_dispatch_extracted(clean_redis):
+def test_dispatch_extracted(redis):
+    service_queue = lambda name: get_service_queue(name, redis)
+
     # Setup the fake datastore
     ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
     file_hash = get_random_hash(64)
@@ -205,56 +212,35 @@ def test_dispatch_extracted(clean_redis):
 
     # Inject the fake submission
     submission = random_model_obj(models.submission.Submission)
-    submission.files.clear()
-    submission.files.append(dict(
+    submission.files = [dict(
         name='./file',
         sha256=file_hash
-    ))
-    submission.sid = 'first-submission'
+    )]
+    sid = submission.sid = 'first-submission'
 
-    # Launch the dispatcher
-    disp = Dispatcher(ds, logger=logging, redis=clean_redis, redis_persist=clean_redis)
+    disp = Dispatcher(ds, redis, redis)
+    disp.running = ToggleTrue()
+    client = DispatchClient(ds, redis, redis)
 
     # Launch the submission
-    task = SubmissionTask(dict(submission=submission))
-    disp.dispatch_submission(task)
+    client.dispatch_submission(submission)
+    disp.pull_submissions()
 
-    # Check that the right values were sent to the
-    file_task = FileTask(disp.file_queue.pop(timeout=1))
-    assert file_task.sid == submission.sid
-    assert file_task.file_info.sha256 == file_hash
-    assert file_task.depth == 0
-    assert file_task.file_info.type == ds.file.get(file_hash).type
+    # Finish one service extracting a file
+    job = client.request_work('0', 'extract', '0')
+    assert job.fileinfo.sha256 == file_hash
+    assert job.filename == './file'
+    new_result: Result = random_minimal_obj(Result)
+    new_result.sha256 = file_hash
+    new_result.response.service_name = 'extract'
+    new_result.response.extracted = [dict(sha256=second_file_hash, name='second-*',
+                                          description='abc', classification='U')]
+    client.service_finished(sid, 'extracted-done', new_result)
 
-    # Finish the services
-    dh = DispatchHash(submission.sid, clean_redis)
-    for service_name in disp.scheduler.services.keys():
-        dh.finish(file_hash, service_name, 'error-code', 0, 'U')
+    # process the result
+    disp.handle_service_results()
 
-    # But one of the services extracted a file
-    dh.add_file(second_file_hash, 10, file_hash)
-
-    # But meanwhile, dispatch_submission has been recalled on the submission
-    disp.dispatch_submission(task)
-
-    # It should see the missing file, and we should get a new file dispatch message for it
-    # to make sure it is getting processed properly, this should be at depth 1, the first layer of
-    # extracted files
-    file_task = disp.file_queue.pop(timeout=1)
-    assert file_task is not None
-    file_task = FileTask(file_task)
-    assert file_task.sid == submission.sid
-    assert file_task.file_info.sha256 == second_file_hash
-    assert file_task.depth == 1
-    assert file_task.file_info.type == ds.file.get(second_file_hash).type
-
-    # Finish the second file
-    for service_name in disp.scheduler.services.keys():
-        dh.finish(second_file_hash, service_name, 'error-code', 0, 'U')
-
-    # And now we should get the finished submission
-    disp.dispatch_submission(task)
-    submission = ds.submission.get(submission.sid)
-    assert submission.state == 'completed'
-    assert submission.errors == []
-    assert len(submission.results) == 2 * len(disp.scheduler.services)
+    #
+    job = client.request_work('0', 'extract', '0')
+    assert job.fileinfo.sha256 == second_file_hash
+    assert job.filename == 'second-*'
