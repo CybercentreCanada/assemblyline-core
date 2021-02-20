@@ -2,6 +2,7 @@ import logging
 import time
 from unittest import mock
 
+import json
 import pytest
 
 import assemblyline.odm.models.file
@@ -112,6 +113,7 @@ def test_simple(redis):
     sub.params.ignore_cache = False
     sub.params.max_extracted = 5
     sub.params.classification = get_classification().UNRESTRICTED
+    sub.params.initial_data = json.dumps({'cats': 'big'})
     sub.files = [dict(
         sha256=file_hash,
         name='file'
@@ -144,7 +146,8 @@ def test_simple(redis):
     assert service_queue('wrench').length() == 1
 
     logger.info('==== third dispatch')
-    client.request_work('0', 'extract', '0')
+    job = client.request_work('0', 'extract', '0')
+    assert job.temporary_submission_data == [{'name': 'cats', 'value': 'big'}]
     client.service_failed(sid, 'abc123', make_error(file_hash, 'extract'))
     # Deliberately do in the wrong order to make sure that works
     disp.handle_service_results()

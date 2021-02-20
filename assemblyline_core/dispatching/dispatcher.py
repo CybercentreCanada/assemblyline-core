@@ -5,6 +5,7 @@ import threading
 import time
 from collections import defaultdict
 from typing import Dict, List, Tuple, Set, Optional
+import json
 
 import elasticapm
 
@@ -57,7 +58,7 @@ class SubmissionTask:
         self.file_schedules: Dict[str, List[Dict[str, Service]]] = {}
         self.file_tags = defaultdict(list)
         self.file_depth: Dict[str, int] = {}
-        self.file_temporary_data = {}
+        self.file_temporary_data = defaultdict(dict)
         self.extra_errors = []
         self.dropped_files = set()
 
@@ -308,6 +309,13 @@ class Dispatcher(CoreBase):
         if submission.params.quota_item and submission.params.submitter:
             self.log.info(f"[{sid}] Submission counts towards {submission.params.submitter.upper()} quota")
 
+        # Apply initial data parameter
+        if submission.params.initial_data:
+            try:
+                task.file_temporary_data[submission.files[0].sha256] = json.loads(submission.params.initial_data)
+            except ValueError as err:
+                self.log.warning(f"[{sid}] could not process initialization data: {err}")
+
         self.add_task(task)
         self.set_submission_timeout(task)
 
@@ -416,7 +424,10 @@ class Dispatcher(CoreBase):
                     ignore_cache=submission.params.ignore_cache,
                     ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
                     tags=task.file_tags.get(sha256, []),
-                    temporary_submission_data=task.file_temporary_data.get(sha256, []),
+                    temporary_submission_data=[
+                        {'name': name, 'value': value}
+                        for name, value in task.file_temporary_data[sha256].items()
+                    ],
                     deep_scan=submission.params.deep_scan,
                     priority=submission.params.priority,
                 ))
@@ -713,7 +724,7 @@ class Dispatcher(CoreBase):
 
         # Update the temporary data table for this file
         for key, value in (temporary_data or {}).items():
-            task.file_temporary_data[key] = value
+            task.file_temporary_data[result.sha256][key] = value
 
         # Record the result as a summary
         task.service_results[(result.sha256, service_name)] = ResultSummary(
@@ -736,7 +747,7 @@ class Dispatcher(CoreBase):
         if new_depth < depth_limit:
             # Prepare the temporary data from the parent to build the temporary data table for
             # these newly extract files
-            parent_data = task.file_temporary_data.get(result.sha256, {})
+            parent_data = task.file_temporary_data[result.sha256]
 
             for extracted_data in result.response.extracted:
                 if extracted_data.sha256 in task.dropped_files or extracted_data.sha256 in task.file_schedules:
