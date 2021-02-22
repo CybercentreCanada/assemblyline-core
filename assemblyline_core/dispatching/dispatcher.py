@@ -893,7 +893,8 @@ class Dispatcher(CoreBase):
             with self.timeout_list_lock:
                 while self.timeout_list and self.timeout_list[0][0] < time_mark:
                     timeouts.append(self.timeout_list.pop(0))
-            self.counter.increment('service_timeouts', len(timeouts))
+
+            service_timeouts = 0
             for _, sid, sha, service_name in timeouts:
                 task = self.get_task(sid)
                 if not task:
@@ -901,6 +902,7 @@ class Dispatcher(CoreBase):
                     continue
                 with task.lock:
                     if sha and service_name:
+                        service_timeouts += 1
                         self.timeout_service(task, sha, service_name)
                     else:
                         self.log.info(f'[{sid}] submission timeout, checking dispatch status...')
@@ -911,6 +913,7 @@ class Dispatcher(CoreBase):
                         if task is not None:
                             self.set_submission_timeout(task)
 
+            self.counter.increment('service_timeouts', service_timeouts)
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
             self.sleep(TIMEOUT_TEST_INTERVAL)
