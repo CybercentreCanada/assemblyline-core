@@ -54,9 +54,9 @@ class DispatchClient:
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
         self.ds = datastore or forge.get_datastore(self.config)
         self.log = logger or logging.getLogger("assemblyline.dispatching.client")
-        self.results = datastore.result
-        self.errors = datastore.error
-        self.files = datastore.file
+        self.results = self.ds.result
+        self.errors = self.ds.error
+        self.files = self.ds.file
         self.submission_assignments = ExpiringHash(DISPATCH_TASK_HASH, host=redis_persist)
         self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
         self.service_data = cast(Dict[str, Service], CachedObject(self._get_services))

@@ -145,16 +145,6 @@ class SubmissionClient:
                             if os.path.exists(temporary_path):
                                 os.unlink(temporary_path)
 
-            # Initialize the temporary data from the submission parameter
-            if submission_obj.params.initial_data:
-                try:
-                    temp_hash_name = get_temporary_submission_data_name(submission_obj.sid,
-                                                                        submission_obj.files[0].sha256)
-                    temporary_submission_data = ExpiringHash(temp_hash_name, host=self.redis)
-                    temporary_submission_data.multi_set(json.loads(submission_obj.params.initial_data))
-                except ValueError as err:
-                    self.log.warning(f"[{submission_obj.sid}] could not process initialization data: {err}")
-
             # Clearing runtime_excluded on initial submit or resubmit
             submission_obj.params.services.runtime_excluded = []
 
