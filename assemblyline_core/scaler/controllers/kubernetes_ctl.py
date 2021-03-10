@@ -28,10 +28,15 @@ API_TIMEOUT = 90
 
 _exponents = {
     'Ki': 2**10,
+    'K': 2**10,
     'Mi': 2**20,
+    'M': 2**20,
     'Gi': 2**30,
+    'G': 2**30,
     'Ti': 2**40,
+    'T': 2**40,
     'Pi': 2**50,
+    'P': 2 ** 50,
 }
 
 
@@ -64,7 +69,8 @@ def create_docker_auth_config(image, username, password):
     })
 
 
-def parse_memory(string):
+def parse_memory(string) -> float:
+    """Convert a memory string to megabytes float"""
     # Maybe we have a number in bytes
     try:
         return float(string)/2**20
@@ -74,6 +80,8 @@ def parse_memory(string):
     # Try parsing a unit'd number then
     if string[-2:] in _exponents:
         return (float(string[:-2]) * _exponents[string[-2:]])/(2**20)
+    if string[-1:] in _exponents:
+        return (float(string[:-1]) * _exponents[string[-1:]])/(2**20)
 
     raise ValueError(string)
 
