@@ -11,8 +11,8 @@ from assemblyline_core.ingester.run_submit import IngesterSubmitter
 from assemblyline_core.ingester.ingester import IngestTask, _dup_prefix
 from assemblyline_core.submission_client import SubmissionClient
 
-from .test_worker_ingest import AssemblylineDatastore
-from .mocking import TrueCountTimes, MockDatastore, clean_redis
+from test_worker_ingest import AssemblylineDatastore
+from mocking import TrueCountTimes, MockDatastore, clean_redis
 
 
 @pytest.fixture
@@ -21,7 +21,8 @@ from .mocking import TrueCountTimes, MockDatastore, clean_redis
 def submit_harness(clean_redis):
     """Setup a test environment just file for the ingest tests"""
     datastore = AssemblylineDatastore(MockDatastore())
-    submitter = IngesterSubmitter(datastore=datastore, redis=clean_redis, persistent_redis=clean_redis)
+    submitter = IngesterSubmitter(
+        datastore=datastore, redis=clean_redis, persistent_redis=clean_redis)
     submitter.running = TrueCountTimes(1)
     return datastore, submitter
 
@@ -85,7 +86,8 @@ def test_submit_duplicate(submit_harness):
         'ingest_id': 'abc123'
     })
     # Make sure the scan key is correct, this is normally done on ingest
-    task.scan_key = task.params.create_filescore_key(task.submission.files[0].sha256, [])
+    task.scan_key = task.params.create_filescore_key(
+        task.submission.files[0].sha256, [])
 
     # Add this file to the scanning table, so it looks like it has already been submitted + ingest again
     submitter.ingester.scanning.add(task.scan_key, task.as_primitives())
@@ -104,7 +106,8 @@ def test_existing_score(submit_harness):
     datastore, submitter = submit_harness
 
     # Set everything to have an existing filestore
-    datastore.filescore.get = mock.MagicMock(return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=time.time())))
+    datastore.filescore.get = mock.MagicMock(return_value=FileScore(
+        dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=time.time())))
 
     # add task to internal queue
     submitter.ingester.unique_queue.push(0, IngestTask({
@@ -139,4 +142,3 @@ def test_existing_score(submit_harness):
     assert mm.unique_queue.pop() is None
     # We should have received a notification about our task, since it was already 'done'
     assert mm.notification_queues['nq-our_queue'].length() == 1
-

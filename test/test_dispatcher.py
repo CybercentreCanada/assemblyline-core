@@ -22,8 +22,8 @@ from assemblyline_core.dispatching.dispatcher import Dispatcher, Submission, Sub
 from assemblyline_core.dispatching.schedules import Scheduler as RealScheduler
 
 # noinspection PyUnresolvedReferences
-from .mocking import MockDatastore, ToggleTrue
-from .test_scheduler import dummy_service
+from mocking import MockDatastore, ToggleTrue
+from test_scheduler import dummy_service
 
 
 @pytest.fixture(scope='module')
@@ -34,6 +34,7 @@ def redis(redis_connection):
 
 
 logger = logging.getLogger('assemblyline.test')
+
 
 class Scheduler(RealScheduler):
     def __init__(self, *args, **kwargs):
@@ -100,8 +101,9 @@ def log_config(caplog):
 @mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', Scheduler)
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
 def test_simple(redis):
-    service_queue = lambda name: get_service_queue(name, redis)
-    ds = MockDatastore(collections=['submission', 'result', 'emptyresult', 'service', 'error', 'file', 'filescore'])
+    def service_queue(name): return get_service_queue(name, redis)
+    ds = MockDatastore(collections=[
+                       'submission', 'result', 'emptyresult', 'service', 'error', 'file', 'filescore'])
 
     file = random_model_obj(File)
     file_hash = file.sha256
@@ -160,8 +162,10 @@ def test_simple(redis):
     logger.info('==== fourth dispatch')
     client.request_work('0', 'extract', '0')
     client.request_work('0', 'wrench', '0')
-    client.service_finished(sid, 'extract-result', make_result(file_hash, 'extract'))
-    client.service_failed(sid, 'wrench-error', make_error(file_hash, 'wrench', False))
+    client.service_finished(sid, 'extract-result',
+                            make_result(file_hash, 'extract'))
+    client.service_failed(sid, 'wrench-error',
+                          make_error(file_hash, 'wrench', False))
     disp.handle_service_results()
     disp.handle_service_results()
 
@@ -176,9 +180,12 @@ def test_simple(redis):
     client.request_work('0', 'av-a', '0')
     client.request_work('0', 'av-b', '0')
     client.request_work('0', 'frankenstrings', '0')
-    client.service_failed(sid, 'av-a-error', make_error(file_hash, 'av-a', False))
-    client.service_failed(sid, 'av-b-error', make_error(file_hash, 'av-b', False))
-    client.service_finished(sid, 'f-result', make_result(file_hash, 'frankenstrings'))
+    client.service_failed(
+        sid, 'av-a-error', make_error(file_hash, 'av-a', False))
+    client.service_failed(
+        sid, 'av-b-error', make_error(file_hash, 'av-b', False))
+    client.service_finished(
+        sid, 'f-result', make_result(file_hash, 'frankenstrings'))
     disp.handle_service_results()
     disp.handle_service_results()
     disp.handle_service_results()
@@ -191,7 +198,8 @@ def test_simple(redis):
     # Finish the xerox service and check if the submission completion got checked
     logger.info('==== sixth dispatch')
     client.request_work('0', 'xerox', '0')
-    client.service_finished(sid, 'xerox-result-key', make_result(file_hash, 'xerox'))
+    client.service_finished(sid, 'xerox-result-key',
+                            make_result(file_hash, 'xerox'))
     disp.handle_service_results()
 
     assert wait_result(task, file_hash, 'xerox')
@@ -202,10 +210,11 @@ def test_simple(redis):
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
 @mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', Scheduler)
 def test_dispatch_extracted(redis):
-    service_queue = lambda name: get_service_queue(name, redis)
+    def service_queue(name): return get_service_queue(name, redis)
 
     # Setup the fake datastore
-    ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
+    ds = MockDatastore(
+        collections=['submission', 'result', 'service', 'error', 'file'])
     file_hash = get_random_hash(64)
     second_file_hash = get_random_hash(64)
 

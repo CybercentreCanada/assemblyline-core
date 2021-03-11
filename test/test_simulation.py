@@ -39,8 +39,8 @@ from assemblyline_core.ingester.run_internal import IngesterInternals
 from assemblyline_core.ingester.run_submit import IngesterSubmitter
 from assemblyline_core.server_base import ServerBase, get_service_stage_hash, ServiceStage
 
-from .mocking import MockCollection
-from .test_scheduler import dummy_service
+from mocking import MockCollection
+from test_scheduler import dummy_service
 
 
 @pytest.fixture(scope='module')
@@ -58,6 +58,7 @@ class MockService(ServerBase):
 
     Including service API, in the future probably include that in this test.
     """
+
     def __init__(self, name, datastore, redis, filestore):
         super().__init__('assemblyline.service.'+name)
         self.service_name = name
@@ -70,7 +71,8 @@ class MockService(ServerBase):
 
     def try_run(self):
         while self.running:
-            task = self.dispatch_client.request_work('worker', self.service_name, '0', timeout=3)
+            task = self.dispatch_client.request_work(
+                'worker', self.service_name, '0', timeout=3)
             if not task:
                 continue
             print(self.service_name, 'has received a job', task.sid)
@@ -80,17 +82,21 @@ class MockService(ServerBase):
             instructions = json.loads(file)
             instructions = instructions.get(self.service_name, {})
             print(self.service_name, 'following instruction:', instructions)
-            hits = self.hits[task.fileinfo.sha256] = self.hits.get(task.fileinfo.sha256, 0) + 1
+            hits = self.hits[task.fileinfo.sha256] = self.hits.get(
+                task.fileinfo.sha256, 0) + 1
 
             if instructions.get('hold', False):
-                queue = get_service_queue(self.service_name, self.dispatch_client.redis)
+                queue = get_service_queue(
+                    self.service_name, self.dispatch_client.redis)
                 queue.push(0, task.as_primitives())
-                _global_semaphore.acquire(blocking=True, timeout=instructions['hold'])
+                _global_semaphore.acquire(
+                    blocking=True, timeout=instructions['hold'])
                 continue
 
             if 'drop' in instructions:
                 if instructions['drop'] >= hits:
-                    self.drops[task.fileinfo.sha256] = self.drops.get(task.fileinfo.sha256, 0) + 1
+                    self.drops[task.fileinfo.sha256] = self.drops.get(
+                        task.fileinfo.sha256, 0) + 1
                     continue
 
             if instructions.get('failure', False):
@@ -193,7 +199,8 @@ class MetricsCounter:
             if self.sync_messages() == 0:
                 time.sleep(0.1)
                 continue
-        pytest.fail(f"Did not get expected metric {name}={value} on metrics channel {channel}")
+        pytest.fail(
+            f"Did not get expected metric {name}={value} on metrics channel {channel}")
 
 
 @pytest.fixture(scope='function')
@@ -222,15 +229,20 @@ def core(request, redis, filestore, config):
     fields.filestore = filestore
     threads: List[ServerBase] = [
         # Start the ingester components
-        IngesterInput(datastore=ds, redis=redis, persistent_redis=redis, config=config),
-        IngesterSubmitter(datastore=ds, redis=redis, persistent_redis=redis, config=config),
-        IngesterInternals(datastore=ds, redis=redis, persistent_redis=redis, config=config),
+        IngesterInput(datastore=ds, redis=redis,
+                      persistent_redis=redis, config=config),
+        IngesterSubmitter(datastore=ds, redis=redis,
+                          persistent_redis=redis, config=config),
+        IngesterInternals(datastore=ds, redis=redis,
+                          persistent_redis=redis, config=config),
 
         # Start the dispatcher
-        Dispatcher(datastore=ds, redis=redis, redis_persist=redis, config=config),
+        Dispatcher(datastore=ds, redis=redis,
+                   redis_persist=redis, config=config),
 
         # Start plumber
-        Plumber(datastore=ds, redis=redis, redis_persist=redis, delay=0.5, config=config),
+        Plumber(datastore=ds, redis=redis,
+                redis_persist=redis, delay=0.5, config=config),
     ]
 
     stages = get_service_stage_hash(redis)
@@ -289,7 +301,8 @@ def ready_body(core, body=None):
         file.write(out)
         file.flush()
         fileinfo = identify.fileinfo(file.name)
-        core.ds.save_or_freshen_file(sha256.hexdigest(), fileinfo, now_as_iso(500), 'U', redis=core.redis)
+        core.ds.save_or_freshen_file(
+            sha256.hexdigest(), fileinfo, now_as_iso(500), 'U', redis=core.redis)
 
     return sha256.hexdigest(), len(out)
 
@@ -344,7 +357,8 @@ def test_deduplication(core, metrics):
     # One of the submission will get processed fully
     assert first_task is not None
     first_task = IngestTask(first_task)
-    first_submission: Submission = core.ds.submission.get(first_task.submission.sid)
+    first_submission: Submission = core.ds.submission.get(
+        first_task.submission.sid)
     assert first_submission.state == 'completed'
     assert len(first_submission.files) == 1
     assert len(first_submission.errors) == 0
@@ -384,7 +398,8 @@ def test_deduplication(core, metrics):
 
     # The third task should not be deduplicated by ingester, so will have a different submission
     third_task = IngestTask(third_task)
-    third_submission: Submission = core.ds.submission.get(third_task.submission.sid)
+    third_submission: Submission = core.ds.submission.get(
+        third_task.submission.sid)
     assert third_submission.state == 'completed'
     assert first_submission.sid != third_submission.sid
     assert len(third_submission.files) == 1
@@ -444,7 +459,8 @@ def test_ingest_retry(core, metrics):
         # One of the submission will get processed fully
         assert first_task is not None
         first_task = IngestTask(first_task)
-        first_submission: Submission = core.ds.submission.get(first_task.submission.sid)
+        first_submission: Submission = core.ds.submission.get(
+            first_task.submission.sid)
         assert len(attempts) == 2
         assert len(failures) == 1
         assert first_submission.state == 'completed'
@@ -787,7 +803,8 @@ def test_depth_limit(core, metrics):
     metrics.expect('ingester', 'submissions_ingested', 1)
     metrics.expect('ingester', 'submissions_completed', 1)
     metrics.expect('dispatcher', 'submissions_completed', 1)
-    metrics.expect('dispatcher', 'files_completed', core.config.submission.max_extraction_depth)
+    metrics.expect('dispatcher', 'files_completed',
+                   core.config.submission.max_extraction_depth)
 
 
 def test_max_extracted_in_one(core, metrics):
@@ -867,7 +884,8 @@ def test_max_extracted_in_several(core, metrics):
     sub: Submission = core.ds.submission.get(task.submission.sid)
     assert len(sub.files) == 1
     # We should only get results for each file up to the max depth
-    assert len(sub.results) == 4 * (1 + 3)  # 4 services, 1 original file, 3 extracted files
+    # 4 services, 1 original file, 3 extracted files
+    assert len(sub.results) == 4 * (1 + 3)
     assert len(sub.errors) == 3  # The number of children that errored out
 
     metrics.expect('ingester', 'submissions_ingested', 1)
@@ -905,7 +923,8 @@ def test_caching(core: CoreSession, metrics):
         # One of the submission will get processed fully
         assert first_task is not None
         first_task = IngestTask(first_task)
-        first_submission: Submission = core.ds.submission.get(first_task.submission.sid)
+        first_submission: Submission = core.ds.submission.get(
+            first_task.submission.sid)
         assert first_submission.state == 'completed'
         assert len(first_submission.files) == 1
         assert len(first_submission.errors) == 0
