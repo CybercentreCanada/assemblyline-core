@@ -22,8 +22,8 @@ from assemblyline_core.dispatching.dispatcher import Dispatcher, Submission, Sub
 from assemblyline_core.dispatching.schedules import Scheduler as RealScheduler
 
 # noinspection PyUnresolvedReferences
-from .mocking import MockDatastore, ToggleTrue
-from .test_scheduler import dummy_service
+from mocking import MockDatastore, ToggleTrue
+from test_scheduler import dummy_service
 
 
 @pytest.fixture(scope='module')
@@ -34,6 +34,7 @@ def redis(redis_connection):
 
 
 logger = logging.getLogger('assemblyline.test')
+
 
 class Scheduler(RealScheduler):
     def __init__(self, *args, **kwargs):
@@ -100,7 +101,7 @@ def log_config(caplog):
 @mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', Scheduler)
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
 def test_simple(redis):
-    service_queue = lambda name: get_service_queue(name, redis)
+    def service_queue(name): return get_service_queue(name, redis)
     ds = MockDatastore(collections=['submission', 'result', 'emptyresult', 'service', 'error', 'file', 'filescore'])
 
     file = random_model_obj(File)
@@ -114,10 +115,7 @@ def test_simple(redis):
     sub.params.max_extracted = 5
     sub.params.classification = get_classification().UNRESTRICTED
     sub.params.initial_data = json.dumps({'cats': 'big'})
-    sub.files = [dict(
-        sha256=file_hash,
-        name='file'
-    )]
+    sub.files = [dict(sha256=file_hash, name='file')]
 
     disp = Dispatcher(ds, redis, redis)
     disp.running = ToggleTrue()
@@ -202,7 +200,7 @@ def test_simple(redis):
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
 @mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', Scheduler)
 def test_dispatch_extracted(redis):
-    service_queue = lambda name: get_service_queue(name, redis)
+    def service_queue(name): return get_service_queue(name, redis)
 
     # Setup the fake datastore
     ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
@@ -215,10 +213,7 @@ def test_dispatch_extracted(redis):
 
     # Inject the fake submission
     submission = random_model_obj(models.submission.Submission)
-    submission.files = [dict(
-        name='./file',
-        sha256=file_hash
-    )]
+    submission.files = [dict(name='./file', sha256=file_hash)]
     sid = submission.sid = 'first-submission'
 
     disp = Dispatcher(ds, redis, redis)

@@ -9,7 +9,7 @@ from assemblyline.odm.models.service import Service
 from assemblyline_core.plumber.run_plumber import Plumber
 from assemblyline_core.server_base import ServiceStage
 
-from .mocking import TrueCountTimes
+from mocking import TrueCountTimes
 
 
 def test_expire_missing_service():
