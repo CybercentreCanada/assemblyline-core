@@ -39,8 +39,8 @@ from assemblyline_core.ingester.run_internal import IngesterInternals
 from assemblyline_core.ingester.run_submit import IngesterSubmitter
 from assemblyline_core.server_base import ServerBase, get_service_stage_hash, ServiceStage
 
-from .mocking import MockCollection
-from .test_scheduler import dummy_service
+from mocking import MockCollection
+from test_scheduler import dummy_service
 
 
 @pytest.fixture(scope='module')
@@ -58,6 +58,7 @@ class MockService(ServerBase):
 
     Including service API, in the future probably include that in this test.
     """
+
     def __init__(self, name, datastore, redis, filestore):
         super().__init__('assemblyline.service.'+name)
         self.service_name = name
@@ -96,8 +97,7 @@ class MockService(ServerBase):
             if instructions.get('failure', False):
                 error = Error(instructions['error'])
                 error.sha256 = task.fileinfo.sha256
-                self.dispatch_client.service_failed(task.sid, error=error,
-                                                    error_key=get_random_id())
+                self.dispatch_client.service_failed(task.sid, error=error, error_key=get_random_id())
                 continue
 
             result_data = {

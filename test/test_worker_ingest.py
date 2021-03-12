@@ -12,7 +12,7 @@ from assemblyline_core.ingester.run_ingest import IngesterInput
 from assemblyline_core.ingester.ingester import IngestTask, _notification_queue_prefix
 from assemblyline_core.submission_client import SubmissionClient
 
-from .mocking import MockDatastore, TrueCountTimes, clean_redis
+from mocking import MockDatastore, TrueCountTimes, clean_redis
 
 
 def make_message(message=None, files=None, params=None):

@@ -12,7 +12,7 @@ from assemblyline.odm.models.service import UpdateConfig
 from assemblyline.odm.random_data import create_services
 from assemblyline.odm.randomizer import random_model_obj
 
-from .mocking import clean_redis, MockDatastore
+from mocking import clean_redis, MockDatastore
 
 
 @pytest.fixture(scope='session')
