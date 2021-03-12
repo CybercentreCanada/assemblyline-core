@@ -198,8 +198,7 @@ def test_ingest_size_error(ingest_harness):
     assert mm.ingest_queue.length() == 0
 
     # A file was dropped
-    queue_name = _notification_queue_prefix + \
-        submission['notification']['queue']
+    queue_name = _notification_queue_prefix + submission['notification']['queue']
     queue = ingester.ingester.notification_queues[queue_name]
     message = queue.pop()
     assert message is not None

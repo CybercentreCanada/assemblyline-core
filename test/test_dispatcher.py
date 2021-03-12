@@ -158,10 +158,8 @@ def test_simple(redis):
     logger.info('==== fourth dispatch')
     client.request_work('0', 'extract', '0')
     client.request_work('0', 'wrench', '0')
-    client.service_finished(sid, 'extract-result',
-                            make_result(file_hash, 'extract'))
-    client.service_failed(sid, 'wrench-error',
-                          make_error(file_hash, 'wrench', False))
+    client.service_finished(sid, 'extract-result', make_result(file_hash, 'extract'))
+    client.service_failed(sid, 'wrench-error', make_error(file_hash, 'wrench', False))
     disp.handle_service_results()
     disp.handle_service_results()
 
@@ -205,8 +203,7 @@ def test_dispatch_extracted(redis):
     def service_queue(name): return get_service_queue(name, redis)
 
     # Setup the fake datastore
-    ds = MockDatastore(
-        collections=['submission', 'result', 'service', 'error', 'file'])
+    ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
     file_hash = get_random_hash(64)
     second_file_hash = get_random_hash(64)
 
