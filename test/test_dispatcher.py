@@ -102,8 +102,7 @@ def log_config(caplog):
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
 def test_simple(redis):
     def service_queue(name): return get_service_queue(name, redis)
-    ds = MockDatastore(collections=[
-                       'submission', 'result', 'emptyresult', 'service', 'error', 'file', 'filescore'])
+    ds = MockDatastore(collections=['submission', 'result', 'emptyresult', 'service', 'error', 'file', 'filescore'])
 
     file = random_model_obj(File)
     file_hash = file.sha256
@@ -116,10 +115,7 @@ def test_simple(redis):
     sub.params.max_extracted = 5
     sub.params.classification = get_classification().UNRESTRICTED
     sub.params.initial_data = json.dumps({'cats': 'big'})
-    sub.files = [dict(
-        sha256=file_hash,
-        name='file'
-    )]
+    sub.files = [dict(sha256=file_hash, name='file')]
 
     disp = Dispatcher(ds, redis, redis)
     disp.running = ToggleTrue()
@@ -180,12 +176,9 @@ def test_simple(redis):
     client.request_work('0', 'av-a', '0')
     client.request_work('0', 'av-b', '0')
     client.request_work('0', 'frankenstrings', '0')
-    client.service_failed(
-        sid, 'av-a-error', make_error(file_hash, 'av-a', False))
-    client.service_failed(
-        sid, 'av-b-error', make_error(file_hash, 'av-b', False))
-    client.service_finished(
-        sid, 'f-result', make_result(file_hash, 'frankenstrings'))
+    client.service_failed(sid, 'av-a-error', make_error(file_hash, 'av-a', False))
+    client.service_failed(sid, 'av-b-error', make_error(file_hash, 'av-b', False))
+    client.service_finished(sid, 'f-result', make_result(file_hash, 'frankenstrings'))
     disp.handle_service_results()
     disp.handle_service_results()
     disp.handle_service_results()
@@ -198,8 +191,7 @@ def test_simple(redis):
     # Finish the xerox service and check if the submission completion got checked
     logger.info('==== sixth dispatch')
     client.request_work('0', 'xerox', '0')
-    client.service_finished(sid, 'xerox-result-key',
-                            make_result(file_hash, 'xerox'))
+    client.service_finished(sid, 'xerox-result-key', make_result(file_hash, 'xerox'))
     disp.handle_service_results()
 
     assert wait_result(task, file_hash, 'xerox')
@@ -224,10 +216,7 @@ def test_dispatch_extracted(redis):
 
     # Inject the fake submission
     submission = random_model_obj(models.submission.Submission)
-    submission.files = [dict(
-        name='./file',
-        sha256=file_hash
-    )]
+    submission.files = [dict(name='./file', sha256=file_hash)]
     sid = submission.sid = 'first-submission'
 
     disp = Dispatcher(ds, redis, redis)

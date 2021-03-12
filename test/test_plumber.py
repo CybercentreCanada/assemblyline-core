@@ -25,10 +25,8 @@ def test_expire_missing_service():
     datastore.list_all_services.return_value = [service_a]
 
     with mock.patch('assemblyline_core.plumber.run_plumber.time'):
-        plumber = Plumber(
-            redis=redis, redis_persist=redis_persist, datastore=datastore)
-        plumber.get_service_stage = mock.MagicMock(
-            return_value=ServiceStage.Running)
+        plumber = Plumber(redis=redis, redis_persist=redis_persist, datastore=datastore)
+        plumber.get_service_stage = mock.MagicMock(return_value=ServiceStage.Running)
         plumber.dispatch_client = mock.MagicMock()
 
         task = random_model_obj(Task)
@@ -55,10 +53,8 @@ def test_flush_paused_queues():
     datastore.list_all_services.return_value = [service_a]
 
     with mock.patch('assemblyline_core.plumber.run_plumber.time'):
-        plumber = Plumber(
-            redis=redis, redis_persist=redis_persist, datastore=datastore)
-        plumber.get_service_stage = mock.MagicMock(
-            return_value=ServiceStage.Running)
+        plumber = Plumber(redis=redis, redis_persist=redis_persist, datastore=datastore)
+        plumber.get_service_stage = mock.MagicMock(return_value=ServiceStage.Running)
         plumber.dispatch_client = mock.MagicMock()
 
         task = random_model_obj(Task)
@@ -69,8 +65,7 @@ def test_flush_paused_queues():
 
         assert plumber.dispatch_client.service_failed.call_count == 0
 
-        plumber.get_service_stage = mock.MagicMock(
-            return_value=ServiceStage.Paused)
+        plumber.get_service_stage = mock.MagicMock(return_value=ServiceStage.Paused)
 
         plumber.running = TrueCountTimes(count=1)
         plumber.try_run()

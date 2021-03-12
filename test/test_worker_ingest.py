@@ -51,8 +51,7 @@ def ingest_harness(clean_redis):
            isolating this test from any other test run at the same time
     """
     datastore = AssemblylineDatastore(MockDatastore())
-    ingester = IngesterInput(
-        datastore=datastore, redis=clean_redis, persistent_redis=clean_redis)
+    ingester = IngesterInput(datastore=datastore, redis=clean_redis, persistent_redis=clean_redis)
     ingester.running = TrueCountTimes(1)
     return datastore, ingester, ingester.ingester.ingest_queue
 
@@ -94,11 +93,9 @@ def test_ingest_simple(ingest_harness):
     task = mm.unique_queue.pop()
     assert task
     task = IngestTask(task)
-    # Only the valid sha passed through
-    assert task.submission.files[0].sha256 == '0' * 64
+    assert task.submission.files[0].sha256 == '0' * 64  # Only the valid sha passed through
     assert 'tobig' not in task.submission.metadata  # The bad metadata was stripped
-    # The valid metadata is unchanged
-    assert task.submission.metadata['small'] == '100'
+    assert task.submission.metadata['small'] == '100'  # The valid metadata is unchanged
     assert task.submission.params.submitter == 'user'
     assert task.submission.params.groups == custom_user_groups
 
@@ -113,8 +110,7 @@ def test_ingest_stale_score_exists(ingest_harness):
     # Add a stale file score to the database for every file always
     from assemblyline.odm.models.filescore import FileScore
     datastore.filescore.get = mock.MagicMock(
-        return_value=FileScore(
-            dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=0))
+        return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=0))
     )
 
     # Process a message that hits the stale score
@@ -141,8 +137,7 @@ def test_ingest_score_exists(ingest_harness):
     # Add a valid file score for all files
     from assemblyline.odm.models.filescore import FileScore
     datastore.filescore.get = mock.MagicMock(
-        return_value=FileScore(
-            dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=time.time()))
+        return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=time.time()))
     )
 
     # Ingest a file
@@ -164,8 +159,7 @@ def test_ingest_groups_custom(ingest_harness):
     user.groups = list(custom_user_groups)
     datastore.user.save('user', user)
 
-    in_queue.push(make_message(
-        params={'submitter': 'user', 'groups': ['group_b']}))
+    in_queue.push(make_message(params={'submitter': 'user', 'groups': ['group_b']}))
     ingester.try_run()
 
     mm = ingester.ingester

@@ -21,8 +21,7 @@ from mocking import TrueCountTimes, MockDatastore, clean_redis
 def submit_harness(clean_redis):
     """Setup a test environment just file for the ingest tests"""
     datastore = AssemblylineDatastore(MockDatastore())
-    submitter = IngesterSubmitter(
-        datastore=datastore, redis=clean_redis, persistent_redis=clean_redis)
+    submitter = IngesterSubmitter(datastore=datastore, redis=clean_redis, persistent_redis=clean_redis)
     submitter.running = TrueCountTimes(1)
     return datastore, submitter
 
@@ -86,8 +85,7 @@ def test_submit_duplicate(submit_harness):
         'ingest_id': 'abc123'
     })
     # Make sure the scan key is correct, this is normally done on ingest
-    task.scan_key = task.params.create_filescore_key(
-        task.submission.files[0].sha256, [])
+    task.scan_key = task.params.create_filescore_key(task.submission.files[0].sha256, [])
 
     # Add this file to the scanning table, so it looks like it has already been submitted + ingest again
     submitter.ingester.scanning.add(task.scan_key, task.as_primitives())
