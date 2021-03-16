@@ -18,7 +18,7 @@ from assemblyline.common import forge
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
 METRICS_QUEUE = "assemblyline_metrics"
-NON_AGGREGATED = ['scaler', 'scaler-status']
+NON_AGGREGATED = ['scaler', 'scaler_status']
 
 
 def cleanup_metrics(input_dict):
