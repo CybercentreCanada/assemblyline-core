@@ -638,7 +638,7 @@ class ScalerServer(CoreBase):
 
             for service_name, metrics in service_metrics.items():
                 export_metrics_once(service_name, Status, metrics, host=HOSTNAME,
-                                    counter_type='scaler-status', config=self.config, redis=self.redis)
+                                    counter_type='scaler_status', config=self.config, redis=self.redis)
 
             memory, memory_total = self.controller.memory_info()
             cpu, cpu_total = self.controller.cpu_info()
