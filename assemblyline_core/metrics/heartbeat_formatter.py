@@ -232,7 +232,7 @@ class HeartbeatFormatter(object):
             except Exception:
                 self.log.exception("An exception occurred while generating WatcherMessage")
 
-        elif m_type == "scaler-status":
+        elif m_type == "scaler_status":
             try:
                 msg = {
                     "sender": self.sender,
