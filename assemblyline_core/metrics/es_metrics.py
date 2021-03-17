@@ -13,6 +13,8 @@ from assemblyline_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 
+from packaging import version
+
 
 class ESMetricsServer(ServerBase):
     """
@@ -38,6 +40,7 @@ class ESMetricsServer(ServerBase):
 
         self.input_es = None
         self.target_es = None
+        self.timestamp_field = "timestamp"
         
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
@@ -127,7 +130,7 @@ class ESMetricsServer(ServerBase):
 
                 # Build Metrics document
                 metric = {
-                    "timestamp": now_as_iso(),
+                    self.timestamp_field: now_as_iso(),
                     "node": {
                         "name": name,
                         "state": state,
@@ -292,7 +295,7 @@ class ESMetricsServer(ServerBase):
             jvm_mem = cluster_stats['nodes']["jvm"]["mem"]
             fs = cluster_stats['nodes']["fs"]
             metric = {
-                "timestamp": now_as_iso(),
+                self.timestamp_field: now_as_iso(),
                 "name": cluster_health['cluster_name'],
                 "status": cluster_health['status'],
                 "indices": {
@@ -420,7 +423,7 @@ class ESMetricsServer(ServerBase):
 
                 metric = {
                     "name": name,
-                    "timestamp": now_as_iso(),
+                    self.timestamp_field: now_as_iso(),
                     "status": health.get(name, 'red'),
                     "shards": shards.get(name, {"total": 0, "unassigned": 0}),
                     "docs": {
@@ -519,8 +522,13 @@ class ESMetricsServer(ServerBase):
                                                      connection_class=elasticsearch.RequestsHttpConnection,
                                                      max_retries=0,
                                                      ca_certs=ca_certs)
+        # Check if target_es supports datastreams (>=7.9)
+        ds_enabled = version.parse(self.target_es.info()['version']['number']) >= version.parse("7.9")
+        if ds_enabled:
+            self.timestamp_field = "@timestamp"
+
         ensure_indexes(self.log, self.target_es, self.config.core.metrics.elasticsearch,
-                       ['es_cluster', 'es_nodes', 'es_indices'])
+                       ['es_cluster', 'es_nodes', 'es_indices'], datastream_enabled=ds_enabled)
 
         while self.running:
             self.heartbeat()
@@ -546,14 +554,16 @@ class ESMetricsServer(ServerBase):
             if self.apm_client:
                 self.apm_client.begin_transaction('metrics')
 
-            plan = [json.dumps({"index": {"_index": "al_metrics_es_cluster"}}), json.dumps(cluster_metrics)]
+            # Datastreams only allow create actions via Bulk API
+            action = "create" if ds_enabled else "index"
+            plan = [json.dumps({action: {"_index": "al_metrics_es_cluster"}}), json.dumps(cluster_metrics)]
 
             for metric in node_metrics.values():
-                plan.append(json.dumps({"index": {"_index": "al_metrics_es_nodes"}}))
+                plan.append(json.dumps({action: {"_index": "al_metrics_es_nodes"}}))
                 plan.append(json.dumps(metric))
 
             for metric in index_metrics.values():
-                plan.append(json.dumps({"index": {"_index": "al_metrics_es_indices"}}))
+                plan.append(json.dumps({action: {"_index": "al_metrics_es_indices"}}))
                 plan.append(json.dumps(metric))
 
             with_retries(self.log, self.target_es.bulk, body="\n".join(plan))
