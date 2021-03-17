@@ -12,7 +12,7 @@ from assemblyline.odm.models.service import UpdateConfig
 from assemblyline.odm.random_data import create_services
 from assemblyline.odm.randomizer import random_model_obj
 
-from mocking import clean_redis, MockDatastore
+from mocking import MockDatastore
 
 
 @pytest.fixture(scope='session')
@@ -28,7 +28,7 @@ def ds():
 
 
 @pytest.fixture
-def updater(clean_redis: Union[clean_redis, redis.Redis], ds, updater_directory):
+def updater(clean_redis: redis.Redis, ds, updater_directory):
     return run_updater.ServiceUpdater(redis_persist=clean_redis, redis=clean_redis, datastore=ds)
 
 

@@ -14,12 +14,16 @@ import time
 from random import random
 from typing import Iterable, List
 
+import elasticapm
+
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
 from assemblyline.common.isotime import now, now_as_iso
 from assemblyline.common.importing import load_module_by_path
-from assemblyline.common import forge
+from assemblyline.common import forge, exceptions, isotime
+from assemblyline.datastore import DataStoreException
+from assemblyline.filestore import CorruptedFileStoreException, FileStoreException
 from assemblyline.odm.models.filescore import FileScore
 from assemblyline.odm.messages.ingest_heartbeat import Metrics
 from assemblyline.remote.datatypes.queues.named import NamedQueue
@@ -27,17 +31,17 @@ from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.multi import MultiQueue
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline.remote.datatypes import get_client
 from assemblyline import odm
-from assemblyline.odm.models.submission import SubmissionParams
+from assemblyline.odm.models.submission import SubmissionParams, Submission as DatabaseSubmission
 from assemblyline.odm.models.alert import EXTENDED_SCAN_VALUES
-from assemblyline.odm.messages.submission import Submission, SubmissionMessage
+from assemblyline.odm.messages.submission import Submission as MessageSubmission, SubmissionMessage
 
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from assemblyline_core.submission_client import SubmissionClient
 from .constants import INGEST_QUEUE_NAME, drop_chance
+from ..server_base import ThreadedCoreBase
 
-_completeq_name = 'm-complete'
+COMPLETE_QUEUE_NAME = 'm-complete'
 _dup_prefix = 'w-m-'
 _notification_queue_prefix = 'nq-'
 _min_priority = 1
@@ -108,7 +112,7 @@ def should_resubmit(score):
 @odm.model()
 class IngestTask(odm.Model):
     # Submission Parameters
-    submission: Submission = odm.Compound(Submission)
+    submission: MessageSubmission = odm.Compound(MessageSubmission)
 
     # Shortcut for properties of the submission
     @property
@@ -135,13 +139,11 @@ class IngestTask(odm.Model):
     ingest_time = odm.Date(default="NOW")
 
 
-class Ingester:
-    """Internal interface to the ingestion queues."""
-
-    def __init__(self, datastore, logger, classification=None, redis=None, persistent_redis=None,
-                 metrics_name='ingester'):
-        self.datastore = datastore
-        self.log = logger
+class Ingester(ThreadedCoreBase):
+    def __init__(self, datastore=None, logger=None, classification=None, redis=None, persistent_redis=None,
+                 metrics_name='ingester', config=None):
+        super().__init__('ingester', logger, redis=redis, redis_persist=persistent_redis, datastore=datastore,
+                         config=config)
 
         # Cache the user groups
         self.cache_lock = threading.RLock()  # TODO are middle man instances single threaded now?
@@ -151,9 +153,6 @@ class Ingester:
         self.notification_queues = {}
         self.whitelisted = {}
         self.whitelisted_lock = threading.RLock()
-
-        # Create a config cache that will refresh config values periodically
-        self.config = forge.CachedObject(forge.get_config)
 
         # Module path parameters are fixed at start time. Changing these involves a restart
         self.is_low_priority = load_module_by_path(self.config.core.ingester.is_low_priority)
@@ -166,18 +165,6 @@ class Ingester:
         self.priority_range = constants.PRIORITY_RANGES
         self.threshold_value = constants.PRIORITY_THRESHOLDS
 
-        # Connect to the redis servers
-        self.redis = redis or get_client(
-            host=self.config.core.redis.nonpersistent.host,
-            port=self.config.core.redis.nonpersistent.port,
-            private=False,
-        )
-        self.persistent_redis = persistent_redis or get_client(
-            host=self.config.core.redis.persistent.host,
-            port=self.config.core.redis.persistent.port,
-            private=False,
-        )
-
         # Classification engine
         self.ce = classification or forge.get_classification()
 
@@ -187,25 +174,25 @@ class Ingester:
 
         # State. The submissions in progress are stored in Redis in order to
         # persist this state and recover in case we crash.
-        self.scanning = Hash('m-scanning-table', self.persistent_redis)
+        self.scanning = Hash('m-scanning-table', self.redis_persist)
 
         # Input. The dispatcher creates a record when any submission completes.
-        self.complete_queue = NamedQueue(_completeq_name, self.redis)
+        self.complete_queue = NamedQueue(COMPLETE_QUEUE_NAME, self.redis)
 
         # Internal. Dropped entries are placed on this queue.
         # self.drop_queue = NamedQueue('m-drop', self.persistent_redis)
 
         # Input. An external process places submission requests on this queue.
-        self.ingest_queue = NamedQueue(INGEST_QUEUE_NAME, self.persistent_redis)
+        self.ingest_queue = NamedQueue(INGEST_QUEUE_NAME, self.redis_persist)
 
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
         self.traffic_queue = CommsQueue('submissions', self.redis)
 
         # Internal. Unique requests are placed in and processed from this queue.
-        self.unique_queue = PriorityQueue('m-unique', self.persistent_redis)
+        self.unique_queue = PriorityQueue('m-unique', self.redis_persist)
 
         # Internal, delay queue for retrying
-        self.retry_queue = PriorityQueue('m-retry', self.persistent_redis)
+        self.retry_queue = PriorityQueue('m-retry', self.redis_persist)
 
         # Internal, timeout watch queue
         self.timeout_queue = PriorityQueue('m-timeout', self.redis)
@@ -217,13 +204,321 @@ class Ingester:
         #   method, not only is the original ingestion finalized, but all entries in the duplicate queue
         #   are finalized as well. This has the effect that all concurrent ingestion of the same file
         #   are 'merged' into a single submission to the system.
-        self.duplicate_queue = MultiQueue(self.persistent_redis)
+        self.duplicate_queue = MultiQueue(self.redis_persist)
 
         # Output. submissions that should have alerts generated
-        self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.persistent_redis)
+        self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.redis_persist)
 
         # Utility object to help submit tasks to dispatching
         self.submit_client = SubmissionClient(datastore=self.datastore, redis=self.redis)
+
+        if self.config.core.metrics.apm_server.server_url is not None:
+            self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
+            elasticapm.instrument()
+            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
+                                                service_name="ingester")
+        else:
+            self.apm_client = None
+
+    def try_run(self):
+        self.maintain_threads({
+            'Ingest': self.handle_ingest,
+            'Submit': self.handle_submit,
+            'Complete': self.handle_complete,
+            'Retries': self.handle_retries,
+            'Timeouts': self.handle_timeouts,
+        })
+
+    def handle_ingest(self):
+        cpu_mark = time.process_time()
+        time_mark = time.time()
+
+        # Move from ingest to unique and waiting queues.
+        # While there are entries in the ingest queue we consume chunk_size
+        # entries at a time and move unique entries to uniqueq / queued and
+        # duplicates to their own queues / waiting.
+        while self.running:
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
+            message = self.ingest_queue.pop(timeout=1)
+
+            cpu_mark = time.process_time()
+            time_mark = time.time()
+
+            if not message:
+                continue
+
+            # Start of ingest message
+            if self.apm_client:
+                self.apm_client.begin_transaction('ingest_msg')
+
+            try:
+                if 'submission' in message:
+                    # A retried task
+                    task = IngestTask(message)
+                else:
+                    # A new submission
+                    sub = MessageSubmission(message)
+                    task = IngestTask(dict(
+                        submission=sub,
+                        ingest_id=sub.sid,
+                    ))
+                    task.submission.sid = None  # Reset to new random uuid
+                    # Write all input to the traffic queue
+                    self.traffic_queue.publish(SubmissionMessage({
+                        'msg': sub,
+                        'msg_type': 'SubmissionIngested',
+                        'sender': 'ingester',
+                    }).as_primitives())
+
+            except (ValueError, TypeError) as error:
+                self.counter.increment('error')
+                self.log.exception(f"Dropped ingest submission {message} because {str(error)}")
+
+                # End of ingest message (value_error)
+                if self.apm_client:
+                    self.apm_client.end_transaction('ingest_input', 'value_error')
+                continue
+
+            self.ingest(task)
+
+            # End of ingest message (success)
+            if self.apm_client:
+                self.apm_client.end_transaction('ingest_input', 'success')
+
+    def handle_submit(self):
+        time_mark, cpu_mark = time.time(), time.process_time()
+
+        while self.running:
+            # noinspection PyBroadException
+            try:
+                self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+                self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
+                # Check if there is room for more submissions
+                length = self.scanning.length()
+                if length >= self.config.core.ingester.max_inflight:
+                    self.sleep(0.1)
+                    time_mark, cpu_mark = time.time(), time.process_time()
+                    continue
+
+                raw = self.unique_queue.pop()
+                time_mark, cpu_mark = time.time(), time.process_time()
+                if not raw:
+                    continue
+
+                # Start of ingest message
+                if self.apm_client:
+                    self.apm_client.begin_transaction('ingest_msg')
+
+                task = IngestTask(raw)
+
+                # noinspection PyBroadException
+                if any(len(file.sha256) != 64 for file in task.submission.files):
+                    self.log.error("Malformed entry on submission queue: %s", task.ingest_id)
+                    # End of ingest message (invalid_hash)
+                    if self.apm_client:
+                        self.apm_client.end_transaction('ingest_submit', 'invalid_hash')
+                    continue
+
+                # If between the initial ingestion and now the drop/whitelist status
+                # of this submission has changed, then drop it now
+                if self.drop(task):
+                    # End of ingest message (dropped)
+                    if self.apm_client:
+                        self.apm_client.end_transaction('ingest_submit', 'dropped')
+                    continue
+
+                if self.is_whitelisted(task):
+                    # End of ingest message (whitelisted)
+                    if self.apm_client:
+                        self.apm_client.end_transaction('ingest_submit', 'whitelisted')
+                    continue
+
+                # Check if this file has been previously processed.
+                pprevious, previous, score, scan_key = None, False, None, None
+                if not task.submission.params.ignore_cache:
+                    pprevious, previous, score, scan_key = self.check(task)
+                else:
+                    scan_key = self.stamp_filescore_key(task)
+
+                # If it HAS been previously processed, we are dealing with a resubmission
+                # finalize will decide what to do, and put the task back in the queue
+                # rewritten properly if we are going to run it again
+                if previous:
+                    if not task.submission.params.services.resubmit and not pprevious:
+                        self.log.warning(f"No psid for what looks like a resubmission of "
+                                         f"{task.submission.files[0].sha256}: {scan_key}")
+                    self.finalize(pprevious, previous, score, task)
+                    # End of ingest message (finalized)
+                    if self.apm_client:
+                        self.apm_client.end_transaction('ingest_submit', 'finalized')
+
+                    continue
+
+                # We have decided this file is worth processing
+
+                # Add the task to the scanning table, this is atomic across all submit
+                # workers, so if it fails, someone beat us to the punch, record the file
+                # as a duplicate then.
+                if not self.scanning.add(scan_key, task.as_primitives()):
+                    self.log.debug('Duplicate %s', task.submission.files[0].sha256)
+                    self.counter.increment('duplicates')
+                    self.duplicate_queue.push(_dup_prefix + scan_key, task.as_primitives())
+                    # End of ingest message (duplicate)
+                    if self.apm_client:
+                        self.apm_client.end_transaction('ingest_submit', 'duplicate')
+
+                    continue
+
+                # We have managed to add the task to the scan table, so now we go
+                # ahead with the submission process
+                try:
+                    self.submit(task)
+                    # End of ingest message (submitted)
+                    if self.apm_client:
+                        self.apm_client.end_transaction('ingest_submit', 'submitted')
+
+                    continue
+                except Exception as _ex:
+                    # For some reason (contained in `ex`) we have failed the submission
+                    # The rest of this function is error handling/recovery
+                    ex = _ex
+                    # traceback = _ex.__traceback__
+
+                self.counter.increment('error')
+
+                should_retry = True
+                if isinstance(ex, CorruptedFileStoreException):
+                    self.log.error("Submission for file '%s' failed due to corrupted "
+                                   "filestore: %s" % (task.sha256, str(ex)))
+                    should_retry = False
+                elif isinstance(ex, DataStoreException):
+                    trace = exceptions.get_stacktrace_info(ex)
+                    self.log.error("Submission for file '%s' failed due to "
+                                   "data store error:\n%s" % (task.sha256, trace))
+                elif not isinstance(ex, FileStoreException):
+                    trace = exceptions.get_stacktrace_info(ex)
+                    self.log.error("Submission for file '%s' failed: %s" % (task.sha256, trace))
+
+                task = IngestTask(self.scanning.pop(scan_key))
+                if not task:
+                    self.log.error('No scanning entry for for %s', task.sha256)
+                    # End of ingest message (no_scan_entry)
+                    if self.apm_client:
+                        self.apm_client.end_transaction('ingest_submit', 'no_scan_entry')
+
+                    continue
+
+                if not should_retry:
+                    # End of ingest message (cannot_retry)
+                    if self.apm_client:
+                        self.apm_client.end_transaction('ingest_submit', 'cannot_retry')
+
+                    continue
+
+                self.retry(task, scan_key, ex)
+                # End of ingest message (retry)
+                if self.apm_client:
+                    self.apm_client.end_transaction('ingest_submit', 'retried')
+
+            except Exception:
+                self.log.exception("Unexpected error")
+                # End of ingest message (exception)
+                if self.apm_client:
+                    self.apm_client.end_transaction('ingest_submit', 'exception')
+
+    def handle_complete(self):
+        while self.running:
+            result = self.complete_queue.pop(timeout=3)
+            if not result:
+                continue
+
+            cpu_mark = time.process_time()
+            time_mark = time.time()
+
+            # Start of ingest message
+            if self.apm_client:
+                self.apm_client.begin_transaction('ingest_msg')
+
+            sub = DatabaseSubmission(result)
+            self.completed(sub)
+
+            # End of ingest message (success)
+            if self.apm_client:
+                elasticapm.label(sid=sub.sid)
+                self.apm_client.end_transaction('ingest_complete', 'success')
+
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
+    def handle_retries(self):
+        tasks = []
+        while self.sleep(0 if tasks else 3):
+            cpu_mark = time.process_time()
+            time_mark = time.time()
+
+            # Start of ingest message
+            if self.apm_client:
+                self.apm_client.begin_transaction('ingest_retries')
+
+            tasks = self.retry_queue.dequeue_range(upper_limit=isotime.now(), num=100)
+
+            for task in tasks:
+                self.ingest_queue.push(task)
+
+            # End of ingest message (success)
+            if self.apm_client:
+                elasticapm.label(retries=len(tasks))
+                self.apm_client.end_transaction('ingest_retries', 'success')
+
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
+    def handle_timeouts(self):
+        timeouts = []
+        while self.sleep(0 if timeouts else 3):
+            cpu_mark = time.process_time()
+            time_mark = time.time()
+
+            # Start of ingest message
+            if self.apm_client:
+                self.apm_client.begin_transaction('ingest_timeouts')
+
+            timeouts = self.timeout_queue.dequeue_range(upper_limit=isotime.now(), num=100)
+
+            for scan_key in timeouts:
+                # noinspection PyBroadException
+                try:
+                    actual_timeout = False
+
+                    # Remove the entry from the hash of submissions in progress.
+                    entry = self.scanning.pop(scan_key)
+                    if entry:
+                        actual_timeout = True
+                        self.log.error("Submission timed out for %s: %s", scan_key, str(entry))
+
+                    dup = self.duplicate_queue.pop(_dup_prefix + scan_key, blocking=False)
+                    if dup:
+                        actual_timeout = True
+
+                    while dup:
+                        self.log.error("Submission timed out for %s: %s", scan_key, str(dup))
+                        dup = self.duplicate_queue.pop(_dup_prefix + scan_key, blocking=False)
+
+                    if actual_timeout:
+                        self.counter.increment('timed_out')
+                except Exception:
+                    self.log.exception("Problem timing out %s:", scan_key)
+
+            # End of ingest message (success)
+            if self.apm_client:
+                elasticapm.label(timeouts=len(timeouts))
+                self.apm_client.end_transaction('ingest_timeouts', 'success')
+
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
     def get_groups_from_user(self, username: str) -> List[str]:
         # Reset the group cache at the top of each hour
@@ -364,6 +659,11 @@ class Ingester:
 
         return result.psid, result.sid, result.score, key
 
+    def stop(self):
+        super().stop()
+        if self.apm_client:
+            elasticapm.uninstrument()
+
     def stale(self, delta: float, errors: int):
         if errors:
             return delta >= self.config.core.ingester.incomplete_stale_after_seconds
@@ -464,7 +764,7 @@ class Ingester:
 
         q = self.notification_queues.get(note_queue, None)
         if not q:
-            self.notification_queues[note_queue] = q = NamedQueue(note_queue, self.persistent_redis)
+            self.notification_queues[note_queue] = q = NamedQueue(note_queue, self.redis_persist)
         q.push(task.as_primitives())
 
     def expired(self, delta: float, errors) -> bool:
@@ -533,7 +833,7 @@ class Ingester:
     def submit(self, task: IngestTask):
         self.submit_client.submit(
             submission_obj=task.submission,
-            completed_queue=_completeq_name,
+            completed_queue=COMPLETE_QUEUE_NAME,
         )
 
         self.timeout_queue.push(int(now(_max_time)), task.scan_key)

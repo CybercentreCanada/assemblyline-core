@@ -3,16 +3,14 @@ from unittest import mock
 import time
 
 from assemblyline.datastore.helper import AssemblylineDatastore
-from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm.models.user import User
 from assemblyline.odm.models.file import File
 from assemblyline.odm.randomizer import random_minimal_obj
 
-from assemblyline_core.ingester.run_ingest import IngesterInput
-from assemblyline_core.ingester.ingester import IngestTask, _notification_queue_prefix
+from assemblyline_core.ingester.ingester import IngestTask, _notification_queue_prefix, Ingester
 from assemblyline_core.submission_client import SubmissionClient
 
-from mocking import MockDatastore, TrueCountTimes, clean_redis
+from mocking import MockDatastore, TrueCountTimes
 
 
 def make_message(message=None, files=None, params=None):
@@ -40,8 +38,6 @@ def make_message(message=None, files=None, params=None):
 
 
 @pytest.fixture
-@mock.patch('assemblyline_core.ingester.ingester.SubmissionClient', new=mock.MagicMock(spec=SubmissionClient))
-@mock.patch('assemblyline_core.ingester.ingester.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
 def ingest_harness(clean_redis):
     """"Setup a test environment.
 
@@ -51,9 +47,11 @@ def ingest_harness(clean_redis):
            isolating this test from any other test run at the same time
     """
     datastore = AssemblylineDatastore(MockDatastore())
-    ingester = IngesterInput(datastore=datastore, redis=clean_redis, persistent_redis=clean_redis)
+    ingester = Ingester(datastore=datastore, redis=clean_redis, persistent_redis=clean_redis)
     ingester.running = TrueCountTimes(1)
-    return datastore, ingester, ingester.ingester.ingest_queue
+    ingester.counter.increment = mock.MagicMock()
+    ingester.submit_client.submit = mock.MagicMock()
+    return datastore, ingester, ingester.ingest_queue
 
 
 def test_ingest_simple(ingest_harness):
@@ -65,32 +63,29 @@ def test_ingest_simple(ingest_harness):
     user.groups = list(custom_user_groups)
     datastore.user.save('user', user)
 
-    # Let the ingest loop run an extra time because we send two messages
-    ingester.running.counter += 1
-
     # Send a message with a garbled sha, this should be dropped
     in_queue.push(make_message(
         files={'sha256': '1'*10}
     ))
 
-    with pytest.raises(ValueError):
-        # Process garbled message
-        ingester.try_run(volatile=True)
+    # Process garbled message
+    ingester.handle_ingest()
+    ingester.counter.increment.assert_called_with('error')
 
     # Send a message that is fine, but has an illegal metadata field
     in_queue.push(make_message(dict(
         metadata={
-            'tobig': 'a' * (ingester.ingester.config.submission.max_metadata_length + 2),
+            'tobig': 'a' * (ingester.config.submission.max_metadata_length + 2),
             'small': '100'
         }
     ), params={'submitter': 'user', 'groups': []}))
 
     # Process those ok message
-    ingester.try_run(volatile=True)
+    ingester.running.counter = 1
+    ingester.handle_ingest()
 
-    mm = ingester.ingester
     # The only task that makes it through though fit these parameters
-    task = mm.unique_queue.pop()
+    task = ingester.unique_queue.pop()
     assert task
     task = IngestTask(task)
     assert task.submission.files[0].sha256 == '0' * 64  # Only the valid sha passed through
@@ -100,8 +95,8 @@ def test_ingest_simple(ingest_harness):
     assert task.submission.params.groups == custom_user_groups
 
     # None of the other tasks should reach the end
-    assert mm.unique_queue.length() == 0
-    assert mm.ingest_queue.length() == 0
+    assert ingester.unique_queue.length() == 0
+    assert ingester.ingest_queue.length() == 0
 
 
 def test_ingest_stale_score_exists(ingest_harness):
@@ -115,20 +110,19 @@ def test_ingest_stale_score_exists(ingest_harness):
 
     # Process a message that hits the stale score
     in_queue.push(make_message())
-    ingester.try_run()
+    ingester.handle_ingest()
 
     # The stale filescore was retrieved
     datastore.filescore.get.assert_called_once()
 
     # but message was ingested as a cache miss
-    mm = ingester.ingester
-    task = mm.unique_queue.pop()
+    task = ingester.unique_queue.pop()
     assert task
     task = IngestTask(task)
     assert task.submission.files[0].sha256 == '0' * 64
 
-    assert mm.unique_queue.length() == 0
-    assert mm.ingest_queue.length() == 0
+    assert ingester.unique_queue.length() == 0
+    assert ingester.ingest_queue.length() == 0
 
 
 def test_ingest_score_exists(ingest_harness):
@@ -142,12 +136,14 @@ def test_ingest_score_exists(ingest_harness):
 
     # Ingest a file
     in_queue.push(make_message())
-    ingester.try_run()
+    ingester.handle_ingest()
 
     # No file has made it into the internal buffer => cache hit and drop
     datastore.filescore.get.assert_called_once()
-    assert ingester.ingester.unique_queue.length() == 0
-    assert ingester.ingester.ingest_queue.length() == 0
+    ingester.counter.increment.assert_any_call('cache_hit')
+    ingester.counter.increment.assert_any_call('duplicates')
+    assert ingester.unique_queue.length() == 0
+    assert ingester.ingest_queue.length() == 0
 
 
 def test_ingest_groups_custom(ingest_harness):
@@ -160,10 +156,9 @@ def test_ingest_groups_custom(ingest_harness):
     datastore.user.save('user', user)
 
     in_queue.push(make_message(params={'submitter': 'user', 'groups': ['group_b']}))
-    ingester.try_run()
+    ingester.handle_ingest()
 
-    mm = ingester.ingester
-    task = mm.unique_queue.pop()
+    task = ingester.unique_queue.pop()
     assert task
     task = IngestTask(task)
     assert task.submission.params.submitter == 'user'
@@ -172,13 +167,11 @@ def test_ingest_groups_custom(ingest_harness):
 
 def test_ingest_size_error(ingest_harness):
     datastore, ingester, in_queue = ingest_harness
-    mm = ingester.ingester
-    # mm._notify_drop = mock.MagicMock()
 
     # Send a rather big file
     submission = make_message(
         files={
-            'size': ingester.ingester.config.submission.max_file_size + 1,
+            'size': ingester.config.submission.max_file_size + 1,
             # 'ascii': 'abc'
         },
         params={
@@ -191,15 +184,14 @@ def test_ingest_size_error(ingest_harness):
     datastore.file.save(submission['files'][0]['sha256'], fo)
     submission['notification'] = {'queue': 'drop_test'}
     in_queue.push(submission)
-    ingester.try_run(volatile=True)
+    ingester.handle_ingest()
 
     # No files in the internal buffer
-    assert mm.unique_queue.length() == 0
-    assert mm.ingest_queue.length() == 0
+    assert ingester.unique_queue.length() == 0
+    assert ingester.ingest_queue.length() == 0
 
     # A file was dropped
     queue_name = _notification_queue_prefix + submission['notification']['queue']
-    queue = ingester.ingester.notification_queues[queue_name]
+    queue = ingester.notification_queues[queue_name]
     message = queue.pop()
     assert message is not None
-    print(message)
