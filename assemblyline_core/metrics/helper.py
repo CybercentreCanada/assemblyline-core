@@ -4,6 +4,7 @@ import time
 import elasticsearch
 
 from assemblyline.datastore.exceptions import ILMException
+from packaging import version
 
 MAX_RETRY_BACKOFF = 10
 
@@ -65,7 +66,7 @@ def create_ilm_policy(es, name, ilm_config):
         raise ILMException(f"ERROR: Failed to create ILM policy: {name}")
 
 
-def ensure_indexes(log, es, config, indexes):
+def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
     for index_type in indexes:
         try:
             index = f"al_metrics_{index_type}"
@@ -85,22 +86,43 @@ def ensure_indexes(log, es, config, indexes):
                 log.debug(f"Index template {index.upper()} does not exists. Creating it now...")
 
                 template_body = {
-                    "index_patterns": [f"{index}-*"],
-                    "order": 1,
                     "settings": {
                         "index.lifecycle.name": policy,
-                        "index.lifecycle.rollover_alias": index
                     }
                 }
+                es_version = version.parse(es.info()['version']['number'])
+                # Check support for component templates (>=7.8)
+                if es_version >= version.parse("7.8"):
+                    component_name = f"{index}-settings"
+                    component_body = {"template": template_body}
+                    if not es.cluster.exists_component_template(component_name):
+                        try:
+                            # Create component template
+                            with_retries(log, es.cluster.put_component_template, component_name, component_body)
+                        except elasticsearch.exceptions.RequestError as e:
+                            if "resource_already_exists_exception" not in str(e):
+                                raise
+                            log.warning(f"Tried to create a component template that already exists: {index.upper()}")
+                    template_body = {"index_patterns": [f"{index}-*"], "composed_of": [component_name]}
+                    if datastream_enabled:
+                        template_body['index_patterns'] = f"{index}*"
+                        template_body['data_stream'] = {}
+                        template_body['priority'] = 1
+
+                # Legacy template
+                else:
+                    template_body["order"] = 1
+                    template_body["index_patterns"] = [f"{index}-*"]
+                    template_body["settings"]["index.lifecycle.rollover_alias"] = index
 
                 try:
-                    with_retries(log, es.indices.put_template, index, template_body)
+                    with_retries(log, es.indices.put_index_template, index, template_body)
                 except elasticsearch.exceptions.RequestError as e:
                     if "resource_already_exists_exception" not in str(e):
                         raise
                     log.warning(f"Tried to create an index template that already exists: {index.upper()}")
 
-            if not with_retries(log, es.indices.exists_alias, index):
+            if not with_retries(log, es.indices.exists_alias, index) and not datastream_enabled:
                 log.debug(f"Index alias {index.upper()} does not exists. Creating it now...")
 
                 index_body = {"aliases": {index: {"is_write_index": True}}}
