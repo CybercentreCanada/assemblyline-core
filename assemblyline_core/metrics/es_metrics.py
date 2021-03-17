@@ -523,12 +523,19 @@ class ESMetricsServer(ServerBase):
                                                      max_retries=0,
                                                      ca_certs=ca_certs)
         # Check if target_es supports datastreams (>=7.9)
+        es_metric_indices = ['es_cluster', 'es_nodes', 'es_indices']
         ds_enabled = version.parse(self.target_es.info()['version']['number']) >= version.parse("7.9")
-        if ds_enabled:
-            self.timestamp_field = "@timestamp"
-
         ensure_indexes(self.log, self.target_es, self.config.core.metrics.elasticsearch,
-                       ['es_cluster', 'es_nodes', 'es_indices'], datastream_enabled=ds_enabled)
+                       es_metric_indices, datastream_enabled=ds_enabled)
+
+        # Were data streams created for the indices specified?
+        try:
+            if self.target_es.indices.get_data_stream(name=[f"al_metrics_{x}" for x in es_metric_indices]):
+                self.timestamp_field = "@timestamp"
+            else:
+                ds_enabled = False
+        except elasticsearch.exceptions.TransportError:
+            ds_enabled = False
 
         while self.running:
             self.heartbeat()
