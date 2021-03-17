@@ -1,7 +1,6 @@
 import time
 
 import pytest
-import fakeredis
 
 from .datastore import MockDatastore, MockCollection
 
@@ -34,21 +33,6 @@ class RedisTime:
         if self.current is not None:
             return self.current, 0
         return time.time(), 0
-
-
-class RedisZPopMin:
-    def __call__(self, key):
-        return 1
-
-
-@pytest.fixture(scope='function')
-def clean_redis():
-    if not hasattr(fakeredis.FakeConnection, 'health_check_interval'):
-        fakeredis.FakeConnection.health_check_interval = None
-    client = fakeredis.FakeRedis()
-    client.time = RedisTime()
-    client.zpopmin = RedisZPopMin()
-    return client
 
 
 class TrueCountTimes:

@@ -42,7 +42,6 @@ setup(
     ],
     extras_require={
         'test': [
-            'fakeredis[lua]',
             'pytest',
             'pytest-cov',
             'codecov',
@@ -51,7 +50,6 @@ setup(
     tests_require=[
         'pytest',
         'pytest-cov',
-        'fakeredis[lua]',
     ],
     package_data={
         '': ["*classification.yml", "*.magic", "VERSION"]

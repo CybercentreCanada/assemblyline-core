@@ -33,10 +33,7 @@ from assemblyline_core.plumber.run_plumber import Plumber
 from assemblyline_core.dispatching import dispatcher
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.dispatching.dispatcher import Dispatcher
-from assemblyline_core.ingester.ingester import IngestTask
-from assemblyline_core.ingester.run_ingest import IngesterInput
-from assemblyline_core.ingester.run_internal import IngesterInternals
-from assemblyline_core.ingester.run_submit import IngesterSubmitter
+from assemblyline_core.ingester.ingester import IngestTask, Ingester
 from assemblyline_core.server_base import ServerBase, get_service_stage_hash, ServiceStage
 
 from mocking import MockCollection
@@ -123,15 +120,16 @@ class MockService(ServerBase):
 
 
 class CoreSession:
-    def __init__(self):
+    def __init__(self, config, ingest):
         self.ds: typing.Optional[AssemblylineDatastore] = None
         self.filestore = None
         self.redis = None
-        self.config: typing.Optional[Config] = None
-        self.ingest: typing.Optional[IngesterInput] = None
-        self.ingest_submit: typing.Optional[IngesterSubmitter] = None
-        self.ingest_internals: typing.Optional[IngesterInternals] = None
-        self.ingest_queue = None
+        self.config: Config = config
+        self.ingest: Ingester = ingest
+
+    @property
+    def ingest_queue(self):
+        return self.ingest.ingest_queue
 
 
 @pytest.fixture(autouse=True)
@@ -211,9 +209,12 @@ def core(request, redis, filestore, config):
     dispatcher.TIMEOUT_TEST_INTERVAL = 1
     # al_log.init_logging("simulation")
 
-    fields = CoreSession()
+    ds = forge.get_datastore()
+    ingester = Ingester(datastore=ds, redis=redis, persistent_redis=redis, config=config)
+
+    fields = CoreSession(config, ingester)
     fields.redis = redis
-    fields.ds = ds = forge.get_datastore()
+    fields.ds = ds
 
     fields.config = config
     forge.config_singletons[False, None] = fields.config
@@ -222,9 +223,7 @@ def core(request, redis, filestore, config):
     fields.filestore = filestore
     threads: List[ServerBase] = [
         # Start the ingester components
-        IngesterInput(datastore=ds, redis=redis, persistent_redis=redis, config=config),
-        IngesterSubmitter(datastore=ds, redis=redis, persistent_redis=redis, config=config),
-        IngesterInternals(datastore=ds, redis=redis, persistent_redis=redis, config=config),
+        ingester,
 
         # Start the dispatcher
         Dispatcher(datastore=ds, redis=redis, redis_persist=redis, config=config),
@@ -234,11 +233,6 @@ def core(request, redis, filestore, config):
     ]
 
     stages = get_service_stage_hash(redis)
-    ingester_input_thread = typing.cast(IngesterInput, threads[0])
-    fields.ingest = ingester_input_thread
-    fields.ingest_queue = ingester_input_thread.ingester.ingest_queue
-    fields.ingest_submit = threads[1]
-    fields.ingest_internals = threads[2]
 
     ds.ds.service = MockCollection(Service)
     ds.ds.service_delta = MockCollection(Service)
@@ -398,7 +392,7 @@ def test_deduplication(core, metrics):
     metrics.expect('dispatcher', 'files_completed', 2)
 
 
-def test_ingest_retry(core, metrics):
+def test_ingest_retry(core: CoreSession, metrics):
     # -------------------------------------------------------------------------------
     #
     sha, size = ready_body(core)
@@ -407,7 +401,7 @@ def test_ingest_retry(core, metrics):
 
     attempts = []
     failures = []
-    original_submit = core.ingest_submit.ingester.submit
+    original_submit = core.ingest.submit
 
     def fail_once(task):
         attempts.append(task)
@@ -416,7 +410,7 @@ def test_ingest_retry(core, metrics):
         else:
             failures.append(task)
             raise ValueError()
-    core.ingest_submit.ingester.submit = fail_once
+    core.ingest.submit = fail_once
 
     try:
         core.ingest_queue.push(SubmissionInput(dict(
@@ -460,11 +454,11 @@ def test_ingest_retry(core, metrics):
         metrics.expect('dispatcher', 'files_completed', 1)
 
     finally:
-        core.ingest_submit.ingester.submit = original_submit
+        core.ingest.submit = original_submit
         assemblyline_core.ingester.ingester._retry_delay = original_retry_delay
 
 
-def test_ingest_timeout(core, metrics):
+def test_ingest_timeout(core: CoreSession, metrics: MetricsCounter):
     # -------------------------------------------------------------------------------
     #
     sha, size = ready_body(core)
@@ -472,11 +466,11 @@ def test_ingest_timeout(core, metrics):
     assemblyline_core.ingester.ingester._max_time = 1
 
     attempts = []
-    original_submit = core.ingest_submit.ingester.submit_client.submit
+    original_submit = core.ingest.submit_client.submit
 
     def _fail(**args):
         attempts.append(args)
-    core.ingest_submit.ingester.submit_client.submit = _fail
+    core.ingest.submit_client.submit = _fail
 
     try:
         si = SubmissionInput(dict(
@@ -505,10 +499,10 @@ def test_ingest_timeout(core, metrics):
         # Make sure the scanning table has been cleared
         time.sleep(0.5)
         for _ in range(60):
-            if not core.ingest.ingester.scanning.exists(scan_key):
+            if not core.ingest.scanning.exists(scan_key):
                 break
             time.sleep(0.1)
-        assert not core.ingest.ingester.scanning.exists(scan_key)
+        assert not core.ingest.scanning.exists(scan_key)
         assert len(attempts) == 1
 
         # Wait until we get feedback from the metrics channel
@@ -516,7 +510,7 @@ def test_ingest_timeout(core, metrics):
         metrics.expect('ingester', 'timed_out', 1)
 
     finally:
-        core.ingest_submit.ingester.submit_client.submit = original_submit
+        core.ingest.submit_client.submit = original_submit
         assemblyline_core.ingester.ingester._max_time = original_max_time
 
 
@@ -921,7 +915,7 @@ def test_caching(core: CoreSession, metrics):
     metrics.clear()
     assert sid1 == sid2
 
-    core.ingest.ingester.cache = {}
+    core.ingest.cache = {}
 
     sid3 = run_once()
     metrics.expect('ingester', 'cache_hit', 1)

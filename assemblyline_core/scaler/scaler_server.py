@@ -25,7 +25,7 @@ from assemblyline.common.forge import get_service_queue
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline_core.scaler.controllers import KubernetesController
 from assemblyline_core.scaler.controllers.interface import ServiceControlError
-from assemblyline_core.server_base import CoreBase, ServiceStage
+from assemblyline_core.server_base import CoreBase, ServiceStage, ThreadedCoreBase
 
 from .controllers import DockerController
 from . import collection
@@ -197,7 +197,7 @@ class ServiceProfile:
         return prof
 
 
-class ScalerServer(CoreBase):
+class ScalerServer(ThreadedCoreBase):
     def __init__(self, config=None, datastore=None, redis=None, redis_persist=None):
         super().__init__('assemblyline.scaler', config=config, datastore=datastore,
                          redis=redis, redis_persist=redis_persist)
@@ -244,10 +244,6 @@ class ScalerServer(CoreBase):
         self.stopping = threading.Event()
         self.main_loop_exit = threading.Event()
 
-    def sleep(self, timeout):
-        self.stopping.wait(timeout)
-        return self.running
-
     def log_crashes(self, fn):
         @functools.wraps(fn)
         def with_logs(*args, **kwargs):
@@ -274,45 +270,18 @@ class ScalerServer(CoreBase):
             self.controller.add_profile(profile)
 
     def try_run(self):
-        expected_threads = {
-            'Log Container Events': self.log_crashes(self.log_container_events),
-            'Process Timeouts': self.log_crashes(self.process_timeouts),
-            'Flush Service Status': self.log_crashes(self.flush_service_status),
-            'Service Configuration Sync': self.log_crashes(self.sync_services),
-            'Service Adjuster': self.log_crashes(self.update_scaling),
-            'Import Metrics': self.log_crashes(self.sync_metrics),
-            'Export Metrics': self.log_crashes(self.export_metrics),
-        }
-        threads = {}
-
-        # Run as long as we need to
-        while self.running:
-            # Check for any crashed threads
-            for name, thread in list(threads.items()):
-                if not thread.is_alive():
-                    self.log.warning(f'Restarting thread: {name}')
-                    threads.pop(name)
-
-            # Start any missing threads
-            for name, function in expected_threads.items():
-                if name not in threads:
-                    self.log.info(f'Starting thread: {name}')
-                    threads[name] = thread = threading.Thread(target=function, name=name)
-                    thread.start()
-
-            # Take a break before doing it again
-            super().heartbeat()
-            self.sleep(2)
-
-        for _t in threads.values():
-            _t.join()
-
-        self.main_loop_exit.set()
+        self.maintain_threads({
+            'Log Container Events': self.log_container_events,
+            'Process Timeouts': self.process_timeouts,
+            'Flush Service Status': self.flush_service_status,
+            'Service Configuration Sync': self.sync_services,
+            'Service Adjuster': self.update_scaling,
+            'Import Metrics': self.sync_metrics,
+            'Export Metrics': self.export_metrics,
+        })
 
     def stop(self):
         super().stop()
-        self.stopping.set()
-        self.main_loop_exit.wait(30)
         self.controller.stop()
 
     def sync_services(self):
