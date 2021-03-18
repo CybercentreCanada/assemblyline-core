@@ -39,6 +39,8 @@ from assemblyline_core.server_base import ServerBase, get_service_stage_hash, Se
 from mocking import MockCollection
 from test_scheduler import dummy_service
 
+RESPONSE_TIMEOUT = 60
+
 
 @pytest.fixture(scope='module')
 def redis(redis_connection):
@@ -333,7 +335,7 @@ def test_deduplication(core, metrics):
         )).as_primitives())
 
     notification_queue = NamedQueue('nq-output-queue-one', core.redis)
-    first_task = notification_queue.pop(timeout=5)
+    first_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
 
     # One of the submission will get processed fully
     assert first_task is not None
@@ -346,7 +348,7 @@ def test_deduplication(core, metrics):
 
     # The other will get processed as a duplicate
     # (Which one is the 'real' one and which is the duplicate isn't important for our purposes)
-    second_task = notification_queue.pop(timeout=5)
+    second_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
     second_task = IngestTask(second_task)
     assert second_task.submission.sid == first_task.submission.sid
 
@@ -373,7 +375,7 @@ def test_deduplication(core, metrics):
     )).as_primitives())
 
     notification_queue = NamedQueue('nq-2', core.redis)
-    third_task = notification_queue.pop(timeout=5)
+    third_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
     assert third_task
 
     # The third task should not be deduplicated by ingester, so will have a different submission
@@ -433,7 +435,7 @@ def test_ingest_retry(core: CoreSession, metrics):
         )).as_primitives())
 
         notification_queue = NamedQueue('nq-output-queue-one', core.redis)
-        first_task = notification_queue.pop(timeout=30)
+        first_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
 
         # One of the submission will get processed fully
         assert first_task is not None
@@ -541,7 +543,7 @@ def test_service_crash_recovery(core, metrics):
     )).as_primitives())
 
     notification_queue = NamedQueue('nq-watcher-recover', core.redis)
-    dropped_task = notification_queue.pop(timeout=30)
+    dropped_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
     assert dropped_task
     dropped_task = IngestTask(dropped_task)
     sub = core.ds.submission.get(dropped_task.submission.sid)
@@ -586,7 +588,7 @@ def test_service_retry_limit(core, metrics):
     )).as_primitives())
 
     notification_queue = NamedQueue('nq-watcher-recover', core.redis)
-    dropped_task = notification_queue.pop(timeout=16)
+    dropped_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
     assert dropped_task
     dropped_task = IngestTask(dropped_task)
     sub = core.ds.submission.get(dropped_task.submission.sid)
@@ -633,7 +635,7 @@ def test_dropping_early(core, metrics):
     )).as_primitives())
 
     notification_queue = NamedQueue('nq-drop', core.redis)
-    dropped_task = notification_queue.pop(timeout=5)
+    dropped_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
     dropped_task = IngestTask(dropped_task)
     sub = core.ds.submission.get(dropped_task.submission.sid)
     assert len(sub.files) == 1
@@ -689,7 +691,7 @@ def test_service_error(core, metrics):
     )).as_primitives())
 
     notification_queue = NamedQueue('nq-error', core.redis)
-    task = IngestTask(notification_queue.pop(timeout=5))
+    task = IngestTask(notification_queue.pop(timeout=RESPONSE_TIMEOUT))
     sub = core.ds.submission.get(task.submission.sid)
     assert len(sub.files) == 1
     assert len(sub.results) == 3
@@ -725,7 +727,7 @@ def test_extracted_file(core, metrics):
     )).as_primitives())
 
     notification_queue = NamedQueue('nq-text-extracted-file', core.redis)
-    task = notification_queue.pop(timeout=5)
+    task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
     assert task
     task = IngestTask(task)
     sub = core.ds.submission.get(task.submission.sid)
@@ -768,7 +770,7 @@ def test_depth_limit(core, metrics):
 
     notification_queue = NamedQueue('nq-test-depth-limit', core.redis)
     start = time.time()
-    task = notification_queue.pop(timeout=10)
+    task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
     print("notification time waited", time.time() - start)
     assert task is not None
     task = IngestTask(task)
@@ -812,7 +814,7 @@ def test_max_extracted_in_one(core, metrics):
 
     notification_queue = NamedQueue('nq-test-extracted-in-one', core.redis)
     start = time.time()
-    task = notification_queue.pop(timeout=10)
+    task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
     print("notification time waited", time.time() - start)
     assert task is not None
     task = IngestTask(task)
@@ -857,7 +859,7 @@ def test_max_extracted_in_several(core, metrics):
     )).as_primitives())
 
     notification_queue = NamedQueue('nq-test-extracted-in-several', core.redis)
-    task = IngestTask(notification_queue.pop(timeout=10))
+    task = IngestTask(notification_queue.pop(timeout=RESPONSE_TIMEOUT))
     sub: Submission = core.ds.submission.get(task.submission.sid)
     assert len(sub.files) == 1
     # We should only get results for each file up to the max depth
@@ -894,7 +896,7 @@ def test_caching(core: CoreSession, metrics):
         )).as_primitives())
 
         notification_queue = NamedQueue('nq-1', core.redis)
-        first_task = notification_queue.pop(timeout=5)
+        first_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
 
         # One of the submission will get processed fully
         assert first_task is not None
@@ -964,7 +966,7 @@ def test_plumber_clearing(core, metrics):
         core.ds.service_delta.save('pre', service_delta)
 
         notification_queue = NamedQueue('nq-test_plumber_clearing', core.redis)
-        dropped_task = notification_queue.pop(timeout=5)
+        dropped_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
         dropped_task = IngestTask(dropped_task)
         sub = core.ds.submission.get(dropped_task.submission.sid)
         assert len(sub.files) == 1
