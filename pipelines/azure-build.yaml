@@ -87,7 +87,7 @@ stages:
         sudo chmod a+rw /var/cache/assemblyline/
         sudo cp $(Pipeline.Workspace)/pipelines/config.yml /etc/assemblyline
       displayName: Install package
-    - script: pytest -rsx -vv
+    - script: pytest -x -rsx -vv
       workingDirectory: $(Pipeline.Workspace)/test
       displayName: Test
 - stage: deploy
