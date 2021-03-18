@@ -18,25 +18,20 @@ client from copying the file again. Once the client has copied the file
 (if required) it then issues a final 'submit'.
 
 """
-import json
 import logging
-import tempfile
 import os
-from typing import Tuple, List
+import tempfile
+from typing import List, Tuple
 
-from assemblyline.common import forge
-from assemblyline.common import identify
+from assemblyline.common import forge, identify
 from assemblyline.common.codec import decode_file
-from assemblyline.common.constants import get_temporary_submission_data_name
 from assemblyline.common.dict_utils import flatten
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.str_utils import safe_str
 from assemblyline.datastore.helper import AssemblylineDatastore
-from assemblyline.odm.messages.submission import Submission as SubmissionObject
-from assemblyline.odm.models.submission import Submission, File
 from assemblyline.filestore import CorruptedFileStoreException, FileStore
-from assemblyline.remote.datatypes.hash import ExpiringHash
-
+from assemblyline.odm.messages.submission import Submission as SubmissionObject
+from assemblyline.odm.models.submission import File, Submission
 from assemblyline_core.dispatching.client import DispatchClient
 
 Classification = forge.get_classification()
@@ -164,6 +159,10 @@ class SubmissionClient:
                 sid=submission_obj.sid,
                 state='submitted'
             ))
+
+            if submission_obj.params.malicious:
+                sub.verdict = {"malicious": [submission_obj.params.submitter]}
+
             self.datastore.submission.save(sub.sid, sub)
 
             self.log.debug("Submission complete. Dispatching: %s", sub.sid)
