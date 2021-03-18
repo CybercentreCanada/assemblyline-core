@@ -218,14 +218,22 @@ class MetricsServer(ServerBase):
                 else:
                     output_metrics[key] = value
 
-            timestamp_field = "@timestamp" if self.is_datastream else "timestamp"
-            output_metrics[timestamp_field] = timestamp
+            ensure_indexes(self.log, self.es, self.config.core.metrics.elasticsearch, [component_type],
+                           datastream_enabled=self.is_datastream)
+
+            index = f"al_metrics_{component_type}"
+            # Were data streams created for the index specified?
+            try:
+                if self.es.indices.get_index_template(name=f"{index}_ds"):
+                    output_metrics['@timestamp'] = timestamp
+                    index = f"{index}_ds"
+            except elasticsearch.exceptions.TransportError:
+                pass
+            output_metrics['timestamp'] = timestamp
             output_metrics = cleanup_metrics(output_metrics)
 
             self.log.info(output_metrics)
-            ensure_indexes(self.log, self.es, self.config.core.metrics.elasticsearch, [component_type],
-                           datastream_enabled=self.is_datastream)
-            with_retries(self.log, self.es.index, index=f"al_metrics_{component_type}", body=output_metrics)
+            with_retries(self.log, self.es.index, index=index, body=output_metrics)
 
         self.log.info("Metrics aggregated. Waiting for next run...")
 
