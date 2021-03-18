@@ -69,7 +69,7 @@ def create_ilm_policy(es, name, ilm_config):
 def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
     for index_type in indexes:
         try:
-            index = f"al_metrics_{index_type}"
+            index = f"al_metrics_{index_type}_ds" if datastream_enabled else f"al_metrics_{index_type}"
             policy = f"{index}_policy"
             while True:
                 try:
@@ -107,7 +107,7 @@ def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
                     if datastream_enabled:
                         template_body['index_patterns'] = f"{index}*"
                         template_body['data_stream'] = {}
-                        template_body['priority'] = 1
+                        template_body['priority'] = 10
 
                 # Legacy template
                 else:

@@ -40,8 +40,8 @@ class ESMetricsServer(ServerBase):
 
         self.input_es = None
         self.target_es = None
-        self.timestamp_field = "timestamp"
-        
+        self.is_datastream = False
+
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
             elasticapm.instrument()
@@ -129,8 +129,9 @@ class ESMetricsServer(ServerBase):
                 self.old_node_data[name]['cgt'] = stats['os']['cgroup']['cpu']['stat']['time_throttled_nanos']
 
                 # Build Metrics document
+                timestamp = now_as_iso()
                 metric = {
-                    self.timestamp_field: now_as_iso(),
+                    "timestamp": timestamp,
                     "node": {
                         "name": name,
                         "state": state,
@@ -238,9 +239,9 @@ class ESMetricsServer(ServerBase):
                         },
                     }
                 }
-
+                if self.is_datastream:
+                    metric['@timestamp'] = timestamp
                 node_metrics[node] = metric
-
             return node_metrics
         finally:
             if self.apm_client:
@@ -294,8 +295,9 @@ class ESMetricsServer(ServerBase):
 
             jvm_mem = cluster_stats['nodes']["jvm"]["mem"]
             fs = cluster_stats['nodes']["fs"]
+            timestamp = now_as_iso()
             metric = {
-                self.timestamp_field: now_as_iso(),
+                "timestamp": timestamp,
                 "name": cluster_health['cluster_name'],
                 "status": cluster_health['status'],
                 "indices": {
@@ -342,6 +344,8 @@ class ESMetricsServer(ServerBase):
                     },
                 }
             }
+            if self.is_datastream:
+                metric['@timestamp'] = timestamp
             return metric
         finally:
             if self.apm_client:
@@ -421,9 +425,10 @@ class ESMetricsServer(ServerBase):
                 self.old_index_data[name]['pit'] = stats['primaries']['indexing']['index_time_in_millis']
                 self.old_index_data[name]['pst'] = stats['primaries']['search']['query_time_in_millis']
 
+                timestamp = now_as_iso()
                 metric = {
                     "name": name,
-                    self.timestamp_field: now_as_iso(),
+                    "timestamp": timestamp,
                     "status": health.get(name, 'red'),
                     "shards": shards.get(name, {"total": 0, "unassigned": 0}),
                     "docs": {
@@ -499,6 +504,9 @@ class ESMetricsServer(ServerBase):
                         "fielddata": stats['total']['fielddata']['memory_size_in_bytes']
                     }
                 }
+                if self.is_datastream:
+                    metric['@timestamp'] = timestamp
+
                 indices_metrics[name] = metric
 
             return indices_metrics
@@ -524,18 +532,16 @@ class ESMetricsServer(ServerBase):
                                                      ca_certs=ca_certs)
         # Check if target_es supports datastreams (>=7.9)
         es_metric_indices = ['es_cluster', 'es_nodes', 'es_indices']
-        ds_enabled = version.parse(self.target_es.info()['version']['number']) >= version.parse("7.9")
+        self.is_datastream = version.parse(self.target_es.info()['version']['number']) >= version.parse("7.9")
         ensure_indexes(self.log, self.target_es, self.config.core.metrics.elasticsearch,
-                       es_metric_indices, datastream_enabled=ds_enabled)
+                       es_metric_indices, datastream_enabled=self.is_datastream)
 
-        # Were data streams created for the indices specified?
+        # Were data streams created for one of the indices specified?
         try:
-            if self.target_es.indices.get_data_stream(name=[f"al_metrics_{x}" for x in es_metric_indices]):
-                self.timestamp_field = "@timestamp"
-            else:
-                ds_enabled = False
+            if not self.target_es.indices.get_index_template(name="al_metrics_es_cluster_ds"):
+                self.is_datastream = False
         except elasticsearch.exceptions.TransportError:
-            ds_enabled = False
+            self.is_datastream = False
 
         while self.running:
             self.heartbeat()
@@ -561,16 +567,20 @@ class ESMetricsServer(ServerBase):
             if self.apm_client:
                 self.apm_client.begin_transaction('metrics')
 
-            # Datastreams only allow create actions via Bulk API
-            action = "create" if ds_enabled else "index"
-            plan = [json.dumps({action: {"_index": "al_metrics_es_cluster"}}), json.dumps(cluster_metrics)]
+            suffix = ""
+            action = "index"
+            # Datastreams only allow create actions via Bulk API; use _ds for distinction between normal indices
+            if self.is_datastream:
+                action = "create"
+                suffix = "_ds"
+            plan = [json.dumps({action: {"_index": f"al_metrics_es_cluster{suffix}"}}), json.dumps(cluster_metrics)]
 
             for metric in node_metrics.values():
-                plan.append(json.dumps({action: {"_index": "al_metrics_es_nodes"}}))
+                plan.append(json.dumps({action: {"_index": f"al_metrics_es_nodes{suffix}"}}))
                 plan.append(json.dumps(metric))
 
             for metric in index_metrics.values():
-                plan.append(json.dumps({action: {"_index": "al_metrics_es_indices"}}))
+                plan.append(json.dumps({action: {"_index": f"al_metrics_es_indices{suffix}"}}))
                 plan.append(json.dumps(metric))
 
             with_retries(self.log, self.target_es.bulk, body="\n".join(plan))
