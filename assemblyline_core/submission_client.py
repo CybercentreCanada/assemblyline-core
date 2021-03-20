@@ -160,7 +160,7 @@ class SubmissionClient:
                 state='submitted'
             ))
 
-            if submission_obj.params.malicious:
+            if self.config.ui.allow_malicious_hinting and submission_obj.params.malicious:
                 sub.verdict = {"malicious": [submission_obj.params.submitter]}
 
             self.datastore.submission.save(sub.sid, sub)
