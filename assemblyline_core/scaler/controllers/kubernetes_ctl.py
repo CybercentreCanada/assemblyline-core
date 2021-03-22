@@ -270,26 +270,27 @@ class KubernetesController(ControllerInterface):
     def _create_metadata(deployment_name: str, labels: Dict[str, str]):
         return V1ObjectMeta(name=deployment_name, labels=labels)
 
-    def _create_volumes(self, service_name):
+    def _create_volumes(self, service_name, mount_updates=False):
         volumes, mounts = [], []
 
         # Attach the mount that provides the config file
         volumes.extend(self.config_volumes.values())
         mounts.extend(self.config_mounts.values())
 
-        # Attach the mount that provides the update
-        volumes.append(V1Volume(
-            name='update-directory',
-            persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
-                claim_name=FILE_UPDATE_VOLUME
-            ),
-        ))
+        if mount_updates:
+            # Attach the mount that provides the update
+            volumes.append(V1Volume(
+                name='update-directory',
+                persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
+                    claim_name=FILE_UPDATE_VOLUME
+                ),
+            ))
 
-        mounts.append(V1VolumeMount(
-            name='update-directory',
-            mount_path=CONTAINER_UPDATE_DIRECTORY,
-            sub_path=service_name
-        ))
+            mounts.append(V1VolumeMount(
+                name='update-directory',
+                mount_path=CONTAINER_UPDATE_DIRECTORY,
+                sub_path=service_name
+            ))
 
         return volumes, mounts
 
@@ -367,11 +368,14 @@ class KubernetesController(ControllerInterface):
         elif current_pull_secret:
             self.api.delete_namespaced_secret(pull_secret_name, self.namespace, _request_timeout=API_TIMEOUT)
 
+        # If an updater container then mount update-directory otherwise ignore
+        mount_updates = any(docker_config.command)
+
         all_labels = dict(self._labels)
         all_labels['component'] = service_name
         all_labels.update(labels or {})
 
-        all_volumes, all_mounts = self._create_volumes(service_name)
+        all_volumes, all_mounts = self._create_volumes(service_name, mount_updates)
         all_volumes.extend(volumes or [])
         all_mounts.extend(mounts or [])
         metadata = self._create_metadata(deployment_name=deployment_name, labels=all_labels)
