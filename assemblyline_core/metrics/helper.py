@@ -88,6 +88,7 @@ def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
                 template_body = {
                     "settings": {
                         "index.lifecycle.name": policy,
+                        "index.codec": "best_compression"
                     }
                 }
                 es_version = version.parse(es.info()['version']['number'])
