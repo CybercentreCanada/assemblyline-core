@@ -24,6 +24,7 @@ from typing import Dict
 import docker
 import yaml
 
+from assemblyline.common import isotime
 from assemblyline.remote.datatypes.lock import Lock
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
     V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
@@ -164,6 +165,7 @@ class DockerUpdateInterface:
         container = self.client.containers.run(
             image=docker_config.image,
             name='update_' + name + '_' + uuid.uuid4().hex,
+            labels={'update_for': name, 'updater_launched': 'true'},
             network=network,
             restart_policy={'Name': 'no'},
             command=docker_config.command,
@@ -184,6 +186,17 @@ class DockerUpdateInterface:
         # Wait for the container to terminate
         if blocking:
             container.wait()
+
+    def cleanup_stale(self):
+        # We want containers that are updater managed, already finished, and exited five minutes ago.
+        # The reason for the delay is in development systems people may want to check the output
+        # of failed update containers they are working on launching with the updater.
+        filters = {'label': 'updater_launched=true', 'status': 'exited'}
+        now = isotime.now_as_iso(-60*5)
+
+        for container in self.client.containers.list(all=True, ignore_removed=True, filters=filters):
+            if container.attrs['State'].get('FinishedAt', '9999') < now:
+                container.remove()
 
     def restart(self, service_name):
         for container in self.client.containers.list(filters={'label': f'component={service_name}'}):
@@ -379,6 +392,15 @@ class KubernetesUpdateInterface:
             self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace,
                                                  propagation_policy='Background', _request_timeout=API_TIMEOUT)
 
+    def cleanup_stale(self):
+        labels = 'app=assemblyline,component=update-script'
+        jobs = self.batch_api.list_namespaced_job(namespace=self.namespace, _request_timeout=API_TIMEOUT,
+                                                  label_selector=labels)
+        for job in jobs.items:
+            if job.status.failed or job.status.succeeded:
+                self.batch_api.delete_namespaced_job(name=job.metadata.name, namespace=self.namespace,
+                                                     propagation_policy='Background', _request_timeout=API_TIMEOUT)
+
     def restart(self, service_name):
         for _ in range(10):
             try:
@@ -558,6 +580,9 @@ class ServiceUpdater(CoreBase):
                 self.log.error(f"Service {service_name} has failed to update. Update procedure cancelled... [{str(e)}]")
 
             self.container_update.pop(service_name)
+
+        # Clear out any old dead containers
+        self.controller.cleanup_stale()
 
     def container_versions(self):
         """Go through the list of services and check what are the latest tags for it"""
