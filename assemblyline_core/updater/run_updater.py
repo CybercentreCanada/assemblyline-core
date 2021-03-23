@@ -192,10 +192,10 @@ class DockerUpdateInterface:
         # The reason for the delay is in development systems people may want to check the output
         # of failed update containers they are working on launching with the updater.
         filters = {'label': 'updater_launched=true', 'status': 'exited'}
-        now = isotime.now_as_iso(-60*5)
+        time_mark = isotime.now_as_iso(-60*5)
 
         for container in self.client.containers.list(all=True, ignore_removed=True, filters=filters):
-            if container.attrs['State'].get('FinishedAt', '9999') < now:
+            if container.attrs['State'].get('FinishedAt', '9999') < time_mark:
                 container.remove()
 
     def restart(self, service_name):
@@ -389,18 +389,28 @@ class KubernetesUpdateInterface:
                 status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name,
                                                             _request_timeout=API_TIMEOUT).status
 
-            self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace,
-                                                 propagation_policy='Background', _request_timeout=API_TIMEOUT)
+            try:
+                self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace,
+                                                     propagation_policy='Background', _request_timeout=API_TIMEOUT)
+            except ApiException as error:
+                if error.status != 404:
+                    raise
 
     def cleanup_stale(self):
+        # Clear up any finished jobs.
+        # This can happen when the updater was restarted while an update was running.
         labels = 'app=assemblyline,component=update-script'
         jobs = self.batch_api.list_namespaced_job(namespace=self.namespace, _request_timeout=API_TIMEOUT,
                                                   label_selector=labels)
         for job in jobs.items:
             if job.status.failed or job.status.succeeded:
-                self.batch_api.delete_namespaced_job(name=job.metadata.name, namespace=self.namespace,
-                                                     propagation_policy='Background', _request_timeout=API_TIMEOUT)
-
+                try:
+                    self.batch_api.delete_namespaced_job(name=job.metadata.name, namespace=self.namespace,
+                                                         propagation_policy='Background', _request_timeout=API_TIMEOUT)
+                except ApiException as error:
+                    if error.status != 404:
+                        raise
+        
     def restart(self, service_name):
         for _ in range(10):
             try:
