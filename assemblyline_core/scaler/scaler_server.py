@@ -330,6 +330,7 @@ class ScalerServer(CoreBase):
                 name = service.name
                 stage = self.get_service_stage(service.name)
                 discovered_services.append(name)
+                mount_updates = bool(service.update_config)
 
                 # noinspection PyBroadException
                 try:
@@ -341,7 +342,8 @@ class ScalerServer(CoreBase):
                                 service_name=service.name,
                                 container_name=_n,
                                 spec=dependency,
-                                labels={'dependency_for': service.name}
+                                labels={'dependency_for': service.name},
+                                mount_updates=mount_updates
                             )
 
                         # Move to the next service stage

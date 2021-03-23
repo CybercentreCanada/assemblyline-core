@@ -310,7 +310,7 @@ class KubernetesController(ControllerInterface):
         )]
 
     def _create_deployment(self, service_name: str, deployment_name: str, docker_config,
-                           shutdown_seconds, scale: int, labels=None, volumes=None, mounts=None):
+                           shutdown_seconds, scale: int, labels=None, volumes=None, mounts=None, mount_updates=False):
 
         replace = False
 
@@ -359,9 +359,6 @@ class KubernetesController(ControllerInterface):
                                                   _request_timeout=API_TIMEOUT)
         elif current_pull_secret:
             self.api.delete_namespaced_secret(pull_secret_name, self.namespace, _request_timeout=API_TIMEOUT)
-
-        # If an updater container then mount update-directory otherwise ignore
-        mount_updates = bool(docker_config.command)
 
         all_labels = dict(self._labels)
         all_labels['component'] = service_name
@@ -482,7 +479,7 @@ class KubernetesController(ControllerInterface):
 
         return new
 
-    def start_stateful_container(self, service_name, container_name, spec, labels):
+    def start_stateful_container(self, service_name, container_name, spec, labels, mount_updates=False):
         # Setup PVC
         deployment_name = service_name + '-' + container_name
         mounts, volumes = [], []
@@ -500,7 +497,7 @@ class KubernetesController(ControllerInterface):
             mounts.append(V1VolumeMount(mount_path=volume_spec.mount_path, name=mount_name))
 
         self._create_deployment(service_name, deployment_name, spec.container,
-                                30, 1, labels, volumes=volumes, mounts=mounts)
+                                30, 1, labels, volumes=volumes, mounts=mounts, mount_updates=mount_updates)
 
     def _ensure_pvc(self, name, storage_class, size):
         request = V1ResourceRequirements(requests={'storage': size})
