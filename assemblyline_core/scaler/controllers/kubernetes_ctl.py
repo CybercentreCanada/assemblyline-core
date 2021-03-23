@@ -369,7 +369,7 @@ class KubernetesController(ControllerInterface):
             self.api.delete_namespaced_secret(pull_secret_name, self.namespace, _request_timeout=API_TIMEOUT)
 
         # If an updater container then mount update-directory otherwise ignore
-        mount_updates = any(docker_config.command)
+        mount_updates = bool(docker_config.command)
 
         all_labels = dict(self._labels)
         all_labels['component'] = service_name
