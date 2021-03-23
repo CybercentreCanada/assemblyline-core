@@ -321,7 +321,7 @@ class DockerController(ControllerInterface):
             out.append(container.name)
         return out
 
-    def start_stateful_container(self, service_name, container_name, spec, labels):
+    def start_stateful_container(self, service_name, container_name, spec, labels, mount_updates=False):
         volumes = {_n: {'bind': _v.mount_path, 'mode': 'rw'} for _n, _v in spec.volumes.items()}
         deployment_name = f'{service_name}-dep-{container_name}'
 
