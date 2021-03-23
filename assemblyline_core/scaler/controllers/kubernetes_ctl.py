@@ -461,7 +461,8 @@ class KubernetesController(ControllerInterface):
 
     def restart(self, service):
         self._create_deployment(service.name, self._deployment_name(service.name), service.container_config,
-                                service.shutdown_seconds, self.get_target(service.name), service.mount_updates)
+                                service.shutdown_seconds, self.get_target(service.name),
+                                mount_updates=service.mount_updates)
 
     def get_running_container_names(self):
         pods = self.api.list_pod_for_all_namespaces(field_selector='status.phase==Running',

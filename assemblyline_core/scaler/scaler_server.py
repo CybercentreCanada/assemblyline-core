@@ -371,11 +371,10 @@ class ScalerServer(ThreadedCoreBase):
                                 else:
                                     profile._max_instances = service.licence_count
 
-                                if profile.container_config != docker_config or profile.config_hash != config_hash or profile.mount_updates != mount_updates:
+                                if profile.container_config != docker_config or profile.config_hash != config_hash:
                                     self.log.info(f"Updating deployment information for {name}")
                                     profile.container_config = docker_config
                                     profile.config_hash = config_hash
-                                    profile.mount_updates = mount_updates
                                     self.controller.restart(profile)
                                     self.log.info(f"Deployment information for {name} replaced")
 
