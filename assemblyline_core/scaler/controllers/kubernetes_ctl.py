@@ -164,7 +164,7 @@ class KubernetesController(ControllerInterface):
     def add_profile(self, profile):
         """Tell the controller about a service profile it needs to manage."""
         self._create_deployment(profile.name, self._deployment_name(profile.name),
-                                profile.container_config, profile.shutdown_seconds, 0)
+                                profile.container_config, profile.shutdown_seconds, 0, mount_updates=profile.mount_updates)
 
     def _monitor_system_info(self):
         while True:
@@ -262,26 +262,27 @@ class KubernetesController(ControllerInterface):
     def _create_metadata(deployment_name: str, labels: Dict[str, str]):
         return V1ObjectMeta(name=deployment_name, labels=labels)
 
-    def _create_volumes(self, service_name):
+    def _create_volumes(self, service_name, mount_updates=False):
         volumes, mounts = [], []
 
         # Attach the mount that provides the config file
         volumes.extend(self.config_volumes.values())
         mounts.extend(self.config_mounts.values())
 
-        # Attach the mount that provides the update
-        volumes.append(V1Volume(
-            name='update-directory',
-            persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
-                claim_name=FILE_UPDATE_VOLUME
-            ),
-        ))
+        if mount_updates:
+            # Attach the mount that provides the update
+            volumes.append(V1Volume(
+                name='update-directory',
+                persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
+                    claim_name=FILE_UPDATE_VOLUME
+                ),
+            ))
 
-        mounts.append(V1VolumeMount(
-            name='update-directory',
-            mount_path=CONTAINER_UPDATE_DIRECTORY,
-            sub_path=service_name
-        ))
+            mounts.append(V1VolumeMount(
+                name='update-directory',
+                mount_path=CONTAINER_UPDATE_DIRECTORY,
+                sub_path=service_name
+            ))
 
         return volumes, mounts
 
@@ -309,7 +310,7 @@ class KubernetesController(ControllerInterface):
         )]
 
     def _create_deployment(self, service_name: str, deployment_name: str, docker_config,
-                           shutdown_seconds, scale: int, labels=None, volumes=None, mounts=None):
+                           shutdown_seconds, scale: int, labels=None, volumes=None, mounts=None, mount_updates=True):
 
         replace = False
 
@@ -363,7 +364,7 @@ class KubernetesController(ControllerInterface):
         all_labels['component'] = service_name
         all_labels.update(labels or {})
 
-        all_volumes, all_mounts = self._create_volumes(service_name)
+        all_volumes, all_mounts = self._create_volumes(service_name, mount_updates)
         all_volumes.extend(volumes or [])
         all_mounts.extend(mounts or [])
         metadata = self._create_metadata(deployment_name=deployment_name, labels=all_labels)
@@ -452,7 +453,8 @@ class KubernetesController(ControllerInterface):
 
     def restart(self, service):
         self._create_deployment(service.name, self._deployment_name(service.name), service.container_config,
-                                service.shutdown_seconds, self.get_target(service.name))
+                                service.shutdown_seconds, self.get_target(service.name),
+                                mount_updates=service.mount_updates)
 
     def get_running_container_names(self):
         pods = self.api.list_pod_for_all_namespaces(field_selector='status.phase==Running',
@@ -478,7 +480,7 @@ class KubernetesController(ControllerInterface):
 
         return new
 
-    def start_stateful_container(self, service_name, container_name, spec, labels):
+    def start_stateful_container(self, service_name, container_name, spec, labels, mount_updates=False):
         # Setup PVC
         deployment_name = service_name + '-' + container_name
         mounts, volumes = [], []
@@ -496,7 +498,7 @@ class KubernetesController(ControllerInterface):
             mounts.append(V1VolumeMount(mount_path=volume_spec.mount_path, name=mount_name))
 
         self._create_deployment(service_name, deployment_name, spec.container,
-                                30, 1, labels, volumes=volumes, mounts=mounts)
+                                30, 1, labels, volumes=volumes, mounts=mounts, mount_updates=mount_updates)
 
     def _ensure_pvc(self, name, storage_class, size):
         request = V1ResourceRequirements(requests={'storage': size})
