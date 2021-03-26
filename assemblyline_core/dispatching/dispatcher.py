@@ -1,5 +1,4 @@
 import bisect
-import functools
 import uuid
 import threading
 import time
@@ -32,7 +31,7 @@ from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
-from assemblyline_core.server_base import CoreBase
+from assemblyline_core.server_base import ThreadedCoreBase
 
 from .schedules import Scheduler
 
@@ -86,7 +85,7 @@ TIMEOUT_TEST_INTERVAL = 5
 SUBMISSION_TOTAL_TIMEOUT = 60 * 20
 
 
-class Dispatcher(CoreBase):
+class Dispatcher(ThreadedCoreBase):
     @staticmethod
     def all_instances(persistent_redis):
         return Hash(DISPATCH_DIRECTORY, host=persistent_redis).keys()
@@ -152,10 +151,6 @@ class Dispatcher(CoreBase):
             self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
                                                 service_name="dispatcher")
 
-        # Thread events related to exiting
-        self.stopping = threading.Event()
-        self.main_loop_exit = threading.Event()
-
         self.timeout_list_lock = threading.Lock()
         self.timeout_list: List[Tuple[int, str, str, str]] = []
 
@@ -167,67 +162,23 @@ class Dispatcher(CoreBase):
         with self._tasks_lock:
             return self._tasks.get(sid)
 
-    def stop(self):
-        super().stop()
-        self.stopping.set()
-
-    def sleep(self, timeout):
-        self.stopping.wait(timeout)
-        return self.running
-
-    def log_crashes(self, fn):
-        @functools.wraps(fn)
-        def with_logs(*args, **kwargs):
-            # noinspection PyBroadException
-            try:
-                fn(*args, **kwargs)
-            except Exception:
-                self.log.exception(f'Crash in dispatcher: {fn.__name__}')
-        return with_logs
-
     def try_run(self):
         self.log.info(f'Using dispatcher id {self.instance_id}')
-
-        expected_threads = {
+        self.maintain_threads({
             # Pull in new submissions
-            'Pull Submissions': self.log_crashes(self.pull_submissions),
+            'Pull Submissions': self.pull_submissions,
             # Handle start messages
-            'Service Start': self.log_crashes(self.handle_service_starts),
+            'Service Start': self.handle_service_starts,
             # Process results
-            'Service Results': self.log_crashes(self.handle_service_results),
+            'Service Results': self.handle_service_results,
             # Handle timeouts
-            'Process Timeouts': self.log_crashes(self.handle_timeouts),
+            'Process Timeouts': self.handle_timeouts,
             # Work guard/thief
-            'Guard Work': self.log_crashes(self.work_guard),
-            'Work Thief': self.log_crashes(self.work_thief),
+            'Guard Work': self.work_guard,
+            'Work Thief': self.work_thief,
             # Handle RPC commands
-            'Commands': self.log_crashes(self.handle_commands),
-        }
-        threads = {}
-
-        # Run as long as we need to
-        while self.running:
-            # Check for any crashed threads
-            for name, thread in list(threads.items()):
-                if not thread.is_alive():
-                    self.log.warning(f'Restarting thread: {name}')
-                    threads.pop(name)
-
-            # Start any missing threads
-            for name, function in expected_threads.items():
-                if name not in threads:
-                    self.log.info(f'Starting thread: {name}')
-                    threads[name] = thread = threading.Thread(target=function, name=name)
-                    thread.start()
-
-            # Take a break before doing it again
-            super().heartbeat()
-            self.sleep(2)
-
-        for _t in threads.values():
-            _t.join()
-
-        self.main_loop_exit.set()
+            'Commands': self.handle_commands,
+        })
 
     def pull_submissions(self):
         queue = self.submission_queue

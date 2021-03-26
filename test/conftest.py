@@ -82,6 +82,15 @@ def redis_connection():
     return pytest.skip("Connection to the Redis server failed. This test cannot be performed...")
 
 
+@pytest.fixture
+def clean_redis(redis_connection):
+    try:
+        redis_connection.flushdb()
+        yield redis_connection
+    finally:
+        redis_connection.flushdb()
+
+
 @pytest.fixture(scope='module')
 def filestore(config):
     try:
