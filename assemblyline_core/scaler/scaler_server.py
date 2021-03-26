@@ -85,7 +85,8 @@ class ServiceProfile:
     This includes how the service should be run, and conditions related to the scaling of the service.
     """
     def __init__(self, name, container_config: DockerConfig, config_hash=0, min_instances=0, max_instances=None,
-                 growth: float = 600, shrink: Optional[float] = None, backlog=500, queue=None, shutdown_seconds=30):
+                 growth: float = 600, shrink: Optional[float] = None, backlog=500, queue=None, shutdown_seconds=30,
+                 mount_updates=True):
         """
         :param name: Name of the service to manage
         :param container_config: Instructions on how to start this service
@@ -102,6 +103,7 @@ class ServiceProfile:
         self.target_duty_cycle = 0.9
         self.shutdown_seconds = shutdown_seconds
         self.config_hash = config_hash
+        self.mount_updates = mount_updates
 
         # How many instances we want, and can have
         self.min_instances = self._min_instances = max(0, int(min_instances))
@@ -187,6 +189,7 @@ class ServiceProfile:
             shrink=self.shrink_threshold,
             backlog=self.backlog,
             shutdown_seconds=self.shutdown_seconds,
+            mount_updates=self.mount_updates
         )
         prof.desired_instances = self.desired_instances
         prof.running_instances = self.running_instances
@@ -299,6 +302,7 @@ class ScalerServer(ThreadedCoreBase):
                 name = service.name
                 stage = self.get_service_stage(service.name)
                 discovered_services.append(name)
+                mount_updates = bool(service.update_config)
 
                 # noinspection PyBroadException
                 try:
@@ -310,7 +314,8 @@ class ScalerServer(ThreadedCoreBase):
                                 service_name=service.name,
                                 container_name=_n,
                                 spec=dependency,
-                                labels={'dependency_for': service.name}
+                                labels={'dependency_for': service.name},
+                                mount_updates=mount_updates
                             )
 
                         # Move to the next service stage
@@ -355,12 +360,12 @@ class ScalerServer(ThreadedCoreBase):
                                     queue=get_service_queue(name, self.redis),
                                     # Give service an extra 30 seconds to upload results
                                     shutdown_seconds=service.timeout + 30,
+                                    mount_updates=mount_updates
                                 ))
 
                             # Update RAM, CPU, licence requirements for running services
                             else:
                                 profile = self.profiles[name]
-
                                 if service.licence_count == 0:
                                     profile._max_instances = float('inf')
                                 else:

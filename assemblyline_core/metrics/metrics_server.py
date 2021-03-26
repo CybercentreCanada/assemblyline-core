@@ -8,14 +8,16 @@ from threading import Lock
 
 import elasticapm
 import elasticsearch
-from apscheduler.schedulers.background import BackgroundScheduler
 
+from apscheduler.schedulers.background import BackgroundScheduler
 from assemblyline_core.metrics.heartbeat_formatter import HeartbeatFormatter
 from assemblyline_core.metrics.helper import ensure_indexes, with_retries
 from assemblyline_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common import forge
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
+from packaging import version
+
 
 METRICS_QUEUE = "assemblyline_metrics"
 NON_AGGREGATED = ['scaler', 'scaler_status']
@@ -120,6 +122,7 @@ class MetricsServer(ServerBase):
         super().__init__('assemblyline.metrics_aggregator', shutdown_timeout=65)
         self.config = config or forge.get_config()
         self.elastic_hosts = self.config.core.metrics.elasticsearch.hosts
+        self.is_datastream = False
 
         if not self.elastic_hosts:
             self.log.error("No elasticsearch cluster defined to store metrics. All gathered stats will be ignored...")
@@ -151,6 +154,8 @@ class MetricsServer(ServerBase):
         self.es = elasticsearch.Elasticsearch(hosts=self.elastic_hosts,
                                               connection_class=elasticsearch.RequestsHttpConnection,
                                               ca_certs=ca_certs)
+        # Determine if ES will support data streams (>= 7.9)
+        self.is_datastream = version.parse(self.es.info()['version']['number']) >= version.parse("7.9")
 
         self.scheduler.add_job(self._create_aggregated_metrics, 'interval', seconds=60)
         self.scheduler.start()
@@ -213,12 +218,22 @@ class MetricsServer(ServerBase):
                 else:
                     output_metrics[key] = value
 
+            ensure_indexes(self.log, self.es, self.config.core.metrics.elasticsearch, [component_type],
+                           datastream_enabled=self.is_datastream)
+
+            index = f"al_metrics_{component_type}"
+            # Were data streams created for the index specified?
+            try:
+                if self.es.indices.get_index_template(name=f"{index}_ds"):
+                    output_metrics['@timestamp'] = timestamp
+                    index = f"{index}_ds"
+            except elasticsearch.exceptions.TransportError:
+                pass
             output_metrics['timestamp'] = timestamp
             output_metrics = cleanup_metrics(output_metrics)
 
             self.log.info(output_metrics)
-            ensure_indexes(self.log, self.es, self.config.core.metrics.elasticsearch, [component_type])
-            with_retries(self.log, self.es.index, index=f"al_metrics_{component_type}", body=output_metrics)
+            with_retries(self.log, self.es.index, index=index, body=output_metrics)
 
         self.log.info("Metrics aggregated. Waiting for next run...")
 
