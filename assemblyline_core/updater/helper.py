@@ -11,7 +11,7 @@ from packaging.version import parse
 DEFAULT_DOCKER_REGISTRY = "registry.hub.docker.com"
 
 
-def _get_proprietary_registry_tags(server, image_name, auth):
+def _get_proprietary_registry_tags(server, image_name, auth, verify):
     # Find latest tag for each types
     url = f"https://{server}/v2/{image_name}/tags/list"
 
@@ -19,7 +19,7 @@ def _get_proprietary_registry_tags(server, image_name, auth):
     headers = {}
     if auth:
         headers["Authorization"] = auth
-    resp = requests.get(url, headers=headers)
+    resp = requests.get(url, headers=headers, verify=verify)
 
     # Test for valid response
     if resp.ok:
@@ -90,7 +90,7 @@ def get_latest_tag_for_service(service_config, system_config, logger):
     if server == DEFAULT_DOCKER_REGISTRY:
         tags = _get_dockerhub_tags(image_name, update_channel)
     else:
-        tags = _get_proprietary_registry_tags(server, image_name, auth)
+        tags = _get_proprietary_registry_tags(server, image_name, auth, not system_config.services.allow_insecure_registry)
 
     tag_name = None
     if not tags:
