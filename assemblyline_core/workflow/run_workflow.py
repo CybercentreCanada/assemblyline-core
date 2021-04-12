@@ -137,7 +137,7 @@ class WorkflowManager(ServerBase):
                         fq_items.append("priority:*")
                     if status:
                         operations.append((self.datastore.alert.UPDATE_SET, 'status', status))
-                        fq_items.append("status:*")
+                        fq_items.append("(status:MALICIOUS OR status:NON-MALICIOUS OR status:ASSESS)")
 
                     fq.append("NOT ({exclusion})".format(exclusion=" AND ".join(fq_items)))
 
