@@ -623,31 +623,56 @@ class Dispatcher(ThreadedCoreBase):
         queue = self.result_queue
         cpu_mark = time.process_time()
         time_mark = time.time()
+        message_buffer: Dict[str, List] = defaultdict(list)
 
-        while self.running:
-            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
-            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+        try:
+            while self.running:
+                self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+                self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
-            message = queue.pop(timeout=1)
+                message = queue.pop(timeout=1)
 
-            cpu_mark = time.process_time()
-            time_mark = time.time()
+                cpu_mark = time.process_time()
+                time_mark = time.time()
 
-            if not message:
-                continue
+                if not message:
+                    continue
 
-            sid = message['service_task']['sid']
-            task = self.get_task(sid)
-            if not task:
-                self.log.warning(f'[{sid}] Result returned for finished task.')
-                continue
+                # Collect messages binned by sid
+                sid = message['service_task']['sid']
+                message_buffer[sid].append(message)
 
-            with task.lock:
-                if 'result' in message:
-                    self.process_service_result(task, message['result_key'],
-                                                Result(message['result']), message['temporary_data'])
-                elif 'error' in message:
-                    self.process_service_error(task, message['error_key'], Error(message['error']))
+                # Every time we get a message try each bin, skipping on if we get stuck waiting for the lock
+                for sid in list(message_buffer.keys()):
+                    # Get the task and lock for the bin we are looking at
+                    task = self.get_task(sid)
+                    if not task:
+                        self.log.warning(f'[{sid}] Result returned for finished task.')
+                        message_buffer.pop(sid, None)
+                        continue
+                    task.lock.acquire(blocking=False)
+
+                    # If we have managed to get the lock process the messages for this sid
+                    if task.lock.locked():
+                        try:
+                            while message_buffer[sid]:
+                                message = message_buffer[sid].pop()
+                                if 'result' in message:
+                                    self.process_service_result(task, message['result_key'],
+                                                                Result(message['result']), message['temporary_data'])
+                                elif 'error' in message:
+                                    self.process_service_error(task, message['error_key'], Error(message['error']))
+                            message_buffer.pop(sid)
+                        finally:
+                            task.lock.release()
+        except Exception:
+            # If one of the messages caused this loop to crash, 'save' the
+            # messages by pushing them back into the queue, only the currently
+            # active message should be dropped this way
+            for messages in message_buffer.values():
+                for message in messages:
+                    queue.push(message)
+            raise
 
     def process_service_result(self, task: SubmissionTask, result_key, result, temporary_data):
         submission: Submission = task.submission
