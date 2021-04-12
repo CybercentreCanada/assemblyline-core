@@ -107,7 +107,7 @@ class DockerController(ControllerInterface):
             self.client.containers.prune()
             self.client.volumes.prune()
 
-    def add_profile(self, profile):
+    def add_profile(self, profile, scale=0):
         """Tell the controller about a service profile it needs to manage."""
         self._pull_image(profile)
         self._profiles[profile.name] = profile

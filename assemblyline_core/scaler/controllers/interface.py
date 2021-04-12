@@ -12,7 +12,7 @@ class ServiceControlError(RuntimeError):
 
 
 class ControllerInterface:
-    def add_profile(self, profile):
+    def add_profile(self, profile, scale=0):
         """Tell the controller about a service profile it needs to manage."""
         raise NotImplementedError()
 
