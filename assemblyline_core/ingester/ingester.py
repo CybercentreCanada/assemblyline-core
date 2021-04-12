@@ -303,7 +303,7 @@ class Ingester(ThreadedCoreBase):
                     time_mark, cpu_mark = time.time(), time.process_time()
                     continue
 
-                raw = self.unique_queue.pop()
+                raw = self.unique_queue.blocking_pop(timeout=3)
                 time_mark, cpu_mark = time.time(), time.process_time()
                 if not raw:
                     continue
