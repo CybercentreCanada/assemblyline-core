@@ -77,6 +77,7 @@ QUEUE_EXPIRY = 60*60
 GUARD_TIMEOUT = 60*2
 TIMEOUT_EXTRA_TIME = 30  # 30 seconds grace for message handling.
 TIMEOUT_TEST_INTERVAL = 5
+MAX_RESULT_BUFFER = 32
 
 # After 20 minutes, check if a submission is still making progress.
 # In the case of a crash somewhere else in the system, we may not have
@@ -650,10 +651,10 @@ class Dispatcher(ThreadedCoreBase):
                         self.log.warning(f'[{sid}] Result returned for finished task.')
                         message_buffer.pop(sid, None)
                         continue
-                    task.lock.acquire(blocking=False)
+                    acquired = task.lock.acquire(blocking=sum(map(len, message_buffer.values())) >= MAX_RESULT_BUFFER)
 
                     # If we have managed to get the lock process the messages for this sid
-                    if task.lock.locked():
+                    if acquired:
                         try:
                             while message_buffer[sid]:
                                 message = message_buffer[sid].pop()
