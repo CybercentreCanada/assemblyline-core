@@ -193,6 +193,8 @@ class Dispatcher(ThreadedCoreBase):
             max_tasks = self.config.core.dispatcher.max_inflight / self.running_dispatchers_estimate
             if self.active_submissions.length() >= max_tasks:
                 self.sleep(1)
+                cpu_mark = time.process_time()
+                time_mark = time.time()
                 continue
 
             message = queue.pop(timeout=1)
