@@ -177,6 +177,7 @@ class MetricsCounter:
                 self.data[key] = shortened
             else:
                 del self.data[key]
+        self.channel.close()
 
         print("Metrics During Test")
         for key, value in self.data.items():
@@ -184,7 +185,7 @@ class MetricsCounter:
 
     def expect(self, channel, name, value):
         start_time = time.time()
-        while time.time() - start_time < 10:
+        while time.time() - start_time < RESPONSE_TIMEOUT:
             if channel in self.data:
                 if self.data[channel].get(name, 0) >= value:
                     # self.data[channel][name] -= value
