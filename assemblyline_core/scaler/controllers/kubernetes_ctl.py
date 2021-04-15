@@ -170,10 +170,10 @@ class KubernetesController(ControllerInterface):
             sub_path=key
         )
 
-    def add_profile(self, profile):
+    def add_profile(self, profile, scale=0):
         """Tell the controller about a service profile it needs to manage."""
         self._create_deployment(profile.name, self._deployment_name(profile.name),
-                                profile.container_config, profile.shutdown_seconds, 0, mount_updates=profile.mount_updates)
+                                profile.container_config, profile.shutdown_seconds, scale, mount_updates=profile.mount_updates)
 
     def _monitor_system_info(self):
         while True:
@@ -330,6 +330,7 @@ class KubernetesController(ControllerInterface):
         for dep in resources.items:
             if dep.metadata.name == deployment_name:
                 replace = True
+                break
 
         # If we have been given a username or password for the registry, we have to
         # update it, if we haven't been, make sure its been cleaned up in the system

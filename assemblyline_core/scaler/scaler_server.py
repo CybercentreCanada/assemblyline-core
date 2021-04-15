@@ -271,7 +271,7 @@ class ScalerServer(ThreadedCoreBase):
             self.log.debug(f'Starting service {profile.name} with a target of {profile.desired_instances}')
             profile.last_update = time.time()
             self.profiles[profile.name] = profile
-            self.controller.add_profile(profile)
+            self.controller.add_profile(profile, scale=profile.desired_instances)
 
     def try_run(self):
         self.maintain_threads({
