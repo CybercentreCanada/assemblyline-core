@@ -1,5 +1,6 @@
 import bisect
 import uuid
+import os
 import threading
 import queue
 import time
@@ -81,6 +82,7 @@ GUARD_TIMEOUT = 60*2
 TIMEOUT_EXTRA_TIME = 30  # 30 seconds grace for message handling.
 TIMEOUT_TEST_INTERVAL = 5
 MAX_RESULT_BUFFER = 32
+RESULT_THREADS = max(1, int(os.getenv('DISPATCHER_RESULT_THREADS', '2')))
 
 # After 20 minutes, check if a submission is still making progress.
 # In the case of a crash somewhere else in the system, we may not have
@@ -191,13 +193,11 @@ class Dispatcher(ThreadedCoreBase):
 
     def try_run(self):
         self.log.info(f'Using dispatcher id {self.instance_id}')
-        self.maintain_threads({
+        threads = {
             # Pull in new submissions
             'Pull Submissions': self.pull_submissions,
             # Handle start messages
             'Service Start': self.handle_service_starts,
-            # Process results
-            'Service Results': self.handle_service_results,
             # Handle timeouts
             'Process Timeouts': self.handle_timeouts,
             # Work guard/thief
@@ -205,7 +205,12 @@ class Dispatcher(ThreadedCoreBase):
             'Work Thief': self.work_thief,
             # Handle RPC commands
             'Commands': self.handle_commands,
-        })
+        }
+        for ii in range(RESULT_THREADS):
+            # Process results
+            threads[f'Service Results #{ii}'] = self.handle_service_results
+
+        self.maintain_threads(threads)
 
         # If the dispatcher is exiting cleanly remove as many tasks from the service queues as we can
         service_queues = {}
