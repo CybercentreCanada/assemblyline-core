@@ -181,6 +181,17 @@ class Dispatcher(ThreadedCoreBase):
             'Commands': self.handle_commands,
         })
 
+        # If the dispatcher is exiting cleanly remove as many tasks from the service queues as we can
+        service_queues = {}
+        for task in self._tasks.values():
+            for (sha256, service_name), dispatch_key in task.queue_keys.items():
+                try:
+                    queue = service_queues[service_name]
+                except KeyError:
+                    queue = get_service_queue(service_name, self.redis)
+                    service_queues[service_name] = queue
+                queue.remove(dispatch_key)
+
     def pull_submissions(self):
         queue = self.submission_queue
         cpu_mark = time.process_time()
