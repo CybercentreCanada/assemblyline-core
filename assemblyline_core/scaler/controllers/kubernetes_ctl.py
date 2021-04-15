@@ -99,7 +99,7 @@ def parse_cpu(string):
 
 
 class KubernetesController(ControllerInterface):
-    def __init__(self, logger, namespace, prefix, priority, labels=None, log_level="INFO"):
+    def __init__(self, logger, namespace, prefix, priority, cpu_reservation, labels=None, log_level="INFO"):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
         try:
@@ -122,6 +122,7 @@ class KubernetesController(ControllerInterface):
 
         self.prefix = prefix.lower()
         self.priority = priority
+        self.cpu_reservation = max(0.0, min(cpu_reservation, 1.0))
         self.logger = logger
         self.log_level = log_level
         self._labels = labels
@@ -313,7 +314,7 @@ class KubernetesController(ControllerInterface):
             volume_mounts=mounts,
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
-                requests={'cpu': cores/4, 'memory': f'{min_memory}Mi'},
+                requests={'cpu': cores*self.cpu_reservation, 'memory': f'{min_memory}Mi'},
             )
         )]
 
