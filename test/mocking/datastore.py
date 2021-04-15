@@ -66,6 +66,9 @@ class MockDatastore:
             assert name in self.__collection_names
         self._collections[name] = MockCollection(schema)
 
+    def list_all_services(self, full=False):
+        return {}
+
     def __getattr__(self, name):
         if self.__collection_names:
             assert name in self.__collection_names
