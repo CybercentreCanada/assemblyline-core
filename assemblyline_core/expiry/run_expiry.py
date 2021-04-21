@@ -83,7 +83,7 @@ class ExpiryManager(ServerBase):
             self.log.info(f"Processing collection: {collection.name}")
             if number_to_delete != 0:
                 if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
-                    with elasticapm.capture_span(name=f'FILESTORE [ThreadPoolExecutor] :: delete()',
+                    with elasticapm.capture_span(name='FILESTORE [ThreadPoolExecutor] :: delete()',
                                                  labels={"num_files": number_to_delete,
                                                          "query": delete_query}):
                         # Delete associated files
