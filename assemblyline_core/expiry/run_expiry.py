@@ -96,7 +96,7 @@ class ExpiryManager(ServerBase):
                                       f'{"cachestore" if "cache" in collection.name else "filestore"}...')
 
                 # Proceed with deletion
-                collection.delete_matching(delete_query, workers=self.config.core.expiry.workers)
+                collection.delete_by_query(delete_query, workers=self.config.core.expiry.workers)
                 self.counter.increment(f'{collection.name}', increment_by=number_to_delete)
 
                 self.log.info(f"    Deleted {number_to_delete} items from the datastore...")
