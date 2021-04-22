@@ -384,12 +384,12 @@ class KubernetesUpdateInterface:
                                                       _request_timeout=API_TIMEOUT).status
 
         if blocking:
-            while not (status.failed or status.succeeded):
-                time.sleep(3)
-                status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name,
-                                                            _request_timeout=API_TIMEOUT).status
-
             try:
+                while not (status.failed or status.succeeded):
+                    time.sleep(3)
+                    status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name,
+                                                                _request_timeout=API_TIMEOUT).status
+
                 self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace,
                                                      propagation_policy='Background', _request_timeout=API_TIMEOUT)
             except ApiException as error:
