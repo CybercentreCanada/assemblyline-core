@@ -5,6 +5,7 @@ import threading
 import queue
 import time
 from collections import defaultdict
+from contextlib import contextmanager
 from typing import Dict, List, Tuple, Set, Optional
 import json
 
@@ -36,6 +37,20 @@ from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
 from assemblyline_core.server_base import ThreadedCoreBase
 
 from .schedules import Scheduler
+
+
+@contextmanager
+def apm_span(client, span_type: str, span_name: str):
+    try:
+        if client:
+            client.begin_transaction(span_type)
+        yield None
+        if client:
+            client.end_transaction(span_name, 'success')
+    except Exception:
+        if client:
+            client.end_transaction(span_name, 'exception')
+        raise
 
 
 class ResultSummary:
@@ -165,6 +180,7 @@ class Dispatcher(ThreadedCoreBase):
         self.timeout_list_lock = threading.Lock()
         self.timeout_list: List[Tuple[int, str, str, str]] = []
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def get_service_version(self, service_name: str) -> Tuple[Optional[str], Optional[str]]:
         # Try to load a cached value if we can
         if service_name in self._service_versions:
@@ -248,10 +264,7 @@ class Dispatcher(ThreadedCoreBase):
                 continue
 
             # Start of process dispatcher transaction
-            if self.apm_client:
-                self.apm_client.begin_transaction('Process dispatcher message')
-
-            try:
+            with apm_span(self.apm_client, 'Process submission message', 'submission_message'):
                 # This is probably a complete task
                 task = SubmissionTask(**message)
                 if self.apm_client:
@@ -260,14 +273,7 @@ class Dispatcher(ThreadedCoreBase):
                 with task.lock:
                     self.dispatch_submission(task)
 
-                # End of process dispatcher transaction (success)
-                if self.apm_client:
-                    self.apm_client.end_transaction('submission_message', 'success')
-            except Exception:
-                if self.apm_client:
-                    self.apm_client.end_transaction('submission_message', 'exception')
-                raise
-
+    @elasticapm.capture_span(span_type='dispatcher')
     def dispatch_submission(self, task: SubmissionTask):
         """
         Find any files associated with a submission and dispatch them if they are
@@ -319,6 +325,7 @@ class Dispatcher(ThreadedCoreBase):
         task.file_names[submission.files[0].sha256] = submission.files[0].name or submission.files[0].sha256
         self.dispatch_file(task, submission.files[0].sha256)
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def dispatch_file(self, task: SubmissionTask, sha256: str) -> bool:
         """
         Dispatch to any outstanding services for the given file.
@@ -461,6 +468,7 @@ class Dispatcher(ThreadedCoreBase):
                 return self.check_submission(task)
         return False
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def check_result_cache(self, task: SubmissionTask, service_task: ServiceTask) -> bool:
         # Check if caching is disabled for this task/service
         service_data = self.service_info.get(service_task.service_name, None)
@@ -516,6 +524,7 @@ class Dispatcher(ThreadedCoreBase):
             if stats:
                 export_metrics_once(service_task.service_name, ServiceMetrics, stats, counter_type='service')
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def check_submission(self, task: SubmissionTask) -> bool:
         """
         Check if a submission is finished.
@@ -627,6 +636,7 @@ class Dispatcher(ThreadedCoreBase):
             params.update(submission.params.service_spec[service.name])
         return params
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def finalize_submission(self, task: SubmissionTask, max_score, file_list):
         """All of the services for all of the files in this submission have finished or failed.
 
@@ -756,29 +766,30 @@ class Dispatcher(ThreadedCoreBase):
                 if not message_buffer:
                     continue
 
-                # Every time we get a message try each bin, skipping on if we get stuck waiting for the lock
-                for sid in list(message_buffer.keys()):
-                    # Get the task and lock for the bin we are looking at
-                    task = self.get_task(sid)
-                    if not task:
-                        self.log.warning(f'[{sid}] Result returned for finished task.')
-                        message_buffer.pop(sid, None)
-                        continue
-                    acquired = task.lock.acquire(blocking=sum(map(len, message_buffer.values())) >= MAX_RESULT_BUFFER)
+                with apm_span(self.apm_client, "Process Dispatcher Results", "dispatcher_results"):
+                    # Every time we get a message try each bin, skipping on if we get stuck waiting for the lock
+                    for sid in list(message_buffer.keys()):
+                        # Get the task and lock for the bin we are looking at
+                        task = self.get_task(sid)
+                        if not task:
+                            self.log.warning(f'[{sid}] Result returned for finished task.')
+                            message_buffer.pop(sid, None)
+                            continue
+                        acquired = task.lock.acquire(blocking=sum(map(len, message_buffer.values())) >= MAX_RESULT_BUFFER)
 
-                    # If we have managed to get the lock process the messages for this sid
-                    if acquired:
-                        try:
-                            while message_buffer[sid]:
-                                message = message_buffer[sid].pop()
-                                if 'result' in message:
-                                    self.process_service_result(task, message['result_key'],
-                                                                Result(message['result']), message['temporary_data'])
-                                elif 'error' in message:
-                                    self.process_service_error(task, message['error_key'], Error(message['error']))
-                            message_buffer.pop(sid)
-                        finally:
-                            task.lock.release()
+                        # If we have managed to get the lock process the messages for this sid
+                        if acquired:
+                            try:
+                                while message_buffer[sid]:
+                                    message = message_buffer[sid].pop()
+                                    if 'result' in message:
+                                        self.process_service_result(task, message['result_key'],
+                                                                    Result(message['result']), message['temporary_data'])
+                                    elif 'error' in message:
+                                        self.process_service_error(task, message['error_key'], Error(message['error']))
+                                message_buffer.pop(sid)
+                            finally:
+                                task.lock.release()
         except Exception:
             # If one of the messages caused this loop to crash, 'save' the
             # messages by pushing them back into the queue, only the currently
@@ -788,6 +799,7 @@ class Dispatcher(ThreadedCoreBase):
                     queue.push(message)
             raise
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def process_service_result(self, task: SubmissionTask, result_key, result, temporary_data):
         submission: Submission = task.submission
         sid = submission.sid
@@ -899,6 +911,7 @@ class Dispatcher(ThreadedCoreBase):
         for w in self._watcher_list(task.submission.sid).members():
             NamedQueue(w).push(msg)
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def process_service_error(self, task: SubmissionTask, error_key, error):
         self.log.info(f'[{task.submission.sid}] Error from service {error.response.service_name} on {error.sha256}')
         self.clear_timeout(task, error.sha256, error.response.service_name)
@@ -923,20 +936,22 @@ class Dispatcher(ThreadedCoreBase):
             if not message:
                 continue
 
-            sid, sha256, service_name, worker_id = message
-            task = self.get_task(sid)
-            if not task:
-                self.log.warning(f'[{sid}] Service started for finished task.')
-                continue
+            with apm_span(self.apm_client, 'Process service start message', 'service_start_message'):
 
-            with task.lock:
-                key = sha256, service_name
-                if task.queue_keys.pop(key, None) is not None:
-                    # If this task is already finished (result message processed before start
-                    # message) we can skip setting a timeout
-                    if key in task.service_errors or key in task.service_results:
-                        continue
-                    self.set_timeout(task, sha256, service_name, worker_id)
+                sid, sha256, service_name, worker_id = message
+                task = self.get_task(sid)
+                if not task:
+                    self.log.warning(f'[{sid}] Service started for finished task.')
+                    continue
+
+                with task.lock:
+                    key = sha256, service_name
+                    if task.queue_keys.pop(key, None) is not None:
+                        # If this task is already finished (result message processed before start
+                        # message) we can skip setting a timeout
+                        if key in task.service_errors or key in task.service_results:
+                            continue
+                        self.set_timeout(task, sha256, service_name, worker_id)
 
     def set_submission_timeout(self, task: SubmissionTask):
         sid = task.submission.sid
@@ -979,39 +994,40 @@ class Dispatcher(ThreadedCoreBase):
                 self.timeout_list.pop(index)
 
     def handle_timeouts(self):
-        while self.running:
-            cpu_mark = time.process_time()
-            time_mark = time.time()
+        while self.sleep(TIMEOUT_TEST_INTERVAL):
+            with apm_span(self.apm_client, 'process_timeouts', 'process_timeouts'):
+                cpu_mark = time.process_time()
+                time_mark = time.time()
 
-            timeouts = []
-            with self.timeout_list_lock:
-                while self.timeout_list and self.timeout_list[0][0] < time_mark:
-                    timeouts.append(self.timeout_list.pop(0))
+                timeouts = []
+                with self.timeout_list_lock:
+                    while self.timeout_list and self.timeout_list[0][0] < time_mark:
+                        timeouts.append(self.timeout_list.pop(0))
 
-            service_timeouts = 0
-            for _, sid, sha, service_name in timeouts:
-                task = self.get_task(sid)
-                if not task:
-                    self.log.warning(f'[{sid}] timeout on finished task.')
-                    continue
-                with task.lock:
-                    if sha and service_name:
-                        service_timeouts += 1
-                        self.timeout_service(task, sha, service_name)
-                    else:
-                        self.log.info(f'[{sid}] submission timeout, checking dispatch status...')
-                        self.check_submission(task)
+                service_timeouts = 0
+                for _, sid, sha, service_name in timeouts:
+                    task = self.get_task(sid)
+                    if not task:
+                        self.log.warning(f'[{sid}] timeout on finished task.')
+                        continue
+                    with task.lock:
+                        if sha and service_name:
+                            service_timeouts += 1
+                            self.timeout_service(task, sha, service_name)
+                        else:
+                            self.log.info(f'[{sid}] submission timeout, checking dispatch status...')
+                            self.check_submission(task)
 
-                        # If we didn't finish the submission here, wait another 20 minutes
-                        task = self.get_task(sid)
-                        if task is not None:
-                            self.set_submission_timeout(task)
+                            # If we didn't finish the submission here, wait another 20 minutes
+                            task = self.get_task(sid)
+                            if task is not None:
+                                self.set_submission_timeout(task)
 
-            self.counter.increment('service_timeouts', service_timeouts)
-            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
-            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
-            self.sleep(TIMEOUT_TEST_INTERVAL)
+                self.counter.increment('service_timeouts', service_timeouts)
+                self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+                self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def timeout_service(self, task: SubmissionTask, sha256, service_name):
         # We believe a service task has timed out, try and read it from running tasks
         # If we can't find the task in running tasks, it finished JUST before timing out, let it go
@@ -1173,22 +1189,22 @@ class Dispatcher(ThreadedCoreBase):
             time_mark = time.time()
 
             # Start of process dispatcher transaction
-            if self.apm_client:
-                self.apm_client.begin_transaction('Process dispatcher message')
+            with apm_span(self.apm_client, 'Process command message', 'command_message'):
 
-            command = DispatcherCommandMessage(message)
-            if command.kind == CREATE_WATCH:
-                payload: CreateWatch = command.payload()
-                self.setup_watch_queue(payload.submission, payload.queue_name)
-            elif command.kind == LIST_OUTSTANDING:
-                payload: ListOutstanding = command.payload()
-                self.list_outstanding(payload.submission, payload.response_queue)
-            else:
-                self.log.warning(f"Unknown command code: {command.kind}")
+                command = DispatcherCommandMessage(message)
+                if command.kind == CREATE_WATCH:
+                    payload: CreateWatch = command.payload()
+                    self.setup_watch_queue(payload.submission, payload.queue_name)
+                elif command.kind == LIST_OUTSTANDING:
+                    payload: ListOutstanding = command.payload()
+                    self.list_outstanding(payload.submission, payload.response_queue)
+                else:
+                    self.log.warning(f"Unknown command code: {command.kind}")
 
-            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
-            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+                self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+                self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def setup_watch_queue(self, sid, queue_name):
         # Create a unique queue
         watch_queue = NamedQueue(queue_name, ttl=30)
@@ -1211,6 +1227,7 @@ class Dispatcher(ThreadedCoreBase):
             for error_key in task.service_errors.values():
                 watch_queue.push(WatchQueueMessage({"status": "FAIL", "cache_key": error_key}).as_primitives())
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def list_outstanding(self, sid: str, queue_name: str):
         response_queue = NamedQueue(queue_name, host=self.redis)
         outstanding = defaultdict(int)
