@@ -1067,16 +1067,13 @@ class Dispatcher(ThreadedCoreBase):
         task_key = ServiceTask.make_key(sid=sid, service_name=service_name, sha=sha256)
         service_task = self.running_tasks.pop(task_key)
         if not service_task:
-            self.log.warning(f"[{sid}] Service {service_task.service_name} "
-                             f"timed out on {service_task.fileinfo.sha256} but task isn't running.")
-            return
+            self.log.warning(f"[{sid}] Service {service_name} "
+                             f"timed out on {sha256} but task isn't running.")
 
         # We can confirm that the task is ours now, even if the worker finished, the result will be ignored
-        service_task = ServiceTask(service_task)
-        _, worker_id = task.running_services.pop((sha256, service_name))
-        self.log.info(f"[{service_task.sid}] Service {service_task.service_name} "
-                      f"running on {worker_id} timed out on {service_task.fileinfo.sha256}.")
-
+        _, worker_id = task.running_services.pop((sha256, service_name), (None, None))
+        self.log.info(f"[{sid}] Service {service_name} "
+                      f"running on {worker_id} timed out on {sha256}.")
         self.dispatch_file(task, sha256)
 
         # We push the task of killing the container off on the scaler, which already has root access
@@ -1084,12 +1081,12 @@ class Dispatcher(ThreadedCoreBase):
         # we aren't accidentally killing the wrong container
         if worker_id is not None:
             self.scaler_timeout_queue.push({
-                'service': service_task.service_name,
+                'service': service_name,
                 'container': worker_id
             })
 
             # Report to the metrics system that a recoverable error has occurred for that service
-            export_metrics_once(service_task.service_name, ServiceMetrics, dict(fail_recoverable=1),
+            export_metrics_once(service_name, ServiceMetrics, dict(fail_recoverable=1),
                                 host=worker_id, counter_type='service')
 
     def work_guard(self):
