@@ -86,6 +86,10 @@ class SubmissionTask:
         self.queue_keys: Dict[Tuple[str, str], bytes] = {}
         self.running_services: Dict[Tuple[str, str], Tuple[int, str]] = {}
 
+    @property
+    def sid(self):
+        return self.submission.sid
+
 
 DISPATCH_TASK_ASSIGNMENT = 'dispatcher-tasks-assigned-to-'
 DISPATCH_START_EVENTS = 'dispatcher-start-events-'
@@ -167,7 +171,6 @@ class Dispatcher(ThreadedCoreBase):
         # Communications queues
         self.start_queue = NamedQueue(DISPATCH_START_EVENTS+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
         self.result_queue = NamedQueue(DISPATCH_RESULT_QUEUE+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
-        self.internal_result_queue = queue.Queue()
         self.command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
 
         # Publish counters to the metrics sink.
@@ -182,6 +185,15 @@ class Dispatcher(ThreadedCoreBase):
 
         self.timeout_list_lock = threading.Lock()
         self.timeout_list: List[Tuple[int, str, str, str]] = []
+
+        # Setup queues for work to be divided into
+        self.process_queues: List[queue.Queue] = [queue.Queue() for _ in range(RESULT_THREADS)]
+
+    def process_queue_index(self, key: str) -> int:
+        return sum(ord(_x) for _x in key) % RESULT_THREADS
+
+    def find_process_queue(self, key: str) -> queue.Queue:
+        return self.process_queues[self.process_queue_index(key)]
 
     @elasticapm.capture_span(span_type='dispatcher')
     def get_service_version(self, service_name: str) -> Tuple[Optional[str], Optional[str]]:
@@ -212,13 +224,20 @@ class Dispatcher(ThreadedCoreBase):
         with self._tasks_lock:
             return self._tasks.get(sid)
 
+    def service_worker_factory(self, index: int):
+        def service_worker():
+            return self.service_worker(index)
+        return service_worker
+
     def try_run(self):
         self.log.info(f'Using dispatcher id {self.instance_id}')
         threads = {
             # Pull in new submissions
             'Pull Submissions': self.pull_submissions,
-            # Handle start messages
-            'Service Start': self.handle_service_starts,
+            # pull start messages
+            'Pull Service Start': self.pull_service_starts,
+            # pull result messages
+            'Pull Service Result': self.pull_service_results,
             # Handle timeouts
             'Process Timeouts': self.handle_timeouts,
             # Work guard/thief
@@ -229,7 +248,7 @@ class Dispatcher(ThreadedCoreBase):
         }
         for ii in range(RESULT_THREADS):
             # Process results
-            threads[f'Service Results #{ii}'] = self.handle_service_results
+            threads[f'Service Update Worker #{ii}'] = self.service_worker_factory(ii)
 
         self.maintain_threads(threads)
 
@@ -238,14 +257,14 @@ class Dispatcher(ThreadedCoreBase):
         for task in self._tasks.values():
             for (sha256, service_name), dispatch_key in task.queue_keys.items():
                 try:
-                    queue = service_queues[service_name]
+                    s_queue = service_queues[service_name]
                 except KeyError:
-                    queue = get_service_queue(service_name, self.redis)
+                    s_queue = get_service_queue(service_name, self.redis)
                     service_queues[service_name] = queue
-                queue.remove(dispatch_key)
+                s_queue.remove(dispatch_key)
 
     def pull_submissions(self):
-        queue = self.submission_queue
+        sub_queue = self.submission_queue
         cpu_mark = time.process_time()
         time_mark = time.time()
 
@@ -260,7 +279,7 @@ class Dispatcher(ThreadedCoreBase):
                 time_mark = time.time()
                 continue
 
-            message = queue.pop(timeout=1)
+            message = sub_queue.pop(timeout=1)
 
             cpu_mark = time.process_time()
             time_mark = time.time()
@@ -508,12 +527,12 @@ class Dispatcher(ThreadedCoreBase):
                 else:
                     stats['not_scored'] += 1
                 self.set_timeout(task, service_task.fileinfo.sha256, service_task.service_name, None)
-                self.internal_result_queue.put({
+                self.find_process_queue(task.sid).put(('result', {
                     'service_task': service_task.as_primitives(),
                     'result': result.as_primitives(),
                     'result_key': result_key,
                     'temporary_data': None
-                })
+                }))
                 return True
 
             result = self.datastore.emptyresult.get_if_exists(f"{result_key}.e")
@@ -522,12 +541,12 @@ class Dispatcher(ThreadedCoreBase):
                 stats['not_scored'] += 1
                 result = self.datastore.create_empty_result_from_key(result_key)
                 self.set_timeout(task, service_task.fileinfo.sha256, service_task.service_name, None)
-                self.internal_result_queue.put({
+                self.find_process_queue(task.sid).put(('result', {
                     'service_task': service_task.as_primitives(),
                     'result': result.as_primitives(),
                     'result_key': f"{result_key}.e",
                     'temporary_data': None
-                })
+                }))
                 return True
             return False
         finally:
@@ -747,67 +766,82 @@ class Dispatcher(ThreadedCoreBase):
         for w in self._watcher_list(task.submission.sid).members():
             NamedQueue(w).push(msg)
 
-    def handle_service_results(self):
-        queue = self.result_queue
+    def pull_service_results(self):
+        result_queue = self.result_queue
         cpu_mark = time.process_time()
         time_mark = time.time()
-        message_buffer: Dict[str, List] = defaultdict(list)
 
-        try:
-            while self.running:
-                self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
-                self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+        while self.running:
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
-                message = queue.pop(timeout=1)
+            message = result_queue.pop(timeout=1)
 
+            cpu_mark = time.process_time()
+            time_mark = time.time()
+
+            if not message:
+                continue
+
+            sid = message['service_task']['sid']
+            self.find_process_queue(sid).put(('result', message))
+
+    def service_worker(self, index: int):
+        self.log.info(f"Start service worker {index}")
+        work_queue = self.process_queues[index]
+        cpu_mark = time.process_time()
+        time_mark = time.time()
+
+        while self.running:
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
+            try:
+                message = work_queue.get(timeout=1)
+            except queue.Empty:
                 cpu_mark = time.process_time()
                 time_mark = time.time()
+                continue
 
-                if message:
-                    # Collect messages binned by sid
-                    sid = message['service_task']['sid']
-                    message_buffer[sid].append(message)
+            cpu_mark = time.process_time()
+            time_mark = time.time()
 
-                while not self.internal_result_queue.empty():
-                    message = self.internal_result_queue.get()
-                    sid = message['service_task']['sid']
-                    message_buffer[sid].append(message)
+            # Unpack what kind of message to process
+            kind, message = message
 
-                if not message_buffer:
-                    continue
+            if kind == 'start':
+                with apm_span(self.apm_client, 'service_start_message'):
+                    sid, sha256, service_name, worker_id = message
+                    task = self.get_task(sid)
+                    if not task:
+                        self.log.warning(f'[{sid}] Service started for finished task.')
+                        continue
 
+                    with task.lock:
+                        key = sha256, service_name
+                        if task.queue_keys.pop(key, None) is not None:
+                            # If this task is already finished (result message processed before start
+                            # message) we can skip setting a timeout
+                            if key in task.service_errors or key in task.service_results:
+                                continue
+                            self.set_timeout(task, sha256, service_name, worker_id)
+            elif kind == 'result':
                 with apm_span(self.apm_client, "dispatcher_results"):
-                    # Every time we get a message try each bin, skipping on if we get stuck waiting for the lock
-                    for sid in list(message_buffer.keys()):
-                        # Get the task and lock for the bin we are looking at
-                        task = self.get_task(sid)
-                        if not task:
-                            self.log.warning(f'[{sid}] Result returned for finished task.')
-                            message_buffer.pop(sid, None)
-                            continue
-                        acquired = task.lock.acquire(blocking=sum(map(len, message_buffer.values())) >= MAX_RESULT_BUFFER)
+                    sid = message['service_task']['sid']
+                    task = self.get_task(sid)
+                    if not task:
+                        self.log.warning(f'[{sid}] Result returned for finished task.')
+                        continue
 
-                        # If we have managed to get the lock process the messages for this sid
-                        if acquired:
-                            try:
-                                while message_buffer[sid]:
-                                    message = message_buffer[sid].pop()
-                                    if 'result' in message:
-                                        self.process_service_result(task, message['result_key'],
-                                                                    Result(message['result']), message['temporary_data'])
-                                    elif 'error' in message:
-                                        self.process_service_error(task, message['error_key'], Error(message['error']))
-                                message_buffer.pop(sid)
-                            finally:
-                                task.lock.release()
-        except Exception:
-            # If one of the messages caused this loop to crash, 'save' the
-            # messages by pushing them back into the queue, only the currently
-            # active message should be dropped this way
-            for messages in message_buffer.values():
-                for message in messages:
-                    queue.push(message)
-            raise
+                    with task.lock:
+                        if 'result' in message:
+                            self.process_service_result(task, message['result_key'],
+                                                        Result(message['result']),
+                                                        message['temporary_data'])
+                        elif 'error' in message:
+                            self.process_service_error(task, message['error_key'], Error(message['error']))
+            else:
+                self.log.warning(f'Invalid work order kind {kind}')
 
     @elasticapm.capture_span(span_type='dispatcher')
     def process_service_result(self, task: SubmissionTask, result_key, result, temporary_data):
@@ -929,8 +963,8 @@ class Dispatcher(ThreadedCoreBase):
             task.service_errors[(error.sha256, error.response.service_name)] = error_key
         self.dispatch_file(task, error.sha256)
 
-    def handle_service_starts(self):
-        queue = self.start_queue
+    def pull_service_starts(self):
+        start_queue = self.start_queue
         cpu_mark = time.process_time()
         time_mark = time.time()
 
@@ -938,7 +972,7 @@ class Dispatcher(ThreadedCoreBase):
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
-            message = queue.pop(timeout=1)
+            message = start_queue.pop(timeout=1)
 
             cpu_mark = time.process_time()
             time_mark = time.time()
@@ -946,22 +980,8 @@ class Dispatcher(ThreadedCoreBase):
             if not message:
                 continue
 
-            with apm_span(self.apm_client, 'service_start_message'):
-
-                sid, sha256, service_name, worker_id = message
-                task = self.get_task(sid)
-                if not task:
-                    self.log.warning(f'[{sid}] Service started for finished task.')
-                    continue
-
-                with task.lock:
-                    key = sha256, service_name
-                    if task.queue_keys.pop(key, None) is not None:
-                        # If this task is already finished (result message processed before start
-                        # message) we can skip setting a timeout
-                        if key in task.service_errors or key in task.service_results:
-                            continue
-                        self.set_timeout(task, sha256, service_name, worker_id)
+            sid = message[0]
+            self.find_process_queue(sid).put(('start', message))
 
     def set_submission_timeout(self, task: SubmissionTask):
         sid = task.submission.sid
