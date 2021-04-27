@@ -38,12 +38,14 @@ from assemblyline_core.server_base import ThreadedCoreBase
 
 from .schedules import Scheduler
 
+APM_SPAN_TYPE = 'handle_message'
+
 
 @contextmanager
-def apm_span(client, span_type: str, span_name: str):
+def apm_span(client, span_name: str):
     try:
         if client:
-            client.begin_transaction(span_type)
+            client.begin_transaction(APM_SPAN_TYPE)
         yield None
         if client:
             client.end_transaction(span_name, 'success')
@@ -266,7 +268,7 @@ class Dispatcher(ThreadedCoreBase):
                 continue
 
             # Start of process dispatcher transaction
-            with apm_span(self.apm_client, 'Process submission message', 'submission_message'):
+            with apm_span(self.apm_client, 'submission_message'):
                 # This is probably a complete task
                 task = SubmissionTask(**message)
                 if self.apm_client:
@@ -339,6 +341,7 @@ class Dispatcher(ThreadedCoreBase):
         """
         submission = task.submission
         sid = submission.sid
+        elasticapm.label(sid=sid, sha256=sha256)
 
         # If its the first time we've seen this file, we won't have a schedule for it
         if sha256 not in task.file_schedules:
@@ -772,7 +775,7 @@ class Dispatcher(ThreadedCoreBase):
                 if not message_buffer:
                     continue
 
-                with apm_span(self.apm_client, "Process Dispatcher Results", "dispatcher_results"):
+                with apm_span(self.apm_client, "dispatcher_results"):
                     # Every time we get a message try each bin, skipping on if we get stuck waiting for the lock
                     for sid in list(message_buffer.keys()):
                         # Get the task and lock for the bin we are looking at
@@ -942,7 +945,7 @@ class Dispatcher(ThreadedCoreBase):
             if not message:
                 continue
 
-            with apm_span(self.apm_client, 'Process service start message', 'service_start_message'):
+            with apm_span(self.apm_client, 'service_start_message'):
 
                 sid, sha256, service_name, worker_id = message
                 task = self.get_task(sid)
@@ -1002,7 +1005,7 @@ class Dispatcher(ThreadedCoreBase):
 
     def handle_timeouts(self):
         while self.sleep(TIMEOUT_TEST_INTERVAL):
-            with apm_span(self.apm_client, 'process_timeouts', 'process_timeouts'):
+            with apm_span(self.apm_client, 'process_timeouts'):
                 cpu_mark = time.process_time()
                 time_mark = time.time()
 
@@ -1162,7 +1165,7 @@ class Dispatcher(ThreadedCoreBase):
 
             # Start of process dispatcher transaction
             if self.apm_client:
-                self.apm_client.begin_transaction('Process dispatcher message')
+                self.apm_client.begin_transaction(APM_SPAN_TYPE)
 
             try:
                 # This is probably a complete task
@@ -1198,7 +1201,7 @@ class Dispatcher(ThreadedCoreBase):
             time_mark = time.time()
 
             # Start of process dispatcher transaction
-            with apm_span(self.apm_client, 'Process command message', 'command_message'):
+            with apm_span(self.apm_client, 'command_message'):
 
                 command = DispatcherCommandMessage(message)
                 if command.kind == CREATE_WATCH:
