@@ -199,10 +199,12 @@ class Dispatcher(ThreadedCoreBase):
         self._service_versions[service_name] = time.time(), (service_version, tool_version)
         return service_version, tool_version
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def add_task(self, task: SubmissionTask):
         with self._tasks_lock:
             self._tasks[task.submission.sid] = task
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def get_task(self, sid: str) -> Optional[SubmissionTask]:
         with self._tasks_lock:
             return self._tasks.get(sid)
@@ -968,6 +970,7 @@ class Dispatcher(ThreadedCoreBase):
             if index < len(self.timeout_list) and self.timeout_list[index] == key:
                 self.timeout_list.pop(index)
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def set_timeout(self, task, sha256, service_name, worker_id):
         sid = task.submission.sid
         service = self.scheduler.services.get(service_name)
