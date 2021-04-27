@@ -148,7 +148,8 @@ def test_simple(redis):
     assert job.temporary_submission_data == [{'name': 'cats', 'value': 'big'}]
     client.service_failed(sid, 'abc123', make_error(file_hash, 'extract'))
     # Deliberately do in the wrong order to make sure that works
-    disp.handle_service_results()
+    disp.pull_service_results()
+    disp.service_worker(disp.process_queue_index(sid))
 
     assert task.queue_keys[(file_hash, 'extract')] is not None
     assert task.queue_keys[(file_hash, 'wrench')] is not None
@@ -160,8 +161,9 @@ def test_simple(redis):
     client.request_work('0', 'wrench', '0')
     client.service_finished(sid, 'extract-result', make_result(file_hash, 'extract'))
     client.service_failed(sid, 'wrench-error', make_error(file_hash, 'wrench', False))
-    disp.handle_service_results()
-    disp.handle_service_results()
+    for _ in range(2):
+        disp.pull_service_results()
+        disp.service_worker(disp.process_queue_index(sid))
 
     assert wait_error(task, file_hash, 'wrench')
     assert wait_result(task, file_hash, 'extract')
@@ -177,9 +179,9 @@ def test_simple(redis):
     client.service_failed(sid, 'av-a-error', make_error(file_hash, 'av-a', False))
     client.service_failed(sid, 'av-b-error', make_error(file_hash, 'av-b', False))
     client.service_finished(sid, 'f-result', make_result(file_hash, 'frankenstrings'))
-    disp.handle_service_results()
-    disp.handle_service_results()
-    disp.handle_service_results()
+    for _ in range(3):
+        disp.pull_service_results()
+        disp.service_worker(disp.process_queue_index(sid))
 
     assert wait_result(task, file_hash, 'frankenstrings')
     assert wait_error(task, file_hash, 'av-a')
@@ -190,7 +192,8 @@ def test_simple(redis):
     logger.info('==== sixth dispatch')
     client.request_work('0', 'xerox', '0')
     client.service_finished(sid, 'xerox-result-key', make_result(file_hash, 'xerox'))
-    disp.handle_service_results()
+    disp.pull_service_results()
+    disp.service_worker(disp.process_queue_index(sid))
 
     assert wait_result(task, file_hash, 'xerox')
     with task.lock:
@@ -236,7 +239,8 @@ def test_dispatch_extracted(redis):
     client.service_finished(sid, 'extracted-done', new_result)
 
     # process the result
-    disp.handle_service_results()
+    disp.pull_service_results()
+    disp.service_worker(disp.process_queue_index(sid))
 
     #
     job = client.request_work('0', 'extract', '0')
