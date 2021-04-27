@@ -176,6 +176,7 @@ class Dispatcher(ThreadedCoreBase):
 
         self.apm_client = None
         if self.config.core.metrics.apm_server.server_url:
+            elasticapm.instrument()
             self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
                                                 service_name="dispatcher")
 
