@@ -341,6 +341,7 @@ class Dispatcher(ThreadedCoreBase):
         """
         submission = task.submission
         sid = submission.sid
+        elasticapm.label(sid=sid, sha256=sha256)
 
         # If its the first time we've seen this file, we won't have a schedule for it
         if sha256 not in task.file_schedules:
