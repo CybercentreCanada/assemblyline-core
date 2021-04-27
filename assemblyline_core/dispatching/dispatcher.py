@@ -342,18 +342,19 @@ class Dispatcher(ThreadedCoreBase):
 
         # If its the first time we've seen this file, we won't have a schedule for it
         if sha256 not in task.file_schedules:
-            # We are processing this file, load the file info, and build the schedule
-            filestore_info = self.datastore.file.get(sha256)
-            file_info = task.file_info[sha256] = FileInfo(dict(
-                magic=filestore_info.magic,
-                md5=filestore_info.md5,
-                mime=filestore_info.mime,
-                sha1=filestore_info.sha1,
-                sha256=filestore_info.sha256,
-                size=filestore_info.size,
-                type=filestore_info.type,
-            ))
-            task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type)
+            with elasticapm.capture_span('build_schedule'):
+                # We are processing this file, load the file info, and build the schedule
+                filestore_info = self.datastore.file.get(sha256)
+                file_info = task.file_info[sha256] = FileInfo(dict(
+                    magic=filestore_info.magic,
+                    md5=filestore_info.md5,
+                    mime=filestore_info.mime,
+                    sha1=filestore_info.sha1,
+                    sha256=filestore_info.sha256,
+                    size=filestore_info.size,
+                    type=filestore_info.type,
+                ))
+                task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type)
         file_info = task.file_info[sha256]
         schedule = list(task.file_schedules[sha256])
 
@@ -361,92 +362,95 @@ class Dispatcher(ThreadedCoreBase):
         # Break when we find a stage that still needs processing
         outstanding = {}
         started_stages = []
-        while schedule and not outstanding:
-            stage = schedule.pop(0)
-            started_stages.append(stage)
+        with elasticapm.capture_span('check_result_table'):
+            while schedule and not outstanding:
+                stage = schedule.pop(0)
+                started_stages.append(stage)
 
-            for service_name in stage:
-                service = self.scheduler.services.get(service_name)
-                if not service:
-                    continue
+                for service_name in stage:
+                    service = self.scheduler.services.get(service_name)
+                    if not service:
+                        continue
 
-                key = (sha256, service_name)
+                    key = (sha256, service_name)
 
-                # If the service terminated in an error, count the error and continue
-                if key in task.service_errors:
-                    continue
+                    # If the service terminated in an error, count the error and continue
+                    if key in task.service_errors:
+                        continue
 
-                # If we have no error, and no result, its not finished
-                result = task.service_results.get(key)
-                if not result:
-                    outstanding[service_name] = service
-                    continue
+                    # If we have no error, and no result, its not finished
+                    result = task.service_results.get(key)
+                    if not result:
+                        outstanding[service_name] = service
+                        continue
 
-                # if the service finished, count the score, and check if the file has been dropped
-                if not submission.params.ignore_filtering and result.drop:
-                    # Clear out anything in the schedule after this stage
-                    task.file_schedules[sha256] = started_stages
-                    schedule.clear()
+                    # if the service finished, count the score, and check if the file has been dropped
+                    if not submission.params.ignore_filtering and result.drop:
+                        # Clear out anything in the schedule after this stage
+                        task.file_schedules[sha256] = started_stages
+                        schedule.clear()
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
             sent, enqueued, running, cache_hits = [], [], [], []
 
             for service_name, service in outstanding.items():
-                queue = get_service_queue(service_name, self.redis)
+                with elasticapm.capture_span('dispatch_task', labels={'service': service_name}):
+                    queue = get_service_queue(service_name, self.redis)
 
-                key = (sha256, service_name)
-                # Check if the task is already running
-                if key in task.running_services:
-                    running.append(service_name)
-                    continue
+                    key = (sha256, service_name)
+                    # Check if the task is already running
+                    if key in task.running_services:
+                        running.append(service_name)
+                        continue
 
-                # Check if this task is already sitting in queue
-                dispatch_key = task.queue_keys.get(key, None)
-                if dispatch_key is not None and queue.rank(dispatch_key) is not None:
-                    enqueued.append(service_name)
-                    continue
+                    # Check if this task is already sitting in queue
+                    with elasticapm.capture_span('check_queue'):
+                        dispatch_key = task.queue_keys.get(key, None)
+                        if dispatch_key is not None and queue.rank(dispatch_key) is not None:
+                            enqueued.append(service_name)
+                            continue
 
-                # Build the actual service dispatch message
-                config = self.build_service_config(service, submission)
-                service_task = ServiceTask(dict(
-                    sid=sid,
-                    metadata=submission.metadata,
-                    min_classification=task.submission.classification,
-                    service_name=service_name,
-                    service_config=config,
-                    fileinfo=file_info,
-                    filename=task.file_names.get(sha256, sha256),
-                    depth=task.file_depth[sha256],
-                    max_files=task.submission.params.max_extracted,
-                    ttl=submission.params.ttl,
-                    ignore_cache=submission.params.ignore_cache,
-                    ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
-                    tags=task.file_tags.get(sha256, []),
-                    temporary_submission_data=[
-                        {'name': name, 'value': value}
-                        for name, value in task.file_temporary_data[sha256].items()
-                    ],
-                    deep_scan=submission.params.deep_scan,
-                    priority=submission.params.priority,
-                ))
-                service_task.metadata['dispatcher__'] = self.instance_id
+                    # Build the actual service dispatch message
+                    config = self.build_service_config(service, submission)
+                    service_task = ServiceTask(dict(
+                        sid=sid,
+                        metadata=submission.metadata,
+                        min_classification=task.submission.classification,
+                        service_name=service_name,
+                        service_config=config,
+                        fileinfo=file_info,
+                        filename=task.file_names.get(sha256, sha256),
+                        depth=task.file_depth[sha256],
+                        max_files=task.submission.params.max_extracted,
+                        ttl=submission.params.ttl,
+                        ignore_cache=submission.params.ignore_cache,
+                        ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
+                        tags=task.file_tags.get(sha256, []),
+                        temporary_submission_data=[
+                            {'name': name, 'value': value}
+                            for name, value in task.file_temporary_data[sha256].items()
+                        ],
+                        deep_scan=submission.params.deep_scan,
+                        priority=submission.params.priority,
+                    ))
+                    service_task.metadata['dispatcher__'] = self.instance_id
 
-                # Check if this task is a cache hit
-                if self.check_result_cache(task, service_task):
-                    cache_hits.append(service_name)
-                    continue
+                    # Check if this task is a cache hit
+                    if self.check_result_cache(task, service_task):
+                        cache_hits.append(service_name)
+                        continue
 
-                # Check if we have attempted this too many times already.
-                task.service_attempts[key] += 1
-                if task.service_attempts[key] > 3:
-                    self.retry_error(task, sha256, service_name)
-                    continue
+                    # Check if we have attempted this too many times already.
+                    task.service_attempts[key] += 1
+                    if task.service_attempts[key] > 3:
+                        self.retry_error(task, sha256, service_name)
+                        continue
 
-                # Its a new task, send it to the service
-                queue_key = queue.push(service_task.priority, service_task.as_primitives())
-                task.queue_keys[(sha256, service_name)] = queue_key
-                sent.append(service_name)
+                    # Its a new task, send it to the service
+                    queue_key = queue.push(service_task.priority, service_task.as_primitives())
+                    task.queue_keys[(sha256, service_name)] = queue_key
+                    sent.append(service_name)
 
             if sent or enqueued or running or cache_hits:
                 # If we have confirmed that we are waiting, or have taken an action, log that.
