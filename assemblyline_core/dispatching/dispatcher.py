@@ -187,7 +187,7 @@ class Dispatcher(ThreadedCoreBase):
         self.timeout_list: List[Tuple[int, str, str, str]] = []
 
         # Setup queues for work to be divided into
-        self.process_queues: List[queue.Queue] = [queue.Queue(512//RESULT_THREADS) for _ in range(RESULT_THREADS)]
+        self.process_queues: List[queue.Queue] = [queue.Queue() for _ in range(RESULT_THREADS)]
 
     def process_queue_index(self, key: str) -> int:
         return sum(ord(_x) for _x in key) % RESULT_THREADS
@@ -775,6 +775,9 @@ class Dispatcher(ThreadedCoreBase):
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
+            buffers = sum(_p.qsize() for _p in self.process_queues)
+            if buffers:
+                self.log.info(f"Buffer length at: {buffers}")
             message = result_queue.pop(timeout=1)
 
             cpu_mark = time.process_time()
