@@ -423,7 +423,7 @@ class Dispatcher(ThreadedCoreBase):
 
             for service_name, service in outstanding.items():
                 with elasticapm.capture_span('dispatch_task', labels={'service': service_name}):
-                    queue = get_service_queue(service_name, self.redis)
+                    service_queue = get_service_queue(service_name, self.redis)
 
                     key = (sha256, service_name)
                     # Check if the task is already running
@@ -434,7 +434,7 @@ class Dispatcher(ThreadedCoreBase):
                     # Check if this task is already sitting in queue
                     with elasticapm.capture_span('check_queue'):
                         dispatch_key = task.queue_keys.get(key, None)
-                        if dispatch_key is not None and queue.rank(dispatch_key) is not None:
+                        if dispatch_key is not None and service_queue.rank(dispatch_key) is not None:
                             enqueued.append(service_name)
                             continue
 
@@ -475,7 +475,7 @@ class Dispatcher(ThreadedCoreBase):
                         continue
 
                     # Its a new task, send it to the service
-                    queue_key = queue.push(service_task.priority, service_task.as_primitives())
+                    queue_key = service_queue.push(service_task.priority, service_task.as_primitives())
                     task.queue_keys[(sha256, service_name)] = queue_key
                     sent.append(service_name)
 
@@ -624,8 +624,8 @@ class Dispatcher(ThreadedCoreBase):
 
                     # Check if the service is in queue, and handle it the same as being in progress.
                     # Check this one last, since it can require a remote call to redis rather than checking a dict.
-                    queue = get_service_queue(service_name, self.redis)
-                    if key in task.queue_keys and queue.rank(task.queue_keys[key]) is not None:
+                    service_queue = get_service_queue(service_name, self.redis)
+                    if key in task.queue_keys and service_queue.rank(task.queue_keys[key]) is not None:
                         processing_files.append(sha256)
                         continue
 
@@ -781,7 +781,7 @@ class Dispatcher(ThreadedCoreBase):
 
             buffers = sum(_p.qsize() for _p in self.process_queues)
             if buffers:
-                self.log.info(f"Buffer length at: {buffers}")
+                self.log.info(f"Buffer length at: {[_p.qsize() for _p in self.process_queues]}")
             message = result_queue.pop(timeout=1)
 
             cpu_mark = time.process_time()
