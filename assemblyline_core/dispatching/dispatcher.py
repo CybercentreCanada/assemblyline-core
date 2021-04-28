@@ -102,7 +102,7 @@ SERVICE_VERSION_EXPIRY_TIME = 30 * 60  # How old service version info can be bef
 GUARD_TIMEOUT = 60*2
 TIMEOUT_EXTRA_TIME = 30  # 30 seconds grace for message handling.
 TIMEOUT_TEST_INTERVAL = 5
-MAX_RESULT_BUFFER = 32
+MAX_RESULT_BUFFER = 64
 RESULT_THREADS = max(1, int(os.getenv('DISPATCHER_RESULT_THREADS', '2')))
 
 # After 20 minutes, check if a submission is still making progress.
@@ -187,13 +187,17 @@ class Dispatcher(ThreadedCoreBase):
         self.timeout_list: List[Tuple[int, str, str, str]] = []
 
         # Setup queues for work to be divided into
-        self.process_queues: List[queue.Queue] = [queue.Queue() for _ in range(RESULT_THREADS)]
+        self.process_queues: List[queue.Queue] = [queue.Queue(MAX_RESULT_BUFFER) for _ in range(RESULT_THREADS)]
+        self.internal_process_queues: List[queue.Queue] = [queue.Queue(MAX_RESULT_BUFFER) for _ in range(RESULT_THREADS)]
 
     def process_queue_index(self, key: str) -> int:
         return sum(ord(_x) for _x in key) % RESULT_THREADS
 
     def find_process_queue(self, key: str) -> queue.Queue:
         return self.process_queues[self.process_queue_index(key)]
+
+    def find_internal_process_queue(self, key: str) -> queue.Queue:
+        return self.internal_process_queues[self.process_queue_index(key)]
 
     @elasticapm.capture_span(span_type='dispatcher')
     def get_service_version(self, service_name: str) -> Tuple[Optional[str], Optional[str]]:
@@ -527,7 +531,7 @@ class Dispatcher(ThreadedCoreBase):
                 else:
                     stats['not_scored'] += 1
                 self.set_timeout(task, service_task.fileinfo.sha256, service_task.service_name, None)
-                self.find_process_queue(task.sid).put(('result', {
+                self.find_internal_process_queue(task.sid).put(('result', {
                     'service_task': service_task.as_primitives(),
                     'result': result.as_primitives(),
                     'result_key': result_key,
@@ -541,7 +545,7 @@ class Dispatcher(ThreadedCoreBase):
                 stats['not_scored'] += 1
                 result = self.datastore.create_empty_result_from_key(result_key)
                 self.set_timeout(task, service_task.fileinfo.sha256, service_task.service_name, None)
-                self.find_process_queue(task.sid).put(('result', {
+                self.find_internal_process_queue(task.sid).put(('result', {
                     'service_task': service_task.as_primitives(),
                     'result': result.as_primitives(),
                     'result_key': f"{result_key}.e",
@@ -792,6 +796,7 @@ class Dispatcher(ThreadedCoreBase):
     def service_worker(self, index: int):
         self.log.info(f"Start service worker {index}")
         work_queue = self.process_queues[index]
+        internal_queue = self.internal_process_queues[index]
         cpu_mark = time.process_time()
         time_mark = time.time()
 
@@ -800,11 +805,14 @@ class Dispatcher(ThreadedCoreBase):
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
             try:
-                message = work_queue.get(timeout=1)
+                message = internal_queue.get_nowait()
             except queue.Empty:
-                cpu_mark = time.process_time()
-                time_mark = time.time()
-                continue
+                try:
+                    message = work_queue.get(timeout=1)
+                except queue.Empty:
+                    cpu_mark = time.process_time()
+                    time_mark = time.time()
+                    continue
 
             cpu_mark = time.process_time()
             time_mark = time.time()
@@ -1014,6 +1022,7 @@ class Dispatcher(ThreadedCoreBase):
         with self.timeout_list_lock:
             bisect.insort(self.timeout_list, (timeout_at, sid, sha256, service_name))
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def clear_timeout(self, task, sha256, service_name):
         sid = task.submission.sid
         task.queue_keys.pop((sha256, service_name), None)
