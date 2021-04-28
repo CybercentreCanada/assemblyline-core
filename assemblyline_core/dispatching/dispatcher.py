@@ -188,7 +188,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Setup queues for work to be divided into
         self.process_queues: List[queue.Queue] = [queue.Queue(MAX_RESULT_BUFFER) for _ in range(RESULT_THREADS)]
-        self.internal_process_queues: List[queue.Queue] = [queue.Queue(MAX_RESULT_BUFFER) for _ in range(RESULT_THREADS)]
+        self.internal_process_queues: List[queue.Queue] = [queue.Queue() for _ in range(RESULT_THREADS)]
 
     def process_queue_index(self, key: str) -> int:
         return sum(ord(_x) for _x in key) % RESULT_THREADS
