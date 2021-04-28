@@ -260,7 +260,7 @@ class Dispatcher(ThreadedCoreBase):
                     s_queue = service_queues[service_name]
                 except KeyError:
                     s_queue = get_service_queue(service_name, self.redis)
-                    service_queues[service_name] = queue
+                    service_queues[service_name] = s_queue
                 s_queue.remove(dispatch_key)
 
     def pull_submissions(self):
