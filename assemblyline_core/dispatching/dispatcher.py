@@ -187,7 +187,7 @@ class Dispatcher(ThreadedCoreBase):
         self.timeout_list: List[Tuple[int, str, str, str]] = []
 
         # Setup queues for work to be divided into
-        self.process_queues: List[queue.Queue] = [queue.Queue() for _ in range(RESULT_THREADS)]
+        self.process_queues: List[queue.Queue] = [queue.Queue(512//RESULT_THREADS) for _ in range(RESULT_THREADS)]
 
     def process_queue_index(self, key: str) -> int:
         return sum(ord(_x) for _x in key) % RESULT_THREADS
