@@ -1107,7 +1107,7 @@ class Dispatcher(ThreadedCoreBase):
         self.dispatchers_directory.set(self.instance_id, old_value)
 
         try:
-            while self.running:
+            while self.sleep(check_interval):
                 cpu_mark = time.process_time()
                 time_mark = time.time()
 
@@ -1129,7 +1129,6 @@ class Dispatcher(ThreadedCoreBase):
 
                 self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
                 self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
-                self.sleep(check_interval)
         finally:
             if not self.running:
                 self.dispatchers_directory.pop(self.instance_id)
