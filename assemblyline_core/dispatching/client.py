@@ -8,8 +8,8 @@ import time
 from typing import Dict, Optional, Any, cast
 
 from assemblyline.common.forge import CachedObject, get_service_queue
-from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, CreateWatch, LIST_OUTSTANDING, \
-    ListOutstanding
+from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, \
+    CreateWatch, LIST_OUTSTANDING, ListOutstanding
 
 from assemblyline.odm.models.service import Service
 
@@ -170,16 +170,18 @@ class DispatchClient:
         # most distant expiry time to prevent pulling it out from under another submission too early
         if result.is_empty():
             # Empty Result will not be archived therefore result.archive_ts drives their deletion
-            self.ds.emptyresult.save(result_key, {"expiry_ts": result.archive_ts}, force_archive_access=True)
+            self.ds.emptyresult.save(
+                result_key, {"expiry_ts": result.archive_ts},
+                force_archive_access=self.config.datastore.ilm.update_archive)
         else:
             with Lock(f"lock-{result_key}", 5, self.redis):
-                old = self.ds.result.get(result_key, force_archive_access=True)
+                old = self.ds.result.get(result_key, force_archive_access=self.config.datastore.ilm.update_archive)
                 if old:
                     if old.expiry_ts and result.expiry_ts:
                         result.expiry_ts = max(result.expiry_ts, old.expiry_ts)
                     else:
                         result.expiry_ts = None
-                self.ds.result.save(result_key, result, force_archive_access=True)
+                self.ds.result.save(result_key, result, force_archive_access=self.config.datastore.ilm.update_archive)
 
         # Send the result key to any watching systems
         msg = {'status': 'OK', 'cache_key': result_key}
