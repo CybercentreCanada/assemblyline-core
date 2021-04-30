@@ -372,16 +372,34 @@ class Dispatcher(ThreadedCoreBase):
             with elasticapm.capture_span('build_schedule'):
                 # We are processing this file, load the file info, and build the schedule
                 filestore_info = self.datastore.file.get(sha256)
-                file_info = task.file_info[sha256] = FileInfo(dict(
-                    magic=filestore_info.magic,
-                    md5=filestore_info.md5,
-                    mime=filestore_info.mime,
-                    sha1=filestore_info.sha1,
-                    sha256=filestore_info.sha256,
-                    size=filestore_info.size,
-                    type=filestore_info.type,
-                ))
-                task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type)
+                if filestore_info is None:
+                    task.dropped_files.add(sha256)
+                    self._dispatching_error(task, Error({
+                        'archive_ts': task.submission.archive_ts,
+                        'expiry_ts': task.submission.expiry_ts,
+                        'response': {
+                            'message': f"Couldn't find file info for {sha256} in submission {sid}",
+                            'service_name': 'Dispatcher',
+                            'service_tool_version': '4.0',
+                            'service_version': '4.0',
+                            'status': 'FAIL_NONRECOVERABLE'
+                        },
+                        'sha256': sha256,
+                        'type': 'UNKNOWN'
+                    }))
+                    task.file_info[sha256] = None
+                    task.file_schedules[sha256] = []
+                else:
+                    file_info = task.file_info[sha256] = FileInfo(dict(
+                        magic=filestore_info.magic,
+                        md5=filestore_info.md5,
+                        mime=filestore_info.mime,
+                        sha1=filestore_info.sha1,
+                        sha256=filestore_info.sha256,
+                        size=filestore_info.size,
+                        type=filestore_info.type,
+                    ))
+                    task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type)
         file_info = task.file_info[sha256]
         schedule = list(task.file_schedules[sha256])
 
