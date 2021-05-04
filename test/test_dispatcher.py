@@ -120,6 +120,8 @@ def test_simple(redis):
     disp = Dispatcher(ds, redis, redis)
     disp.running = ToggleTrue()
     client = DispatchClient(ds, redis, redis)
+    client.dispatcher_data_age = time.time()
+    client.dispatcher_data.append(disp.instance_id)
 
     # Submit a problem, and check that it gets added to the dispatch hash
     # and the right service queues
@@ -222,6 +224,8 @@ def test_dispatch_extracted(redis):
     disp = Dispatcher(ds, redis, redis)
     disp.running = ToggleTrue()
     client = DispatchClient(ds, redis, redis)
+    client.dispatcher_data_age = time.time()
+    client.dispatcher_data.append(disp.instance_id)
 
     # Launch the submission
     client.dispatch_submission(submission)
