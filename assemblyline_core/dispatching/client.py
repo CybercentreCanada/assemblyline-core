@@ -166,7 +166,7 @@ class DispatchClient:
             self.log.info(f"{service_name}:{worker_id} no task returned: [task from dead dispatcher]")
             return None
 
-        if self.running_tasks.add(task.key(), result):
+        if self.running_tasks.add(task.key(), task.as_primitives()):
             self.log.info(f"[{task.sid}/{task.fileinfo.sha256}] {service_name}:{worker_id} task found")
             start_queue = NamedQueue(DISPATCH_START_EVENTS + dispatcher, host=self.redis)
             start_queue.push((task.sid, task.fileinfo.sha256, service_name, worker_id))
