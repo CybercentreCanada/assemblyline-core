@@ -21,7 +21,7 @@ from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.error import Error
 from assemblyline.remote.datatypes import get_client, reply_queue_name
-from assemblyline.remote.datatypes.hash import ExpiringHash
+from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.lock import Lock
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
@@ -58,7 +58,7 @@ class DispatchClient:
         self.errors = self.ds.error
         self.files = self.ds.file
         self.submission_assignments = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
-        self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
+        self.running_tasks = Hash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
         self.service_data = cast(Dict[str, Service], CachedObject(self._get_services))
         self.dispatcher_data = []
         self.dispatcher_data_age = 0

@@ -100,6 +100,7 @@ QUEUE_EXPIRY = 60*60
 SERVICE_VERSION_CACHE_TIME = 30  # Time between checking redis for new service version info
 SERVICE_VERSION_EXPIRY_TIME = 30 * 60  # How old service version info can be before we ignore it
 GUARD_TIMEOUT = 60*2
+GLOBAL_TASK_CHECK_INTERVAL = 60*5
 TIMEOUT_EXTRA_TIME = 30  # 30 seconds grace for message handling.
 TIMEOUT_TEST_INTERVAL = 5
 MAX_RESULT_BUFFER = 64
@@ -146,7 +147,7 @@ class Dispatcher(ThreadedCoreBase):
         #
         # # Build some utility classes
         self.scheduler = Scheduler(self.datastore, self.config, self.redis)
-        self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
+        self.running_tasks = Hash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
 
         # Track what the most recent service versions seen by the service server are
@@ -249,6 +250,8 @@ class Dispatcher(ThreadedCoreBase):
             'Work Thief': self.work_thief,
             # Handle RPC commands
             'Commands': self.handle_commands,
+            # Process to protect against old dead tasks timing out
+            'Global Timeout Backstop': self.timeout_backstop,
         }
         for ii in range(RESULT_THREADS):
             # Process results
@@ -1299,3 +1302,35 @@ class Dispatcher(ThreadedCoreBase):
                 for sha, service_name in task.running_services.keys():
                     outstanding[service_name] += 1
         response_queue.push(outstanding)
+
+    def timeout_backstop(self):
+        while self.sleep(GLOBAL_TASK_CHECK_INTERVAL):
+            cpu_mark = time.process_time()
+            time_mark = time.time()
+
+            # Start of process dispatcher transaction
+            with apm_span(self.apm_client, 'timeout_backstop'):
+                # Download all running tasks
+                all_tasks = self.running_tasks.items()
+
+                # Filter out all that belong to a running dispatcher
+                all_tasks = [ServiceTask(_s) for _s in all_tasks]
+                dispatcher_instances = set(Dispatcher.all_instances(persistent_redis=self.redis_persist))
+                all_tasks = [_s for _s in all_tasks if _s.metadata['dispatcher__'] not in dispatcher_instances]
+
+                # The remaining running tasks belong to dead dispatchers and can be killed
+                for task in all_tasks:
+                    if not self.running_tasks.pop(task.key()):
+                        continue
+
+                    self.scaler_timeout_queue.push({
+                        'service': task.service_name,
+                        'container': task.metadata['worker__']
+                    })
+
+                    # Report to the metrics system that a recoverable error has occurred for that service
+                    export_metrics_once(task.service_name, ServiceMetrics, dict(fail_recoverable=1),
+                                        host=task.metadata['worker__'], counter_type='service')
+
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
