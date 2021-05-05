@@ -279,6 +279,14 @@ class Dispatcher(ThreadedCoreBase):
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
+            # Check if we are at the submission limit globally
+            if self.submissions_assignments.length() >= self.config.core.dispatcher.max_inflight:
+                self.sleep(1)
+                cpu_mark = time.process_time()
+                time_mark = time.time()
+                continue                
+
+            # Check if we are maxing out our share of the submission limit
             max_tasks = self.config.core.dispatcher.max_inflight / self.running_dispatchers_estimate
             if self.active_submissions.length() >= max_tasks:
                 self.sleep(1)
@@ -286,8 +294,8 @@ class Dispatcher(ThreadedCoreBase):
                 time_mark = time.time()
                 continue
 
+            # Grab a submission message
             message = sub_queue.pop(timeout=1)
-
             cpu_mark = time.process_time()
             time_mark = time.time()
 
