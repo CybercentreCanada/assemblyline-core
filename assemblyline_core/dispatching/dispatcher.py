@@ -800,9 +800,6 @@ class Dispatcher(ThreadedCoreBase):
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
-            buffers = sum(_p.qsize() for _p in self.process_queues)
-            if buffers:
-                self.log.info(f"Buffer length at: {[_p.qsize() for _p in self.process_queues]}")
             message = result_queue.pop(timeout=1)
 
             cpu_mark = time.process_time()
