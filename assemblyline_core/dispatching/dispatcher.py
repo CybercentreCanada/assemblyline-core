@@ -100,7 +100,7 @@ QUEUE_EXPIRY = 60*60
 SERVICE_VERSION_CACHE_TIME = 30  # Time between checking redis for new service version info
 SERVICE_VERSION_EXPIRY_TIME = 30 * 60  # How old service version info can be before we ignore it
 GUARD_TIMEOUT = 60*2
-GLOBAL_TASK_CHECK_INTERVAL = 60*5
+GLOBAL_TASK_CHECK_INTERVAL = 60*3
 TIMEOUT_EXTRA_TIME = 30  # 30 seconds grace for message handling.
 TIMEOUT_TEST_INTERVAL = 5
 MAX_RESULT_BUFFER = 64
@@ -1311,7 +1311,7 @@ class Dispatcher(ThreadedCoreBase):
                 all_tasks = self.running_tasks.items()
 
                 # Filter out all that belong to a running dispatcher
-                all_tasks = [ServiceTask(_s) for _s in all_tasks]
+                all_tasks = [ServiceTask(_s) for _s in all_tasks.values()]
                 dispatcher_instances = set(Dispatcher.all_instances(persistent_redis=self.redis_persist))
                 all_tasks = [_s for _s in all_tasks if _s.metadata['dispatcher__'] not in dispatcher_instances]
 
@@ -1319,6 +1319,7 @@ class Dispatcher(ThreadedCoreBase):
                 for task in all_tasks:
                     if not self.running_tasks.pop(task.key()):
                         continue
+                    self.log.warning(f"[{task.sid}]Task killed by backstop {task.service_name} {task.fileinfo.sha256}")
 
                     self.scaler_timeout_queue.push({
                         'service': task.service_name,
