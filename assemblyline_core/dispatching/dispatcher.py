@@ -1112,10 +1112,9 @@ class Dispatcher(ThreadedCoreBase):
                              f"timed out on {sha256} but task isn't running.")
 
         # We can confirm that the task is ours now, even if the worker finished, the result will be ignored
+        _, worker_id = task.running_services.pop((sha256, service_name), (None, None))
         self.log.info(f"[{sid}] Service {service_name} "
                       f"running on {worker_id} timed out on {sha256}.")
-
-        _, worker_id = task.running_services.pop((sha256, service_name), (None, None))
         self.dispatch_file(task, sha256, timed_out_host=worker_id)
         
         # We push the task of killing the container off on the scaler, which already has root access
