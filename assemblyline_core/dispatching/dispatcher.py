@@ -984,6 +984,7 @@ class Dispatcher(ThreadedCoreBase):
 
         self.dispatch_file(task, result.sha256)
 
+    @elasticapm.capture_span(span_type='dispatcher')
     def _dispatching_error(self, task: SubmissionTask, error):
         error_key = error.build_key()
         task.extra_errors.append(error_key)
