@@ -930,57 +930,58 @@ class Dispatcher(ThreadedCoreBase):
                 task.file_names[extracted_data.sha256] = extracted_data.name
 
         # Send the extracted files to the dispatcher
-        dispatched = 0
-        if new_depth < depth_limit:
-            # Prepare the temporary data from the parent to build the temporary data table for
-            # these newly extract files
-            parent_data = task.file_temporary_data[result.sha256]
+        with apm_span(self.apm_client, 'process_extracted_files'):
+            dispatched = 0
+            if new_depth < depth_limit:
+                # Prepare the temporary data from the parent to build the temporary data table for
+                # these newly extract files
+                parent_data = task.file_temporary_data[result.sha256]
 
-            for extracted_data in result.response.extracted:
-                if extracted_data.sha256 in task.dropped_files or extracted_data.sha256 in task.file_schedules:
-                    continue
+                for extracted_data in result.response.extracted:
+                    if extracted_data.sha256 in task.dropped_files or extracted_data.sha256 in task.file_schedules:
+                        continue
 
-                if len(task.file_schedules) > submission.params.max_extracted:
-                    self.log.info(f'[{sid}] hit extraction limit, dropping {extracted_data.sha256}')
-                    task.dropped_files.add(extracted_data.sha256)
+                    if len(task.file_schedules) > submission.params.max_extracted:
+                        self.log.info(f'[{sid}] hit extraction limit, dropping {extracted_data.sha256}')
+                        task.dropped_files.add(extracted_data.sha256)
+                        self._dispatching_error(task, Error({
+                            'archive_ts': result.archive_ts,
+                            'expiry_ts': result.expiry_ts,
+                            'response': {
+                                'message': f"Too many files extracted for submission {sid} "
+                                           f"{extracted_data.sha256} extracted by "
+                                           f"{service_name} will be dropped",
+                                'service_name': service_name,
+                                'service_tool_version': result.response.service_tool_version,
+                                'service_version': result.response.service_version,
+                                'status': 'FAIL_NONRECOVERABLE'
+                            },
+                            'sha256': extracted_data.sha256,
+                            'type': 'MAX FILES REACHED'
+                        }))
+                        continue
+
+                    dispatched += 1
+                    task.file_temporary_data[extracted_data.sha256] = dict(parent_data)
+                    if self.dispatch_file(task, extracted_data.sha256):
+                        return
+
+            else:
+                for extracted_data in result.response.extracted:
                     self._dispatching_error(task, Error({
                         'archive_ts': result.archive_ts,
                         'expiry_ts': result.expiry_ts,
                         'response': {
-                            'message': f"Too many files extracted for submission {sid} "
-                                       f"{extracted_data.sha256} extracted by "
-                                       f"{service_name} will be dropped",
-                            'service_name': service_name,
+                            'message': f"{service_name} has extracted a file "
+                                       f"{extracted_data.sha256} beyond the depth limits",
+                            'service_name': result.response.service_name,
                             'service_tool_version': result.response.service_tool_version,
                             'service_version': result.response.service_version,
                             'status': 'FAIL_NONRECOVERABLE'
                         },
                         'sha256': extracted_data.sha256,
-                        'type': 'MAX FILES REACHED'
+                        'type': 'MAX DEPTH REACHED'
                     }))
-                    continue
-
-                dispatched += 1
-                task.file_temporary_data[extracted_data.sha256] = dict(parent_data)
-                if self.dispatch_file(task, extracted_data.sha256):
-                    return
-
-        else:
-            for extracted_data in result.response.extracted:
-                self._dispatching_error(task, Error({
-                    'archive_ts': result.archive_ts,
-                    'expiry_ts': result.expiry_ts,
-                    'response': {
-                        'message': f"{service_name} has extracted a file "
-                                   f"{extracted_data.sha256} beyond the depth limits",
-                        'service_name': result.response.service_name,
-                        'service_tool_version': result.response.service_tool_version,
-                        'service_version': result.response.service_version,
-                        'status': 'FAIL_NONRECOVERABLE'
-                    },
-                    'sha256': extracted_data.sha256,
-                    'type': 'MAX DEPTH REACHED'
-                }))
 
         self.dispatch_file(task, result.sha256)
 
