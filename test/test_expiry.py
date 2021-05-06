@@ -99,4 +99,5 @@ def test_archive_all(ds_archive):
         assert v == expiry.counter_archive.get(k)
         collection = getattr(ds_archive, k)
         collection.commit()
-        assert collection.search("id:*")['total'] == v
+        assert collection.search("id:*")['total'] == 0
+        assert collection.search("id:*", use_archive=True)['total'] == v
