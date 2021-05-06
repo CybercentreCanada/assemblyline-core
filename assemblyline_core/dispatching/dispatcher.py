@@ -933,7 +933,7 @@ class Dispatcher(ThreadedCoreBase):
                 task.file_names[extracted_data.sha256] = extracted_data.name
 
         # Send the extracted files to the dispatcher
-        with apm_span(self.apm_client, 'process_extracted_files'):
+        with elasticapm.capture_span('process_extracted_files'):
             dispatched = 0
             if new_depth < depth_limit:
                 # Prepare the temporary data from the parent to build the temporary data table for
