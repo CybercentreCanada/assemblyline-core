@@ -1204,7 +1204,8 @@ class Dispatcher(ThreadedCoreBase):
             # Don't load more than the proper portion of work. Let the thief
             # go a fixed margin over the limit, so that recovering past work
             # will continue even when max submissions are in progress.
-            max_tasks = self.config.core.dispatcher.max_inflight / self.running_dispatchers_estimate
+            # Consider one less running dispatcher, because we're in the middle of processing a dead one
+            max_tasks = self.config.core.dispatcher.max_inflight / (self.running_dispatchers_estimate - 1)
             if self.active_submissions.length() >= max_tasks + 500:
                 self.sleep(1)
                 continue
