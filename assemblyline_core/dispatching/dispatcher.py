@@ -983,6 +983,14 @@ class Dispatcher(ThreadedCoreBase):
                         'type': 'MAX DEPTH REACHED'
                     }))
 
+        # Check if its worth trying to run the next stage
+        # Not worth running if we know we are waiting for another service
+        if any(_s == result.sha256 for _s, _ in task.running_services.keys()):
+            return
+        # Not worth running if we know we have services in queue
+        if any(_s == result.sha256 for _s, _ in task.queue_keys.keys()):
+            return
+        # Try to run the next stage
         self.dispatch_file(task, result.sha256)
 
     @elasticapm.capture_span(span_type='dispatcher')
