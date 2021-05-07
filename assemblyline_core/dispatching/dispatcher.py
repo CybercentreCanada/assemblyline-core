@@ -285,7 +285,7 @@ class Dispatcher(ThreadedCoreBase):
                 self.sleep(1)
                 cpu_mark = time.process_time()
                 time_mark = time.time()
-                continue                
+                continue
 
             # Check if we are maxing out our share of the submission limit
             max_tasks = self.config.core.dispatcher.max_inflight / self.running_dispatchers_estimate
@@ -366,7 +366,7 @@ class Dispatcher(ThreadedCoreBase):
         self.dispatch_file(task, submission.files[0].sha256)
 
     @elasticapm.capture_span(span_type='dispatcher')
-    def dispatch_file(self, task: SubmissionTask, sha256: str, timed_out_host: str = None) -> bool:
+    def dispatch_file(self, task: SubmissionTask, sha256: str) -> bool:
         """
         Dispatch to any outstanding services for the given file.
         If nothing can be dispatched, check if the submission is finished.
@@ -502,7 +502,7 @@ class Dispatcher(ThreadedCoreBase):
                     # Check if we have attempted this too many times already.
                     task.service_attempts[key] += 1
                     if task.service_attempts[key] > 3:
-                        self.retry_error(task, sha256, service_name, timed_out_host)
+                        self.retry_error(task, sha256, service_name)
                         continue
 
                     # Its a new task, send it to the service
@@ -520,7 +520,7 @@ class Dispatcher(ThreadedCoreBase):
                 # If we are not waiting, and have not taken an action, we must have hit the
                 # retry limit on the only service running. In that case, we can move directly
                 # onto the next stage of services, so recurse to trigger them.
-                return self.dispatch_file(task, sha256, timed_out_host)
+                return self.dispatch_file(task, sha256)
 
         else:
             self.counter.increment('files_completed')
@@ -768,7 +768,7 @@ class Dispatcher(ThreadedCoreBase):
             'sender': 'dispatcher',
         }).as_primitives())
 
-    def retry_error(self, task: SubmissionTask, sha256, service_name, host):
+    def retry_error(self, task: SubmissionTask, sha256, service_name):
         self.log.warning(f"[{task.submission.sid}/{sha256}] "
                          f"{service_name} marking task failed: TASK PREEMPTED ")
 
@@ -795,7 +795,7 @@ class Dispatcher(ThreadedCoreBase):
         task.service_errors[(sha256, service_name)] = error_key
 
         export_metrics_once(service_name, ServiceMetrics, dict(fail_nonrecoverable=1),
-                            counter_type='service', host=host)
+                            counter_type='service', host='dispatcher')
 
         # Send the result key to any watching systems
         msg = {'status': 'FAIL', 'cache_key': error_key}
@@ -1122,10 +1122,12 @@ class Dispatcher(ThreadedCoreBase):
                              f"timed out on {sha256} but task isn't running.")
 
         # We can confirm that the task is ours now, even if the worker finished, the result will be ignored
-        _, worker_id = task.running_services.pop((sha256, service_name), (None, None))
-        self.log.info(f"[{sid}] Service {service_name} "
-                      f"running on {worker_id} timed out on {sha256}.")
-        self.dispatch_file(task, sha256, timed_out_host=worker_id)
+        service_task = ServiceTask(service_task)
+        self.log.info(f"[{service_task.sid}] Service {service_task.service_name} "
+                      f"timed out on {service_task.fileinfo.sha256}.")
+
+        _, worker_id = task.running_services.pop((sha256, service_name))
+        self.dispatch_file(task, sha256)
 
         # We push the task of killing the container off on the scaler, which already has root access
         # the scaler can also double check that the service name and container id match, to be sure
