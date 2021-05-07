@@ -73,13 +73,13 @@ class MockService(ServerBase):
             task = self.dispatch_client.request_work('worker', self.service_name, '0', timeout=3)
             if not task:
                 continue
-            print(self.service_name, 'has received a job', task.sid)
+            self.log.info(f"{self.service_name} has received a job {task.sid}")
 
             file = self.filestore.get(task.fileinfo.sha256)
 
             instructions = json.loads(file)
             instructions = instructions.get(self.service_name, {})
-            print(self.service_name, 'following instruction:', instructions)
+            self.log.info(f"{self.service_name} following instruction: {instructions}")
             hits = self.hits[task.fileinfo.sha256] = self.hits.get(task.fileinfo.sha256, 0) + 1
 
             if instructions.get('hold', False):
