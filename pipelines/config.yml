@@ -6,12 +6,12 @@ filestore:
 core:
   redis:
     nonpersistent:
-      host: localhost
+      host: redis
       port: 6379
     persistent:
-      host: localhost
+      host: redis
       port: 6379
 datastore:
   ilm:
     enabled: true
-  hosts: ["localhost:9200"]
+  hosts: ["elasticsearch:9200"]
