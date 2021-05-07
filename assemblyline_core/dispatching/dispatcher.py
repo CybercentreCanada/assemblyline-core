@@ -451,7 +451,7 @@ class Dispatcher(ThreadedCoreBase):
                 # If we are not waiting, and have not taken an action, we must have hit the
                 # retry limit on the only service running. In that case, we can move directly
                 # onto the next stage of services, so recurse to trigger them.
-                return self.dispatch_file(task, sha256)
+                return self.dispatch_file(task, sha256, timed_out_host)
 
         else:
             self.counter.increment('files_completed')
