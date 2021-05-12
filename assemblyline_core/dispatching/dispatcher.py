@@ -586,7 +586,8 @@ class Dispatcher(ThreadedCoreBase):
             return False
         finally:
             if stats:
-                export_metrics_once(service_task.service_name, ServiceMetrics, stats, counter_type='service')
+                export_metrics_once(service_task.service_name, ServiceMetrics, stats,
+                                    counter_type='service', redis=self.redis)
 
     @elasticapm.capture_span(span_type='dispatcher')
     def check_submission(self, task: SubmissionTask) -> bool:
@@ -795,7 +796,7 @@ class Dispatcher(ThreadedCoreBase):
         task.service_errors[(sha256, service_name)] = error_key
 
         export_metrics_once(service_name, ServiceMetrics, dict(fail_nonrecoverable=1),
-                            counter_type='service', host='dispatcher')
+                            counter_type='service', host='dispatcher', redis=self.redis)
 
         # Send the result key to any watching systems
         msg = {'status': 'FAIL', 'cache_key': error_key}
@@ -820,6 +821,7 @@ class Dispatcher(ThreadedCoreBase):
                 continue
 
             sid = message['service_task']['sid']
+            self.log.debug(f"Result for {sid} pushed to {self.process_queue_index(sid)}")
             self.find_process_queue(sid).put(('result', message))
 
     def service_worker(self, index: int):
@@ -848,6 +850,7 @@ class Dispatcher(ThreadedCoreBase):
 
             # Unpack what kind of message to process
             kind, message = message
+            self.log.debug(f"{kind} message for worker {index}")
 
             if kind == 'start':
                 with apm_span(self.apm_client, 'service_start_message'):
@@ -865,6 +868,7 @@ class Dispatcher(ThreadedCoreBase):
                             if key in task.service_errors or key in task.service_results:
                                 continue
                             self.set_timeout(task, sha256, service_name, worker_id)
+
             elif kind == 'result':
                 with apm_span(self.apm_client, "dispatcher_results"):
                     sid = message['service_task']['sid']
@@ -1096,6 +1100,7 @@ class Dispatcher(ThreadedCoreBase):
                         if sha and service_name:
                             service_timeouts += 1
                             self.timeout_service(task, sha, service_name)
+                            self.log.debug(f'[{sid}] timeout on service {service_name} processed')
                         else:
                             self.log.info(f'[{sid}] submission timeout, checking dispatch status...')
                             self.check_submission(task)
@@ -1139,7 +1144,7 @@ class Dispatcher(ThreadedCoreBase):
 
             # Report to the metrics system that a recoverable error has occurred for that service
             export_metrics_once(service_task.service_name, ServiceMetrics, dict(fail_recoverable=1),
-                                host=worker_id, counter_type='service')
+                                host=worker_id, counter_type='service', redis=self.redis)
 
     def work_guard(self):
         check_interval = GUARD_TIMEOUT/8
@@ -1350,7 +1355,7 @@ class Dispatcher(ThreadedCoreBase):
 
                     # Report to the metrics system that a recoverable error has occurred for that service
                     export_metrics_once(task.service_name, ServiceMetrics, dict(fail_recoverable=1),
-                                        host=task.metadata['worker__'], counter_type='service')
+                                        host=task.metadata['worker__'], counter_type='service', redis=self.redis)
 
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)

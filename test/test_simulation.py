@@ -94,6 +94,7 @@ class MockService(ServerBase):
             if 'drop' in instructions:
                 if instructions['drop'] >= hits:
                     self.drops[task.fileinfo.sha256] = self.drops.get(task.fileinfo.sha256, 0) + 1
+                    print('dropping', task.sid)
                     continue
 
             if instructions.get('failure', False):
@@ -139,7 +140,7 @@ class CoreSession:
 
 @pytest.fixture(autouse=True)
 def log_config(caplog):
-    caplog.set_level(logging.INFO, logger='assemblyline')
+    caplog.set_level(logging.DEBUG, logger='assemblyline')
 
 
 class MetricsCounter:
@@ -211,9 +212,9 @@ def core(request, redis, filestore, config):
     # Block logs from being initialized, it breaks under pytest if you create new stream handlers
     from assemblyline.common import log as al_log
     al_log.init_logging = lambda *args: None
-    dispatcher.TIMEOUT_EXTRA_TIME = 0
+    dispatcher.TIMEOUT_EXTRA_TIME = 2
     dispatcher.TIMEOUT_TEST_INTERVAL = 1
-    # al_log.init_logging("simulation")
+    al_log.init_logging("simulation")
 
     ds = forge.get_datastore()
     ingester = Ingester(datastore=ds, redis=redis, persistent_redis=redis, config=config)
@@ -321,7 +322,7 @@ def test_deduplication(core, metrics):
         'pre': {'lock': 60}
     })
 
-    _global_semaphore.acquire()
+    _global_semaphore = threading.Semaphore(value=0)
 
     for _ in range(2):
         core.ingest_queue.push(SubmissionInput(dict(

@@ -10,6 +10,7 @@ services:
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
     ports:
       - '9200:9200'
+    networks: [test]
 
   minio:
     image: minio/minio
@@ -19,9 +20,15 @@ services:
     ports:
       - '9000:9000'
     command: server /data
+    networks: [test]
 
   redis:
     image: redis
     ports:
       - '6379:6379'
       - '6380:6379'
+    networks: [test]
+
+networks:
+  test:
+    external: true
