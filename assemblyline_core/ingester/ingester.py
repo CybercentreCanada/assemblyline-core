@@ -142,7 +142,7 @@ class IngestTask(odm.Model):
 class Ingester(ThreadedCoreBase):
     def __init__(self, datastore=None, logger=None, classification=None, redis=None, persistent_redis=None,
                  metrics_name='ingester', config=None):
-        super().__init__('ingester', logger, redis=redis, redis_persist=persistent_redis, datastore=datastore,
+        super().__init__('assemblyline.ingester', logger, redis=redis, redis_persist=persistent_redis, datastore=datastore,
                          config=config)
 
         # Cache the user groups
