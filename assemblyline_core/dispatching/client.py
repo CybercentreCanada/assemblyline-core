@@ -21,14 +21,14 @@ from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.error import Error
 from assemblyline.remote.datatypes import get_client, reply_queue_name
-from assemblyline.remote.datatypes.hash import ExpiringHash
+from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.lock import Lock
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline_core.dispatching.dispatcher import DISPATCH_START_EVENTS, DISPATCH_RESULT_QUEUE, \
     DISPATCH_COMMAND_QUEUE
 
-from assemblyline_core.dispatching.dispatcher import ServiceTask
+from assemblyline_core.dispatching.dispatcher import ServiceTask, Dispatcher
 
 
 class RetryRequestWork(Exception):
@@ -45,7 +45,7 @@ class DispatchClient:
             private=False,
         )
 
-        redis_persist = redis_persist or get_client(
+        self.redis_persist = redis_persist or get_client(
             host=self.config.core.redis.persistent.host,
             port=self.config.core.redis.persistent.port,
             private=False,
@@ -57,13 +57,27 @@ class DispatchClient:
         self.results = self.ds.result
         self.errors = self.ds.error
         self.files = self.ds.file
-        self.submission_assignments = ExpiringHash(DISPATCH_TASK_HASH, host=redis_persist)
-        self.running_tasks = ExpiringHash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
+        self.submission_assignments = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
+        self.running_tasks = Hash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
         self.service_data = cast(Dict[str, Service], CachedObject(self._get_services))
+        self.dispatcher_data = []
+        self.dispatcher_data_age = 0
+        self.dead_dispatchers = []
 
     def _get_services(self):
         # noinspection PyUnresolvedReferences
         return {x.name: x for x in self.ds.list_all_services(full=True)}
+
+    def is_dispatcher(self, dispatcher_id) -> bool:
+        if dispatcher_id in self.dead_dispatchers:
+            return False
+        if time.time() - self.dispatcher_data_age > 120 or dispatcher_id not in self.dispatcher_data:
+            self.dispatcher_data = Dispatcher.all_instances(self.redis_persist)
+        if dispatcher_id in self.dispatcher_data:
+            return True
+        else:
+            self.dead_dispatchers.append(dispatcher_id)
+            return False
 
     def dispatch_submission(self, submission: Submission, completed_queue: str = None):
         """Insert a submission into the dispatching system.
@@ -145,10 +159,15 @@ class DispatchClient:
             self.log.info(f"{service_name}:{worker_id} no task returned: [empty message]")
             return None
         task = ServiceTask(result)
+        task.metadata['worker__'] = worker_id
+        dispatcher = task.metadata['dispatcher__']
 
-        if self.running_tasks.add(task.key(), result):
+        if not self.is_dispatcher(dispatcher):
+            self.log.info(f"{service_name}:{worker_id} no task returned: [task from dead dispatcher]")
+            return None
+
+        if self.running_tasks.add(task.key(), task.as_primitives()):
             self.log.info(f"[{task.sid}/{task.fileinfo.sha256}] {service_name}:{worker_id} task found")
-            dispatcher = task.metadata['dispatcher__']
             start_queue = NamedQueue(DISPATCH_START_EVENTS + dispatcher, host=self.redis)
             start_queue.push((task.sid, task.fileinfo.sha256, service_name, worker_id))
             return task
