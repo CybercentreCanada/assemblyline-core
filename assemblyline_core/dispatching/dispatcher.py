@@ -65,6 +65,7 @@ class ResultSummary:
 
 class SubmissionTask:
     """Dispatcher internal model for submissions"""
+
     def __init__(self, submission, completed_queue):
         self.submission: Submission = Submission(submission)
         self.completed_queue = str(completed_queue)
@@ -372,6 +373,7 @@ class Dispatcher(ThreadedCoreBase):
 
         :param task: Submission task object.
         :param sha256: hash of the file to check.
+        :param timed_out_host: Name of the host that timed out after maximum service attempts.
         :return: true if submission is finished.
         """
         submission = task.submission
@@ -776,7 +778,7 @@ class Dispatcher(ThreadedCoreBase):
             created='NOW',
             expiry_ts=now_as_iso(ttl * 24 * 60 * 60) if ttl else None,
             response=dict(
-                message=f'The number of retries has passed the limit.',
+                message='The number of retries has passed the limit.',
                 service_name=service_name,
                 service_version='0',
                 status='FAIL_NONRECOVERABLE',
@@ -792,7 +794,8 @@ class Dispatcher(ThreadedCoreBase):
         task.running_services.pop((sha256, service_name), None)
         task.service_errors[(sha256, service_name)] = error_key
 
-        export_metrics_once(service_name, ServiceMetrics, dict(fail_nonrecoverable=1), counter_type='service')
+        export_metrics_once(service_name, ServiceMetrics, dict(fail_nonrecoverable=1),
+                            counter_type='service', host='dispatcher')
 
         # Send the result key to any watching systems
         msg = {'status': 'FAIL', 'cache_key': error_key}
