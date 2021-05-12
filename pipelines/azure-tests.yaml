@@ -10,11 +10,15 @@ resources:
   containers:
   - container: redis
     image: redis
+    ports:
+      - 6379:6379
   - container: elasticsearch
     image: cccs/elasticsearch:7.8.0
     env:
       ES_JAVA_OPTS: "-Xms512m -Xmx512m"
       DISCOVERY_TYPE: 'single-node'
+    ports:
+      - 9200:9200
   repositories:
   - repository: assemblyline-base
     type: github
@@ -35,12 +39,18 @@ jobs:
     elasticsearch: elasticsearch
     redis: redis
 
-  container: 'cccs/assemblyline_dev:test-env-$(python.version)'
-
   steps:
+    - task: UsePythonVersion@0
+      displayName: Set python version
+      inputs:
+        versionSpec: '$(python.version)'
     - checkout: self
     - checkout: assemblyline-base
     - script: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libffi-dev libfuzzy-dev python3-dev git
+        sudo mkdir -p /etc/assemblyline/
+        sudo mkdir -p /var/cache/assemblyline/
         sudo cp pipelines/config.yml /etc/assemblyline
         sudo chmod a+rw /var/cache/assemblyline/
         sudo env "PATH=$PATH" python -m pip install --no-cache-dir -U pip cython setuptools

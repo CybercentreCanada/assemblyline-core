@@ -88,9 +88,6 @@ class MockService(ServerBase):
                 _global_semaphore.acquire(blocking=True, timeout=instructions['hold'])
                 continue
 
-            if instructions.get('lock', False):
-                _global_semaphore.acquire(blocking=True, timeout=instructions['lock'])
-
             if 'drop' in instructions:
                 if instructions['drop'] >= hits:
                     self.drops[task.fileinfo.sha256] = self.drops.get(task.fileinfo.sha256, 0) + 1
@@ -314,14 +311,9 @@ def ready_extract(core, children):
 
 
 def test_deduplication(core, metrics):
-    global _global_semaphore
     # -------------------------------------------------------------------------------
     # Submit two identical jobs, check that they get deduped by ingester
-    sha, size = ready_body(core, {
-        'pre': {'lock': 60}
-    })
-
-    _global_semaphore.acquire()
+    sha, size = ready_body(core)
 
     for _ in range(2):
         core.ingest_queue.push(SubmissionInput(dict(
@@ -343,9 +335,6 @@ def test_deduplication(core, metrics):
             )]
         )).as_primitives())
 
-    metrics.expect('ingester', 'duplicates', 1)
-    _global_semaphore.release()
-
     notification_queue = NamedQueue('nq-output-queue-one', core.redis)
     first_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
 
@@ -361,7 +350,6 @@ def test_deduplication(core, metrics):
     # The other will get processed as a duplicate
     # (Which one is the 'real' one and which is the duplicate isn't important for our purposes)
     second_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
-    assert second_task is not None, "Second task didn't respond before timeout"
     second_task = IngestTask(second_task)
     assert second_task.submission.sid == first_task.submission.sid
 
@@ -386,7 +374,6 @@ def test_deduplication(core, metrics):
             name='abc123'
         )]
     )).as_primitives())
-    _global_semaphore.release()
 
     notification_queue = NamedQueue('nq-2', core.redis)
     third_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
@@ -403,6 +390,7 @@ def test_deduplication(core, metrics):
     metrics.expect('ingester', 'submissions_ingested', 3)
     metrics.expect('ingester', 'submissions_completed', 2)
     metrics.expect('ingester', 'files_completed', 2)
+    metrics.expect('ingester', 'duplicates', 1)
     metrics.expect('dispatcher', 'submissions_completed', 2)
     metrics.expect('dispatcher', 'files_completed', 2)
 
@@ -971,11 +959,8 @@ def test_plumber_clearing(core, metrics):
 
         metrics.expect('ingester', 'submissions_ingested', 1)
         service_queue = get_service_queue('pre', core.redis)
-        start = time.time()
         while service_queue.length() != 1:
             time.sleep(0.1)
-            if time.time() - start > RESPONSE_TIMEOUT:
-                pytest.fail()
 
         service_delta = core.ds.service_delta.get('pre')
         service_delta['enabled'] = False
