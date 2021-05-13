@@ -584,7 +584,8 @@ class Dispatcher(ThreadedCoreBase):
             return False
         finally:
             if stats:
-                export_metrics_once(service_task.service_name, ServiceMetrics, stats, counter_type='service')
+                export_metrics_once(service_task.service_name, ServiceMetrics, stats,
+                                    counter_type='service', host='dispatcher')
 
     @elasticapm.capture_span(span_type='dispatcher')
     def check_submission(self, task: SubmissionTask) -> bool:
@@ -792,7 +793,8 @@ class Dispatcher(ThreadedCoreBase):
         task.running_services.pop((sha256, service_name), None)
         task.service_errors[(sha256, service_name)] = error_key
 
-        export_metrics_once(service_name, ServiceMetrics, dict(fail_nonrecoverable=1), counter_type='service')
+        export_metrics_once(service_name, ServiceMetrics, dict(fail_nonrecoverable=1),
+                            counter_type='service', host='dispatcher')
 
         # Send the result key to any watching systems
         msg = {'status': 'FAIL', 'cache_key': error_key}
