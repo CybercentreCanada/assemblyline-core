@@ -586,7 +586,8 @@ class Dispatcher(ThreadedCoreBase):
             return False
         finally:
             if stats:
-                export_metrics_once(service_task.service_name, ServiceMetrics, stats, counter_type='service')
+                export_metrics_once(service_task.service_name, ServiceMetrics, stats,
+                                    counter_type='service', host='dispatcher')
 
     @elasticapm.capture_span(span_type='dispatcher')
     def check_submission(self, task: SubmissionTask) -> bool:
