@@ -42,7 +42,7 @@ class Plumber(CoreBase):
             for service_name, service in service_queues.items():
                 if not service or not service.enabled or self.get_service_stage(service_name) != ServiceStage.Running:
                     while True:
-                        task = self.dispatch_client.request_work(None, service_name=service_name,
+                        task = self.dispatch_client.request_work('plumber', service_name=service_name,
                                                                  service_version='0', blocking=False)
                         if task is None:
                             break
