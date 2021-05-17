@@ -14,8 +14,11 @@ from assemblyline.odm.messages.expiry_heartbeat import Metrics
 
 
 class ExpiryManager(ServerBase):
-    def __init__(self):
+    def __init__(self, force_ilm=False):
         self.config = forge.get_config()
+        if force_ilm:
+            self.config.datastore.ilm.enabled = True
+
         super().__init__('assemblyline.expiry', shutdown_timeout=self.config.core.expiry.sleep_time + 5)
         self.datastore = forge.get_datastore(config=self.config, archive_access=True)
         self.filestore = forge.get_filestore(config=self.config)
@@ -130,10 +133,11 @@ class ExpiryManager(ServerBase):
             self.log.info(f"Processing collection: {collection.name}")
             if number_to_archive != 0:
                 # Proceed with archiving
-                collection.archive(archive_query)
-                self.counter_archive.increment(f'{collection.name}', increment_by=number_to_archive)
-
-                self.log.info(f"    Archived {number_to_archive} items to the time sliced storage...")
+                if collection.archive(archive_query):
+                    self.counter_archive.increment(f'{collection.name}', increment_by=number_to_archive)
+                    self.log.info(f"    Archived {number_to_archive} documents...")
+                else:
+                    self.log.warning(f"    Failed to properly archive {number_to_archive} documents...")
 
             else:
                 self.log.debug("    Nothing to archive in this collection.")
