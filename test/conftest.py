@@ -2,8 +2,14 @@
 Pytest configuration file, setup global pytest fixtures and functions here.
 """
 import os
+import pytest
+
+from redis.exceptions import ConnectionError
 
 from assemblyline.common import forge
+from assemblyline.datastore.stores.es_store import ESStore
+from assemblyline.datastore.helper import AssemblylineDatastore
+
 original_classification = forge.get_classification
 
 
@@ -15,11 +21,6 @@ def test_classification(yml_config=None):
 forge.get_classification = test_classification
 
 
-from assemblyline.datastore.helper import AssemblylineDatastore
-from assemblyline.datastore.stores.es_store import ESStore
-from redis.exceptions import ConnectionError
-
-import pytest
 original_skip = pytest.skip
 
 # Check if we are in an unattended build environment where skips won't be noticed
@@ -46,6 +47,7 @@ def config():
     config.logging.log_as_json = False
     config.core.metrics.apm_server.server_url = None
     config.core.metrics.export_interval = 1
+    config.datastore.ilm.enabled = True
     return config
 
 

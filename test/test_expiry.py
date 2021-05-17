@@ -89,10 +89,9 @@ def test_expire_all(ds_expiry):
 
 
 def test_archive_all(ds_archive):
-    expiry = ExpiryManager()
+    expiry = ExpiryManager(force_ilm=True)
     expiry.counter = FakeCounter()
     expiry.counter_archive = FakeCounter()
-    expiry.config.datastore.ilm.enabled = True
     expiry.run_archive_once()
 
     for k, v in archive_collections_len.items():
