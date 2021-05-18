@@ -1210,17 +1210,15 @@ class Dispatcher(ThreadedCoreBase):
         target_jobs = ExpiringHash(DISPATCH_TASK_ASSIGNMENT+target, host=self.redis_persist)
         self.log.info(f'Starting to steal work from {target}')
 
-        keys = target_jobs.keys()
-        while self.running and keys:
-            # Don't load more than the proper portion of work. Let the thief
-            # go a fixed margin over the limit, so that recovering past work
-            # will continue even when max submissions are in progress.
-            # Consider one less running dispatcher, because we're in the middle of processing a dead one
-            max_tasks = self.config.core.dispatcher.max_inflight / max(self.running_dispatchers_estimate - 1, 1)
-            if self.active_submissions.length() >= max_tasks + 500:
-                self.sleep(1)
-                continue
+        # Start of process dispatcher transaction
+        if self.apm_client:
+            self.apm_client.begin_transaction(APM_SPAN_TYPE)
 
+        cpu_mark = time.process_time()
+        time_mark = time.time()
+
+        keys = target_jobs.keys()
+        while keys:
             message = target_jobs.pop(keys.pop())
             if not keys:
                 keys = target_jobs.keys()
@@ -1228,32 +1226,13 @@ class Dispatcher(ThreadedCoreBase):
             if not message:
                 continue
 
-            cpu_mark = time.process_time()
-            time_mark = time.time()
+            self.submission_queue.unpop(message)
 
-            # Start of process dispatcher transaction
-            if self.apm_client:
-                self.apm_client.begin_transaction(APM_SPAN_TYPE)
+        self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+        self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
-            try:
-                # This is probably a complete task
-                task = SubmissionTask(**message)
-                if self.apm_client:
-                    elasticapm.label(sid=task.submission.sid)
-
-                with task.lock:
-                    self.dispatch_submission(task)
-
-                # End of process dispatcher transaction (success)
-                if self.apm_client:
-                    self.apm_client.end_transaction('submission_message', 'success')
-            except Exception:
-                if self.apm_client:
-                    self.apm_client.end_transaction('submission_message', 'exception')
-                raise
-
-            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
-            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+        if self.apm_client:
+            self.apm_client.end_transaction('submission_message', 'success')
 
         self.log.info(f'Finished stealing work from {target}')
         self.dispatchers_directory.pop(target)
