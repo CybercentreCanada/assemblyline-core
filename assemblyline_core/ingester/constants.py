@@ -1,5 +1,6 @@
 from math import tanh
 
+COMPLETE_QUEUE_NAME = 'm-complete'
 INGEST_QUEUE_NAME = 'm-ingest'
 
 
