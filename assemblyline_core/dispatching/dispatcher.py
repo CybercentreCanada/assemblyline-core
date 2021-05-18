@@ -1257,19 +1257,19 @@ class Dispatcher(ThreadedCoreBase):
                 # Get the submissions belonging to an dispatcher we don't know about
                 assignments = self.submissions_assignments.items()
                 dispatcher_instances = set(Dispatcher.all_instances(persistent_redis=self.redis_persist))
-                assignments = {k: v for k, v in assignments.items() if v not in dispatcher_instances}
+                missing = [sid for sid, instance in assignments.items() if instance not in dispatcher_instances]
 
                 # Submissions that didn't belong to anyone should be recovered
-                for sid in assignments.keys():
+                for sid in missing:
                     if not self.recover_submission(sid):
                         self.submissions_assignments.pop(sid)
 
             # Start of process dispatcher transaction
             with apm_span(self.apm_client, 'abandoned_submission_check'):
                 # Get the submissions belonging to an dispatcher we don't know about
-                for item in self.datastore.submission.stream_search('state: submitted', fl='id'):
-                    if not self.submissions_assignments.exists(item['id']):
-                        self.recover_submission(item['id'])
+                for item in self.datastore.submission.stream_search('state: submitted', fl='sid'):
+                    if not self.submissions_assignments.exists(item['sid']):
+                        self.recover_submission(item['sid'])
 
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
@@ -1280,6 +1280,7 @@ class Dispatcher(ThreadedCoreBase):
         submission: Submission = self.datastore.submission.get_if_exists(sid)
         if not submission:
             return False
+        self.log.warning(f'Recovered dead submission: {sid}')
 
         # Try to recover the completion queue value by checking with the ingest table
         completed_queue = ''
