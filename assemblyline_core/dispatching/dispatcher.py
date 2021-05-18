@@ -158,8 +158,8 @@ class Dispatcher(ThreadedCoreBase):
         self.running_dispatchers_estimate = 1
 
         # Tables to track what submissions are running where
-        self.active_submissions = ExpiringHash(DISPATCH_TASK_ASSIGNMENT+self.instance_id, host=self.redis_persist)
-        self.submissions_assignments = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
+        self.active_submissions = Hash(DISPATCH_TASK_ASSIGNMENT+self.instance_id, host=self.redis_persist)
+        self.submissions_assignments = Hash(DISPATCH_TASK_HASH, host=self.redis_persist)
         self.ingester_scanning = Hash('m-scanning-table', self.redis_persist)
 
         # Communications queues
