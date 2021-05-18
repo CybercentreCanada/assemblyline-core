@@ -1279,7 +1279,7 @@ class Dispatcher(ThreadedCoreBase):
 
     def recover_submission(self, sid: str) -> bool:
         # Make sure we can load the submission body
-        submission: Submission = self.datastore.submission.get_if_exists(sid, as_obj=False)
+        submission: Submission = self.datastore.submission.get_if_exists(sid)
         if not submission:
             return False
 
