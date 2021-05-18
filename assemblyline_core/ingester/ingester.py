@@ -38,10 +38,9 @@ from assemblyline.odm.messages.submission import Submission as MessageSubmission
 
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from assemblyline_core.submission_client import SubmissionClient
-from .constants import INGEST_QUEUE_NAME, drop_chance
+from .constants import INGEST_QUEUE_NAME, drop_chance, COMPLETE_QUEUE_NAME
 from ..server_base import ThreadedCoreBase
 
-COMPLETE_QUEUE_NAME = 'm-complete'
 _dup_prefix = 'w-m-'
 _notification_queue_prefix = 'nq-'
 _min_priority = 1
