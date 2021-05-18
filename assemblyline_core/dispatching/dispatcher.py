@@ -94,6 +94,7 @@ class SubmissionTask:
 
 
 DISPATCH_TASK_ASSIGNMENT = 'dispatcher-tasks-assigned-to-'
+TASK_ASSIGNMENT_PATTERN = DISPATCH_TASK_ASSIGNMENT + '*'
 DISPATCH_START_EVENTS = 'dispatcher-start-events-'
 DISPATCH_RESULT_QUEUE = 'dispatcher-results-'
 DISPATCH_COMMAND_QUEUE = 'dispatcher-commands-'
@@ -303,13 +304,18 @@ class Dispatcher(ThreadedCoreBase):
         submission = task.submission
         sid = submission.sid
 
+        if not self.submissions_assignments.add(sid, self.instance_id):
+            self.log.warning(f"[{sid}] Received an assigned submission dropping")
+            with self._tasks_lock:
+                self._tasks.pop(sid)
+            return
+
         if not self.active_submissions.exists(sid):
             self.log.info(f"[{sid}] New submission received")
             self.active_submissions.add(sid, {
                 'completed_queue': task.completed_queue,
                 'submission': submission.as_primitives()
             })
-            self.submissions_assignments.set(sid, self.instance_id)
 
             # Write all new submissions to the traffic queue
             self.traffic_queue.publish(SubmissionMessage({
@@ -1086,12 +1092,10 @@ class Dispatcher(ThreadedCoreBase):
 
     def work_thief(self):
 
-        assignment_pattern = DISPATCH_TASK_ASSIGNMENT + '*'
         last_seen = {}
 
         try:
-            while self.running:
-                self.sleep(GUARD_TIMEOUT / 4)
+            while self.sleep(GUARD_TIMEOUT / 4):
                 cpu_mark = time.process_time()
                 time_mark = time.time()
 
@@ -1099,7 +1103,7 @@ class Dispatcher(ThreadedCoreBase):
                 last_seen.update(self.dispatchers_directory.items())
 
                 # List all dispatchers with jobs assigned
-                for raw_key in self.redis_persist.keys(assignment_pattern):
+                for raw_key in self.redis_persist.keys(TASK_ASSIGNMENT_PATTERN):
                     key: str = raw_key.decode()
                     key = key[len(DISPATCH_TASK_ASSIGNMENT):]
                     if key not in last_seen:
@@ -1115,6 +1119,7 @@ class Dispatcher(ThreadedCoreBase):
                     if time.time() - last_seen[oldest] > GUARD_TIMEOUT:
                         self.steal_work(oldest)
                         last_seen.pop(oldest)
+
         finally:
             if not self.running:
                 self.dispatchers_directory.pop(self.instance_id)
@@ -1132,14 +1137,16 @@ class Dispatcher(ThreadedCoreBase):
 
         keys = target_jobs.keys()
         while keys:
-            message = target_jobs.pop(keys.pop())
+            key = keys.pop()
+            message = target_jobs.pop(key)
             if not keys:
                 keys = target_jobs.keys()
 
             if not message:
                 continue
 
-            self.submission_queue.unpop(message)
+            if self.submissions_assignments.pop(key):
+                self.submission_queue.unpop(message)
 
         self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
         self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
@@ -1254,24 +1261,32 @@ class Dispatcher(ThreadedCoreBase):
                     export_metrics_once(task.service_name, ServiceMetrics, dict(fail_recoverable=1),
                                         host=task.metadata['worker__'], counter_type='service')
 
-            # Start of process dispatcher transaction
+            # Look for instances that are in the assignment table, but the instance its assigned to doesn't exist.
+            # We try to remove the instance from the table to prevent multiple dispatcher instances from
+            # recovering it at the same time
             with apm_span(self.apm_client, 'orphan_submission_check'):
                 # Get the submissions belonging to an dispatcher we don't know about
                 assignments = self.submissions_assignments.items()
                 dispatcher_instances = set(Dispatcher.all_instances(persistent_redis=self.redis_persist))
-                assignments = {k: v for k, v in assignments.items() if v not in dispatcher_instances}
+                # List all dispatchers with jobs assigned
+                for raw_key in self.redis_persist.keys(TASK_ASSIGNMENT_PATTERN):
+                    key: str = raw_key.decode()
+                    dispatcher_instances.add(key[len(DISPATCH_TASK_ASSIGNMENT):])
+                missing = [sid for sid, instance in assignments.items() if instance not in dispatcher_instances]
 
                 # Submissions that didn't belong to anyone should be recovered
-                for sid in assignments.keys():
-                    if not self.recover_submission(sid):
-                        self.submissions_assignments.pop(sid)
+                for sid in missing:
+                    if self.submissions_assignments.pop(sid):
+                        self.recover_submission(sid)
 
-            # Start of process dispatcher transaction
-            with apm_span(self.apm_client, 'abandoned_submission_check'):
-                # Get the submissions belonging to an dispatcher we don't know about
-                for item in self.datastore.submission.stream_search('state: submitted', fl='id'):
-                    if not self.submissions_assignments.exists(item['id']):
-                        self.recover_submission(item['id'])
+            # Look for
+            # with apm_span(self.apm_client, 'abandoned_submission_check'):
+            #     # Get the submissions belonging to an dispatcher we don't know about
+            #     for item in self.datastore.submission.stream_search('state: submitted', fl='sid'):
+            #         if item['sid'] in assignments:
+            #             continue
+            #         if self.submission_queue.
+
 
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
@@ -1282,6 +1297,7 @@ class Dispatcher(ThreadedCoreBase):
         submission: Submission = self.datastore.submission.get_if_exists(sid)
         if not submission:
             return False
+        self.log.warning(f'Recovered dead submission: {sid}')
 
         # Try to recover the completion queue value by checking with the ingest table
         completed_queue = ''
