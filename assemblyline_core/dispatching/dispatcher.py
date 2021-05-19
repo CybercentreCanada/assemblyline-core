@@ -1280,14 +1280,14 @@ class Dispatcher(ThreadedCoreBase):
                         self.recover_submission(sid)
 
             # Look for unassigned submissions in the datastore if we don't have a
-            # large number of outstanding things in the queue already 
+            # large number of outstanding things in the queue already
             if self.submission_queue.length() < 500:
                 with apm_span(self.apm_client, 'abandoned_submission_check'):
                     # Get the submissions belonging to an dispatcher we don't know about
                     for item in self.datastore.submission.stream_search('state: submitted', fl='sid'):
                         if item['sid'] in assignments:
                             continue
-                        self.recover_submission(sid)
+                        self.recover_submission(item['sid'])
 
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
