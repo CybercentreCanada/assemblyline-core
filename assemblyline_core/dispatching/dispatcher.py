@@ -37,6 +37,7 @@ from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
 from assemblyline_core.server_base import ThreadedCoreBase
 
 from .schedules import Scheduler
+from ..ingester.constants import COMPLETE_QUEUE_NAME
 
 APM_SPAN_TYPE = 'handle_message'
 
@@ -92,6 +93,7 @@ class SubmissionTask:
 
 
 DISPATCH_TASK_ASSIGNMENT = 'dispatcher-tasks-assigned-to-'
+TASK_ASSIGNMENT_PATTERN = DISPATCH_TASK_ASSIGNMENT + '*'
 DISPATCH_START_EVENTS = 'dispatcher-start-events-'
 DISPATCH_RESULT_QUEUE = 'dispatcher-results-'
 DISPATCH_COMMAND_QUEUE = 'dispatcher-commands-'
@@ -99,7 +101,7 @@ DISPATCH_DIRECTORY = 'dispatchers-directory'
 QUEUE_EXPIRY = 60*60
 SERVICE_VERSION_EXPIRY_TIME = 30 * 60  # How old service version info can be before we ignore it
 GUARD_TIMEOUT = 60*2
-GLOBAL_TASK_CHECK_INTERVAL = 60*5
+GLOBAL_TASK_CHECK_INTERVAL = 60*10
 TIMEOUT_EXTRA_TIME = 30  # 30 seconds grace for message handling.
 TIMEOUT_TEST_INTERVAL = 5
 MAX_RESULT_BUFFER = 64
@@ -136,10 +138,6 @@ class Dispatcher(ThreadedCoreBase):
 
         # Load the datastore collections that we are going to be using
         self.instance_id = uuid.uuid4().hex
-        # self.submissions: Collection = datastore.submission
-        # self.results: Collection = datastore.result
-        # self.errors: Collection = datastore.error
-        # self.files: Collection = datastore.file
         self._tasks: Dict[str, SubmissionTask] = {}
         self._tasks_lock = threading.Lock()
 
@@ -163,6 +161,7 @@ class Dispatcher(ThreadedCoreBase):
         # Tables to track what submissions are running where
         self.active_submissions = Hash(DISPATCH_TASK_ASSIGNMENT+self.instance_id, host=self.redis_persist)
         self.submissions_assignments = Hash(DISPATCH_TASK_HASH, host=self.redis_persist)
+        self.ingester_scanning = Hash('m-scanning-table', self.redis_persist)
 
         # Communications queues
         self.start_queue = NamedQueue(DISPATCH_START_EVENTS+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
@@ -304,13 +303,18 @@ class Dispatcher(ThreadedCoreBase):
         submission = task.submission
         sid = submission.sid
 
+        if not self.submissions_assignments.add(sid, self.instance_id):
+            self.log.warning(f"[{sid}] Received an assigned submission dropping")
+            with self._tasks_lock:
+                self._tasks.pop(sid)
+            return
+
         if not self.active_submissions.exists(sid):
             self.log.info(f"[{sid}] New submission received")
             self.active_submissions.add(sid, {
                 'completed_queue': task.completed_queue,
                 'submission': submission.as_primitives()
             })
-            self.submissions_assignments.set(sid, self.instance_id)
 
             # Write all new submissions to the traffic queue
             self.traffic_queue.publish(SubmissionMessage({
@@ -1086,12 +1090,10 @@ class Dispatcher(ThreadedCoreBase):
 
     def work_thief(self):
 
-        assignment_pattern = DISPATCH_TASK_ASSIGNMENT + '*'
         last_seen = {}
 
         try:
-            while self.running:
-                self.sleep(GUARD_TIMEOUT / 4)
+            while self.sleep(GUARD_TIMEOUT / 4):
                 cpu_mark = time.process_time()
                 time_mark = time.time()
 
@@ -1099,7 +1101,7 @@ class Dispatcher(ThreadedCoreBase):
                 last_seen.update(self.dispatchers_directory.items())
 
                 # List all dispatchers with jobs assigned
-                for raw_key in self.redis_persist.keys(assignment_pattern):
+                for raw_key in self.redis_persist.keys(TASK_ASSIGNMENT_PATTERN):
                     key: str = raw_key.decode()
                     key = key[len(DISPATCH_TASK_ASSIGNMENT):]
                     if key not in last_seen:
@@ -1115,6 +1117,7 @@ class Dispatcher(ThreadedCoreBase):
                     if time.time() - last_seen[oldest] > GUARD_TIMEOUT:
                         self.steal_work(oldest)
                         last_seen.pop(oldest)
+
         finally:
             if not self.running:
                 self.dispatchers_directory.pop(self.instance_id)
@@ -1123,50 +1126,31 @@ class Dispatcher(ThreadedCoreBase):
         target_jobs = Hash(DISPATCH_TASK_ASSIGNMENT+target, host=self.redis_persist)
         self.log.info(f'Starting to steal work from {target}')
 
-        keys = target_jobs.keys()
-        while self.running and keys:
-            # Don't load more than the proper portion of work. Let the thief
-            # go a fixed margin over the limit, so that recovering past work
-            # will continue even when max submissions are in progress.
-            # Consider one less running dispatcher, because we're in the middle of processing a dead one
-            max_tasks = self.config.core.dispatcher.max_inflight / max(self.running_dispatchers_estimate - 1, 1)
-            if self.active_submissions.length() >= max_tasks + 500:
-                self.sleep(1)
-                continue
+        # Start of process dispatcher transaction
+        if self.apm_client:
+            self.apm_client.begin_transaction(APM_SPAN_TYPE)
 
-            message = target_jobs.pop(keys.pop())
+        cpu_mark = time.process_time()
+        time_mark = time.time()
+
+        keys = target_jobs.keys()
+        while keys:
+            key = keys.pop()
+            message = target_jobs.pop(key)
             if not keys:
                 keys = target_jobs.keys()
 
             if not message:
                 continue
 
-            cpu_mark = time.process_time()
-            time_mark = time.time()
+            if self.submissions_assignments.pop(key):
+                self.submission_queue.unpop(message)
 
-            # Start of process dispatcher transaction
-            if self.apm_client:
-                self.apm_client.begin_transaction(APM_SPAN_TYPE)
+        self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+        self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
-            try:
-                # This is probably a complete task
-                task = SubmissionTask(**message)
-                if self.apm_client:
-                    elasticapm.label(sid=task.submission.sid)
-
-                with task.lock:
-                    self.dispatch_submission(task)
-
-                # End of process dispatcher transaction (success)
-                if self.apm_client:
-                    self.apm_client.end_transaction('submission_message', 'success')
-            except Exception:
-                if self.apm_client:
-                    self.apm_client.end_transaction('submission_message', 'exception')
-                raise
-
-            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
-            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+        if self.apm_client:
+            self.apm_client.end_transaction('submission_message', 'success')
 
         self.log.info(f'Finished stealing work from {target}')
         self.dispatchers_directory.pop(target)
@@ -1234,26 +1218,38 @@ class Dispatcher(ThreadedCoreBase):
         response_queue.push(outstanding)
 
     def timeout_backstop(self):
-        while self.sleep(GLOBAL_TASK_CHECK_INTERVAL):
+        while self.running:
             cpu_mark = time.process_time()
             time_mark = time.time()
 
             # Start of process dispatcher transaction
             with apm_span(self.apm_client, 'timeout_backstop'):
-                # Download all running tasks
-                all_tasks = self.running_tasks.items()
-
-                # Filter out all that belong to a running dispatcher
-                all_tasks = [ServiceTask(_s) for _s in all_tasks.values()]
                 dispatcher_instances = set(Dispatcher.all_instances(persistent_redis=self.redis_persist))
-                all_tasks = [_s for _s in all_tasks if _s.metadata['dispatcher__'] not in dispatcher_instances]
+                error_tasks = []
 
-                # The remaining running tasks belong to dead dispatchers and can be killed
-                for task in all_tasks:
+                # iterate running tasks
+                for task_key, task_body in self.running_tasks:
+                    task = ServiceTask(task_body)
+                    # Filter out all that belong to a running dispatcher
+                    if task.metadata['dispatcher__'] in dispatcher_instances:
+                        continue
+                    error_tasks.append(task)
+
+                # Refresh our dispatcher list.
+                dispatcher_instances = set(Dispatcher.all_instances(persistent_redis=self.redis_persist))
+
+                # The remaining running tasks (probably) belong to dead dispatchers and can be killed
+                for task in error_tasks:
+                    # Check against our refreshed dispatcher list in case it changed during the previous scan
+                    if task.metadata['dispatcher__'] in dispatcher_instances:
+                        continue
+
+                    # If its already been handled, we don't need to
                     if not self.running_tasks.pop(task.key()):
                         continue
-                    self.log.warning(f"[{task.sid}]Task killed by backstop {task.service_name} {task.fileinfo.sha256}")
 
+                    # Kill the task that would report to a dead dispatcher
+                    self.log.warning(f"[{task.sid}]Task killed by backstop {task.service_name} {task.fileinfo.sha256}")
                     self.scaler_timeout_queue.push({
                         'service': task.service_name,
                         'container': task.metadata['worker__']
@@ -1263,5 +1259,54 @@ class Dispatcher(ThreadedCoreBase):
                     export_metrics_once(task.service_name, ServiceMetrics, dict(fail_recoverable=1),
                                         host=task.metadata['worker__'], counter_type='service')
 
+            # Look for instances that are in the assignment table, but the instance its assigned to doesn't exist.
+            # We try to remove the instance from the table to prevent multiple dispatcher instances from
+            # recovering it at the same time
+            with apm_span(self.apm_client, 'orphan_submission_check'):
+                # Get the submissions belonging to an dispatcher we don't know about
+                assignments = self.submissions_assignments.items()
+                dispatcher_instances = set(Dispatcher.all_instances(persistent_redis=self.redis_persist))
+                # List all dispatchers with jobs assigned
+                for raw_key in self.redis_persist.keys(TASK_ASSIGNMENT_PATTERN):
+                    key: str = raw_key.decode()
+                    dispatcher_instances.add(key[len(DISPATCH_TASK_ASSIGNMENT):])
+                missing = [sid for sid, instance in assignments.items() if instance not in dispatcher_instances]
+
+                # Submissions that didn't belong to anyone should be recovered
+                for sid in missing:
+                    if self.submissions_assignments.pop(sid):
+                        self.recover_submission(sid)
+
+            # Look for unassigned submissions in the datastore if we don't have a
+            # large number of outstanding things in the queue already
+            if self.submission_queue.length() < 500:
+                with apm_span(self.apm_client, 'abandoned_submission_check'):
+                    # Get the submissions belonging to an dispatcher we don't know about
+                    for item in self.datastore.submission.stream_search('state: submitted', fl='sid'):
+                        if item['sid'] in assignments:
+                            continue
+                        self.recover_submission(item['sid'])
+
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+            self.sleep(GLOBAL_TASK_CHECK_INTERVAL)
+
+    def recover_submission(self, sid: str) -> bool:
+        # Make sure we can load the submission body
+        submission: Submission = self.datastore.submission.get_if_exists(sid)
+        if not submission:
+            return False
+        self.log.warning(f'Recovered dead submission: {sid}')
+
+        # Try to recover the completion queue value by checking with the ingest table
+        completed_queue = ''
+        scan_key = submission.params.create_filescore_key(submission.files[0].sha256)
+        if self.ingester_scanning.exists(scan_key):
+            completed_queue = COMPLETE_QUEUE_NAME
+
+        # Put the file back into processing
+        self.submission_queue.unpop(dict(
+            submission=submission.as_primitives(),
+            completed_queue=completed_queue,
+        ))
+        return True
