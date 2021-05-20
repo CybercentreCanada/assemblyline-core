@@ -18,14 +18,15 @@ from packaging import version
 
 class ESMetricsServer(ServerBase):
     """
-    There can only be one of these type of metrics server running because it gathers elasticsearch metrics for 
+    There can only be one of these type of metrics server running because it gathers elasticsearch metrics for
     the whole cluster.
     """
+
     def __init__(self, config=None):
         super().__init__('assemblyline.es_metrics', shutdown_timeout=15)
         self.config = config or forge.get_config()
         self.target_hosts = self.config.core.metrics.elasticsearch.hosts
-        
+
         self.index_interval = 10.0
         self.old_node_data = {}
         self.old_cluster_data = {}
