@@ -13,7 +13,7 @@ import elasticapm
 
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
-    DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH, SERVICE_VERSION_HASH
+    DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
 from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
@@ -29,7 +29,7 @@ from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
-from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
+from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
@@ -97,10 +97,9 @@ DISPATCH_RESULT_QUEUE = 'dispatcher-results-'
 DISPATCH_COMMAND_QUEUE = 'dispatcher-commands-'
 DISPATCH_DIRECTORY = 'dispatchers-directory'
 QUEUE_EXPIRY = 60*60
-SERVICE_VERSION_CACHE_TIME = 30  # Time between checking redis for new service version info
 SERVICE_VERSION_EXPIRY_TIME = 30 * 60  # How old service version info can be before we ignore it
 GUARD_TIMEOUT = 60*2
-GLOBAL_TASK_CHECK_INTERVAL = 60*3
+GLOBAL_TASK_CHECK_INTERVAL = 60*5
 TIMEOUT_EXTRA_TIME = 30  # 30 seconds grace for message handling.
 TIMEOUT_TEST_INTERVAL = 5
 MAX_RESULT_BUFFER = 64
@@ -150,10 +149,6 @@ class Dispatcher(ThreadedCoreBase):
         self.running_tasks = Hash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
 
-        # Track what the most recent service versions seen by the service server are
-        self.service_versions = Hash(SERVICE_VERSION_HASH, host=self.redis)
-        self._service_versions: Dict[str, Tuple[float, Tuple[str, str]]] = {}
-
         # self.classification_engine = forge.get_classification()
         #
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
@@ -166,8 +161,8 @@ class Dispatcher(ThreadedCoreBase):
         self.running_dispatchers_estimate = 1
 
         # Tables to track what submissions are running where
-        self.active_submissions = ExpiringHash(DISPATCH_TASK_ASSIGNMENT+self.instance_id, host=self.redis_persist)
-        self.submissions_assignments = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
+        self.active_submissions = Hash(DISPATCH_TASK_ASSIGNMENT+self.instance_id, host=self.redis_persist)
+        self.submissions_assignments = Hash(DISPATCH_TASK_HASH, host=self.redis_persist)
 
         # Communications queues
         self.start_queue = NamedQueue(DISPATCH_START_EVENTS+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
@@ -199,25 +194,6 @@ class Dispatcher(ThreadedCoreBase):
 
     def find_internal_process_queue(self, key: str) -> queue.Queue:
         return self.internal_process_queues[self.process_queue_index(key)]
-
-    @elasticapm.capture_span(span_type='dispatcher')
-    def get_service_version(self, service_name: str) -> Tuple[Optional[str], Optional[str]]:
-        # Try to load a cached value if we can
-        if service_name in self._service_versions:
-            read_time, row = self._service_versions[service_name]
-            if time.time() - read_time < SERVICE_VERSION_CACHE_TIME:
-                return row
-
-        # Read a new value from redis
-        row = self.service_versions.get(service_name)
-        if not row:
-            self._service_versions.pop(service_name, None)
-            return None, None
-        write_time, service_version, tool_version = row
-        if time.time() - write_time > SERVICE_VERSION_EXPIRY_TIME:
-            return None, None
-        self._service_versions[service_name] = time.time(), (service_version, tool_version)
-        return service_version, tool_version
 
     @elasticapm.capture_span(span_type='dispatcher')
     def add_task(self, task: SubmissionTask):
@@ -448,7 +424,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
-            sent, enqueued, running, cache_hits = [], [], [], []
+            sent, enqueued, running = [], [], []
 
             for service_name, service in outstanding.items():
                 with elasticapm.capture_span('dispatch_task', labels={'service': service_name}):
@@ -466,6 +442,12 @@ class Dispatcher(ThreadedCoreBase):
                         if dispatch_key is not None and service_queue.rank(dispatch_key) is not None:
                             enqueued.append(service_name)
                             continue
+
+                    # Check if we have attempted this too many times already.
+                    task.service_attempts[key] += 1
+                    if task.service_attempts[key] > 3:
+                        self.retry_error(task, sha256, service_name)
+                        continue
 
                     # Build the actual service dispatch message
                     config = self.build_service_config(service, submission)
@@ -492,28 +474,16 @@ class Dispatcher(ThreadedCoreBase):
                     ))
                     service_task.metadata['dispatcher__'] = self.instance_id
 
-                    # Check if this task is a cache hit
-                    if self.check_result_cache(task, service_task):
-                        cache_hits.append(service_name)
-                        continue
-
-                    # Check if we have attempted this too many times already.
-                    task.service_attempts[key] += 1
-                    if task.service_attempts[key] > 3:
-                        self.retry_error(task, sha256, service_name)
-                        continue
-
                     # Its a new task, send it to the service
                     queue_key = service_queue.push(service_task.priority, service_task.as_primitives())
                     task.queue_keys[(sha256, service_name)] = queue_key
                     sent.append(service_name)
 
-            if sent or enqueued or running or cache_hits:
+            if sent or enqueued or running:
                 # If we have confirmed that we are waiting, or have taken an action, log that.
                 self.log.info(f"[{sid}] File {sha256} sent to: {sent} "
                               f"already in queue for: {enqueued} "
-                              f"running on: {running} "
-                              f"cache hit on: {cache_hits}")
+                              f"running on: {running}")
             else:
                 # If we are not waiting, and have not taken an action, we must have hit the
                 # retry limit on the only service running. In that case, we can move directly
@@ -529,63 +499,6 @@ class Dispatcher(ThreadedCoreBase):
                 self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
                 return self.check_submission(task)
         return False
-
-    @elasticapm.capture_span(span_type='dispatcher')
-    def check_result_cache(self, task: SubmissionTask, service_task: ServiceTask) -> bool:
-        # Check if caching is disabled for this task/service
-        service_data = self.service_info.get(service_task.service_name, None)
-        if service_task.ignore_cache or service_data is None or service_data.disable_cache:
-            return False
-
-        # Make sure we know what service version the task would be sent to
-        service_version, service_tool_version = self.get_service_version(service_task.service_name)
-        if service_version is None:
-            return False
-
-        # Build the result key and see if the result exists
-        result_key = Result.help_build_key(sha256=service_task.fileinfo.sha256,
-                                           service_name=service_task.service_name,
-                                           service_version=service_version,
-                                           service_tool_version=service_tool_version,
-                                           is_empty=False,
-                                           task=service_task)
-
-        stats = defaultdict(int)
-        try:
-            result = self.datastore.result.get_if_exists(result_key)
-            if result:
-                stats['cache_hit'] += 1
-                if result.result.score:
-                    stats['scored'] += 1
-                else:
-                    stats['not_scored'] += 1
-                self.set_timeout(task, service_task.fileinfo.sha256, service_task.service_name, None)
-                self.find_internal_process_queue(task.sid).put(('result', {
-                    'service_task': service_task.as_primitives(),
-                    'result': result.as_primitives(),
-                    'result_key': result_key,
-                    'temporary_data': None
-                }))
-                return True
-
-            result = self.datastore.emptyresult.get_if_exists(f"{result_key}.e")
-            if result:
-                stats['cache_hit'] += 1
-                stats['not_scored'] += 1
-                result = self.datastore.create_empty_result_from_key(result_key)
-                self.set_timeout(task, service_task.fileinfo.sha256, service_task.service_name, None)
-                self.find_internal_process_queue(task.sid).put(('result', {
-                    'service_task': service_task.as_primitives(),
-                    'result': result.as_primitives(),
-                    'result_key': f"{result_key}.e",
-                    'temporary_data': None
-                }))
-                return True
-            return False
-        finally:
-            if stats:
-                export_metrics_once(service_task.service_name, ServiceMetrics, stats,
-                                    counter_type='service', host='dispatcher')
 
     @elasticapm.capture_span(span_type='dispatcher')
     def check_submission(self, task: SubmissionTask) -> bool:
@@ -1207,7 +1120,7 @@ class Dispatcher(ThreadedCoreBase):
                 self.dispatchers_directory.pop(self.instance_id)
 
     def steal_work(self, target):
-        target_jobs = ExpiringHash(DISPATCH_TASK_ASSIGNMENT+target, host=self.redis_persist)
+        target_jobs = Hash(DISPATCH_TASK_ASSIGNMENT+target, host=self.redis_persist)
         self.log.info(f'Starting to steal work from {target}')
 
         keys = target_jobs.keys()
