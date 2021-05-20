@@ -18,12 +18,11 @@ from assemblyline.odm.messages.dispatcher_heartbeat import DispatcherMessage
 from assemblyline.odm.messages.expiry_heartbeat import ExpiryMessage
 from assemblyline.odm.messages.ingest_heartbeat import IngestMessage
 from assemblyline.odm.messages.service_heartbeat import ServiceMessage
-from assemblyline.odm.messages.watcher_heartbeat import WatcherMessage
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.remote.datatypes.queues.priority import PriorityQueue, UniquePriorityQueue
+from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 
 STATUS_QUEUE = "status"
 
@@ -100,7 +99,8 @@ class HeartbeatFormatter(object):
             for collection_name in metrics.EXPIRY_METRICS:
                 try:
                     collection = getattr(self.datastore, collection_name)
-                    self.to_expire[collection_name] = collection.search(self.delete_query, rows=0, fl='id')['total']
+                    self.to_expire[collection_name] = collection.search(self.delete_query, rows=0, fl='id',
+                                                                        track_total_hits="true")['total']
                 except SearchException:
                     self.to_expire[collection_name] = 0
         except Exception:

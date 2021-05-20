@@ -180,7 +180,7 @@ def with_retries(log, func, *args, **kwargs):
         except (elasticsearch.exceptions.ConnectionError,
                 elasticsearch.exceptions.ConnectionTimeout,
                 elasticsearch.exceptions.AuthenticationException):
-            log.warning(f"No connection to Elasticsearch, retrying...")
+            log.warning("No connection to Elasticsearch, retrying...")
             time.sleep(min(retries, MAX_RETRY_BACKOFF))
             retries += 1
 
