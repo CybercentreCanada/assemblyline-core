@@ -631,7 +631,7 @@ class Ingester(ThreadedCoreBase):
             self.counter.increment('cache_hit_local')
             self.log.info(f'[{task.ingest_id} :: {task.sha256}] Local cache hit')
         else:
-            result = self.datastore.filescore.get(key)
+            result = self.datastore.filescore.get_if_exists(key)
             if result:
                 self.counter.increment('cache_hit')
                 self.log.info(f'[{task.ingest_id} :: {task.sha256}] Remote cache hit')
