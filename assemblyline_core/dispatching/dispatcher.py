@@ -960,6 +960,9 @@ class Dispatcher(ThreadedCoreBase):
             bisect.insort(self.timeout_list, (timeout_at, sid, '', ''))
 
     def clear_submission_timeout(self, task: SubmissionTask):
+        if task.timeout_at is None:
+            return
+
         with self.timeout_list_lock:
             key = (task.timeout_at, task.submission.sid, '', '')
             task.timeout_at = None
