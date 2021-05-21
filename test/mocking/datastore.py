@@ -13,6 +13,9 @@ class MockCollection:
             return self._docs[key].as_primitives()
         return self._docs[key]
 
+    def get_if_exists(self, *args, **kwargs):
+        return self.get(*args, **kwargs)
+
     def multiget(self, key_list, as_obj=True, as_dictionary=True):
         if as_dictionary:
             return {key: self.get(key, as_obj=as_obj) for key in key_list}
