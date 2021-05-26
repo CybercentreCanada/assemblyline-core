@@ -1,4 +1,3 @@
-import bisect
 import uuid
 import os
 import threading
@@ -37,6 +36,7 @@ from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
 from assemblyline_core.server_base import ThreadedCoreBase
 
 from .schedules import Scheduler
+from .timeout import TimeoutTable
 from ..ingester.constants import COMPLETE_QUEUE_NAME
 
 APM_SPAN_TYPE = 'handle_message'
@@ -85,7 +85,7 @@ class SubmissionTask:
         self.service_errors: Dict[Tuple[str, str], dict] = {}
         self.service_attempts: Dict[Tuple[str, str], int] = defaultdict(int)
         self.queue_keys: Dict[Tuple[str, str], bytes] = {}
-        self.running_services: Dict[Tuple[str, str], Tuple[int, str]] = {}
+        self.running_services: Set[Tuple[str, str]] = set()
 
     @property
     def sid(self):
@@ -178,8 +178,8 @@ class Dispatcher(ThreadedCoreBase):
             self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
                                                 service_name="dispatcher")
 
-        self.timeout_list_lock = threading.Lock()
-        self.timeout_list: List[Tuple[int, str, str, str]] = []
+        self._service_timeouts = TimeoutTable()
+        self._submission_timeouts = TimeoutTable()
 
         # Setup queues for work to be divided into
         self.process_queues: List[queue.Queue] = [queue.Queue(MAX_RESULT_BUFFER) for _ in range(RESULT_THREADS)]
@@ -338,7 +338,7 @@ class Dispatcher(ThreadedCoreBase):
                 self.log.warning(f"[{sid}] could not process initialization data: {err}")
 
         self.add_task(task)
-        self.set_submission_timeout(task)
+        self._submission_timeouts.set(task.sid, time.time() + SUBMISSION_TOTAL_TIMEOUT, None)
 
         task.file_depth[submission.files[0].sha256] = 0
         task.file_names[submission.files[0].sha256] = submission.files[0].name or submission.files[0].sha256
@@ -653,7 +653,7 @@ class Dispatcher(ThreadedCoreBase):
         sid = submission.sid
 
         # Now that a submission is finished, we can remove it from the timeout list
-        self.clear_submission_timeout(task)
+        self._submission_timeouts.clear(task.sid)
 
         if submission.params.quota_item and submission.params.submitter:
             self.log.info(f"[{sid}] Submission no longer counts toward {submission.params.submitter.upper()} quota")
@@ -707,7 +707,7 @@ class Dispatcher(ThreadedCoreBase):
         self.datastore.error.save(error_key, error.as_primitives())
 
         task.queue_keys.pop((sha256, service_name), None)
-        task.running_services.pop((sha256, service_name), None)
+        task.running_services.discard((sha256, service_name))
         task.service_errors[(sha256, service_name)] = error_key
 
         export_metrics_once(service_name, ServiceMetrics, dict(fail_nonrecoverable=1),
@@ -904,7 +904,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Check if its worth trying to run the next stage
         # Not worth running if we know we are waiting for another service
-        if any(_s == result.sha256 for _s, _ in task.running_services.keys()):
+        if any(_s == result.sha256 for _s, _ in task.running_services):
             return
         # Not worth running if we know we have services in queue
         if any(_s == result.sha256 for _s, _ in task.queue_keys.keys()):
@@ -949,47 +949,21 @@ class Dispatcher(ThreadedCoreBase):
             sid = message[0]
             self.find_process_queue(sid).put(('start', message))
 
-    def set_submission_timeout(self, task: SubmissionTask):
-        sid = task.submission.sid
-        timeout_at = int(time.time() + SUBMISSION_TOTAL_TIMEOUT)
-        task.timeout_at = timeout_at
-        with self.timeout_list_lock:
-            bisect.insort(self.timeout_list, (timeout_at, sid, '', ''))
-
-    def clear_submission_timeout(self, task: SubmissionTask):
-        with self.timeout_list_lock:
-            key = (task.timeout_at, task.submission.sid, '', '')
-            task.timeout_at = None
-            index = bisect.bisect_left(self.timeout_list, key)
-            if index < len(self.timeout_list) and self.timeout_list[index] == key:
-                self.timeout_list.pop(index)
-
     @elasticapm.capture_span(span_type='dispatcher')
-    def set_timeout(self, task, sha256, service_name, worker_id):
+    def set_timeout(self, task: SubmissionTask, sha256, service_name, worker_id):
         sid = task.submission.sid
         service = self.scheduler.services.get(service_name)
         if not service:
             return
-
-        timeout_at = int(time.time() + service.timeout + TIMEOUT_EXTRA_TIME)
-
-        task.running_services[(sha256, service_name)] = timeout_at, worker_id
-        with self.timeout_list_lock:
-            bisect.insort(self.timeout_list, (timeout_at, sid, sha256, service_name))
+        self._service_timeouts.set((sid, sha256, service_name), service.timeout + TIMEOUT_EXTRA_TIME, worker_id)
+        task.running_services.add((sha256, service_name))
 
     @elasticapm.capture_span(span_type='dispatcher')
     def clear_timeout(self, task, sha256, service_name):
         sid = task.submission.sid
         task.queue_keys.pop((sha256, service_name), None)
-        row = task.running_services.pop((sha256, service_name), None)
-        if row is None:
-            return
-        timeout_at, worker_id = row
-        with self.timeout_list_lock:
-            key = (timeout_at, sid, sha256, service_name)
-            index = bisect.bisect_left(self.timeout_list, key)
-            if index < len(self.timeout_list) and self.timeout_list[index] == key:
-                self.timeout_list.pop(index)
+        task.running_services.discard((sha256, service_name))
+        self._service_timeouts.clear((sid, sha256, service_name))
 
     def handle_timeouts(self):
         while self.sleep(TIMEOUT_TEST_INTERVAL):
@@ -997,36 +971,32 @@ class Dispatcher(ThreadedCoreBase):
                 cpu_mark = time.process_time()
                 time_mark = time.time()
 
-                timeouts = []
-                with self.timeout_list_lock:
-                    while self.timeout_list and self.timeout_list[0][0] < time_mark:
-                        timeouts.append(self.timeout_list.pop(0))
+                # Check for submission timeouts
+                submission_timeouts = self._submission_timeouts.timeouts()
+                for sid in submission_timeouts.keys():
+                    self.log.info(f'[{sid}] submission timeout, checking dispatch status...')
+                    self.check_submission(task)
 
-                service_timeouts = 0
-                for _, sid, sha, service_name in timeouts:
+                    # If we didn't finish the submission here, wait another 20 minutes
+                    if self.get_task():
+                        self._submission_timeouts.set(sid, SUBMISSION_TOTAL_TIMEOUT, None)
+
+                # Check for service timeouts
+                service_timeouts = self._service_timeouts.timeouts()
+                for (sid, sha, service_name), worker_id in service_timeouts.items():
                     task = self.get_task(sid)
                     if not task:
                         self.log.warning(f'[{sid}] timeout on finished task.')
                         continue
                     with task.lock:
-                        if sha and service_name:
-                            service_timeouts += 1
-                            self.timeout_service(task, sha, service_name)
-                        else:
-                            self.log.info(f'[{sid}] submission timeout, checking dispatch status...')
-                            self.check_submission(task)
+                        self.timeout_service(task, sha, service_name, worker_id)
 
-                            # If we didn't finish the submission here, wait another 20 minutes
-                            task = self.get_task(sid)
-                            if task is not None:
-                                self.set_submission_timeout(task)
-
-                self.counter.increment('service_timeouts', service_timeouts)
+                self.counter.increment('service_timeouts', len(service_timeouts))
                 self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
                 self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
     @elasticapm.capture_span(span_type='dispatcher')
-    def timeout_service(self, task: SubmissionTask, sha256, service_name):
+    def timeout_service(self, task: SubmissionTask, sha256, service_name, worker_id):
         # We believe a service task has timed out, try and read it from running tasks
         # If we can't find the task in running tasks, it finished JUST before timing out, let it go
         sid = task.submission.sid
@@ -1038,7 +1008,7 @@ class Dispatcher(ThreadedCoreBase):
                              f"timed out on {sha256} but task isn't running.")
 
         # We can confirm that the task is ours now, even if the worker finished, the result will be ignored
-        _, worker_id = task.running_services.pop((sha256, service_name), (None, None))
+        task.running_services.discard((sha256, service_name))
         self.log.info(f"[{sid}] Service {service_name} "
                       f"running on {worker_id} timed out on {sha256}.")
         self.dispatch_file(task, sha256)
@@ -1213,7 +1183,7 @@ class Dispatcher(ThreadedCoreBase):
             with task.lock:
                 for sha, service_name in task.queue_keys.keys():
                     outstanding[service_name] += 1
-                for sha, service_name in task.running_services.keys():
+                for sha, service_name in task.running_services:
                     outstanding[service_name] += 1
         response_queue.push(outstanding)
 
