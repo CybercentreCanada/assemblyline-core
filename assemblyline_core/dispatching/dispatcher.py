@@ -306,8 +306,6 @@ class Dispatcher(ThreadedCoreBase):
 
         if not self.submissions_assignments.add(sid, self.instance_id):
             self.log.warning(f"[{sid}] Received an assigned submission dropping")
-            with self._tasks_lock:
-                self._tasks.pop(sid)
             return
 
         if not self.active_submissions.exists(sid):
@@ -820,6 +818,11 @@ class Dispatcher(ThreadedCoreBase):
             self.log.debug(f"[{sid}/{result.sha256}] {service_name} succeeded. "
                            f"Result will be stored in {result_key}")
 
+        # The depth is set for the root file, and for all extracted files whether we process them or not
+        if result.sha256 not in task.file_depth:
+            self.log.warning(f"[{sid}/{result.sha256}] {service_name} returned result for file that wasn't requested.")
+            return
+
         # Check if the service is a candidate for dynamic recursion prevention
         if not submission.params.ignore_dynamic_recursion_prevention:
             service_info = self.scheduler.services.get(result.response.service_name, None)
@@ -959,6 +962,9 @@ class Dispatcher(ThreadedCoreBase):
             bisect.insort(self.timeout_list, (timeout_at, sid, '', ''))
 
     def clear_submission_timeout(self, task: SubmissionTask):
+        if task.timeout_at is None:
+            return
+
         with self.timeout_list_lock:
             key = (task.timeout_at, task.submission.sid, '', '')
             task.timeout_at = None
