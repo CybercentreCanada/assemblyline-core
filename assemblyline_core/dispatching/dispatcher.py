@@ -102,7 +102,7 @@ QUEUE_EXPIRY = 60*60
 SERVICE_VERSION_EXPIRY_TIME = 30 * 60  # How old service version info can be before we ignore it
 GUARD_TIMEOUT = 60*2
 GLOBAL_TASK_CHECK_INTERVAL = 60*10
-TIMEOUT_EXTRA_TIME = 30  # 30 seconds grace for message handling.
+TIMEOUT_EXTRA_TIME = 5
 TIMEOUT_TEST_INTERVAL = 5
 MAX_RESULT_BUFFER = 64
 RESULT_THREADS = max(1, int(os.getenv('DISPATCHER_RESULT_THREADS', '2')))
@@ -305,8 +305,6 @@ class Dispatcher(ThreadedCoreBase):
 
         if not self.submissions_assignments.add(sid, self.instance_id):
             self.log.warning(f"[{sid}] Received an assigned submission dropping")
-            with self._tasks_lock:
-                self._tasks.pop(sid)
             return
 
         if not self.active_submissions.exists(sid):
@@ -818,6 +816,11 @@ class Dispatcher(ThreadedCoreBase):
             self.log.debug(f"[{sid}/{result.sha256}] {service_name} succeeded. "
                            f"Result will be stored in {result_key}")
 
+        # The depth is set for the root file, and for all extracted files whether we process them or not
+        if result.sha256 not in task.file_depth:
+            self.log.warning(f"[{sid}/{result.sha256}] {service_name} returned result for file that wasn't requested.")
+            return
+
         # Check if the service is a candidate for dynamic recursion prevention
         if not submission.params.ignore_dynamic_recursion_prevention:
             service_info = self.scheduler.services.get(result.response.service_name, None)
@@ -957,6 +960,9 @@ class Dispatcher(ThreadedCoreBase):
             bisect.insort(self.timeout_list, (timeout_at, sid, '', ''))
 
     def clear_submission_timeout(self, task: SubmissionTask):
+        if task.timeout_at is None:
+            return
+
         with self.timeout_list_lock:
             key = (task.timeout_at, task.submission.sid, '', '')
             task.timeout_at = None
@@ -1232,8 +1238,10 @@ class Dispatcher(ThreadedCoreBase):
                     task = ServiceTask(task_body)
                     # Filter out all that belong to a running dispatcher
                     if task.metadata['dispatcher__'] in dispatcher_instances:
-                        continue
-                    error_tasks.append(task)
+                        error_tasks.append(task)
+                    # Filter out ones that belong to dead tasks owned by this dispatcher
+                    if task.metadata['dispatcher__'] == self.instance_id and task.sid not in self._tasks:
+                        error_tasks.append(task)
 
                 # Refresh our dispatcher list.
                 dispatcher_instances = set(Dispatcher.all_instances(persistent_redis=self.redis_persist))
@@ -1241,8 +1249,9 @@ class Dispatcher(ThreadedCoreBase):
                 # The remaining running tasks (probably) belong to dead dispatchers and can be killed
                 for task in error_tasks:
                     # Check against our refreshed dispatcher list in case it changed during the previous scan
-                    if task.metadata['dispatcher__'] in dispatcher_instances:
-                        continue
+                    if task.metadata['dispatcher__'] != self.instance_id:
+                        if task.metadata['dispatcher__'] in dispatcher_instances:
+                            continue
 
                     # If its already been handled, we don't need to
                     if not self.running_tasks.pop(task.key()):

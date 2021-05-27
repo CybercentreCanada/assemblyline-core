@@ -100,7 +100,8 @@ class ServiceProfile:
         self.name = name
         self.queue: PriorityQueue = queue
         self.container_config = container_config
-        self.target_duty_cycle = 0.9
+        self.high_duty_cycle = 0.7
+        self.low_duty_cycle = 0.5
         self.shutdown_seconds = shutdown_seconds
         self.config_hash = config_hash
         self.mount_updates = mount_updates
@@ -158,7 +159,10 @@ class ServiceProfile:
         self.pressure += delta * math.sqrt(backlog/self.backlog)
 
         # Should we scale down due to duty cycle? (are some of the workers idle)
-        self.pressure -= delta * (self.target_duty_cycle - duty_cycle)/self.target_duty_cycle
+        if duty_cycle > self.high_duty_cycle:
+            self.pressure -= delta * (self.high_duty_cycle - duty_cycle)/self.high_duty_cycle
+        if duty_cycle < self.low_duty_cycle:
+            self.pressure -= delta * (self.low_duty_cycle - duty_cycle)/self.low_duty_cycle
 
         # Apply the friction, tendency to do nothing, move the change pressure gradually to the center.
         leak = min(self.leak_rate * delta, abs(self.pressure))
@@ -557,7 +561,7 @@ class ScalerServer(ThreadedCoreBase):
                             delta=export_interval,
                             instances=0,
                             backlog=queue_length,
-                            duty_cycle=profile.target_duty_cycle
+                            duty_cycle=profile.high_duty_cycle
                         )
 
             # TODO maybe find another way of implementing this that is less aggressive
