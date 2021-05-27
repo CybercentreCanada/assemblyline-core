@@ -129,6 +129,7 @@ def test_simple(redis):
     # task = SubmissionTask(sub.as_primitives(), 'some-completion-queue')
     client.dispatch_submission(sub)
     disp.pull_submissions()
+    disp.service_worker(disp.process_queue_index(sid))
     task = disp.get_task(sid)
 
     assert task.queue_keys[(file_hash, 'extract')] is not None
@@ -198,8 +199,7 @@ def test_simple(redis):
     disp.service_worker(disp.process_queue_index(sid))
 
     assert wait_result(task, file_hash, 'xerox')
-    with task.lock:
-        assert disp.get_task(sid) is None
+    assert disp.get_task(sid) is None
 
 
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
@@ -230,6 +230,7 @@ def test_dispatch_extracted(redis):
     # Launch the submission
     client.dispatch_submission(submission)
     disp.pull_submissions()
+    disp.service_worker(disp.process_queue_index(sid))
 
     # Finish one service extracting a file
     job = client.request_work('0', 'extract', '0')
@@ -244,6 +245,7 @@ def test_dispatch_extracted(redis):
 
     # process the result
     disp.pull_service_results()
+    disp.service_worker(disp.process_queue_index(sid))
     disp.service_worker(disp.process_queue_index(sid))
 
     #
