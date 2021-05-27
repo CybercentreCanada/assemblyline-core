@@ -454,7 +454,7 @@ class KubernetesController(ControllerInterface):
                                                 _request_timeout=API_TIMEOUT)
             for pod in pods.items:
                 if pod.metadata.name == container_id:
-                    self.api.delete_namespaced_pod(name=container_id, namespace=self.namespace,
+                    self.api.delete_namespaced_pod(name=container_id, namespace=self.namespace, grace_period_seconds=0,
                                                    _request_timeout=API_TIMEOUT)
                     return
         except ApiException as error:
