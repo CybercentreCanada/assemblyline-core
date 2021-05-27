@@ -1238,22 +1238,22 @@ class Dispatcher(ThreadedCoreBase):
                 # iterate running tasks
                 for task_key, task_body in self.running_tasks:
                     task = ServiceTask(task_body)
-                    # Filter out all that belong to a running dispatcher
-                    if task.metadata['dispatcher__'] in dispatcher_instances:
+                    # Its a bad task if it's dispatcher isn't running
+                    if task.metadata['dispatcher__'] not in dispatcher_instances:
                         error_tasks.append(task)
-                    # Filter out ones that belong to dead tasks owned by this dispatcher
+                    # Its a bad task if its OUR task, but we aren't tracking that submission anymore
                     if task.metadata['dispatcher__'] == self.instance_id and task.sid not in self._tasks:
                         error_tasks.append(task)
 
                 # Refresh our dispatcher list.
                 dispatcher_instances = set(Dispatcher.all_instances(persistent_redis=self.redis_persist))
+                other_dispatcher_instances = dispatcher_instances - {self.instance_id}
 
                 # The remaining running tasks (probably) belong to dead dispatchers and can be killed
                 for task in error_tasks:
                     # Check against our refreshed dispatcher list in case it changed during the previous scan
-                    if task.metadata['dispatcher__'] != self.instance_id:
-                        if task.metadata['dispatcher__'] in dispatcher_instances:
-                            continue
+                    if task.metadata['dispatcher__'] in other_dispatcher_instances:
+                        continue
 
                     # If its already been handled, we don't need to
                     if not self.running_tasks.pop(task.key()):
