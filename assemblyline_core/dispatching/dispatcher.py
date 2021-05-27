@@ -1236,10 +1236,10 @@ class Dispatcher(ThreadedCoreBase):
                 # iterate running tasks
                 for task_key, task_body in self.running_tasks:
                     task = ServiceTask(task_body)
-                    # Filter out all that belong to a running dispatcher
+                    # Its a bad task if it's dispatcher isn't running
                     if task.metadata['dispatcher__'] not in dispatcher_instances:
                         error_tasks.append(task)
-                    # Filter out ones that belong to dead tasks owned by this dispatcher
+                    # Its a bad task if its OUR task, but we aren't tracking that submission anymore
                     if task.metadata['dispatcher__'] == self.instance_id and task.sid not in self._tasks:
                         error_tasks.append(task)
 
