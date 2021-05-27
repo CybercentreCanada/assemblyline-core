@@ -110,6 +110,7 @@ class ServiceProfile:
         self.min_instances = self._min_instances = max(0, int(min_instances))
         self._max_instances = max(0, int(max_instances)) if max_instances else float('inf')
         self.desired_instances: int = 0
+        self.target_instances: int = 0
         self.running_instances: int = 0
 
         # Information tracking when we want to grow/shrink
@@ -140,9 +141,9 @@ class ServiceProfile:
 
     @property
     def max_instances(self):
-        # Adjust the max_instances based on the number that is already running
+        # Adjust the max_instances based on the number that is already requested
         # this keeps the scaler from running way ahead with its demands when resource caps are reached
-        return min(self._max_instances, self.running_instances + 2)
+        return min(self._max_instances, self.target_instances + 2)
 
     def update(self, delta, instances, backlog, duty_cycle):
         self.last_update = time.time()
@@ -272,6 +273,7 @@ class ScalerServer(ThreadedCoreBase):
         with self.profiles_lock:
             profile.desired_instances = max(self.controller.get_target(profile.name), profile.min_instances)
             profile.running_instances = profile.desired_instances
+            profile.target_instances = profile.desired_instances
             self.log.debug(f'Starting service {profile.name} with a target of {profile.desired_instances}')
             profile.last_update = time.time()
             self.profiles[profile.name] = profile
@@ -486,6 +488,7 @@ class ScalerServer(ThreadedCoreBase):
             # Apply those adjustments we have made back to the controller
             with pool:
                 for name, value in targets.items():
+                    self.profiles[name].target_instances = value
                     old = self.controller.get_target(name)
                     if value != old:
                         self.log.info(f"Scaling service {name}: {old} -> {value}")
@@ -606,7 +609,7 @@ class ScalerServer(ThreadedCoreBase):
                 for service_name, profile in self.profiles.items():
                     service_metrics[service_name] = {
                         'running': profile.running_instances,
-                        'target': profile.desired_instances,
+                        'target': profile.target_instances,
                         'minimum': profile.min_instances,
                         'maximum': profile.instance_limit,
                         'dynamic_maximum': profile.max_instances,
