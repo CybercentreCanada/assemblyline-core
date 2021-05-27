@@ -140,8 +140,7 @@ class ServiceProfile:
 
     @property
     def max_instances(self):
-        # return self._max_instances
-        # Adjust the max_instances based on the number that is already running
+        # Adjust the max_instances based on the number that is already requested
         # this keeps the scaler from running way ahead with its demands when resource caps are reached
         return min(self._max_instances, self.target_instances + 2)
 
