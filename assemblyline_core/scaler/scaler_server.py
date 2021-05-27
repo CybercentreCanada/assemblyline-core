@@ -561,7 +561,7 @@ class ScalerServer(ThreadedCoreBase):
                             delta=export_interval,
                             instances=0,
                             backlog=queue_length,
-                            duty_cycle=profile.target_duty_cycle
+                            duty_cycle=profile.high_duty_cycle
                         )
 
             # TODO maybe find another way of implementing this that is less aggressive
