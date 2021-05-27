@@ -154,7 +154,7 @@ class ServiceProfile:
         # Adjust min instances based on queue (if something has min_instances == 0, bump it up to 1 when
         # there is anything in the queue) this should have no effect for min_instances > 0
         self.min_instances = max(self._min_instances, int(bool(backlog)))
-        self.desired_instances = max(self.min_instances, min(self._max_instances, self.desired_instances))
+        self.desired_instances = max(self.min_instances, min(self.max_instances, self.desired_instances))
 
         # Should we scale up because of backlog
         self.pressure += delta * math.sqrt(backlog/self.backlog)
