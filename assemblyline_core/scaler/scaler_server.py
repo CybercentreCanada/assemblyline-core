@@ -100,7 +100,8 @@ class ServiceProfile:
         self.name = name
         self.queue: PriorityQueue = queue
         self.container_config = container_config
-        self.target_duty_cycle = 0.9
+        self.high_duty_cycle = 0.7
+        self.low_duty_cycle = 0.5
         self.shutdown_seconds = shutdown_seconds
         self.config_hash = config_hash
         self.mount_updates = mount_updates
@@ -109,6 +110,7 @@ class ServiceProfile:
         self.min_instances = self._min_instances = max(0, int(min_instances))
         self._max_instances = max(0, int(max_instances)) if max_instances else float('inf')
         self.desired_instances: int = 0
+        self.target_instances: int = 0
         self.running_instances: int = 0
 
         # Information tracking when we want to grow/shrink
@@ -139,9 +141,9 @@ class ServiceProfile:
 
     @property
     def max_instances(self):
-        # Adjust the max_instances based on the number that is already running
+        # Adjust the max_instances based on the number that is already requested
         # this keeps the scaler from running way ahead with its demands when resource caps are reached
-        return min(self._max_instances, self.running_instances + 2)
+        return min(self._max_instances, self.target_instances + 2)
 
     def update(self, delta, instances, backlog, duty_cycle):
         self.last_update = time.time()
@@ -158,7 +160,10 @@ class ServiceProfile:
         self.pressure += delta * math.sqrt(backlog/self.backlog)
 
         # Should we scale down due to duty cycle? (are some of the workers idle)
-        self.pressure -= delta * (self.target_duty_cycle - duty_cycle)/self.target_duty_cycle
+        if duty_cycle > self.high_duty_cycle:
+            self.pressure -= delta * (self.high_duty_cycle - duty_cycle)/self.high_duty_cycle
+        if duty_cycle < self.low_duty_cycle:
+            self.pressure -= delta * (self.low_duty_cycle - duty_cycle)/self.low_duty_cycle
 
         # Apply the friction, tendency to do nothing, move the change pressure gradually to the center.
         leak = min(self.leak_rate * delta, abs(self.pressure))
@@ -268,6 +273,7 @@ class ScalerServer(ThreadedCoreBase):
         with self.profiles_lock:
             profile.desired_instances = max(self.controller.get_target(profile.name), profile.min_instances)
             profile.running_instances = profile.desired_instances
+            profile.target_instances = profile.desired_instances
             self.log.debug(f'Starting service {profile.name} with a target of {profile.desired_instances}')
             profile.last_update = time.time()
             self.profiles[profile.name] = profile
@@ -482,6 +488,7 @@ class ScalerServer(ThreadedCoreBase):
             # Apply those adjustments we have made back to the controller
             with pool:
                 for name, value in targets.items():
+                    self.profiles[name].target_instances = value
                     old = self.controller.get_target(name)
                     if value != old:
                         self.log.info(f"Scaling service {name}: {old} -> {value}")
@@ -557,7 +564,7 @@ class ScalerServer(ThreadedCoreBase):
                             delta=export_interval,
                             instances=0,
                             backlog=queue_length,
-                            duty_cycle=profile.target_duty_cycle
+                            duty_cycle=profile.high_duty_cycle
                         )
 
             # TODO maybe find another way of implementing this that is less aggressive
@@ -602,7 +609,7 @@ class ScalerServer(ThreadedCoreBase):
                 for service_name, profile in self.profiles.items():
                     service_metrics[service_name] = {
                         'running': profile.running_instances,
-                        'target': profile.desired_instances,
+                        'target': profile.target_instances,
                         'minimum': profile.min_instances,
                         'maximum': profile.instance_limit,
                         'dynamic_maximum': profile.max_instances,
