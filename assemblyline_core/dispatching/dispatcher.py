@@ -49,7 +49,7 @@ class Action(enum.IntEnum):
     dispatch_file = 1
     service_timeout = 2
     result = 3
-    check_submission = 3
+    check_submission = 4
 
 
 @dataclasses.dataclass(order=True)
