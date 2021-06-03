@@ -46,6 +46,7 @@ class TimeoutTable:
             current: TimeoutItem = self.timeout_queue.get_nowait()
             while current.expiry <= now or self.event_data.get(current.key, None) != current:
                 if self.event_data.get(current.key, None) == current:
+                    self.event_data.pop(current.key)
                     found[current.key] = current.data
                 current = self.timeout_queue.get_nowait()
 
