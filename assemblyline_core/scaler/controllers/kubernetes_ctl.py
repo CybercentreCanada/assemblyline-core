@@ -173,7 +173,8 @@ class KubernetesController(ControllerInterface):
     def add_profile(self, profile, scale=0):
         """Tell the controller about a service profile it needs to manage."""
         self._create_deployment(profile.name, self._deployment_name(profile.name),
-                                profile.container_config, profile.shutdown_seconds, scale, mount_updates=profile.mount_updates)
+                                profile.container_config, profile.shutdown_seconds, scale,
+                                mount_updates=profile.mount_updates)
 
     def _monitor_system_info(self):
         while True:
@@ -396,6 +397,7 @@ class KubernetesController(ControllerInterface):
 
         spec = ExtensionsV1beta1DeploymentSpec(
             replicas=int(scale),
+            revision_history_limit=0,
             selector=V1LabelSelector(match_labels=all_labels),
             template=template,
         )
