@@ -46,9 +46,9 @@ APM_SPAN_TYPE = 'handle_message'
 
 class Action(enum.IntEnum):
     start = 0
-    dispatch_file = 1
-    service_timeout = 2
-    result = 3
+    result = 1
+    dispatch_file = 2
+    service_timeout = 3
     check_submission = 4
 
 
@@ -90,7 +90,6 @@ class SubmissionTask:
     def __init__(self, submission, completed_queue):
         self.submission: Submission = Submission(submission)
         self.completed_queue = str(completed_queue)
-        self.timeout_at: Optional[int] = None
 
         self.file_info: Dict[str, Optional[FileInfo]] = {}
         self.file_names: Dict[str, str] = {}
@@ -159,8 +158,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Load the datastore collections that we are going to be using
         self.instance_id = uuid.uuid4().hex
-        self._tasks: Dict[str, SubmissionTask] = {}
-        self._tasks_lock = threading.Lock()
+        self.tasks: Dict[str, SubmissionTask] = {}
 
         #
         # # Build some utility classes
@@ -204,23 +202,14 @@ class Dispatcher(ThreadedCoreBase):
 
         # Setup queues for work to be divided into
         self.process_queues: List[PriorityQueue[DispatchAction]] = [PriorityQueue() for _ in range(RESULT_THREADS)]
-        self.queue_ready_signals: List[threading.Event] = [threading.Event() for _ in range(RESULT_THREADS)]
+        self.queue_ready_signals: List[threading.Semaphore] = [threading.Semaphore(MAX_RESULT_BUFFER)
+                                                               for _ in range(RESULT_THREADS)]
 
     def process_queue_index(self, key: str) -> int:
         return sum(ord(_x) for _x in key) % RESULT_THREADS
 
     def find_process_queue(self, key: str):
         return self.process_queues[self.process_queue_index(key)]
-
-    @elasticapm.capture_span(span_type='dispatcher')
-    def add_task(self, task: SubmissionTask):
-        with self._tasks_lock:
-            self._tasks[task.submission.sid] = task
-
-    @elasticapm.capture_span(span_type='dispatcher')
-    def get_task(self, sid: str) -> Optional[SubmissionTask]:
-        with self._tasks_lock:
-            return self._tasks.get(sid)
 
     def service_worker_factory(self, index: int):
         def service_worker():
@@ -254,7 +243,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # If the dispatcher is exiting cleanly remove as many tasks from the service queues as we can
         service_queues = {}
-        for task in self._tasks.values():
+        for task in self.tasks.values():
             for (sha256, service_name), dispatch_key in task.queue_keys.items():
                 try:
                     s_queue = service_queues[service_name]
@@ -351,7 +340,7 @@ class Dispatcher(ThreadedCoreBase):
             except ValueError as err:
                 self.log.warning(f"[{sid}] could not process initialization data: {err}")
 
-        self.add_task(task)
+        self.tasks[sid] = task
         self._submission_timeouts.set(task.sid, SUBMISSION_TOTAL_TIMEOUT, None)
 
         task.file_depth[submission.files[0].sha256] = 0
@@ -689,8 +678,7 @@ class Dispatcher(ThreadedCoreBase):
         watcher_list.delete()
         self.active_submissions.pop(sid)
         self.submissions_assignments.pop(sid)
-        with self._tasks_lock:
-            self._tasks.pop(sid)
+        self.tasks.pop(sid, None)
 
         # Count the submission as 'complete' either way
         self.counter.increment('submissions_completed')
@@ -738,31 +726,15 @@ class Dispatcher(ThreadedCoreBase):
 
     def pull_service_results(self):
         result_queue = self.result_queue
-        cpu_mark = time.process_time()
-        time_mark = time.time()
 
         while self.running:
-            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
-            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
-
             message = result_queue.pop(timeout=1)
-
-            cpu_mark = time.process_time()
-            time_mark = time.time()
-
             if not message:
                 continue
 
             sid = message['service_task']['sid']
-            work_queue = self.find_process_queue(sid)
-            event = self.queue_ready_signals[self.process_queue_index(sid)]
-
-            while work_queue.qsize() > MAX_RESULT_BUFFER:
-                event.clear()
-                if event.wait(1):
-                    break
-
-            work_queue.put(DispatchAction(kind=Action.result, sid=sid, data=message))
+            self.queue_ready_signals[self.process_queue_index(sid)].acquire()
+            self.find_process_queue(sid).put(DispatchAction(kind=Action.result, sid=sid, data=message))
 
     def service_worker(self, index: int):
         self.log.info(f"Start service worker {index}")
@@ -778,13 +750,9 @@ class Dispatcher(ThreadedCoreBase):
             try:
                 message = work_queue.get(timeout=1)
             except Empty:
-                ready_event.set()
                 cpu_mark = time.process_time()
                 time_mark = time.time()
                 continue
-
-            if work_queue.qsize() < MAX_RESULT_BUFFER:
-                ready_event.set()
 
             cpu_mark = time.process_time()
             time_mark = time.time()
@@ -793,7 +761,7 @@ class Dispatcher(ThreadedCoreBase):
 
             if kind == Action.start:
                 with apm_span(self.apm_client, 'service_start_message'):
-                    task = self.get_task(message.sid)
+                    task = self.tasks.get(message.sid)
                     if not task:
                         self.log.warning(f'[{message.sid}] Service started for finished task.')
                         continue
@@ -807,11 +775,13 @@ class Dispatcher(ThreadedCoreBase):
                         self.set_timeout(task, message.sha, message.service_name, message.worker_id)
 
             elif kind == Action.result:
+                self.queue_ready_signals[self.process_queue_index(message.sid)].release()
                 with apm_span(self.apm_client, "dispatcher_results"):
-                    task = self.get_task(message.sid)
+                    task = self.tasks.get(message.sid)
                     if not task:
                         self.log.warning(f'[{message.sid}] Result returned for finished task.')
                         continue
+                    self._submission_timeouts.set(message.sid, SUBMISSION_TOTAL_TIMEOUT, None)
 
                     if 'result' in message.data:
                         self.process_service_result(task, message.data['result_key'],
@@ -822,22 +792,22 @@ class Dispatcher(ThreadedCoreBase):
 
             elif kind == Action.check_submission:
                 with apm_span(self.apm_client, "check_submission_message"):
-                    self.log.info(f'[{message.sid}] submission timeout, checking dispatch status...')
-                    task = self.get_task(message.sid)
+                    task = self.tasks.get(message.sid)
                     if task:
+                        self.log.info(f'[{message.sid}] submission timeout, checking dispatch status...')
                         self.check_submission(task)
 
                         # If we didn't finish the submission here, wait another 20 minutes
-                        if self.get_task():
+                        if message.sid in self.tasks:
                             self._submission_timeouts.set(message.sid, SUBMISSION_TOTAL_TIMEOUT, None)
 
             elif kind == Action.service_timeout:
-                task = self.get_task(message.sid)
+                task = self.tasks.get(message.sid)
                 if task:
                     self.timeout_service(task, message.sha, message.service_name, message.worker_id)
 
             elif kind == Action.dispatch_file:
-                task = self.get_task(message.sid)
+                task = self.tasks.get(message.sid)
                 if task:
                     self.dispatch_file(task, message.sha)
 
@@ -933,7 +903,8 @@ class Dispatcher(ThreadedCoreBase):
                     dispatched += 1
                     task.active_files.add(extracted_data.sha256)
                     task.file_temporary_data[extracted_data.sha256] = dict(parent_data)
-                    self.find_process_queue(sid).put(DispatchAction(kind=Action.dispatch_file, sid=sid, sha=extracted_data.sha256))
+                    self.find_process_queue(sid).put(DispatchAction(kind=Action.dispatch_file, sid=sid,
+                                                                    sha=extracted_data.sha256))
             else:
                 for extracted_data in result.response.extracted:
                     self._dispatching_error(task, Error({
@@ -1046,9 +1017,10 @@ class Dispatcher(ThreadedCoreBase):
         task.queue_keys.pop((sha256, service_name), None)
         task_key = ServiceTask.make_key(sid=sid, service_name=service_name, sha=sha256)
         service_task = self.running_tasks.pop(task_key)
-        if not service_task:
-            self.log.warning(f"[{sid}] Service {service_name} "
-                             f"timed out on {sha256} but task isn't running.")
+        if not service_task and (sha256, service_name) not in task.running_services:
+            self.log.debug(f"[{sid}] Service {service_name} "
+                           f"timed out on {sha256} but task isn't running.")
+            return
 
         # We can confirm that the task is ours now, even if the worker finished, the result will be ignored
         task.running_services.discard((sha256, service_name))
@@ -1201,7 +1173,7 @@ class Dispatcher(ThreadedCoreBase):
         watch_queue.push(WatchQueueMessage({'status': 'START'}).as_primitives())
 
         #
-        task = self.get_task(sid)
+        task = self.tasks.get(sid)
         if not task:
             watch_queue.push(WatchQueueMessage({"status": "STOP"}).as_primitives())
             return
@@ -1220,7 +1192,7 @@ class Dispatcher(ThreadedCoreBase):
     def list_outstanding(self, sid: str, queue_name: str):
         response_queue = NamedQueue(queue_name, host=self.redis)
         outstanding = defaultdict(int)
-        task = self.get_task(sid)
+        task = self.tasks.get(sid)
         if task:
             for sha, service_name in list(task.queue_keys.keys()):
                 outstanding[service_name] += 1
@@ -1245,7 +1217,7 @@ class Dispatcher(ThreadedCoreBase):
                     if task.metadata['dispatcher__'] not in dispatcher_instances:
                         error_tasks.append(task)
                     # Its a bad task if its OUR task, but we aren't tracking that submission anymore
-                    if task.metadata['dispatcher__'] == self.instance_id and task.sid not in self._tasks:
+                    if task.metadata['dispatcher__'] == self.instance_id and task.sid not in self.tasks:
                         error_tasks.append(task)
 
                 # Refresh our dispatcher list.
