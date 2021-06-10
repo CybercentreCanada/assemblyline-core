@@ -46,9 +46,9 @@ APM_SPAN_TYPE = 'handle_message'
 
 class Action(enum.IntEnum):
     start = 0
-    dispatch_file = 1
-    service_timeout = 2
-    result = 3
+    result = 1
+    dispatch_file = 2
+    service_timeout = 3
     check_submission = 4
 
 
@@ -89,7 +89,6 @@ class SubmissionTask:
     def __init__(self, submission, completed_queue):
         self.submission: Submission = Submission(submission)
         self.completed_queue = str(completed_queue)
-        self.timeout_at: Optional[int] = None
 
         self.file_info: Dict[str, Optional[FileInfo]] = {}
         self.file_names: Dict[str, str] = {}
@@ -202,7 +201,8 @@ class Dispatcher(ThreadedCoreBase):
 
         # Setup queues for work to be divided into
         self.process_queues: List[PriorityQueue[DispatchAction]] = [PriorityQueue() for _ in range(RESULT_THREADS)]
-        self.queue_ready_signals: List[threading.Event] = [threading.Event() for _ in range(RESULT_THREADS)]
+        self.queue_ready_signals: List[threading.Semaphore] = [threading.Semaphore(MAX_RESULT_BUFFER)
+                                                               for _ in range(RESULT_THREADS)]
 
     def process_queue_index(self, key: str) -> int:
         return sum(ord(_x) for _x in key) % RESULT_THREADS
@@ -724,31 +724,15 @@ class Dispatcher(ThreadedCoreBase):
 
     def pull_service_results(self):
         result_queue = self.result_queue
-        cpu_mark = time.process_time()
-        time_mark = time.time()
 
         while self.running:
-            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
-            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
-
             message = result_queue.pop(timeout=1)
-
-            cpu_mark = time.process_time()
-            time_mark = time.time()
-
             if not message:
                 continue
 
             sid = message['service_task']['sid']
-            work_queue = self.find_process_queue(sid)
-            event = self.queue_ready_signals[self.process_queue_index(sid)]
-
-            while work_queue.qsize() > MAX_RESULT_BUFFER:
-                event.clear()
-                if event.wait(1):
-                    break
-
-            work_queue.put(DispatchAction(kind=Action.result, sid=sid, data=message))
+            self.queue_ready_signals[self.process_queue_index(sid)].acquire()
+            self.find_process_queue(sid).put(DispatchAction(kind=Action.result, sid=sid, data=message))
 
     def service_worker(self, index: int):
         self.log.info(f"Start service worker {index}")
@@ -764,13 +748,9 @@ class Dispatcher(ThreadedCoreBase):
             try:
                 message = work_queue.get(timeout=1)
             except Empty:
-                ready_event.set()
                 cpu_mark = time.process_time()
                 time_mark = time.time()
                 continue
-
-            if work_queue.qsize() < MAX_RESULT_BUFFER:
-                ready_event.set()
 
             cpu_mark = time.process_time()
             time_mark = time.time()
@@ -793,6 +773,7 @@ class Dispatcher(ThreadedCoreBase):
                         self.set_timeout(task, message.sha, message.service_name, message.worker_id)
 
             elif kind == Action.result:
+                self.queue_ready_signals[self.process_queue_index(message.sid)].release()
                 with apm_span(self.apm_client, "dispatcher_results"):
                     task = self.tasks.get(message.sid)
                     if not task:
@@ -809,9 +790,9 @@ class Dispatcher(ThreadedCoreBase):
 
             elif kind == Action.check_submission:
                 with apm_span(self.apm_client, "check_submission_message"):
-                    self.log.info(f'[{message.sid}] submission timeout, checking dispatch status...')
                     task = self.tasks.get(message.sid)
                     if task:
+                        self.log.info(f'[{message.sid}] submission timeout, checking dispatch status...')
                         self.check_submission(task)
 
                         # If we didn't finish the submission here, wait another 20 minutes
@@ -1034,9 +1015,10 @@ class Dispatcher(ThreadedCoreBase):
         task.queue_keys.pop((sha256, service_name), None)
         task_key = ServiceTask.make_key(sid=sid, service_name=service_name, sha=sha256)
         service_task = self.running_tasks.pop(task_key)
-        if not service_task:
-            self.log.warning(f"[{sid}] Service {service_name} "
-                             f"timed out on {sha256} but task isn't running.")
+        if not service_task and (sha256, service_name) not in task.running_services:
+            self.log.debug(f"[{sid}] Service {service_name} "
+                           f"timed out on {sha256} but task isn't running.")
+            return
 
         # We can confirm that the task is ours now, even if the worker finished, the result will be ignored
         task.running_services.discard((sha256, service_name))
