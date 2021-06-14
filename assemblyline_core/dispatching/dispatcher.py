@@ -14,6 +14,7 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
+from assemblyline.common.dict_utils import flatten
 from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
@@ -66,6 +67,7 @@ class ResultSummary:
 
 class SubmissionTask:
     """Dispatcher internal model for submissions"""
+
     def __init__(self, submission, completed_queue):
         self.submission: Submission = Submission(submission)
         self.completed_queue = str(completed_queue)
@@ -259,7 +261,7 @@ class Dispatcher(ThreadedCoreBase):
                 self.sleep(1)
                 cpu_mark = time.process_time()
                 time_mark = time.time()
-                continue                
+                continue
 
             # Check if we are maxing out our share of the submission limit
             max_tasks = self.config.core.dispatcher.max_inflight / self.running_dispatchers_estimate
@@ -692,7 +694,7 @@ class Dispatcher(ThreadedCoreBase):
             created='NOW',
             expiry_ts=now_as_iso(ttl * 24 * 60 * 60) if ttl else None,
             response=dict(
-                message=f'The number of retries has passed the limit.',
+                message='The number of retries has passed the limit.',
                 service_name=service_name,
                 service_version='0',
                 status='FAIL_NONRECOVERABLE',
@@ -829,7 +831,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Save the tags
         for section in result.result.sections:
-            task.file_tags[result.sha256].extend(tag_dict_to_list(section.tags.as_primitives()))
+            task.file_tags[result.sha256].extend(flatten(tag_dict_to_list(section.tags.as_primitives())))
 
         # Update the temporary data table for this file
         for key, value in (temporary_data or {}).items():
