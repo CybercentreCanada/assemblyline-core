@@ -831,7 +831,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Save the tags
         for section in result.result.sections:
-            task.file_tags[result.sha256].extend(flatten(tag_dict_to_list(section.tags.as_primitives())))
+            task.file_tags[result.sha256].extend(tag_dict_to_list(flatten(section.tags.as_primitives())))
 
         # Update the temporary data table for this file
         for key, value in (temporary_data or {}).items():
