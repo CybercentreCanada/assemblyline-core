@@ -103,6 +103,9 @@ def get_summary(datastore, srecord, user_classification):
 
     # Process Tags
     for t in submission_summary['tags']:
+        if t.get('safelisted', False):
+            continue
+
         tag_value = t['value']
         tag_type = t['type']
 

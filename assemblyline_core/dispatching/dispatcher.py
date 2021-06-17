@@ -15,6 +15,7 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
+from assemblyline.common.dict_utils import flatten
 from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
@@ -846,7 +847,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Save the tags
         for section in result.result.sections:
-            task.file_tags[result.sha256].extend(tag_dict_to_list(section.tags.as_primitives()))
+            task.file_tags[result.sha256].extend(tag_dict_to_list(flatten(section.tags.as_primitives())))
 
         # Update the temporary data table for this file
         for key, value in (temporary_data or {}).items():
