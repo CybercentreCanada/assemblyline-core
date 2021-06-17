@@ -3,6 +3,7 @@ import json
 import os
 import time
 import threading
+import weakref
 from typing import Dict, List
 
 from kubernetes import client, config
@@ -133,6 +134,7 @@ class KubernetesController(ControllerInterface):
         self.namespace = namespace
         self.config_volumes: Dict[str, V1Volume] = {}
         self.config_mounts: Dict[str, V1VolumeMount] = {}
+        self._external_profiles = weakref.WeakValueDictionary()
 
         # A record of previously reported events so that we don't report the same message repeatedly, fill it with
         # existing messages so we don't have a huge dump of duplicates on restart
@@ -175,6 +177,7 @@ class KubernetesController(ControllerInterface):
         self._create_deployment(profile.name, self._deployment_name(profile.name),
                                 profile.container_config, profile.shutdown_seconds, scale,
                                 mount_updates=profile.mount_updates)
+        self._external_profiles[profile.name] = profile
 
     def _monitor_system_info(self):
         while True:
@@ -448,6 +451,11 @@ class KubernetesController(ControllerInterface):
                 if error.reason == 'Conflict':
                     self.logger.info(f"Conflict scaling {service_name} retrying.")
                     continue
+                if error.status == 404:
+                    profile = self._external_profiles.get(service_name, None)
+                    if profile:
+                        self.add_profile(profile, scale=target)
+                    return
                 raise
 
     def stop_container(self, service_name, container_id):
