@@ -1,5 +1,3 @@
-import hashlib
-
 from assemblyline.common import forge
 from assemblyline.common.caching import TimeExpiredCache
 from assemblyline.common.dict_utils import recursive_update
