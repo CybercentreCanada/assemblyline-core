@@ -1,5 +1,3 @@
-import hashlib
-
 from assemblyline.common import forge
 from assemblyline.common.caching import TimeExpiredCache
 from assemblyline.common.dict_utils import recursive_update
@@ -104,6 +102,9 @@ def get_summary(datastore, srecord, user_classification):
 
     # Process Tags
     for t in submission_summary['tags']:
+        if t.get('safelisted', False):
+            continue
+
         tag_value = t['value']
         tag_type = t['type']
 
