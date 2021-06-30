@@ -565,6 +565,7 @@ class ServiceUpdater(CoreBase):
                     env={
                         "SERVICE_TAG": update_data['latest_tag'],
                         "SERVICE_API_HOST": os.environ.get('SERVICE_API_HOST', "http://al_service_server:5003"),
+                        "SERVICE_API_KEY": os.environ.get('SERVICE_API_KEY','ThisIsARandomAuthKey...ChangeMe!'),
                         "REGISTER_ONLY": 'true'
                     },
                     network='al_registration',
