@@ -91,7 +91,7 @@ def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
                         "index.codec": "best_compression"
                     }
                 }
-                es_version = version.parse(es.info()['version']['number'])
+
                 # Check if datastream is enabled
                 if datastream_enabled:
                     component_name = f"{index}-settings"
