@@ -91,9 +91,9 @@ def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
                         "index.codec": "best_compression"
                     }
                 }
-                es_version = version.parse(es.info()['version']['number'])
-                # Check support for component templates (>=7.8)
-                if es_version >= version.parse("7.8"):
+
+                # Check if datastream is enabled
+                if datastream_enabled:
                     component_name = f"{index}-settings"
                     component_body = {"template": template_body}
                     if not es.cluster.exists_component_template(component_name):
@@ -104,11 +104,12 @@ def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
                             if "resource_already_exists_exception" not in str(e):
                                 raise
                             log.warning(f"Tried to create a component template that already exists: {index.upper()}")
-                    template_body = {"index_patterns": [f"{index}-*"], "composed_of": [component_name]}
-                    if datastream_enabled:
-                        template_body['index_patterns'] = f"{index}*"
-                        template_body['data_stream'] = {}
-                        template_body['priority'] = 10
+                    template_body = {
+                        "index_patterns": f"{index}*",
+                        "composed_of": [component_name],
+                        "data_stream": {},
+                        "priority": 10
+                    }
 
                 # Legacy template
                 else:
