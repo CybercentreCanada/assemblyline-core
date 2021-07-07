@@ -476,7 +476,8 @@ class Dispatcher(ThreadedCoreBase):
                         ttl=submission.params.ttl,
                         ignore_cache=submission.params.ignore_cache,
                         ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
-                        tags=task.file_tags.get(sha256, []),
+                        tags=[{'type': x['type'], 'value': x['value'], 'short_type': x['short_type']}
+                              for x in task.file_tags.get(sha256, [])],
                         temporary_submission_data=[
                             {'name': name, 'value': value}
                             for name, value in task.file_temporary_data[sha256].items()
@@ -740,7 +741,6 @@ class Dispatcher(ThreadedCoreBase):
     def service_worker(self, index: int):
         self.log.info(f"Start service worker {index}")
         work_queue = self.process_queues[index]
-        ready_event = self.queue_ready_signals[index]
         cpu_mark = time.process_time()
         time_mark = time.time()
 
