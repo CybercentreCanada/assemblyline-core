@@ -15,7 +15,7 @@ from assemblyline.odm.randomizer import random_model_obj, get_random_tags
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
-NUM_SUBMISSIONS = 2
+NUM_SUBMISSIONS = 3
 all_submissions = []
 
 
