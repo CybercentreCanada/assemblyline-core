@@ -81,7 +81,7 @@ def test_create_single_alert(config, datastore):
     assert alert.sid == submission.sid
 
 
-def test_update_single_alert(config, datastore):
+def test_update_single_alert(config, datastore, delete_original=False):
     persistent_redis = get_client(
         host=config.core.redis.persistent.host,
         port=config.core.redis.persistent.port,
@@ -139,9 +139,16 @@ def test_update_single_alert(config, datastore):
     child_ingest_msg.submission.time = ingest_msg.submission.time
     child_ingest_msg.ingest_id = ingest_msg.ingest_id
 
+    alert_type_assertion = 'update'
+
+    if delete_original:
+        datastore.alert.delete(original_alert['alert_id'])
+        alert_type_assertion = 'create'
+
     alert_queue.push(child_ingest_msg.as_primitives())
     alert_type = alerter.run_once()
-    assert alert_type == 'update'
+    assert alert_type == alert_type_assertion
+
     datastore.alert.commit()
 
     updated_alert = datastore.alert.get(datastore.alert.search(f"sid:{child_submission.sid}",
@@ -149,3 +156,9 @@ def test_update_single_alert(config, datastore):
     assert updated_alert is not None
 
     assert updated_alert != original_alert
+
+
+def test_update_expired_alert(config, datastore):
+    # If we're attempting to update an alert that has either expired or was removed from the 'alert' collection
+    # Alert should be created in it's stead
+    test_update_single_alert(config, datastore, delete_original=True)
