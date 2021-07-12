@@ -216,17 +216,25 @@ def perform_alert_update(datastore, logger, alert):
 
 
 def save_alert(datastore, counter, logger, alert, psid):
-    if psid:
-        msg_type = "AlertUpdated"
-        perform_alert_update(datastore, logger, alert)
-        counter.increment('updated')
-        ret_val = 'update'
-    else:
+    def create_alert():
         msg_type = "AlertCreated"
         datastore.alert.save(alert['alert_id'], alert)
         logger.info(f"Alert {alert['alert_id']} has been created.")
         counter.increment('created')
         ret_val = 'create'
+        return msg_type, ret_val
+
+    if psid:
+        try:
+            msg_type = "AlertUpdated"
+            perform_alert_update(datastore, logger, alert)
+            counter.increment('updated')
+            ret_val = 'update'
+        except KeyError as e:
+            logger.warning(f"{str(e)}. Creating a new alert [{alert['alert_id']}]...")
+            msg_type, ret_val = create_alert()
+    else:
+        msg_type, ret_val = create_alert()
 
     msg = AlertMessage({
         "msg": alert,
