@@ -133,6 +133,8 @@ class KubernetesController(ControllerInterface):
         self.namespace = namespace
         self.config_volumes: Dict[str, V1Volume] = {}
         self.config_mounts: Dict[str, V1VolumeMount] = {}
+        self.core_config_volumes: Dict[str, V1Volume] = {}
+        self.core_config_mounts: Dict[str, V1VolumeMount] = {}
 
         # A record of previously reported events so that we don't report the same message repeatedly, fill it with
         # existing messages so we don't have a huge dump of duplicates on restart
@@ -165,6 +167,22 @@ class KubernetesController(ControllerInterface):
             )
 
         self.config_mounts[target_path] = V1VolumeMount(
+            name=name,
+            mount_path=target_path,
+            sub_path=key
+        )
+
+    def core_config_mount(self, name, config_map, key, target_path):
+        if name not in self.core_config_volumes:
+            self.core_config_volumes[name] = V1Volume(
+                name=name,
+                config_map=V1ConfigMapVolumeSource(
+                    name=config_map,
+                    optional=False
+                )
+            )
+
+        self.core_config_mounts[target_path] = V1VolumeMount(
             name=name,
             mount_path=target_path,
             sub_path=key
@@ -272,12 +290,16 @@ class KubernetesController(ControllerInterface):
     def _create_metadata(deployment_name: str, labels: Dict[str, str]):
         return V1ObjectMeta(name=deployment_name, labels=labels)
 
-    def _create_volumes(self, service_name, mount_updates=False):
+    def _create_volumes(self, service_name, mount_updates=False, core_mounts=False):
         volumes, mounts = [], []
 
         # Attach the mount that provides the config file
         volumes.extend(self.config_volumes.values())
         mounts.extend(self.config_mounts.values())
+
+        if core_mounts:
+            volumes.extend(self.core_config_volumes.values())
+            mounts.extend(self.core_config_mounts.values())
 
         if mount_updates:
             # Attach the mount that provides the update
@@ -320,7 +342,8 @@ class KubernetesController(ControllerInterface):
         )]
 
     def _create_deployment(self, service_name: str, deployment_name: str, docker_config,
-                           shutdown_seconds, scale: int, labels=None, volumes=None, mounts=None, mount_updates=True):
+                           shutdown_seconds, scale: int, labels=None, volumes=None, mounts=None,
+                           mount_updates=True, core_mounts=False):
 
         replace = False
 
@@ -375,7 +398,7 @@ class KubernetesController(ControllerInterface):
         all_labels['component'] = service_name
         all_labels.update(labels or {})
 
-        all_volumes, all_mounts = self._create_volumes(service_name, mount_updates)
+        all_volumes, all_mounts = self._create_volumes(service_name, mount_updates, core_mounts)
         all_volumes.extend(volumes or [])
         all_mounts.extend(mounts or [])
         metadata = self._create_metadata(deployment_name=deployment_name, labels=all_labels)
@@ -510,7 +533,8 @@ class KubernetesController(ControllerInterface):
             mounts.append(V1VolumeMount(mount_path=volume_spec.mount_path, name=mount_name))
 
         self._create_deployment(service_name, deployment_name, spec.container,
-                                30, 1, labels, volumes=volumes, mounts=mounts, mount_updates=mount_updates)
+                                30, 1, labels, volumes=volumes, mounts=mounts,
+                                mount_updates=mount_updates, core_mounts=spec.run_as_core)
 
     def _ensure_pvc(self, name, storage_class, size):
         request = V1ResourceRequirements(requests={'storage': size})

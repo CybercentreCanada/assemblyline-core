@@ -54,6 +54,9 @@ CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
 CLASSIFICATION_CONFIGMAP = os.getenv('CLASSIFICATION_CONFIGMAP', None)
 CLASSIFICATION_CONFIGMAP_KEY = os.getenv('CLASSIFICATION_CONFIGMAP_KEY', 'classification.yml')
 
+CONFIGURATION_CONFIGMAP = os.getenv('CONFIGURATION_CONFIGMAP', None)
+CONFIGURATION_CONFIGMAP_KEY = os.getenv('CONFIGURATION_CONFIGMAP_KEY', 'config.yml')
+
 
 class Pool:
     """
@@ -234,6 +237,10 @@ class ScalerServer(ThreadedCoreBase):
                 self.controller.config_mount('classification-config', config_map=CLASSIFICATION_CONFIGMAP,
                                              key=CLASSIFICATION_CONFIGMAP_KEY,
                                              target_path='/etc/assemblyline/classification.yml')
+            if CONFIGURATION_CONFIGMAP:
+                self.controller.core_config_mount('assemblyline-config', config_map=CONFIGURATION_CONFIGMAP,
+                                                  key=CONFIGURATION_CONFIGMAP_KEY,
+                                                  target_path='/etc/assemblyline/config.yml')
         else:
             self.log.info("Loading Docker cluster interface.")
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
