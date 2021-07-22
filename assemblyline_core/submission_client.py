@@ -121,7 +121,8 @@ class SubmissionClient:
             params=submission_obj.params,
             results=[],
             sid=submission_obj.sid,
-            state='submitted'
+            state='submitted',
+            scan_key=submission_obj.scan_key,
         ))
 
         if self.config.ui.allow_malicious_hinting and submission_obj.params.malicious:

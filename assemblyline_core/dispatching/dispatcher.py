@@ -1287,8 +1287,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Try to recover the completion queue value by checking with the ingest table
         completed_queue = ''
-        scan_key = submission.params.create_filescore_key(submission.files[0].sha256)
-        if self.ingester_scanning.exists(scan_key):
+        if submission.scan_key:
             completed_queue = COMPLETE_QUEUE_NAME
 
         # Put the file back into processing
