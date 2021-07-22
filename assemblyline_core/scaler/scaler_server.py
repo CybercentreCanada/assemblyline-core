@@ -39,7 +39,6 @@ APM_SPAN_TYPE = 'scaler'
 SERVICE_SYNC_INTERVAL = 30
 SCALE_INTERVAL = 5
 METRIC_SYNC_INTERVAL = 0.5
-SERVICE_STATUS_FLUSH = 5
 CONTAINER_EVENTS_LOG_INTERVAL = 2
 HEARTBEAT_INTERVAL = 5
 
@@ -309,7 +308,6 @@ class ScalerServer(ThreadedCoreBase):
         self.maintain_threads({
             'Log Container Events': self.log_container_events,
             'Process Timeouts': self.process_timeouts,
-            'Flush Service Status': self.flush_service_status,
             'Service Configuration Sync': self.sync_services,
             'Service Adjuster': self.update_scaling,
             'Import Metrics': self.sync_metrics,
@@ -605,6 +603,7 @@ class ScalerServer(ThreadedCoreBase):
 
     def _timeout_kill(self, service, container):
         with apm_span(self.apm_client, 'timeout_kill'):
+            self.status_table.pop(container)
             self.controller.stop_container(service, container)
 
     def process_timeouts(self):
@@ -660,23 +659,6 @@ class ScalerServer(ThreadedCoreBase):
                 }
                 export_metrics_once('scaler', Metrics, metrics, host=HOSTNAME,
                                     counter_type='scaler', config=self.config, redis=self.redis)
-
-    def flush_service_status(self):
-        """The service status table may have references to containers that have crashed. Try to remove them all."""
-        bad_containers = set()
-        while self.sleep(SERVICE_STATUS_FLUSH):
-            with apm_span(self.apm_client, 'flush_service_status'):
-                # Pull all container names
-                names = set(self.controller.get_running_container_names())
-
-                # Get the names we have status for
-                for hostname in self.status_table.keys():
-                    if hostname not in names:
-                        if hostname in bad_containers:
-                            self.status_table.pop(hostname)
-                            bad_containers.discard(hostname)
-                        else:
-                            bad_containers.add(hostname)
 
     def log_container_events(self):
         """The service status table may have references to containers that have crashed. Try to remove them all."""
