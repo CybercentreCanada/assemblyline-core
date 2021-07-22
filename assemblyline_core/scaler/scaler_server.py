@@ -611,7 +611,15 @@ class ScalerServer(ThreadedCoreBase):
             futures = []
 
             while self.running:
+                message = self.scaler_timeout_queue.pop(blocking=True, timeout=1)
+                if not message:
+                    continue
+
                 with apm_span(self.apm_client, 'process_timeouts'):
+                    # Process new messages
+                    self.log.info(f"Killing service container: {message['container']} running: {message['service']}")
+                    futures.append(pool.submit(self._timeout_kill, message['service'], message['container']))
+
                     # Process finished
                     finished = [_f for _f in futures if _f.done()]
                     futures = [_f for _f in futures if _f not in finished]
@@ -619,13 +627,6 @@ class ScalerServer(ThreadedCoreBase):
                         exception = _f.exception()
                         if exception is not None:
                             self.log.error(f"Exception trying to stop timed out service container: {exception}")
-
-                    # Process new messages
-                    message = self.scaler_timeout_queue.pop(blocking=True, timeout=1)
-                    if not message:
-                        continue
-                    self.log.info(f"Killing service container: {message['container']} running: {message['service']}")
-                    futures.append(pool.submit(self._timeout_kill, message['service'], message['container']))
 
     def export_metrics(self):
         while self.sleep(self.config.logging.export_interval):
