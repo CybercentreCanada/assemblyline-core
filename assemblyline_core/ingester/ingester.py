@@ -12,7 +12,7 @@ be created.
 import threading
 import time
 from random import random
-from typing import Iterable, List
+from typing import Iterable, List, Optional, Dict, Tuple
 
 import elasticapm
 
@@ -50,7 +50,7 @@ _max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
 HOUR_IN_SECONDS = 60 * 60
 
 
-def must_drop(length, maximum):
+def must_drop(length: int, maximum: int) -> bool:
     """
     To calculate the probability of dropping an incoming submission we compare
     the number returned by random() which will be in the range [0,1) and the
@@ -73,7 +73,7 @@ def must_drop(length, maximum):
     return random() < drop_chance(length, maximum)
 
 
-def determine_resubmit_selected(selected, resubmit_to):
+def determine_resubmit_selected(selected: List[str], resubmit_to: List[str]) -> Optional[List[str]]:
     resubmit_selected = None
 
     selected = set(selected)
@@ -85,7 +85,7 @@ def determine_resubmit_selected(selected, resubmit_to):
     return resubmit_selected
 
 
-def should_resubmit(score):
+def should_resubmit(score: float) -> bool:
 
     # Resubmit:
     #
@@ -159,9 +159,9 @@ class Ingester(ThreadedCoreBase):
 
         # Constants are loaded based on a non-constant path, so has to be done at init rather than load
         constants = forge.get_constants(self.config)
-        self.priority_value = constants.PRIORITIES
-        self.priority_range = constants.PRIORITY_RANGES
-        self.threshold_value = constants.PRIORITY_THRESHOLDS
+        self.priority_value: Dict[str, int] = constants.PRIORITIES
+        self.priority_range: Dict[str, Tuple[int, int]] = constants.PRIORITY_RANGES
+        self.threshold_value: Dict[str, int] = constants.PRIORITY_THRESHOLDS
 
         # Classification engine
         self.ce = classification or forge.get_classification()
@@ -335,7 +335,7 @@ class Ingester(ThreadedCoreBase):
                     continue
 
                 # Check if this file has been previously processed.
-                pprevious, previous, score, scan_key = None, False, None, None
+                pprevious, previous, score, scan_key = None, None, None, None
                 if not task.submission.params.ignore_cache:
                     pprevious, previous, score, scan_key = self.check(task)
                 else:
@@ -568,7 +568,7 @@ class Ingester(ThreadedCoreBase):
             task.params.groups = self.get_groups_from_user(task.params.submitter)
 
         # Check if this file is already being processed
-        pprevious, previous, score = None, False, None
+        pprevious, previous, score = None, None, None
         if not param.ignore_cache:
             pprevious, previous, score, _ = self.check(task)
 
@@ -619,7 +619,7 @@ class Ingester(ThreadedCoreBase):
 
         self.unique_queue.push(priority, task.as_primitives())
 
-    def check(self, task: IngestTask):
+    def check(self, task: IngestTask) -> Tuple[Optional[str], Optional[str], Optional[float], str]:
         key = self.stamp_filescore_key(task)
 
         with self.cache_lock:
@@ -635,7 +635,7 @@ class Ingester(ThreadedCoreBase):
                 self.log.info(f'[{task.ingest_id} :: {task.sha256}] Remote cache hit')
             else:
                 self.counter.increment('cache_miss')
-                return None, False, None, key
+                return None, None, None, key
 
             with self.cache_lock:
                 self.cache[key] = result
@@ -649,11 +649,11 @@ class Ingester(ThreadedCoreBase):
             self.counter.increment('cache_expired')
             self.cache.pop(key, None)
             self.datastore.filescore.delete(key)
-            return None, False, None, key
+            return None, None, None, key
         elif self.stale(age, errors):
             self.log.info(f"[{task.ingest_id} :: {task.sha256}] Cache hit dropped, cache is stale")
             self.counter.increment('cache_stale')
-            return None, False, result.score, key
+            return None, None, result.score, key
 
         return result.psid, result.sid, result.score, key
 
@@ -669,7 +669,7 @@ class Ingester(ThreadedCoreBase):
             return delta >= self.config.core.ingester.stale_after_seconds
 
     @staticmethod
-    def stamp_filescore_key(task: IngestTask, sha256=None):
+    def stamp_filescore_key(task: IngestTask, sha256: str = None) -> str:
         if not sha256:
             sha256 = task.submission.files[0].sha256
 
@@ -681,7 +681,7 @@ class Ingester(ThreadedCoreBase):
 
         return key
 
-    def completed(self, sub):
+    def completed(self, sub: DatabaseSubmission):
         """Invoked when notified that a submission has completed."""
         # There is only one file in the submissions we have made
         sha256 = sub.files[0].sha256
@@ -837,7 +837,7 @@ class Ingester(ThreadedCoreBase):
         self.timeout_queue.push(int(now(_max_time)), task.submission.scan_key)
         self.log.info(f"[{task.ingest_id} :: {task.sha256}] Submitted to dispatcher for analysis")
 
-    def retry(self, task, scan_key, ex):
+    def retry(self, task: IngestTask, scan_key: str, ex):
         current_time = now()
 
         retries = task.retries + 1
@@ -856,7 +856,7 @@ class Ingester(ThreadedCoreBase):
             task.retries = retries
             self.retry_queue.push(int(now(_retry_delay)), task.as_primitives())
 
-    def finalize(self, psid, sid, score, task: IngestTask):
+    def finalize(self, psid: str, sid: str, score: float, task: IngestTask):
         self.log.info(f"[{task.ingest_id} :: {task.sha256}] Completed")
         if psid:
             task.params.psid = psid
@@ -885,12 +885,11 @@ class Ingester(ThreadedCoreBase):
             task.submission.sid = None
             task.submission.scan_key = None
             task.params.services.resubmit = []
-            task.scan_key = None
             task.params.services.selected = resubmit_selected
 
             self.unique_queue.push(task.params.priority, task.as_primitives())
 
-    def is_alert(self, task: IngestTask, score):
+    def is_alert(self, task: IngestTask, score: float) -> bool:
         if not task.params.generate_alert:
             return False
 
