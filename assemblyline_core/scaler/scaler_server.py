@@ -577,20 +577,22 @@ class ScalerServer(ThreadedCoreBase):
 
                 with self.profiles_lock:
                     for profile_name, profile in self.profiles.items():
+                        queue_length = profile.queue.length() if profile.queue else 0
+
                         # Pull out statistics from the metrics regularization
                         update = self.state.read(profile_name)
                         if update:
                             delta = time.time() - profile.last_update
                             profile.update(
                                 delta=delta,
-                                backlog=profile.queue.length(),
+                                backlog=queue_length,
                                 **update
                             )
 
                         # Check if we expect no messages, if so pull the queue length ourselves
                         # since there is no heartbeat
                         if targets.get(profile_name) == 0 and profile.desired_instances == 0 and profile.queue:
-                            queue_length = profile.queue.length()
+
                             if queue_length > 0:
                                 self.log.info(f"Service at zero instances has messages: "
                                               f"{profile.name} ({queue_length} in queue)")
