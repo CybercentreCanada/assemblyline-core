@@ -17,7 +17,7 @@ from contextlib import contextmanager
 import elasticapm
 
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.remote.datatypes.queues.priority import PriorityQueue
+from assemblyline.remote.datatypes.queues.priority import PriorityQueue, length as pq_length
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline.odm.models.service import Service, DockerConfig
@@ -574,8 +574,12 @@ class ScalerServer(ThreadedCoreBase):
                 export_interval = self.config.core.metrics.export_interval
 
                 with self.profiles_lock:
+                    queues = [profile.queue for profile in self.profiles.values() if profile.queue]
+                    lengths_list = pq_length(*queues)
+                    lengths = {_q: _l for _q, _l in zip(queues, lengths_list)}
+
                     for profile_name, profile in self.profiles.items():
-                        queue_length = profile.queue.length() if profile.queue else 0
+                        queue_length = lengths.get(profile.queue, 0)
 
                         # Pull out statistics from the metrics regularization
                         update = self.state.read(profile_name)
