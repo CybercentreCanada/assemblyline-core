@@ -80,10 +80,10 @@ def test_submit_duplicate(submit_harness):
         'ingest_id': 'abc123'
     })
     # Make sure the scan key is correct, this is normally done on ingest
-    task.scan_key = task.params.create_filescore_key(task.submission.files[0].sha256, [])
+    task.submission.scan_key = task.params.create_filescore_key(task.submission.files[0].sha256, [])
 
     # Add this file to the scanning table, so it looks like it has already been submitted + ingest again
-    submitter.scanning.add(task.scan_key, task.as_primitives())
+    submitter.scanning.add(task.submission.scan_key, task.as_primitives())
     submitter.unique_queue.push(0, task.as_primitives())
 
     submitter.handle_submit()
@@ -91,7 +91,7 @@ def test_submit_duplicate(submit_harness):
     # No tasks should be left in the queue
     assert submitter.unique_queue.pop() is None
     # The task should have been pushed to the duplicates queue
-    assert submitter.duplicate_queue.length(_dup_prefix + task.scan_key) == 1
+    assert submitter.duplicate_queue.length(_dup_prefix + task.submission.scan_key) == 1
 
 
 def test_existing_score(submit_harness):

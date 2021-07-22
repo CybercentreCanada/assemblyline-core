@@ -127,7 +127,6 @@ class IngestTask(odm.Model):
         return self.submission.files[0].sha256
 
     # Information about the ingestion itself, parameters irrelevant
-    scan_key = odm.Optional(odm.Keyword())  # the filescore key
     retries = odm.Integer(default=0)
 
     # Fields added after a submission is complete for notification/bookkeeping processes
@@ -674,11 +673,11 @@ class Ingester(ThreadedCoreBase):
         if not sha256:
             sha256 = task.submission.files[0].sha256
 
-        key = task.scan_key
+        key = task.submission.scan_key
 
         if not key:
             key = task.params.create_filescore_key(sha256)
-            task.scan_key = key
+            task.submission.scan_key = key
 
         return key
 
@@ -686,7 +685,7 @@ class Ingester(ThreadedCoreBase):
         """Invoked when notified that a submission has completed."""
         # There is only one file in the submissions we have made
         sha256 = sub.files[0].sha256
-        scan_key = sub.params.create_filescore_key(sha256)
+        scan_key = sub.scan_key or sub.params.create_filescore_key(sha256)
         raw = self.scanning.pop(scan_key)
 
         psid = sub.params.psid
@@ -835,7 +834,7 @@ class Ingester(ThreadedCoreBase):
             completed_queue=COMPLETE_QUEUE_NAME,
         )
 
-        self.timeout_queue.push(int(now(_max_time)), task.scan_key)
+        self.timeout_queue.push(int(now(_max_time)), task.submission.scan_key)
         self.log.info(f"[{task.ingest_id} :: {task.sha256}] Submitted to dispatcher for analysis")
 
     def retry(self, task, scan_key, ex):
@@ -884,6 +883,7 @@ class Ingester(ThreadedCoreBase):
             self.log.info(f"[{task.ingest_id} :: {task.sha256}] Resubmitted for extended analysis")
             task.params.psid = sid
             task.submission.sid = None
+            task.submission.scan_key = None
             task.params.services.resubmit = []
             task.scan_key = None
             task.params.services.selected = resubmit_selected
