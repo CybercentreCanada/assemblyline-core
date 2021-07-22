@@ -603,8 +603,8 @@ class ScalerServer(ThreadedCoreBase):
 
     def _timeout_kill(self, service, container):
         with apm_span(self.apm_client, 'timeout_kill'):
-            self.status_table.pop(container)
             self.controller.stop_container(service, container)
+            self.status_table.pop(container)
 
     def process_timeouts(self):
         with concurrent.futures.ThreadPoolExecutor(10) as pool:
