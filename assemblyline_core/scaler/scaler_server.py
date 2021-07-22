@@ -569,8 +569,7 @@ class ScalerServer(ThreadedCoreBase):
 
                 # Download the current targets in the orchestrator while not holding the lock
                 with self.profiles_lock:
-                    service_names = list(self.profiles.keys())
-                targets = {name: self.controller.get_target(name) for name in service_names}
+                    targets = {name: profile.target_instances for name, profile in self.profiles.items()}
 
                 # Check the set of services that might be sitting at zero instances, and if it is, we need to
                 # manually check if it is offline
