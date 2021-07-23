@@ -568,6 +568,7 @@ class Ingester(ThreadedCoreBase):
             task.params.groups = self.get_groups_from_user(task.params.submitter)
 
         # Check if this file is already being processed
+        self.stamp_filescore_key(task)
         pprevious, previous, score = None, None, None
         if not param.ignore_cache:
             pprevious, previous, score, _ = self.check(task)
@@ -685,7 +686,11 @@ class Ingester(ThreadedCoreBase):
         """Invoked when notified that a submission has completed."""
         # There is only one file in the submissions we have made
         sha256 = sub.files[0].sha256
-        scan_key = sub.scan_key or sub.params.create_filescore_key(sha256)
+        scan_key = sub.scan_key
+        if not scan_key:
+            self.log.warning(f"[{sub.metadata.get('ingest_id', 'unknown')} :: {sha256}] "
+                             f"Submission missing scan key")
+            scan_key = sub.params.create_filescore_key(sha256)
         raw = self.scanning.pop(scan_key)
 
         psid = sub.params.psid

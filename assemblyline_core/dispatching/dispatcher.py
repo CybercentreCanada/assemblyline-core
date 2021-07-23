@@ -1245,6 +1245,19 @@ class Dispatcher(ThreadedCoreBase):
                     export_metrics_once(task.service_name, ServiceMetrics, dict(fail_recoverable=1),
                                         host=task.metadata['worker__'], counter_type='service')
 
+            # Look for unassigned submissions in the datastore if we don't have a
+            # large number of outstanding things in the queue already.
+            with apm_span(self.apm_client, 'orphan_submission_check'):
+                assignments = self.submissions_assignments.items()
+                recovered_from_database = []
+                if self.submission_queue.length() < 500:
+                    with apm_span(self.apm_client, 'abandoned_submission_check'):
+                        # Get the submissions belonging to an dispatcher we don't know about
+                        for item in self.datastore.submission.stream_search('state: submitted', fl='sid'):
+                            if item['sid'] in assignments:
+                                continue
+                            recovered_from_database.append(item['sid'])
+
             # Look for instances that are in the assignment table, but the instance its assigned to doesn't exist.
             # We try to remove the instance from the table to prevent multiple dispatcher instances from
             # recovering it at the same time
@@ -1256,33 +1269,33 @@ class Dispatcher(ThreadedCoreBase):
                 for raw_key in self.redis_persist.keys(TASK_ASSIGNMENT_PATTERN):
                     key: str = raw_key.decode()
                     dispatcher_instances.add(key[len(DISPATCH_TASK_ASSIGNMENT):])
-                missing = [sid for sid, instance in assignments.items() if instance not in dispatcher_instances]
 
                 # Submissions that didn't belong to anyone should be recovered
-                for sid in missing:
-                    if self.submissions_assignments.pop(sid):
-                        self.recover_submission(sid)
+                for sid, instance in assignments.items():
+                    if instance in dispatcher_instances:
+                        continue
+                    if self.submissions_assignments.conditional_remove(sid, instance):
+                        self.recover_submission(sid, 'from assignment table')
 
-            # Look for unassigned submissions in the datastore if we don't have a
-            # large number of outstanding things in the queue already
-            if self.submission_queue.length() < 500:
-                with apm_span(self.apm_client, 'abandoned_submission_check'):
-                    # Get the submissions belonging to an dispatcher we don't know about
-                    for item in self.datastore.submission.stream_search('state: submitted', fl='sid'):
-                        if item['sid'] in assignments:
-                            continue
-                        self.recover_submission(item['sid'])
+            # Go back over the list of sids from the database now that we have a copy of the
+            # assignments table taken after our database scan
+            for sid in recovered_from_database:
+                if sid not in assignments:
+                    self.recover_submission(sid, 'from database scan')
 
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
             self.sleep(GLOBAL_TASK_CHECK_INTERVAL)
 
-    def recover_submission(self, sid: str) -> bool:
+    def recover_submission(self, sid: str, message: str) -> bool:
         # Make sure we can load the submission body
         submission: Submission = self.datastore.submission.get_if_exists(sid)
         if not submission:
             return False
-        self.log.warning(f'Recovered dead submission: {sid}')
+        if submission.state != 'submitted':
+            return False
+
+        self.log.warning(f'Recovered dead submission: {sid} {message}')
 
         # Try to recover the completion queue value by checking with the ingest table
         completed_queue = ''
