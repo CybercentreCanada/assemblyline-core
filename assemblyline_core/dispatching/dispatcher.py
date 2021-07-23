@@ -1270,11 +1270,12 @@ class Dispatcher(ThreadedCoreBase):
                 for raw_key in self.redis_persist.keys(TASK_ASSIGNMENT_PATTERN):
                     key: str = raw_key.decode()
                     dispatcher_instances.add(key[len(DISPATCH_TASK_ASSIGNMENT):])
-                missing = [sid for sid, instance in assignments.items() if instance not in dispatcher_instances]
 
                 # Submissions that didn't belong to anyone should be recovered
-                for sid in missing:
-                    if self.submissions_assignments.pop(sid):
+                for sid, instance in assignments.items():
+                    if instance in dispatcher_instances:
+                        continue
+                    if self.submissions_assignments.conditional_remove(sid, instance):
                         self.recover_submission(sid, 'from assignment table')
 
             # Go back over the list of sids from the database now that we have a copy of the
