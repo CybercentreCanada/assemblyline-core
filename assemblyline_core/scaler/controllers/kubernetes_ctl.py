@@ -460,7 +460,9 @@ class KubernetesController(ControllerInterface):
 
     def stop_container(self, service_name, container_id):
         try:
-            pods = self.api.list_namespaced_pod(namespace=self.namespace, label_selector=f'component={service_name}',
+            pods = self.api.list_namespaced_pod(namespace=self.namespace,
+                                                field_selector=f'metadata.name={container_id}',
+                                                label_selector=f'component={service_name}',
                                                 _request_timeout=API_TIMEOUT)
             for pod in pods.items:
                 if pod.metadata.name == container_id:
