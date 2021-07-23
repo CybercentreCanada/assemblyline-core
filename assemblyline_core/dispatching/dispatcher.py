@@ -1293,6 +1293,9 @@ class Dispatcher(ThreadedCoreBase):
         submission: Submission = self.datastore.submission.get_if_exists(sid)
         if not submission:
             return False
+        if submission.state != 'submitted':
+            return False
+
         self.log.warning(f'Recovered dead submission: {sid} {message}')
 
         # Try to recover the completion queue value by checking with the ingest table
