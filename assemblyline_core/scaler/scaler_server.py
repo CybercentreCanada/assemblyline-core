@@ -446,9 +446,11 @@ class ScalerServer(ThreadedCoreBase):
         while self.sleep(SCALE_INTERVAL):
             with apm_span(self.apm_client, 'update_scaling'):
                 # Figure out what services are expected to be running and how many
-                with self.profiles_lock:
-                    all_profiles: Dict[str, ServiceProfile] = copy.deepcopy(self.profiles)
-                targets = {_p.name: self.controller.get_target(_p.name) for _p in all_profiles.values()}
+                with elasticapm.capture_span('read_profiles'):
+                    with self.profiles_lock:
+                        all_profiles: Dict[str, ServiceProfile] = copy.deepcopy(self.profiles)
+                    raw_targets = self.controller.get_targets()
+                    targets = {_p.name: raw_targets.get(_p.name, 0) for _p in all_profiles.values()}
 
                 for name, profile in all_profiles.items():
                     self.log.debug(f'{name}')
@@ -516,13 +518,14 @@ class ScalerServer(ThreadedCoreBase):
                     remaining_profiles = trim(remaining_profiles)
 
                 # Apply those adjustments we have made back to the controller
-                with pool:
-                    for name, value in targets.items():
-                        self.profiles[name].target_instances = value
-                        old = old_targets[name]
-                        if value != old:
-                            self.log.info(f"Scaling service {name}: {old} -> {value}")
-                            pool.call(self.controller.set_target, name, value)
+                with elasticapm.capture_span('write_targets'):
+                    with pool:
+                        for name, value in targets.items():
+                            self.profiles[name].target_instances = value
+                            old = old_targets[name]
+                            if value != old:
+                                self.log.info(f"Scaling service {name}: {old} -> {value}")
+                                pool.call(self.controller.set_target, name, value)
 
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
     def handle_service_error(self, service_name):
