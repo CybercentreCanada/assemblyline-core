@@ -1,7 +1,7 @@
 import os
 import threading
 import time
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 from assemblyline.odm.models.service import DockerConfig
 from .interface import ControllerInterface, ServiceControlError
@@ -259,6 +259,9 @@ class DockerController(ControllerInterface):
             else:
                 self.log.warning(f"Unknown docker status string: {container.status}")
         return running
+
+    def get_targets(self) -> Dict[str, int]:
+        return {name: self.get_target(name) for name in self._profiles.keys()}
 
     def set_target(self, service_name, target):
         """Change how many instances of a service docker is trying to keep up.

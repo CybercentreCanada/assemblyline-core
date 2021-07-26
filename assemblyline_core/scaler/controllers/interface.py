@@ -36,6 +36,10 @@ class ControllerInterface:
         """Get the target for running instances of a service."""
         raise NotImplementedError()
 
+    def get_targets(self):
+        """Get the target for running instances of all services."""
+        raise NotImplementedError()
+
     def set_target(self, service_name, target):
         """Set the target for running instances of a service."""
         raise NotImplementedError()
