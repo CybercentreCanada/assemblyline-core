@@ -434,6 +434,25 @@ class KubernetesController(ControllerInterface):
                 return 0
             raise
 
+    def get_targets(self) -> Dict[str, int]:
+        """Get the target for running instances of all services."""
+        targets = {}
+        label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items())
+        response = None
+        args = {}
+
+        while response is None or args.get('_continue'):
+            response = self.apps_api.list_namespaced_deployment(namespace=self.namespace, limit=100,
+                                                                label_selector=label_selector,
+                                                                _request_timeout=API_TIMEOUT, **args)
+            args['_continue'] = getattr(response.metadata, '_continue')
+
+            for deployment in response.items:
+                if 'component' in deployment.metadata.labels:
+                    targets[deployment.metadata.labels['component']] = deployment.spec.replicas
+
+        return targets
+
     def set_target(self, service_name: str, target: int):
         """Set the target for running instances of a service."""
         for _ in range(10):
