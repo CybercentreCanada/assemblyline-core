@@ -171,7 +171,7 @@ class KubernetesController(ControllerInterface):
         self._quota_cpu_limit = None
         self._quota_cpu_used = None
         self._quota_mem_limit = None
-        self._quota_mem_limit = None
+        self._quota_mem_used = None
         quota_background = threading.Thread(target=self._monitor_quotas, daemon=True)
         quota_background.start()
 
@@ -283,7 +283,7 @@ class KubernetesController(ControllerInterface):
                 self._quota_cpu_limit = None
                 self._quota_cpu_used = None
                 self._quota_mem_limit = None
-                self._quota_mem_limit = None
+                self._quota_mem_used = None
 
                 for event in watch.stream(func=self.api.list_namespaced_resource_quota, namespace=self.namespace):
                     if not self.running:
