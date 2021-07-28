@@ -3,7 +3,7 @@ import json
 import os
 import threading
 import weakref
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import kubernetes
 from kubernetes import client, config
@@ -53,7 +53,7 @@ def median(values: List[float]) -> float:
     return values[len(values)//2]
 
 
-def get_resources(container):
+def get_resources(container) -> Tuple[float, float]:
     requests = container['resources'].get('requests', {})
     limits = container['resources'].get('limits', {})
 
@@ -68,7 +68,7 @@ def get_resources(container):
     return cpu_value, memory_value
 
 
-def create_docker_auth_config(image, username, password):
+def create_docker_auth_config(image: str, username: str, password: str) -> str:
     # Take the registry part of the image if set, use the default registry if no registry component is in the string
     if '/' in image:
         server_name = image.rpartition('/')[0]
@@ -91,7 +91,7 @@ def create_docker_auth_config(image, username, password):
     })
 
 
-def parse_memory(string) -> float:
+def parse_memory(string: str) -> float:
     """Convert a memory string to megabytes float"""
     # Maybe we have a number in bytes
     try:
@@ -108,7 +108,7 @@ def parse_memory(string) -> float:
     raise ValueError(string)
 
 
-def parse_cpu(string):
+def parse_cpu(string: str) -> float:
     try:
         return float(string)
     except ValueError:
@@ -142,17 +142,17 @@ class KubernetesController(ControllerInterface):
             # Load again with our settings set
             config.load_kube_config(client_configuration=cfg)
 
-        self.running = True
-        self.prefix = prefix.lower()
-        self.priority = priority
-        self.cpu_reservation = max(0.0, min(cpu_reservation, 1.0))
+        self.running: bool = True
+        self.prefix: str = prefix.lower()
+        self.priority: str = priority
+        self.cpu_reservation: float = max(0.0, min(cpu_reservation, 1.0))
         self.logger = logger
-        self.log_level = log_level
-        self._labels = labels
+        self.log_level: str = log_level
+        self._labels: Dict[str, str] = labels
         self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
         self.net_api = client.NetworkingV1Api()
-        self.namespace = namespace
+        self.namespace: str = namespace
         self.config_volumes: Dict[str, V1Volume] = {}
         self.config_mounts: Dict[str, V1VolumeMount] = {}
         self._external_profiles = weakref.WeakValueDictionary()
