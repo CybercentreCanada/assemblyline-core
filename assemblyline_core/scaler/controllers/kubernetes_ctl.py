@@ -3,7 +3,7 @@ import json
 import os
 import threading
 import weakref
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import kubernetes
 from kubernetes import client, config
@@ -168,22 +168,26 @@ class KubernetesController(ControllerInterface):
             if 'scaler' not in event.involved_object.name:
                 self.events_window[event.metadata.uid] = event.count
 
-        self._quota_cpu_limit = None
-        self._quota_cpu_used = None
-        self._quota_mem_limit = None
-        self._quota_mem_used = None
+        self._quota_cpu_limit: Optional[float] = None
+        self._quota_cpu_used: Optional[float] = None
+        self._quota_mem_limit: Optional[float] = None
+        self._quota_mem_used: Optional[float] = None
         quota_background = threading.Thread(target=self._monitor_quotas, daemon=True)
         quota_background.start()
 
-        self._node_pool_max_ram = 0
-        self._node_pool_max_cpu = 0
+        self._node_pool_max_ram: float = 0
+        self._node_pool_max_cpu: float = 0
         node_background = threading.Thread(target=self._monitor_node_pool, daemon=True)
         node_background.start()
 
-        self._pod_used_ram = 0
-        self._pod_used_cpu = 0
+        self._pod_used_ram: float = 0
+        self._pod_used_cpu: float = 0
         pod_background = threading.Thread(target=self._monitor_pods, daemon=True)
         pod_background.start()
+
+        self._deployment_targets: Dict[str, int] = {}
+        deployment_background = threading.Thread(target=self._monitor_deployments, daemon=True)
+        deployment_background.start()
 
     def stop(self):
         self.running = False
@@ -335,6 +339,27 @@ class KubernetesController(ControllerInterface):
                         self._quota_mem_used = max(mem_used.values())
                     else:
                         self._quota_mem_used = None
+
+            except ApiException:
+                self.logger.exception("Error in quota monitoring")
+
+    def _monitor_deployments(self):
+        while self.running:
+            try:
+                watch = TypelessWatch()
+
+                self._deployment_targets = {}
+                label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items())
+
+                for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
+                                          namespace=self.namespace, label_selector=label_selector):
+                    if event['type'] in ['ADDED', 'MODIFIED']:
+                        name = event['raw_object']['metadata']['labels'].get('component', None)
+                        if name is not None:
+                            self._deployment_targets[name] = event['raw_object']['spec']['replicas']
+                    elif event['type'] == 'DELETED':
+                        name = event['raw_object']['metadata']['labels'].get('component', None)
+                        self._deployment_targets.pop(name, None)
 
             except ApiException:
                 self.logger.exception("Error in quota monitoring")
@@ -500,36 +525,11 @@ class KubernetesController(ControllerInterface):
 
     def get_target(self, service_name: str) -> int:
         """Get the target for running instances of a service."""
-        try:
-            scale = self.apps_api.read_namespaced_deployment_scale(self._deployment_name(service_name),
-                                                                   namespace=self.namespace,
-                                                                   _request_timeout=API_TIMEOUT)
-            return int(scale.spec.replicas or 0)
-        except ApiException as error:
-            # If we get a 404 it means the resource doesn't exist, which we treat the same as
-            # scheduled to run zero instances since we create deployments on demand
-            if error.status == 404:
-                return 0
-            raise
+        return self._deployment_targets.get(service_name, 0)
 
     def get_targets(self) -> Dict[str, int]:
         """Get the target for running instances of all services."""
-        targets = {}
-        label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items())
-        response = None
-        args = {}
-
-        while response is None or args.get('_continue'):
-            response = self.apps_api.list_namespaced_deployment(namespace=self.namespace, limit=100,
-                                                                label_selector=label_selector,
-                                                                _request_timeout=API_TIMEOUT, **args)
-            args['_continue'] = getattr(response.metadata, '_continue')
-
-            for deployment in response.items:
-                if 'component' in deployment.metadata.labels:
-                    targets[deployment.metadata.labels['component']] = deployment.spec.replicas
-
-        return targets
+        return self._deployment_targets
 
     def set_target(self, service_name: str, target: int):
         """Set the target for running instances of a service."""
