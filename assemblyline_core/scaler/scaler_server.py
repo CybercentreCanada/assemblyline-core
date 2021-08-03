@@ -64,6 +64,7 @@ class Pool:
     jobs as a context manager, and wait for the batch to finish after
     the context ends.
     """
+
     def __init__(self, size=10):
         self.pool = concurrent.futures.ThreadPoolExecutor(size)
         self.futures = []
@@ -87,6 +88,7 @@ class ServiceProfile:
 
     This includes how the service should be run, and conditions related to the scaling of the service.
     """
+
     def __init__(self, name, container_config: DockerConfig, config_hash=0, min_instances=0, max_instances=None,
                  growth: float = 600, shrink: Optional[float] = None, backlog=500, queue=None, shutdown_seconds=30,
                  mount_updates=True):
@@ -324,6 +326,8 @@ class ScalerServer(ThreadedCoreBase):
                         # Enable this service's dependencies
                         self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
                         for _n, dependency in service.dependencies.items():
+                            dependency.container.image = Template(dependency.container.image) \
+                                .safe_substitute(image_variables)
                             self.controller.start_stateful_container(
                                 service_name=service.name,
                                 container_name=_n,
