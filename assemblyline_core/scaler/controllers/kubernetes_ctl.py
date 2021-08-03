@@ -4,9 +4,9 @@ import json
 import os
 import threading
 import weakref
-import urllib3
 from typing import Dict, List, Optional, Tuple
 
+import urllib3
 import kubernetes
 from kubernetes import client, config
 from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
