@@ -220,6 +220,7 @@ class KubernetesController(ControllerInterface):
 
     def _monitor_node_pool(self):
         while self.running:
+            # noinspection PyBroadException
             try:
                 self._node_pool_max_cpu = 0
                 self._node_pool_max_ram = 0
@@ -236,11 +237,12 @@ class KubernetesController(ControllerInterface):
                         self._node_pool_max_cpu -= parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
                         self._node_pool_max_ram -= parse_memory(event['raw_object']['status']['allocatable']['memory'])
 
-            except ApiException:
+            except Exception:
                 self.logger.exception("Error in node pool loop")
 
     def _monitor_pods(self):
         while self.running:
+            # noinspection PyBroadException
             try:
                 watch = TypelessWatch()
                 containers = {}
@@ -271,12 +273,13 @@ class KubernetesController(ControllerInterface):
                     self._pod_used_cpu = sum(cpu_used) + cpu_unrestricted * median(cpu_used)
                     self._pod_used_ram = sum(memory_used) + memory_unrestricted * median(memory_used)
 
-            except ApiException:
+            except Exception:
                 self.logger.exception("Error in pod loop")
 
     def _monitor_quotas(self):
 
         while self.running:
+            # noinspection PyBroadException
             try:
                 watch = TypelessWatch()
                 cpu_limits = {}
@@ -340,11 +343,12 @@ class KubernetesController(ControllerInterface):
                     else:
                         self._quota_mem_used = None
 
-            except ApiException:
+            except Exception:
                 self.logger.exception("Error in quota monitoring")
 
     def _monitor_deployments(self):
         while self.running:
+            # noinspection PyBroadException
             try:
                 watch = TypelessWatch()
 
@@ -361,7 +365,7 @@ class KubernetesController(ControllerInterface):
                         name = event['raw_object']['metadata']['labels'].get('component', None)
                         self._deployment_targets.pop(name, None)
 
-            except ApiException:
+            except Exception:
                 self.logger.exception("Error in quota monitoring")
 
     def cpu_info(self):
