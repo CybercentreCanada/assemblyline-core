@@ -517,7 +517,7 @@ class KubernetesController(ControllerInterface):
 
     def start_stateful_container(self, service_name, container_name, spec, labels, mount_updates=False):
         # Setup PVC
-        deployment_name = service_name + '-' + container_name
+        deployment_name = f"{service_name}-{container_name}".lower()
         mounts, volumes = [], []
         for volume_name, volume_spec in spec.volumes.items():
             mount_name = deployment_name + volume_name
