@@ -28,6 +28,7 @@ FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 # RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
 
 API_TIMEOUT = 90
+WATCH_TIMEOUT = 10 * 60
 
 _exponents = {
     'Ki': 2**10,
@@ -241,7 +242,7 @@ class KubernetesController(ControllerInterface):
         self._node_pool_max_ram = 0
         watch = TypelessWatch()
 
-        for event in watch.stream(func=self.api.list_node):
+        for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT):
             if not self.running:
                 break
 
@@ -258,7 +259,7 @@ class KubernetesController(ControllerInterface):
         self._pod_used_cpu = 0
         self._pod_used_ram = 0
 
-        for event in watch.stream(func=self.api.list_pod_for_all_namespaces):
+        for event in watch.stream(func=self.api.list_pod_for_all_namespaces, timeout_seconds=WATCH_TIMEOUT):
             if not self.running:
                 break
 
@@ -294,7 +295,8 @@ class KubernetesController(ControllerInterface):
         self._quota_mem_limit = None
         self._quota_mem_used = None
 
-        for event in watch.stream(func=self.api.list_namespaced_resource_quota, namespace=self.namespace):
+        for event in watch.stream(func=self.api.list_namespaced_resource_quota, namespace=self.namespace,
+                                  timeout_seconds=WATCH_TIMEOUT):
             if not self.running:
                 break
 
@@ -352,7 +354,8 @@ class KubernetesController(ControllerInterface):
         label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items())
 
         for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
-                                  namespace=self.namespace, label_selector=label_selector):
+                                  namespace=self.namespace, label_selector=label_selector,
+                                  timeout_seconds=WATCH_TIMEOUT):
             if event['type'] in ['ADDED', 'MODIFIED']:
                 name = event['raw_object']['metadata']['labels'].get('component', None)
                 if name is not None:
