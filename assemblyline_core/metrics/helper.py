@@ -91,9 +91,10 @@ def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
                         "index.codec": "best_compression"
                     }
                 }
-
+                put_template_func = None
                 # Check if datastream is enabled
                 if datastream_enabled:
+                    put_template_func = es.indices.put_index_template
                     component_name = f"{index}-settings"
                     component_body = {"template": template_body}
                     if not es.cluster.exists_component_template(component_name):
@@ -113,12 +114,13 @@ def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
 
                 # Legacy template
                 else:
+                    put_template_func = es.indices.put_template
                     template_body["order"] = 1
                     template_body["index_patterns"] = [f"{index}-*"]
                     template_body["settings"]["index.lifecycle.rollover_alias"] = index
 
                 try:
-                    with_retries(log, es.indices.put_index_template, index, template_body)
+                    with_retries(log, put_template_func, index, template_body)
                 except elasticsearch.exceptions.RequestError as e:
                     if "resource_already_exists_exception" not in str(e):
                         raise
