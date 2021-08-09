@@ -29,6 +29,7 @@ FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 
 API_TIMEOUT = 90
 WATCH_TIMEOUT = 10 * 60
+WATCH_API_TIMEOUT = WATCH_TIMEOUT + 10
 
 _exponents = {
     'Ki': 2**10,
@@ -242,7 +243,8 @@ class KubernetesController(ControllerInterface):
         self._node_pool_max_ram = 0
         watch = TypelessWatch()
 
-        for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT):
+        for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT,
+                                  _request_timeout=WATCH_API_TIMEOUT):
             if not self.running:
                 break
 
@@ -259,7 +261,8 @@ class KubernetesController(ControllerInterface):
         self._pod_used_cpu = 0
         self._pod_used_ram = 0
 
-        for event in watch.stream(func=self.api.list_pod_for_all_namespaces, timeout_seconds=WATCH_TIMEOUT):
+        for event in watch.stream(func=self.api.list_pod_for_all_namespaces, timeout_seconds=WATCH_TIMEOUT,
+                                  _request_timeout=WATCH_API_TIMEOUT):
             if not self.running:
                 break
 
@@ -296,7 +299,7 @@ class KubernetesController(ControllerInterface):
         self._quota_mem_used = None
 
         for event in watch.stream(func=self.api.list_namespaced_resource_quota, namespace=self.namespace,
-                                  timeout_seconds=WATCH_TIMEOUT):
+                                  timeout_seconds=WATCH_TIMEOUT, _request_timeout=WATCH_API_TIMEOUT):
             if not self.running:
                 break
 
@@ -355,7 +358,7 @@ class KubernetesController(ControllerInterface):
 
         for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
                                   namespace=self.namespace, label_selector=label_selector,
-                                  timeout_seconds=WATCH_TIMEOUT):
+                                  timeout_seconds=WATCH_TIMEOUT, _request_timeout=WATCH_API_TIMEOUT):
             if event['type'] in ['ADDED', 'MODIFIED']:
                 name = event['raw_object']['metadata']['labels'].get('component', None)
                 if name is not None:
