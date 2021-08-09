@@ -55,6 +55,7 @@ def get_latest_tag_for_service(service_config, system_config, logger):
     # Fix service image
     image_variables = defaultdict(str)
     image_variables.update(system_config.services.image_variables)
+    image_variables.update(system_config.services.update_image_variables)
     image = string.Template(image).safe_substitute(image_variables)
 
     # Get authentication
