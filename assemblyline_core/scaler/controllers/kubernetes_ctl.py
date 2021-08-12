@@ -229,7 +229,7 @@ class KubernetesController(ControllerInterface):
                 try:
                     function()
 
-                except urllib3.exceptions.ProtocolError:
+                except (urllib3.exceptions.ProtocolError, urllib3.exceptions.ReadTimeoutError):
                     # Protocol errors are a product of api connections timing out, just retry silently.
                     pass
 
