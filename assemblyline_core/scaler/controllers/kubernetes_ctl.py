@@ -125,7 +125,7 @@ class KubernetesController(ControllerInterface):
         self.cpu_reservation = max(0.0, min(cpu_reservation, 1.0))
         self.logger = logger
         self.log_level = log_level
-        self._labels = labels
+        self._labels = labels or {}
         self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
         self.net_api = client.NetworkingV1Api()
@@ -318,7 +318,7 @@ class KubernetesController(ControllerInterface):
 
         return volumes, mounts
 
-    def _create_containers(self, deployment_name, container_config, mounts):
+    def _create_containers(self, service_name: str, deployment_name, container_config, mounts):
         cores = container_config.cpu_cores
         memory = container_config.ram_mb
         min_memory = min(container_config.ram_mb_min, container_config.ram_mb)
@@ -326,6 +326,7 @@ class KubernetesController(ControllerInterface):
         environment_variables += [
             V1EnvVar(name='UPDATE_PATH', value=CONTAINER_UPDATE_DIRECTORY),
             V1EnvVar(name='FILE_UPDATE_DIRECTORY', value=CONTAINER_UPDATE_DIRECTORY),
+            V1EnvVar(name='AL_SERVICE_NAME', value=service_name),
             V1EnvVar(name='LOG_LEVEL', value=self.log_level)
         ]
         return [V1Container(
@@ -396,6 +397,8 @@ class KubernetesController(ControllerInterface):
 
         all_labels = dict(self._labels)
         all_labels['component'] = service_name
+        if core_mounts:
+            all_labels['section'] = 'core'
         all_labels.update(labels or {})
 
         all_volumes, all_mounts = self._create_volumes(service_name, mount_updates, core_mounts)
@@ -405,7 +408,7 @@ class KubernetesController(ControllerInterface):
 
         pod = V1PodSpec(
             volumes=all_volumes,
-            containers=self._create_containers(deployment_name, docker_config, all_mounts),
+            containers=self._create_containers(service_name, deployment_name, docker_config, all_mounts),
             priority_class_name=self.priority,
             termination_grace_period_seconds=shutdown_seconds,
         )
@@ -517,7 +520,7 @@ class KubernetesController(ControllerInterface):
 
     def start_stateful_container(self, service_name, container_name, spec, labels, mount_updates=False):
         # Setup PVC
-        deployment_name = f"{service_name}-{container_name}".lower()
+        deployment_name = f"{self._deployment_name(service_name)}-{container_name}".lower()
         mounts, volumes = [], []
         for volume_name, volume_spec in spec.volumes.items():
             mount_name = deployment_name + volume_name
