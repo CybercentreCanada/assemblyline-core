@@ -34,7 +34,7 @@ from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
-from assemblyline_core.server_base import ThreadedCoreBase
+from assemblyline.common.server_base import ThreadedCoreBase
 
 from .schedules import Scheduler
 from ..ingester.constants import COMPLETE_QUEUE_NAME

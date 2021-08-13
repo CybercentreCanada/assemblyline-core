@@ -6,7 +6,7 @@ from assemblyline.odm.models.service import Service
 from assemblyline.odm.randomizer import random_model_obj
 
 from assemblyline_core.dispatching.dispatcher import Scheduler
-from assemblyline_core.server_base import get_service_stage_hash, ServiceStage
+from assemblyline.common.server_base import get_service_stage_hash, ServiceStage
 
 
 @pytest.fixture(scope='module')

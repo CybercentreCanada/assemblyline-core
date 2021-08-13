@@ -3,7 +3,7 @@
 import elasticapm
 import time
 
-from assemblyline_core.server_base import ServerBase
+from assemblyline.common.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.str_utils import safe_str
@@ -28,9 +28,10 @@ class WorkflowManager(ServerBase):
         else:
             self.apm_client = None
 
-    def close(self):
+    def stop(self):
         if self.apm_client:
             elasticapm.uninstrument()
+        super().stop()
 
     def get_last_reporting_ts(self, p_start_ts):
         # Start of transaction

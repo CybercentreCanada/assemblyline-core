@@ -13,7 +13,7 @@ from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.constants import service_queue_name
 
 from assemblyline_core.dispatching.client import DispatchClient
-from assemblyline_core.server_base import CoreBase, ServiceStage
+from assemblyline.common.server_base import CoreBase, ServiceStage
 
 
 class Plumber(CoreBase):

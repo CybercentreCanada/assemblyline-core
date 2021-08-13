@@ -25,7 +25,7 @@ from assemblyline.common.forge import get_service_queue
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline_core.scaler.controllers import KubernetesController
 from assemblyline_core.scaler.controllers.interface import ServiceControlError
-from assemblyline_core.server_base import CoreBase, ServiceStage, ThreadedCoreBase
+from assemblyline.common.server_base import CoreBase, ServiceStage, ThreadedCoreBase
 
 from .controllers import DockerController
 from . import collection

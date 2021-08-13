@@ -2,7 +2,7 @@
 
 import elasticapm
 
-from assemblyline_core.server_base import ServerBase
+from assemblyline.common.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.remote.datatypes import get_client
@@ -36,12 +36,13 @@ class Alerter(ServerBase):
         else:
             self.apm_client = None
 
-    def close(self):
+    def stop(self):
         if self.counter:
             self.counter.stop()
 
         if self.apm_client:
             elasticapm.uninstrument()
+        super().stop()
 
     def run_once(self):
         alert = self.alert_queue.pop(timeout=1)

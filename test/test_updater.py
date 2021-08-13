@@ -4,7 +4,7 @@ import redis
 import tempfile
 import pytest
 
-from assemblyline_core.server_base import ServiceStage
+from assemblyline.common.server_base import ServiceStage
 from assemblyline_core.updater import run_updater
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.helper import AssemblylineDatastore
