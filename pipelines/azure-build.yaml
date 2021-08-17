@@ -76,7 +76,7 @@ stages:
               export VERSION=${BUILD_SOURCEBRANCH#"refs/tags/v"}
               sudo -E env "PATH=$PATH" python -m pip install "assemblyline"
               if [[ "$VERSION" != *stable* ]]; then
-                sudo -E env "PATH=$PATH" python -m pip install --pre "assemblyline"
+                sudo -E env "PATH=$PATH" python -m pip install --pre -U "assemblyline"
               fi
               export VERSION=${VERSION/stable}
               export VERSION=${VERSION/beta/b}
