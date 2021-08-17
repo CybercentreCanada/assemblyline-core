@@ -331,20 +331,28 @@ class KubernetesController(ControllerInterface):
                 if 'hard' in status:
                     if 'cpu' in status['hard']:
                         cpu_limits[name] = parse_cpu(status['hard']['cpu'])
+                    if 'requests.cpu' in status['hard']:
+                        cpu_limits[name] = parse_cpu(status['hard']['requests.cpu'])
                     if 'limits.cpu' in status['hard']:
                         cpu_limits[name] = parse_cpu(status['hard']['limits.cpu'])
                     if 'memory' in status['hard']:
                         mem_limits[name] = parse_memory(status['hard']['memory'])
+                    if 'requests.memory' in status['hard']:
+                        mem_limits[name] = parse_memory(status['hard']['requests.memory'])
                     if 'limits.memory' in status['hard']:
                         mem_limits[name] = parse_memory(status['hard']['limits.memory'])
 
                 if 'used' in status:
                     if 'cpu' in status['used']:
                         cpu_used[name] = parse_cpu(status['used']['cpu'])
+                    if 'requests.cpu' in status['used']:
+                        cpu_used[name] = parse_cpu(status['used']['requests.cpu'])
                     if 'limits.cpu' in status['used']:
                         cpu_used[name] = parse_cpu(status['used']['limits.cpu'])
                     if 'memory' in status['used']:
                         mem_used[name] = parse_memory(status['used']['memory'])
+                    if 'requests.memory' in status['used']:
+                        mem_used[name] = parse_memory(status['used']['requests.memory'])
                     if 'limits.memory' in status['used']:
                         mem_used[name] = parse_memory(status['used']['limits.memory'])
 
