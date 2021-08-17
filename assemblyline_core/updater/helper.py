@@ -11,39 +11,51 @@ from packaging.version import parse
 DEFAULT_DOCKER_REGISTRY = "registry.hub.docker.com"
 
 
-def _get_proprietary_registry_tags(server, image_name, auth, verify):
-    # Find latest tag for each types
-    url = f"https://{server}/v2/{image_name}/tags/list"
-
-    # Get tag list
-    headers = {}
-    if auth:
-        headers["Authorization"] = auth
-    resp = requests.get(url, headers=headers, verify=verify)
-
-    # Test for valid response
-    if resp.ok:
-        # Test for positive list of tags
-        resp_data = resp.json()
-        return resp_data['tags']
-    return []
+class ContainerRegistry():
+    # Provide a means of obtaining a list of tags from a container registry
+    def _get_proprietary_registry_tags(self, server, image_name, auth, verify):
+        raise NotImplementedError()
 
 
-def _get_dockerhub_tags(image_name, update_channel):
-    # Find latest tag for each types
-    url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/repositories/{image_name}/tags" \
-          f"?page_size=5&page=1&name={update_channel}"
+class DockerRegistry(ContainerRegistry):
+    def _get_proprietary_registry_tags(self, server, image_name, auth, verify):
+        # Find latest tag for each types
+        url = f"https://{server}/v2/{image_name}/tags/list"
 
-    # Get tag list
-    resp = requests.get(url)
+        # Get tag list
+        headers = {}
+        if auth:
+            headers["Authorization"] = auth
+        resp = requests.get(url, headers=headers, verify=verify)
 
-    # Test for valid response
-    if resp.ok:
-        # Test for positive list of tags
-        resp_data = resp.json()
-        return [x['name'] for x in resp_data['results']]
+        # Test for valid response
+        if resp.ok:
+            # Test for positive list of tags
+            resp_data = resp.json()
+            return resp_data['tags']
+        return []
 
-    return []
+
+class HarborRegistry(ContainerRegistry):
+    def _get_proprietary_registry_tags(self, server, image_name, auth, verify):
+        # Determine project/repo IDs from image name
+        project_id, repo_id = image_name.split('/', 1)
+        url = f"https://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts"
+
+        headers = {}
+        if auth:
+            headers["Authorization"] = auth
+        resp = requests.get(url, headers=headers, verify=verify)
+
+        if resp.ok:
+            return [tag['name'] for tag in resp.json()[0]['tags']]
+        return []
+
+
+REGISTRY_TYPE_MAPPING = {
+    'docker': DockerRegistry(),
+    'harbor': HarborRegistry()
+}
 
 
 def get_latest_tag_for_service(service_config, system_config, logger):
@@ -87,11 +99,13 @@ def get_latest_tag_for_service(service_config, system_config, logger):
 
     # Split repo name without the tag
     image_name = image_name.rsplit(":", 1)[0]
+    registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
 
     if server == DEFAULT_DOCKER_REGISTRY:
         tags = _get_dockerhub_tags(image_name, update_channel)
     else:
-        tags = _get_proprietary_registry_tags(server, image_name, auth, not system_config.services.allow_insecure_registry)
+        tags = registry._get_proprietary_registry_tags(server, image_name, auth,
+                                                       not system_config.services.allow_insecure_registry)
 
     tag_name = None
     if not tags:
@@ -113,3 +127,21 @@ def get_latest_tag_for_service(service_config, system_config, logger):
         image_name = "/".join([server, image_name])
 
     return image_name, tag_name, auth_config
+
+
+# Default for obtaining tags from DockerHub
+def _get_dockerhub_tags(image_name, update_channel):
+    # Find latest tag for each types
+    url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/repositories/{image_name}/tags" \
+        f"?page_size=5&page=1&name={update_channel}"
+
+    # Get tag list
+    resp = requests.get(url)
+
+    # Test for valid response
+    if resp.ok:
+        # Test for positive list of tags
+        resp_data = resp.json()
+        return [x['name'] for x in resp_data['results']]
+
+    return []

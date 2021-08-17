@@ -22,6 +22,7 @@ from assemblyline_core.dispatching.dispatcher import Dispatcher, Submission, Sub
 from assemblyline_core.dispatching.schedules import Scheduler as RealScheduler
 
 # noinspection PyUnresolvedReferences
+from assemblyline_core.dispatching.timeout import TimeoutTable
 from mocking import MockDatastore, ToggleTrue
 from test_scheduler import dummy_service
 
@@ -129,7 +130,8 @@ def test_simple(redis):
     # task = SubmissionTask(sub.as_primitives(), 'some-completion-queue')
     client.dispatch_submission(sub)
     disp.pull_submissions()
-    task = disp.get_task(sid)
+    disp.service_worker(disp.process_queue_index(sid))
+    task = disp.tasks.get(sid)
 
     assert task.queue_keys[(file_hash, 'extract')] is not None
     assert task.queue_keys[(file_hash, 'wrench')] is not None
@@ -198,8 +200,7 @@ def test_simple(redis):
     disp.service_worker(disp.process_queue_index(sid))
 
     assert wait_result(task, file_hash, 'xerox')
-    with task.lock:
-        assert disp.get_task(sid) is None
+    assert disp.tasks.get(sid) is None
 
 
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
@@ -230,6 +231,7 @@ def test_dispatch_extracted(redis):
     # Launch the submission
     client.dispatch_submission(submission)
     disp.pull_submissions()
+    disp.service_worker(disp.process_queue_index(sid))
 
     # Finish one service extracting a file
     job = client.request_work('0', 'extract', '0')
@@ -245,8 +247,52 @@ def test_dispatch_extracted(redis):
     # process the result
     disp.pull_service_results()
     disp.service_worker(disp.process_queue_index(sid))
+    disp.service_worker(disp.process_queue_index(sid))
 
     #
     job = client.request_work('0', 'extract', '0')
     assert job.fileinfo.sha256 == second_file_hash
     assert job.filename == 'second-*'
+
+
+from unittest import mock
+mock_time = mock.Mock()
+mock_time.return_value = 0
+
+
+@mock.patch('time.time', mock_time)
+def test_timeout():
+    table = TimeoutTable()
+    table.set('first', 5, 1)
+    table.set('second', 10, 2)
+    table.set('third', 15, 3)
+    table.set('fourth', 20, 4)
+
+    # Expire one thing
+    mock_time.return_value = 6
+    items = table.timeouts()
+    assert len(items) == 1
+    assert items['first'] == 1
+
+    # Replace the data and expiry
+    table.set('second', 20, 5)  # second now expires at 26
+
+    # Expire two things
+    mock_time.return_value = 21
+    items = table.timeouts()
+    assert len(items) == 2
+    assert items['third'] == 3
+    assert items['fourth'] == 4
+
+    # Expire nothing
+    assert len(table.timeouts()) == 0
+
+    # Expire the final thing
+    mock_time.return_value = 30
+    items = table.timeouts()
+    assert len(items) == 1
+    assert items['second'] == 5
+
+    # Expire nothing
+    assert len(table.timeouts()) == 0
+

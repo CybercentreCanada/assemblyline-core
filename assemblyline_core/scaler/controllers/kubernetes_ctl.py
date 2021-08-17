@@ -1,10 +1,13 @@
 import base64
+import functools
 import json
 import os
-import time
 import threading
-from typing import Dict, List
+import weakref
+from typing import Dict, List, Optional, Tuple
 
+import urllib3
+import kubernetes
 from kubernetes import client, config
 from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
@@ -25,6 +28,8 @@ FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 # RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
 
 API_TIMEOUT = 90
+WATCH_TIMEOUT = 10 * 60
+WATCH_API_TIMEOUT = WATCH_TIMEOUT + 10
 
 _exponents = {
     'Ki': 2**10,
@@ -40,13 +45,34 @@ _exponents = {
 }
 
 
+class TypelessWatch(kubernetes.watch.Watch):
+    """A kubernetes watch object that doesn't marshal the response."""
+    def get_return_type(self, func):
+        return None
+
+
 def median(values: List[float]) -> float:
     if len(values) == 0:
         return 0
     return values[len(values)//2]
 
 
-def create_docker_auth_config(image, username, password):
+def get_resources(container) -> Tuple[float, float]:
+    requests = container['resources'].get('requests', {})
+    limits = container['resources'].get('limits', {})
+
+    cpu_value = requests.get('cpu', limits.get('cpu', None))
+    if cpu_value is not None:
+        cpu_value = parse_cpu(cpu_value)
+
+    memory_value = requests.get('memory', limits.get('memory', None))
+    if memory_value is not None:
+        memory_value = parse_memory(memory_value)
+
+    return cpu_value, memory_value
+
+
+def create_docker_auth_config(image: str, username: str, password: str) -> str:
     # Take the registry part of the image if set, use the default registry if no registry component is in the string
     if '/' in image:
         server_name = image.rpartition('/')[0]
@@ -69,7 +95,7 @@ def create_docker_auth_config(image, username, password):
     })
 
 
-def parse_memory(string) -> float:
+def parse_memory(string: str) -> float:
     """Convert a memory string to megabytes float"""
     # Maybe we have a number in bytes
     try:
@@ -86,7 +112,7 @@ def parse_memory(string) -> float:
     raise ValueError(string)
 
 
-def parse_cpu(string):
+def parse_cpu(string: str) -> float:
     try:
         return float(string)
     except ValueError:
@@ -120,21 +146,22 @@ class KubernetesController(ControllerInterface):
             # Load again with our settings set
             config.load_kube_config(client_configuration=cfg)
 
-        self.prefix = prefix.lower()
-        self.priority = priority
-        self.cpu_reservation = max(0.0, min(cpu_reservation, 1.0))
+        self.running: bool = True
+        self.prefix: str = prefix.lower()
+        self.priority: str = priority
+        self.cpu_reservation: float = max(0.0, min(cpu_reservation, 1.0))
         self.logger = logger
-        self.log_level = log_level
-        self._labels = labels or {}
+        self.log_level: str = log_level
+        self._labels: Dict[str, str] = labels or {}
         self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
         self.net_api = client.NetworkingV1Api()
-        self.auto_cloud = False  # TODO draw from config
-        self.namespace = namespace
+        self.namespace: str = namespace
         self.config_volumes: Dict[str, V1Volume] = {}
         self.config_mounts: Dict[str, V1VolumeMount] = {}
         self.core_config_volumes: Dict[str, V1Volume] = {}
         self.core_config_mounts: Dict[str, V1VolumeMount] = {}
+        self._external_profiles = weakref.WeakValueDictionary()
 
         # A record of previously reported events so that we don't report the same message repeatedly, fill it with
         # existing messages so we don't have a huge dump of duplicates on restart
@@ -147,11 +174,29 @@ class KubernetesController(ControllerInterface):
             if 'scaler' not in event.involved_object.name:
                 self.events_window[event.metadata.uid] = event.count
 
-        self._current_cpu = 0, 0
-        self._current_ram = 0, 0
-        self._get_system_info()
-        background = threading.Thread(target=self._monitor_system_info, daemon=True)
-        background.start()
+        self._quota_cpu_limit: Optional[float] = None
+        self._quota_cpu_used: Optional[float] = None
+        self._quota_mem_limit: Optional[float] = None
+        self._quota_mem_used: Optional[float] = None
+        quota_background = threading.Thread(target=self._loop_forever(self._monitor_quotas), daemon=True)
+        quota_background.start()
+
+        self._node_pool_max_ram: float = 0
+        self._node_pool_max_cpu: float = 0
+        node_background = threading.Thread(target=self._loop_forever(self._monitor_node_pool), daemon=True)
+        node_background.start()
+
+        self._pod_used_ram: float = 0
+        self._pod_used_cpu: float = 0
+        pod_background = threading.Thread(target=self._loop_forever(self._monitor_pods), daemon=True)
+        pod_background.start()
+
+        self._deployment_targets: Dict[str, int] = {}
+        deployment_background = threading.Thread(target=self._loop_forever(self._monitor_deployments), daemon=True)
+        deployment_background.start()
+
+    def stop(self):
+        self.running = False
 
     def _deployment_name(self, service_name):
         return (self.prefix + service_name).lower().replace('_', '-')
@@ -193,98 +238,162 @@ class KubernetesController(ControllerInterface):
         self._create_deployment(profile.name, self._deployment_name(profile.name),
                                 profile.container_config, profile.shutdown_seconds, scale,
                                 mount_updates=profile.mount_updates)
+        self._external_profiles[profile.name] = profile
 
-    def _monitor_system_info(self):
-        while True:
-            try:
-                start = time.time()
-                self._get_system_info()
-                remaining_sleep = 3 - (time.time() - start)
-                if remaining_sleep > 0:
-                    time.sleep(remaining_sleep)
-            except Exception:
-                self.logger.exception("Error in kubernetes system info loop:")
+    def _loop_forever(self, function):
+        @functools.wraps(function)
+        def _function():
+            while self.running:
+                # noinspection PyBroadException
+                try:
+                    function()
 
-    def _get_system_info(self):
-        # Try to get the limit from the namespace
-        max_cpu = parse_cpu('inf')
-        used_cpu = 0
-        used_ram = 0
+                except (urllib3.exceptions.ProtocolError, urllib3.exceptions.ReadTimeoutError):
+                    # Protocol errors are a product of api connections timing out, just retry silently.
+                    pass
 
-        max_ram = float('inf')
+                except Exception:
+                    self.logger.exception(f"Error in {function.__name__}")
+        return _function
 
-        found = False
-        resources = self.api.list_namespaced_resource_quota(namespace=self.namespace, _request_timeout=API_TIMEOUT)
-        for limit in resources.items:
-            # Don't worry about specific quotas, just look for namespace wide ones
-            if limit.spec.scope_selector or limit.spec.scopes:
+    def _monitor_node_pool(self):
+        self._node_pool_max_cpu = 0
+        self._node_pool_max_ram = 0
+        watch = TypelessWatch()
+
+        for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT,
+                                  _request_timeout=WATCH_API_TIMEOUT):
+            if not self.running:
+                break
+
+            if event['type'] == "ADDED":
+                self._node_pool_max_cpu += parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
+                self._node_pool_max_ram += parse_memory(event['raw_object']['status']['allocatable']['memory'])
+            elif event['type'] == "DELETED":
+                self._node_pool_max_cpu -= parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
+                self._node_pool_max_ram -= parse_memory(event['raw_object']['status']['allocatable']['memory'])
+
+    def _monitor_pods(self):
+        watch = TypelessWatch()
+        containers = {}
+        self._pod_used_cpu = 0
+        self._pod_used_ram = 0
+
+        for event in watch.stream(func=self.api.list_pod_for_all_namespaces, timeout_seconds=WATCH_TIMEOUT,
+                                  _request_timeout=WATCH_API_TIMEOUT):
+            if not self.running:
+                break
+
+            uid = event['raw_object']['metadata']['uid']
+
+            if event['type'] in ['ADDED', 'MODIFIED']:
+                for container in event['raw_object']['spec']['containers']:
+                    containers[f"{uid}-{container['name']}"] = get_resources(container)
+            elif event['type'] == 'DELETED':
+                for container in event['raw_object']['spec']['containers']:
+                    containers.pop(f"{uid}-{container['name']}", None)
+            else:
                 continue
 
-            found = True  # At least one limit has been found
-            if 'limits.cpu' in limit.status.hard:
-                max_cpu = min(max_cpu, parse_cpu(limit.status.hard['limits.cpu']))
+            memory_unrestricted = sum(1 for cpu, mem in containers.values() if mem is None)
+            cpu_unrestricted = sum(1 for cpu, mem in containers.values() if cpu is None)
 
-            if 'limits.cpu' in limit.status.used:
-                used_cpu = max(used_cpu, parse_cpu(limit.status.used['limits.cpu']))
+            memory_used = [mem for cpu, mem in containers.values() if mem is not None]
+            cpu_used = [cpu for cpu, mem in containers.values() if cpu is not None]
 
-            if 'limits.memory' in limit.status.hard:
-                max_ram = min(max_ram, parse_memory(limit.status.hard['limits.memory']))
+            self._pod_used_cpu = sum(cpu_used) + cpu_unrestricted * median(cpu_used)
+            self._pod_used_ram = sum(memory_used) + memory_unrestricted * median(memory_used)
 
-            if 'limits.memory' in limit.status.used:
-                used_ram = max(used_ram, parse_memory(limit.status.used['limits.memory']))
+    def _monitor_quotas(self):
+        watch = TypelessWatch()
+        cpu_limits = {}
+        cpu_used = {}
+        mem_limits = {}
+        mem_used = {}
 
-        if found:
-            self._current_cpu = max_cpu - used_cpu, max_cpu
-            self._current_ram = max_ram - used_ram, max_ram
-            return
+        self._quota_cpu_limit = None
+        self._quota_cpu_used = None
+        self._quota_mem_limit = None
+        self._quota_mem_used = None
 
-        # If the limit isn't set by the user, and we are on a cloud with auto-scaling
-        # we don't have a real memory limit
-        if self.auto_cloud:
-            return parse_cpu('inf'), parse_cpu('inf')
+        for event in watch.stream(func=self.api.list_namespaced_resource_quota, namespace=self.namespace,
+                                  timeout_seconds=WATCH_TIMEOUT, _request_timeout=WATCH_API_TIMEOUT):
+            if not self.running:
+                break
 
-        # Try to get the limit by looking at the host list
-        cpu = 0
-        memory = 0
-        for node in self.api.list_node(_request_timeout=API_TIMEOUT).items:
-            cpu += parse_cpu(node.status.allocatable['cpu'])
-            memory += parse_memory(node.status.allocatable['memory'])
-        max_cpu = cpu
-        max_memory = memory
+            name = event['raw_object']['metadata']['name']
+            if 'scope_selector' in event['raw_object']['spec'] or 'scopes' in event['raw_object']['spec']:
+                continue
 
-        memory_unrestricted = 0
-        cpu_unrestricted = 0
-        memory_restrictions = []
-        cpu_restrictions = []
+            if event['type'] in ['ADDED', 'MODIFIED']:
+                status = event['raw_object']['status']
 
-        for pod in self.api.list_pod_for_all_namespaces(_request_timeout=API_TIMEOUT).items:
-            for container in pod.spec.containers:
-                requests = container.resources.requests or {}
-                limits = container.resources.limits or {}
+                if 'hard' in status:
+                    if 'cpu' in status['hard']:
+                        cpu_limits[name] = parse_cpu(status['hard']['cpu'])
+                    if 'memory' in status['hard']:
+                        mem_limits[name] = parse_memory(status['hard']['memory'])
 
-                cpu_value = requests.get('cpu', limits.get('cpu', None))
-                if cpu_value is None:
-                    cpu_unrestricted += 1
-                else:
-                    cpu_restrictions.append(parse_cpu(cpu_value))
+                if 'used' in status:
+                    if 'cpu' in status['used']:
+                        cpu_used[name] = parse_cpu(status['used']['cpu'])
+                    if 'memory' in status['used']:
+                        mem_used[name] = parse_memory(status['used']['memory'])
 
-                memory_value = requests.get('memory', limits.get('memory', None))
-                if memory_value is None:
-                    memory_unrestricted += 1
-                else:
-                    memory_restrictions.append(parse_memory(memory_value))
+            elif event['type'] == 'DELETED':
+                cpu_limits.pop(name, None)
+                cpu_used.pop(name, None)
+                mem_limits.pop(name, None)
+                mem_used.pop(name, None)
+            else:
+                continue
 
-        cpu -= sum(cpu_restrictions) + median(cpu_restrictions) * cpu_unrestricted
-        memory -= sum(memory_restrictions) + median(memory_restrictions) * memory_unrestricted
+            if cpu_limits:
+                self._quota_cpu_limit = min(cpu_limits.values())
+            else:
+                self._quota_cpu_limit = None
 
-        self._current_cpu = cpu, max_cpu
-        self._current_ram = memory, max_memory
+            if cpu_used:
+                self._quota_cpu_used = max(cpu_used.values())
+            else:
+                self._quota_cpu_used = None
+
+            if mem_limits:
+                self._quota_mem_limit = min(mem_limits.values())
+            else:
+                self._quota_mem_limit = None
+
+            if mem_used:
+                self._quota_mem_used = max(mem_used.values())
+            else:
+                self._quota_mem_used = None
+
+    def _monitor_deployments(self):
+        watch = TypelessWatch()
+
+        self._deployment_targets = {}
+        label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items())
+
+        for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
+                                  namespace=self.namespace, label_selector=label_selector,
+                                  timeout_seconds=WATCH_TIMEOUT, _request_timeout=WATCH_API_TIMEOUT):
+            if event['type'] in ['ADDED', 'MODIFIED']:
+                name = event['raw_object']['metadata']['labels'].get('component', None)
+                if name is not None:
+                    self._deployment_targets[name] = event['raw_object']['spec']['replicas']
+            elif event['type'] == 'DELETED':
+                name = event['raw_object']['metadata']['labels'].get('component', None)
+                self._deployment_targets.pop(name, None)
 
     def cpu_info(self):
-        return self._current_cpu
+        if self._quota_cpu_used and self._quota_cpu_limit:
+            return self._quota_cpu_limit - self._quota_cpu_used, self._quota_cpu_limit
+        return self._node_pool_max_cpu - self._pod_used_cpu, self._node_pool_max_cpu
 
     def memory_info(self):
-        return self._current_ram
+        if self._quota_mem_used and self._quota_mem_limit:
+            return self._quota_mem_limit - self._quota_mem_used, self._quota_mem_limit
+        return self._node_pool_max_ram - self._pod_used_ram, self._node_pool_max_ram
 
     @staticmethod
     def _create_metadata(deployment_name: str, labels: Dict[str, str]):
@@ -445,17 +554,11 @@ class KubernetesController(ControllerInterface):
 
     def get_target(self, service_name: str) -> int:
         """Get the target for running instances of a service."""
-        try:
-            scale = self.apps_api.read_namespaced_deployment_scale(self._deployment_name(service_name),
-                                                                   namespace=self.namespace,
-                                                                   _request_timeout=API_TIMEOUT)
-            return int(scale.spec.replicas or 0)
-        except ApiException as error:
-            # If we get a 404 it means the resource doesn't exist, which we treat the same as
-            # scheduled to run zero instances since we create deployments on demand
-            if error.status == 404:
-                return 0
-            raise
+        return self._deployment_targets.get(service_name, 0)
+
+    def get_targets(self) -> Dict[str, int]:
+        """Get the target for running instances of all services."""
+        return self._deployment_targets
 
     def set_target(self, service_name: str, target: int):
         """Set the target for running instances of a service."""
@@ -474,11 +577,18 @@ class KubernetesController(ControllerInterface):
                 if error.reason == 'Conflict':
                     self.logger.info(f"Conflict scaling {service_name} retrying.")
                     continue
+                if error.status == 404:
+                    profile = self._external_profiles.get(service_name, None)
+                    if profile:
+                        self.add_profile(profile, scale=target)
+                    return
                 raise
 
     def stop_container(self, service_name, container_id):
         try:
-            pods = self.api.list_namespaced_pod(namespace=self.namespace, label_selector=f'component={service_name}',
+            pods = self.api.list_namespaced_pod(namespace=self.namespace,
+                                                field_selector=f'metadata.name={container_id}',
+                                                label_selector=f'component={service_name}',
                                                 _request_timeout=API_TIMEOUT)
             for pod in pods.items:
                 if pod.metadata.name == container_id:
