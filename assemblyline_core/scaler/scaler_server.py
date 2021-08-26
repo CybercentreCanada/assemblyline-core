@@ -20,9 +20,11 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue, length as pq_length
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import ExpiringHash
+from assemblyline.remote.datatypes.events import EventWatcher
 from assemblyline.odm.models.service import Service, DockerConfig
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
 from assemblyline.odm.messages.scaler_status_heartbeat import Status
+from assemblyline.odm.messages.changes import ServiceChange, Operation
 from assemblyline.common.forge import get_service_queue
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline_core.scaler.controllers import KubernetesController
@@ -36,7 +38,7 @@ APM_SPAN_TYPE = 'scaler'
 
 # How often (in seconds) to download new service data, try to scale managed services,
 # and download more metrics data respectively
-SERVICE_SYNC_INTERVAL = 30
+SERVICE_SYNC_INTERVAL = 60 * 30  # Every half hour
 SCALE_INTERVAL = 5
 METRIC_SYNC_INTERVAL = 0.5
 CONTAINER_EVENTS_LOG_INTERVAL = 2
@@ -231,6 +233,8 @@ class ScalerServer(ThreadedCoreBase):
         self.error_count_lock = threading.Lock()
         self.error_count: Dict[str, List[float]] = {}
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
+        self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
+        self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
 
         labels = {
             'app': 'assemblyline',
@@ -305,6 +309,7 @@ class ScalerServer(ThreadedCoreBase):
             self.controller.add_profile(profile, scale=profile.desired_instances)
 
     def try_run(self):
+        self.service_change_watcher.start()
         self.maintain_threads({
             'Log Container Events': self.log_container_events,
             'Process Timeouts': self.process_timeouts,
@@ -316,103 +321,28 @@ class ScalerServer(ThreadedCoreBase):
 
     def stop(self):
         super().stop()
+        self.service_change_watcher.stop()
         self.controller.stop()
+
+    def _handle_service_change_event(self, data: ServiceChange):
+        if data.operation == Operation.Removed:
+            self.log.info(f'Service appears to be deleted, removing {data.name}')
+            stage = self.get_service_stage(data.name)
+            self.stop_service(data.name, stage)
+        else:
+            self._sync_service(self.datastore.get_service_with_delta(data.name))
 
     def sync_services(self):
         while self.running:
             with apm_span(self.apm_client, 'sync_services'):
-                default_settings = self.config.core.scaler.service_defaults
-                image_variables = defaultdict(str)
-                image_variables.update(self.config.services.image_variables)
                 with self.profiles_lock:
                     current_services = set(self.profiles.keys())
-                discovered_services = []
+                discovered_services: list[str] = []
 
                 # Get all the service data
                 for service in self.datastore.list_all_services(full=True):
-                    service: Service = service
-                    name = service.name
-                    stage = self.get_service_stage(service.name)
-                    discovered_services.append(name)
-                    mount_updates = bool(service.update_config)
-
-                    # noinspection PyBroadException
-                    try:
-                        if service.enabled and stage == ServiceStage.Off:
-                            # Enable this service's dependencies
-                            self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
-                            for _n, dependency in service.dependencies.items():
-                                self.controller.start_stateful_container(
-                                    service_name=service.name,
-                                    container_name=_n,
-                                    spec=dependency,
-                                    labels={'dependency_for': service.name},
-                                    mount_updates=mount_updates
-                                )
-
-                            # Move to the next service stage
-                            if service.update_config and service.update_config.wait_for_update:
-                                self._service_stage_hash.set(name, ServiceStage.Update)
-                            else:
-                                self._service_stage_hash.set(name, ServiceStage.Running)
-
-                        if not service.enabled:
-                            self.stop_service(service.name, stage)
-                            continue
-
-                        # Check that all enabled services are enabled
-                        if service.enabled and stage == ServiceStage.Running:
-                            # Compute a hash of service properties not include in the docker config, that
-                            # should still result in a service being restarted when changed
-                            config_hash = hash(str(sorted(service.config.items())))
-                            config_hash = hash((config_hash, str(service.submission_params)))
-
-                            # Build the docker config for the service, we are going to either create it or
-                            # update it so we need to know what the current configuration is either way
-                            docker_config = service.docker_config
-                            docker_config.image = Template(docker_config.image).safe_substitute(image_variables)
-                            set_keys = set(var.name for var in docker_config.environment)
-                            for var in default_settings.environment:
-                                if var.name not in set_keys:
-                                    docker_config.environment.append(var)
-
-                            # Add the service to the list of services being scaled
-                            with self.profiles_lock:
-                                if name not in self.profiles:
-                                    self.log.info(f'Adding {service.name} to scaling')
-                                    self.add_service(ServiceProfile(
-                                        name=name,
-                                        min_instances=default_settings.min_instances,
-                                        growth=default_settings.growth,
-                                        shrink=default_settings.shrink,
-                                        config_hash=config_hash,
-                                        backlog=default_settings.backlog,
-                                        max_instances=service.licence_count,
-                                        container_config=docker_config,
-                                        queue=get_service_queue(name, self.redis),
-                                        # Give service an extra 30 seconds to upload results
-                                        shutdown_seconds=service.timeout + 30,
-                                        mount_updates=mount_updates
-                                    ))
-
-                                # Update RAM, CPU, licence requirements for running services
-                                else:
-                                    profile = self.profiles[name]
-                                    if service.licence_count == 0:
-                                        profile._max_instances = float('inf')
-                                    else:
-                                        profile._max_instances = service.licence_count
-
-                                    if profile.container_config != docker_config or profile.config_hash != config_hash:
-                                        self.log.info(f"Updating deployment information for {name}")
-                                        profile.container_config = docker_config
-                                        profile.config_hash = config_hash
-                                        self.controller.restart(profile)
-                                        self.log.info(f"Deployment information for {name} replaced")
-
-                    except Exception:
-                        self.log.exception(f"Error applying service settings from: {service.name}")
-                        self.handle_service_error(service.name)
+                    self._sync_service(service)
+                    discovered_services.append(service.name)
 
                 # Find any services we have running, that are no longer in the database and remove them
                 for stray_service in current_services - set(discovered_services):
@@ -421,6 +351,92 @@ class ScalerServer(ThreadedCoreBase):
                     self.stop_service(stray_service, stage)
 
             self.sleep(SERVICE_SYNC_INTERVAL)
+
+    def _sync_service(self, service: Service):
+        name = service.name
+        stage = self.get_service_stage(service.name)
+        mount_updates = bool(service.update_config)
+        default_settings = self.config.core.scaler.service_defaults
+        image_variables = defaultdict(str)
+        image_variables.update(self.config.services.image_variables)
+
+        # noinspection PyBroadException
+        try:
+            if service.enabled and stage == ServiceStage.Off:
+                # Enable this service's dependencies
+                self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
+                for _n, dependency in service.dependencies.items():
+                    self.controller.start_stateful_container(
+                        service_name=service.name,
+                        container_name=_n,
+                        spec=dependency,
+                        labels={'dependency_for': service.name},
+                        mount_updates=mount_updates
+                    )
+
+                # Move to the next service stage
+                if service.update_config and service.update_config.wait_for_update:
+                    self._service_stage_hash.set(name, ServiceStage.Update)
+                else:
+                    self._service_stage_hash.set(name, ServiceStage.Running)
+
+            if not service.enabled:
+                self.stop_service(service.name, stage)
+                continue
+
+            # Check that all enabled services are enabled
+            if service.enabled and stage == ServiceStage.Running:
+                # Compute a hash of service properties not include in the docker config, that
+                # should still result in a service being restarted when changed
+                config_hash = hash(str(sorted(service.config.items())))
+                config_hash = hash((config_hash, str(service.submission_params)))
+
+                # Build the docker config for the service, we are going to either create it or
+                # update it so we need to know what the current configuration is either way
+                docker_config = service.docker_config
+                docker_config.image = Template(docker_config.image).safe_substitute(image_variables)
+                set_keys = set(var.name for var in docker_config.environment)
+                for var in default_settings.environment:
+                    if var.name not in set_keys:
+                        docker_config.environment.append(var)
+
+                # Add the service to the list of services being scaled
+                with self.profiles_lock:
+                    if name not in self.profiles:
+                        self.log.info(f'Adding {service.name} to scaling')
+                        self.add_service(ServiceProfile(
+                            name=name,
+                            min_instances=default_settings.min_instances,
+                            growth=default_settings.growth,
+                            shrink=default_settings.shrink,
+                            config_hash=config_hash,
+                            backlog=default_settings.backlog,
+                            max_instances=service.licence_count,
+                            container_config=docker_config,
+                            queue=get_service_queue(name, self.redis),
+                            # Give service an extra 30 seconds to upload results
+                            shutdown_seconds=service.timeout + 30,
+                            mount_updates=mount_updates
+                        ))
+
+                    # Update RAM, CPU, licence requirements for running services
+                    else:
+                        profile = self.profiles[name]
+                        if service.licence_count == 0:
+                            profile._max_instances = float('inf')
+                        else:
+                            profile._max_instances = service.licence_count
+
+                        if profile.container_config != docker_config or profile.config_hash != config_hash:
+                            self.log.info(f"Updating deployment information for {name}")
+                            profile.container_config = docker_config
+                            profile.config_hash = config_hash
+                            self.controller.restart(profile)
+                            self.log.info(f"Deployment information for {name} replaced")
+
+        except Exception:
+            self.log.exception(f"Error applying service settings from: {service.name}")
+            self.handle_service_error(service.name)
 
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
     def stop_service(self, name, current_stage):

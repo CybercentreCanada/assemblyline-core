@@ -229,7 +229,7 @@ class ThreadedCoreBase(CoreBase):
         self.stopping.set()
         self.main_loop_exit.wait(30)
 
-    def sleep(self, timeout):
+    def sleep(self, timeout: float):
         self.stopping.wait(timeout)
         return self.running
 
