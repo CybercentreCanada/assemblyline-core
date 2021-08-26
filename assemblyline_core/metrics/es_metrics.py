@@ -8,7 +8,7 @@ import elasticsearch
 import time
 
 from assemblyline_core.metrics.helper import with_retries, ensure_indexes
-from assemblyline.common.server_base import ServerBase
+from assemblyline_core.server_base import ServerBase
 
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso

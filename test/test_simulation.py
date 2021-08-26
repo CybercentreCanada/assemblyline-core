@@ -34,7 +34,7 @@ from assemblyline_core.dispatching import dispatcher
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.dispatching.dispatcher import Dispatcher
 from assemblyline_core.ingester.ingester import IngestTask, Ingester
-from assemblyline.common.server_base import ServerBase, get_service_stage_hash, ServiceStage
+from assemblyline_core.server_base import ServerBase, get_service_stage_hash, ServiceStage
 
 from mocking import MockCollection
 from test_scheduler import dummy_service

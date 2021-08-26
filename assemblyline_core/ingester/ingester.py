@@ -16,7 +16,7 @@ from typing import Iterable, List, Optional, Dict, Tuple
 
 import elasticapm
 
-from assemblyline.common.server_base import ThreadedCoreBase
+from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info

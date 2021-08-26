@@ -12,7 +12,7 @@ import elasticsearch
 from apscheduler.schedulers.background import BackgroundScheduler
 from assemblyline_core.metrics.heartbeat_formatter import HeartbeatFormatter
 from assemblyline_core.metrics.helper import ensure_indexes, with_retries
-from assemblyline.common.server_base import ServerBase
+from assemblyline_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common import forge
 from assemblyline.remote.datatypes.queues.comms import CommsQueue

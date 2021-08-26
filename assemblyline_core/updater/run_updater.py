@@ -42,7 +42,7 @@ from assemblyline.odm.models.user import User
 from assemblyline.odm.models.user_settings import UserSettings
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config
-from assemblyline.common.server_base import CoreBase, ServiceStage
+from assemblyline_core.server_base import CoreBase, ServiceStage
 from assemblyline_core.updater.helper import get_latest_tag_for_service
 
 SERVICE_SYNC_INTERVAL = 30  # How many seconds between checking for new services, or changes in service status

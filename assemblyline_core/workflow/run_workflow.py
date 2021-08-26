@@ -3,7 +3,7 @@
 import elasticapm
 import time
 
-from assemblyline.common.server_base import ServerBase
+from assemblyline_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.str_utils import safe_str

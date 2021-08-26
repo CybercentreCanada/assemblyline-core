@@ -9,7 +9,7 @@ from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
-from assemblyline.common.server_base import get_service_stage_hash, ServiceStage
+from assemblyline_core.server_base import get_service_stage_hash, ServiceStage
 
 
 # If you are doing development and you want the system to route jobs ignoring the service setup/teardown

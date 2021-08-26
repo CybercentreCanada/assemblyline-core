@@ -7,7 +7,7 @@ from assemblyline.odm.random_data import random_model_obj
 from assemblyline.odm.models.service import Service
 
 from assemblyline_core.plumber.run_plumber import Plumber
-from assemblyline.common.server_base import ServiceStage
+from assemblyline_core.server_base import ServiceStage
 
 from mocking import TrueCountTimes
 

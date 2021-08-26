@@ -2,7 +2,7 @@
 
 import elasticapm
 
-from assemblyline.common.server_base import ServerBase
+from assemblyline_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.remote.datatypes import get_client

@@ -8,7 +8,7 @@ from assemblyline.common import forge
 from assemblyline.common.uid import get_random_id
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline_core.dispatching.client import DispatchClient
-from assemblyline.common.server_base import ServerBase
+from assemblyline_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm.messages.task import Task as ServiceTask
