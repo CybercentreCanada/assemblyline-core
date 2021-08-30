@@ -26,7 +26,14 @@ class DockerRegistry(ContainerRegistry):
         headers = {}
         if auth:
             headers["Authorization"] = auth
-        resp = requests.get(url, headers=headers, verify=verify)
+
+        try:
+            resp = requests.get(url, headers=headers, verify=verify)
+        except requests.exceptions.SSLError:
+            # Connect to insecure registry over HTTP (development only)
+            if not verify:
+                url = f"http://{server}/v2/{image_name}/tags/list"
+                resp = requests.get(url, headers=headers, verify=verify)
 
         # Test for valid response
         if resp.ok:
@@ -45,10 +52,17 @@ class HarborRegistry(ContainerRegistry):
         headers = {}
         if auth:
             headers["Authorization"] = auth
-        resp = requests.get(url, headers=headers, verify=verify)
+
+        try:
+            resp = requests.get(url, headers=headers, verify=verify)
+        except requests.exceptions.SSLError:
+            # Connect to insecure registry over HTTP (development only)
+            if not verify:
+                url = f"http://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts"
+                resp = requests.get(url, headers=headers, verify=verify)
 
         if resp.ok:
-            return [tag['name'] for tag in resp.json()[0]['tags']]
+            return [tag['name'] for image in resp.json() for tag in image['tags']]
         return []
 
 
