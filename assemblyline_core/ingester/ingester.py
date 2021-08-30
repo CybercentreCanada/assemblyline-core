@@ -16,6 +16,7 @@ from typing import Iterable, List, Optional, Dict, Tuple
 
 import elasticapm
 
+from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
@@ -39,7 +40,6 @@ from assemblyline.odm.messages.submission import Submission as MessageSubmission
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from assemblyline_core.submission_client import SubmissionClient
 from .constants import INGEST_QUEUE_NAME, drop_chance, COMPLETE_QUEUE_NAME
-from ..server_base import ThreadedCoreBase
 
 _dup_prefix = 'w-m-'
 _notification_queue_prefix = 'nq-'

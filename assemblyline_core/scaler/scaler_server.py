@@ -57,6 +57,9 @@ CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
 CLASSIFICATION_CONFIGMAP = os.getenv('CLASSIFICATION_CONFIGMAP', None)
 CLASSIFICATION_CONFIGMAP_KEY = os.getenv('CLASSIFICATION_CONFIGMAP_KEY', 'classification.yml')
 
+CONFIGURATION_CONFIGMAP = os.getenv('CONFIGURATION_CONFIGMAP', None)
+CONFIGURATION_CONFIGMAP_KEY = os.getenv('CONFIGURATION_CONFIGMAP_KEY', 'config')
+
 
 @contextmanager
 def apm_span(client, span_name: str):
@@ -78,6 +81,7 @@ class Pool:
     jobs as a context manager, and wait for the batch to finish after
     the context ends.
     """
+
     def __init__(self, size=10):
         self.pool = concurrent.futures.ThreadPoolExecutor(size)
         self.futures = []
@@ -101,6 +105,7 @@ class ServiceProfile:
 
     This includes how the service should be run, and conditions related to the scaling of the service.
     """
+
     def __init__(self, name, container_config: DockerConfig, config_hash=0, min_instances=0, max_instances=None,
                  growth: float = 600, shrink: Optional[float] = None, backlog=500, queue=None, shutdown_seconds=30,
                  mount_updates=True):
@@ -251,6 +256,10 @@ class ScalerServer(ThreadedCoreBase):
                 self.controller.config_mount('classification-config', config_map=CLASSIFICATION_CONFIGMAP,
                                              key=CLASSIFICATION_CONFIGMAP_KEY,
                                              target_path='/etc/assemblyline/classification.yml')
+            if CONFIGURATION_CONFIGMAP:
+                self.controller.core_config_mount('assemblyline-config', config_map=CONFIGURATION_CONFIGMAP,
+                                                  key=CONFIGURATION_CONFIGMAP_KEY,
+                                                  target_path='/etc/assemblyline/config.yml')
         else:
             self.log.info("Loading Docker cluster interface.")
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
@@ -342,6 +351,8 @@ class ScalerServer(ThreadedCoreBase):
                             # Enable this service's dependencies
                             self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
                             for _n, dependency in service.dependencies.items():
+                                dependency.container.image = Template(dependency.container.image) \
+                                    .safe_substitute(image_variables)
                                 self.controller.start_stateful_container(
                                     service_name=service.name,
                                     container_name=_n,

@@ -2,6 +2,7 @@
 A base classes and utilities to provide a common set of behaviours for
 the assemblyline core server nodes.
 """
+from __future__ import annotations
 import enum
 import functools
 import time
@@ -11,12 +12,15 @@ import signal
 import sys
 import io
 import os
-from typing import cast, Dict, Callable
+from typing import cast, Callable, TYPE_CHECKING
 
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.odm.models.service import Service
 from assemblyline.common import forge, log as al_log
+
+if TYPE_CHECKING:
+    from assemblyline.datastore.helper import AssemblylineDatastore
 
 
 SHUTDOWN_SECONDS_LIMIT = 10
@@ -39,6 +43,8 @@ class ServerBase(threading.Thread):
         self.config = config or forge.get_config()
 
         self.running = None
+        self.stopping = threading.Event()
+
         self.log = logger or logging.getLogger(component_name)
         self._exception = None
         self._traceback = None
@@ -53,7 +59,6 @@ class ServerBase(threading.Thread):
         return self
 
     def __exit__(self, _exc_type, _exc_val, _exc_tb):
-        self.close()
         if _exc_type is not None:
             self.log.exception(f'Terminated because of an {_exc_type} exception')
         else:
@@ -69,9 +74,6 @@ class ServerBase(threading.Thread):
             exit(1)  # So any static analysis tools get the behaviour of this function 'correct'
         import ctypes
         ctypes.string_at(0)  # SEGFAULT out of here
-
-    def close(self):
-        pass
 
     def interrupt_handler(self, signum, stack_frame):
         self.log.info(f"Instance caught signal. Coming down...")
@@ -94,9 +96,16 @@ class ServerBase(threading.Thread):
             _, self._exception, self._traceback = sys.exc_info()
             self.log.exception("Exiting:")
 
+    def sleep(self, timeout: float):
+        self.stopping.wait(timeout)
+        return self.running
+        
     def serve_forever(self):
         self.start()
-        self.join()
+        # We may not want to let the main thread block on a single join call. 
+        # It can interfere with signal handling.
+        while self.sleep(1):
+            pass
 
     def start(self):
         """Start the server workload."""
@@ -113,6 +122,7 @@ class ServerBase(threading.Thread):
         """
         # The running loops should stop within a few seconds of this flag being set.
         self.running = False
+        self.stopping.set()
 
         # If it doesn't stop within a few seconds, this other thread should kill the entire process
         stop_thread = threading.Thread(target=self.__stop)
@@ -148,7 +158,7 @@ class ServerBase(threading.Thread):
         while duration > 0:
             self.heartbeat()
             sleep_time = min(duration, HEARTBEAT_TIME_LIMIT * 2)
-            time.sleep(sleep_time)
+            self.sleep(sleep_time)
             duration -= sleep_time
 
 
@@ -182,7 +192,7 @@ class CoreBase(ServerBase):
                  shutdown_timeout: float = None, config=None, datastore=None,
                  redis=None, redis_persist=None):
         super().__init__(component_name=component_name, logger=logger, shutdown_timeout=shutdown_timeout, config=config)
-        self.datastore = datastore or forge.get_datastore(self.config)
+        self.datastore: AssemblylineDatastore = datastore or forge.get_datastore(self.config)
 
         # Connect to all of our persistent redis structures
         self.redis = redis or get_client(
@@ -197,7 +207,7 @@ class CoreBase(ServerBase):
         )
 
         # Create a cached service data object, and access to the service status
-        self.service_info = cast(Dict[str, Service], forge.CachedObject(self._get_services))
+        self.service_info = cast(dict[str, Service], forge.CachedObject(self._get_services))
         self._service_stage_hash = get_service_stage_hash(self.redis)
 
     def _get_services(self):
@@ -206,11 +216,6 @@ class CoreBase(ServerBase):
 
     def get_service_stage(self, service_name: str) -> ServiceStage:
         return ServiceStage(self._service_stage_hash.get(service_name) or ServiceStage.Off)
-
-    def is_service_running(self, service_name: str) -> bool:
-        # TODO should we add an option to just return off/running based on the service
-        #      enabled/disabled flag when doing development
-        return self.service_info[service_name].enabled and self.get_service_stage(service_name) == ServiceStage.Running
 
 
 class ThreadedCoreBase(CoreBase):
@@ -221,17 +226,11 @@ class ThreadedCoreBase(CoreBase):
                          config=config, datastore=datastore, redis=redis, redis_persist=redis_persist)
 
         # Thread events related to exiting
-        self.stopping = threading.Event()
         self.main_loop_exit = threading.Event()
 
     def stop(self):
         super().stop()
-        self.stopping.set()
         self.main_loop_exit.wait(30)
-
-    def sleep(self, timeout):
-        self.stopping.wait(timeout)
-        return self.running
 
     def log_crashes(self, fn):
         @functools.wraps(fn)
@@ -243,7 +242,7 @@ class ThreadedCoreBase(CoreBase):
                 self.log.exception(f'Crash in dispatcher: {fn.__name__}')
         return with_logs
 
-    def maintain_threads(self, expected_threads: Dict[str, Callable]):
+    def maintain_threads(self, expected_threads: dict[str, Callable[..., None]]):
         expected_threads = {name: self.log_crashes(start) for name, start in expected_threads.items()}
         threads = {}
 
