@@ -142,7 +142,9 @@ def get_latest_tag_for_service(service_config, system_config, logger):
         logger.info(f"Latest {service_name} tag on {update_channel.upper()} channel is: {tag_name}")
 
     # Fix service image for use in Kubernetes
-    image = string.Template(image).safe_substitute(system_config.services.image_variables)
+    image_variables = defaultdict(str)
+    image_variables.update(system_config.services.image_variables)
+    image = string.Template(image).safe_substitute(image_variables)
     server, image_name = process_image(image)
 
     # Append server to image if not the default server
