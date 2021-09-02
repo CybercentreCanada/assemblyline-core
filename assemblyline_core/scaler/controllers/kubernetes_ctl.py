@@ -23,11 +23,8 @@ from assemblyline_core.scaler.controllers.interface import ControllerInterface
 
 
 # How to identify the update volume as a whole, in a way that the underlying container system recognizes.
-FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
 CONTAINER_UPDATE_DIRECTORY = '/mount/updates/'
 
-# Where to find the update directory inside this container.
-FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 # RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
 
 API_TIMEOUT = 90
@@ -50,6 +47,7 @@ _exponents = {
 
 class TypelessWatch(kubernetes.watch.Watch):
     """A kubernetes watch object that doesn't marshal the response."""
+
     def get_return_type(self, func):
         return None
 
@@ -208,7 +206,7 @@ class KubernetesController(ControllerInterface):
     def _dependency_name(self, service_name: str, container_name: str):
         return f"{self._deployment_name(service_name)}-{container_name}".lower()
 
-    def config_mount(self, name:str, config_map:str, key:str, target_path:str):
+    def config_mount(self, name: str, config_map: str, key: str, target_path: str):
         if name not in self.config_volumes:
             self.config_volumes[name] = V1Volume(
                 name=name,
@@ -417,24 +415,10 @@ class KubernetesController(ControllerInterface):
             volumes.extend(self.core_config_volumes.values())
             mounts.extend(self.core_config_mounts.values())
 
-        if mount_updates:
-            # Attach the mount that provides the update
-            volumes.append(V1Volume(
-                name='update-directory',
-                persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
-                    claim_name=FILE_UPDATE_VOLUME
-                ),
-            ))
-
-            mounts.append(V1VolumeMount(
-                name='update-directory',
-                mount_path=CONTAINER_UPDATE_DIRECTORY,
-                sub_path=service_name
-            ))
-
         return volumes, mounts
 
-    def _create_containers(self, service_name: str, deployment_name:str, container_config, mounts, core_container=False):
+    def _create_containers(self, service_name: str, deployment_name: str, container_config, mounts,
+                           core_container=False):
         cores = container_config.cpu_cores
         memory = container_config.ram_mb
         min_memory = min(container_config.ram_mb_min, container_config.ram_mb)
@@ -450,7 +434,7 @@ class KubernetesController(ControllerInterface):
             V1EnvVar(name='FILE_UPDATE_DIRECTORY', value=CONTAINER_UPDATE_DIRECTORY),
             V1EnvVar(name='AL_SERVICE_NAME', value=service_name),
             V1EnvVar(name='LOG_LEVEL', value=self.log_level)
-        ]        
+        ]
         # Overwrite ones defined dynamically by dependency container launches
         for name, value in self._service_limited_env[service_name].items():
             environment_variables.append(V1EnvVar(name=name, value=value))
@@ -472,10 +456,6 @@ class KubernetesController(ControllerInterface):
                            mount_updates=True, core_mounts=False):
 
         replace = False
-
-        if not os.path.exists(os.path.join(FILE_UPDATE_DIRECTORY, service_name)):
-            os.makedirs(os.path.join(FILE_UPDATE_DIRECTORY, service_name), 0x777)
-
         resources = self.apps_api.list_namespaced_deployment(namespace=self.namespace, _request_timeout=API_TIMEOUT)
         for dep in resources.items:
             if dep.metadata.name == deployment_name:
@@ -533,7 +513,7 @@ class KubernetesController(ControllerInterface):
 
         pod = V1PodSpec(
             volumes=all_volumes,
-            containers=self._create_containers(service_name, deployment_name, docker_config, 
+            containers=self._create_containers(service_name, deployment_name, docker_config,
                                                all_mounts, core_container=core_mounts),
             priority_class_name=self.priority,
             termination_grace_period_seconds=shutdown_seconds,
@@ -645,8 +625,8 @@ class KubernetesController(ControllerInterface):
 
         return new
 
-    def start_stateful_container(self, service_name:str, container_name:str, 
-                                 spec, labels:dict[str, str], mount_updates:bool=False):
+    def start_stateful_container(self, service_name: str, container_name: str,
+                                 spec, labels: dict[str, str], mount_updates: bool = False):
         # Setup PVC
         deployment_name = self._dependency_name(service_name, container_name)
         mounts, volumes = [], []
@@ -688,7 +668,7 @@ class KubernetesController(ControllerInterface):
                     selector=labels,
                     ports=[V1ServicePort(port=int(_p)) for _p in spec.container.ports]
                 )
-            ) 
+            )
             self.api.create_namespaced_service(self.namespace, service)
 
         # Add entries to the environment variable list to point to this container
