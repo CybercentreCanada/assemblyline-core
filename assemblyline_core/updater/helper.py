@@ -73,16 +73,38 @@ REGISTRY_TYPE_MAPPING = {
 
 
 def get_latest_tag_for_service(service_config, system_config, logger):
+    def process_image(image):
+        # Find which server to search in
+        server = image.split("/")[0]
+        if server != "cccs":
+            if ":" in server:
+                image_name = image[len(server) + 1:]
+            else:
+                try:
+                    socket.gethostbyname_ex(server)
+                    image_name = image[len(server) + 1:]
+                except socket.gaierror:
+                    server = DEFAULT_DOCKER_REGISTRY
+                    image_name = image
+        else:
+            server = DEFAULT_DOCKER_REGISTRY
+            image_name = image
+
+        # Split repo name without the tag
+        image_name = image_name.rsplit(":", 1)[0]
+
+        return server, image_name
+
     # Extract info
     service_name = service_config.name
     image = service_config.docker_config.image
     update_channel = service_config.update_channel
 
-    # Fix service image
+    # Fix service image for calling Docker API
     image_variables = defaultdict(str)
     image_variables.update(system_config.services.image_variables)
     image_variables.update(system_config.services.update_image_variables)
-    image = string.Template(image).safe_substitute(image_variables)
+    searchable_image = string.Template(image).safe_substitute(image_variables)
 
     # Get authentication
     auth = None
@@ -95,24 +117,7 @@ def get_latest_tag_for_service(service_config, system_config, logger):
         upass = f"{service_config.docker_config.registry_username}:{service_config.docker_config.registry_password}"
         auth = f"Basic {b64encode(upass.encode()).decode()}"
 
-    # Find which server to search in
-    server = image.split("/")[0]
-    if server != "cccs":
-        if ":" in server:
-            image_name = image[len(server) + 1:]
-        else:
-            try:
-                socket.gethostbyname_ex(server)
-                image_name = image[len(server) + 1:]
-            except socket.gaierror:
-                server = DEFAULT_DOCKER_REGISTRY
-                image_name = image
-    else:
-        server = DEFAULT_DOCKER_REGISTRY
-        image_name = image
-
-    # Split repo name without the tag
-    image_name = image_name.rsplit(":", 1)[0]
+    server, image_name = process_image(searchable_image)
     registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
 
     if server == DEFAULT_DOCKER_REGISTRY:
@@ -135,6 +140,10 @@ def get_latest_tag_for_service(service_config, system_config, logger):
                     tag_name = t
 
         logger.info(f"Latest {service_name} tag on {update_channel.upper()} channel is: {tag_name}")
+
+    # Fix service image for use in Kubernetes
+    image = string.Template(image).safe_substitute(system_config.services.image_variables)
+    server, image_name = process_image(image)
 
     # Append server to image if not the default server
     if server != "registry.hub.docker.com":
