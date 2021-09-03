@@ -309,14 +309,14 @@ class KubernetesUpdateInterface:
 
         if CLASSIFICATION_CONFIGMAP:
             volumes.append(V1Volume(
-                name=f'mount-classification',
+                name='mount-classification',
                 config_map=V1ConfigMapVolumeSource(
                     name=CLASSIFICATION_CONFIGMAP
                 ),
             ))
 
             volume_mounts.append(V1VolumeMount(
-                name=f'mount-classification',
+                name='mount-classification',
                 mount_path='/etc/assemblyline/classification.yml',
                 sub_path=CLASSIFICATION_CONFIGMAP_KEY,
                 read_only=True,
@@ -450,9 +450,11 @@ class ServiceUpdater(CoreBase):
         # have some performance down sides, but may help us run into fewer docker FS overlay
         # cleanup issues. Try to flush it out every time we start. This service should
         # be a singleton anyway.
-        self.temporary_directory = os.path.join(FILE_UPDATE_DIRECTORY, '.tmp')
-        shutil.rmtree(self.temporary_directory, ignore_errors=True)
-        os.makedirs(self.temporary_directory)
+        ################################# DELETE FOR PSU CHANGE#########################
+        # self.temporary_directory = os.path.join(FILE_UPDATE_DIRECTORY, '.tmp')
+        # shutil.rmtree(self.temporary_directory, ignore_errors=True)
+        # os.makedirs(self.temporary_directory)
+        ################################# DELETE FOR PSU CHANGE#########################
 
         self.container_update = Hash('container-update', self.redis_persist)
         self.services = Hash('service-updates', self.redis_persist)
