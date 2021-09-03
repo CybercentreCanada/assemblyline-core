@@ -612,7 +612,7 @@ class ServiceUpdater(CoreBase):
         """Run the scheduler loop until told to stop."""
         # Do an initial call to the main methods, who will then be registered with the scheduler
         self.sync_services()
-        self.update_services()
+        # self.update_services()
         self.container_versions()
         self.container_updates()
         self.heartbeat()
