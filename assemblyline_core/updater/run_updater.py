@@ -450,6 +450,7 @@ class ServiceUpdater(CoreBase):
         # have some performance down sides, but may help us run into fewer docker FS overlay
         # cleanup issues. Try to flush it out every time we start. This service should
         # be a singleton anyway.
+
         ################################# DELETE FOR PSU CHANGE#########################
         # self.temporary_directory = os.path.join(FILE_UPDATE_DIRECTORY, '.tmp')
         # shutil.rmtree(self.temporary_directory, ignore_errors=True)
