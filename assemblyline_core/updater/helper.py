@@ -47,6 +47,7 @@ class HarborRegistry(ContainerRegistry):
     def _get_proprietary_registry_tags(self, server, image_name, auth, verify):
         # Determine project/repo IDs from image name
         project_id, repo_id = image_name.split('/', 1)
+        repo_id = repo_id.replace('/', "%2F")
         url = f"https://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts"
 
         headers = {}
