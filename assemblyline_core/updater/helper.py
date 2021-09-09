@@ -129,7 +129,7 @@ def get_latest_tag_for_service(service_config, system_config, logger):
 
     tag_name = None
     if not tags:
-        logger.warning(f"Cannot fetch latest tag for service {service_name} - {image}"
+        logger.warning(f"Cannot fetch latest tag for service {service_name} - {image_name}"
                        f" => [server: {server}, repo_name: {image_name}, channel: {update_channel}]")
     else:
         tag_name = f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.0.{update_channel}0"
