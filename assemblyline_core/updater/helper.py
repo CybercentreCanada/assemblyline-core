@@ -48,7 +48,7 @@ class HarborRegistry(ContainerRegistry):
         # Determine project/repo IDs from image name
         project_id, repo_id = image_name.split('/', 1)
         repo_id = repo_id.replace('/', "%2F")
-        url = f"https://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts"
+        url = f"https://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts?page_size=0"
 
         headers = {}
         if auth:
