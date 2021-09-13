@@ -110,6 +110,7 @@ class DockerUpdateInterface:
     it properly on new containers we launch. FILE_UPDATE_DIRECTORY gives us the path
     that it is mounted at in the update manager container.
     """
+
     def __init__(self, log_level="INFO"):
         self.client = docker.from_env()
         self._external_network = None
@@ -308,14 +309,14 @@ class KubernetesUpdateInterface:
 
         if CLASSIFICATION_CONFIGMAP:
             volumes.append(V1Volume(
-                name=f'mount-classification',
+                name='mount-classification',
                 config_map=V1ConfigMapVolumeSource(
                     name=CLASSIFICATION_CONFIGMAP
                 ),
             ))
 
             volume_mounts.append(V1VolumeMount(
-                name=f'mount-classification',
+                name='mount-classification',
                 mount_path='/etc/assemblyline/classification.yml',
                 sub_path=CLASSIFICATION_CONFIGMAP_KEY,
                 read_only=True,
@@ -324,77 +325,76 @@ class KubernetesUpdateInterface:
         section = 'core'
         if network == 'al_registration':
             section = 'service'
+            labels = {
+                'app': 'assemblyline',
+                'section': section,
+                'component': 'update-script',
+            }
+            labels.update(self.extra_labels)
 
-        labels = {
-            'app': 'assemblyline',
-            'section': section,
-            'component': 'update-script',
-        }
-        labels.update(self.extra_labels)
-
-        metadata = V1ObjectMeta(
-            name=name,
-            labels=labels
-        )
-
-        environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in docker_config.environment]
-        environment_variables.extend([V1EnvVar(name=k, value=v) for k, v in env.items()])
-        environment_variables.append(V1EnvVar(name="LOG_LEVEL", value=self.log_level))
-
-        cores = docker_config.cpu_cores
-        memory = docker_config.ram_mb
-        memory_min = min(docker_config.ram_mb_min, memory)
-
-        container = V1Container(
-            name=name,
-            image=docker_config.image,
-            command=docker_config.command,
-            env=environment_variables,
-            image_pull_policy='Always',
-            volume_mounts=volume_mounts,
-            resources=V1ResourceRequirements(
-                limits={'cpu': cores, 'memory': f'{memory}Mi'},
-                requests={'cpu': cores / 4, 'memory': f'{memory_min}Mi'},
+            metadata = V1ObjectMeta(
+                name=name,
+                labels=labels
             )
-        )
 
-        pod = V1PodSpec(
-            volumes=volumes,
-            restart_policy='Never',
-            containers=[container],
-            priority_class_name=self.priority_class,
-        )
+            environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in docker_config.environment]
+            environment_variables.extend([V1EnvVar(name=k, value=v) for k, v in env.items()])
+            environment_variables.append(V1EnvVar(name="LOG_LEVEL", value=self.log_level))
 
-        if use_pull_secret:
-            pod.image_pull_secrets = [V1LocalObjectReference(name=pull_secret_name)]
+            cores = docker_config.cpu_cores
+            memory = docker_config.ram_mb
+            memory_min = min(docker_config.ram_mb_min, memory)
 
-        job = V1Job(
-            metadata=metadata,
-            spec=V1JobSpec(
-                backoff_limit=1,
-                completions=1,
-                template=V1PodTemplateSpec(
-                    metadata=metadata,
-                    spec=pod
+            container = V1Container(
+                name=name,
+                image=docker_config.image,
+                command=docker_config.command,
+                env=environment_variables,
+                image_pull_policy='Always',
+                volume_mounts=volume_mounts,
+                resources=V1ResourceRequirements(
+                    limits={'cpu': cores, 'memory': f'{memory}Mi'},
+                    requests={'cpu': cores / 4, 'memory': f'{memory_min}Mi'},
                 )
             )
-        )
 
-        status = self.batch_api.create_namespaced_job(namespace=self.namespace, body=job,
-                                                      _request_timeout=API_TIMEOUT).status
+            pod = V1PodSpec(
+                volumes=volumes,
+                restart_policy='Never',
+                containers=[container],
+                priority_class_name=self.priority_class,
+            )
 
-        if blocking:
-            try:
-                while not (status.failed or status.succeeded):
-                    time.sleep(3)
-                    status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name,
-                                                                _request_timeout=API_TIMEOUT).status
+            if use_pull_secret:
+                pod.image_pull_secrets = [V1LocalObjectReference(name=pull_secret_name)]
 
-                self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace,
-                                                     propagation_policy='Background', _request_timeout=API_TIMEOUT)
-            except ApiException as error:
-                if error.status != 404:
-                    raise
+            job = V1Job(
+                metadata=metadata,
+                spec=V1JobSpec(
+                    backoff_limit=1,
+                    completions=1,
+                    template=V1PodTemplateSpec(
+                        metadata=metadata,
+                        spec=pod
+                    )
+                )
+            )
+
+            status = self.batch_api.create_namespaced_job(namespace=self.namespace, body=job,
+                                                          _request_timeout=API_TIMEOUT).status
+
+            if blocking:
+                try:
+                    while not (status.failed or status.succeeded):
+                        time.sleep(3)
+                        status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name,
+                                                                    _request_timeout=API_TIMEOUT).status
+
+                    self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace,
+                                                         propagation_policy='Background', _request_timeout=API_TIMEOUT)
+                except ApiException as error:
+                    if error.status != 404:
+                        raise
 
     def cleanup_stale(self):
         # Clear up any finished jobs.
@@ -410,7 +410,7 @@ class KubernetesUpdateInterface:
                 except ApiException as error:
                     if error.status != 404:
                         raise
-        
+
     def restart(self, service_name):
         for _ in range(10):
             try:
@@ -450,9 +450,12 @@ class ServiceUpdater(CoreBase):
         # have some performance down sides, but may help us run into fewer docker FS overlay
         # cleanup issues. Try to flush it out every time we start. This service should
         # be a singleton anyway.
-        self.temporary_directory = os.path.join(FILE_UPDATE_DIRECTORY, '.tmp')
-        shutil.rmtree(self.temporary_directory, ignore_errors=True)
-        os.makedirs(self.temporary_directory)
+
+        ################################# DELETE FOR PSU CHANGE#########################
+        # self.temporary_directory = os.path.join(FILE_UPDATE_DIRECTORY, '.tmp')
+        # shutil.rmtree(self.temporary_directory, ignore_errors=True)
+        # os.makedirs(self.temporary_directory)
+        ################################# DELETE FOR PSU CHANGE#########################
 
         self.container_update = Hash('container-update', self.redis_persist)
         self.services = Hash('service-updates', self.redis_persist)
@@ -565,7 +568,7 @@ class ServiceUpdater(CoreBase):
                     env={
                         "SERVICE_TAG": update_data['latest_tag'],
                         "SERVICE_API_HOST": os.environ.get('SERVICE_API_HOST', "http://al_service_server:5003"),
-                        "SERVICE_API_KEY": os.environ.get('SERVICE_API_KEY','ThisIsARandomAuthKey...ChangeMe!'),
+                        "SERVICE_API_KEY": os.environ.get('SERVICE_API_KEY', 'ThisIsARandomAuthKey...ChangeMe!'),
                         "REGISTER_ONLY": 'true'
                     },
                     network='al_registration',
@@ -612,7 +615,7 @@ class ServiceUpdater(CoreBase):
         """Run the scheduler loop until told to stop."""
         # Do an initial call to the main methods, who will then be registered with the scheduler
         self.sync_services()
-        self.update_services()
+        # self.update_services()
         self.container_versions()
         self.container_updates()
         self.heartbeat()

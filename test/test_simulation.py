@@ -265,7 +265,6 @@ def core(request, redis, filestore, config):
         t.start()
 
     def stop_core():
-        [tr.close() for tr in threads]
         [tr.stop() for tr in threads]
         [tr.raising_join() for tr in threads]
     request.addfinalizer(stop_core)

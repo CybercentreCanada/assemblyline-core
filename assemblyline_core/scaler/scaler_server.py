@@ -59,6 +59,9 @@ CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
 CLASSIFICATION_CONFIGMAP = os.getenv('CLASSIFICATION_CONFIGMAP', None)
 CLASSIFICATION_CONFIGMAP_KEY = os.getenv('CLASSIFICATION_CONFIGMAP_KEY', 'classification.yml')
 
+CONFIGURATION_CONFIGMAP = os.getenv('CONFIGURATION_CONFIGMAP', None)
+CONFIGURATION_CONFIGMAP_KEY = os.getenv('CONFIGURATION_CONFIGMAP_KEY', 'config')
+
 
 @contextmanager
 def apm_span(client, span_name: str):
@@ -80,6 +83,7 @@ class Pool:
     jobs as a context manager, and wait for the batch to finish after
     the context ends.
     """
+
     def __init__(self, size=10):
         self.pool = concurrent.futures.ThreadPoolExecutor(size)
         self.futures = []
@@ -103,9 +107,9 @@ class ServiceProfile:
 
     This includes how the service should be run, and conditions related to the scaling of the service.
     """
+
     def __init__(self, name, container_config: DockerConfig, config_hash=0, min_instances=0, max_instances=None,
-                 growth: float = 600, shrink: Optional[float] = None, backlog=500, queue=None, shutdown_seconds=30,
-                 mount_updates=True):
+                 growth: float = 600, shrink: Optional[float] = None, backlog=500, queue=None, shutdown_seconds=30):
         """
         :param name: Name of the service to manage
         :param container_config: Instructions on how to start this service
@@ -123,7 +127,6 @@ class ServiceProfile:
         self.low_duty_cycle = 0.5
         self.shutdown_seconds = shutdown_seconds
         self.config_hash = config_hash
-        self.mount_updates = mount_updates
 
         # How many instances we want, and can have
         self.min_instances = self._min_instances = max(0, int(min_instances))
@@ -213,7 +216,6 @@ class ServiceProfile:
             shrink=self.shrink_threshold,
             backlog=self.backlog,
             shutdown_seconds=self.shutdown_seconds,
-            mount_updates=self.mount_updates
         )
         prof.desired_instances = self.desired_instances
         prof.running_instances = self.running_instances
@@ -255,6 +257,10 @@ class ScalerServer(ThreadedCoreBase):
                 self.controller.config_mount('classification-config', config_map=CLASSIFICATION_CONFIGMAP,
                                              key=CLASSIFICATION_CONFIGMAP_KEY,
                                              target_path='/etc/assemblyline/classification.yml')
+            if CONFIGURATION_CONFIGMAP:
+                self.controller.core_config_mount('assemblyline-config', config_map=CONFIGURATION_CONFIGMAP,
+                                                  key=CONFIGURATION_CONFIGMAP_KEY,
+                                                  target_path='/etc/assemblyline/config.yml')
         else:
             self.log.info("Loading Docker cluster interface.")
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
@@ -343,6 +349,89 @@ class ScalerServer(ThreadedCoreBase):
                 for service in self.datastore.list_all_services(full=True):
                     self._sync_service(service)
                     discovered_services.append(service.name)
+                    service: Service = service
+                    name = service.name
+                    stage = self.get_service_stage(service.name)
+                    discovered_services.append(name)
+
+                    # noinspection PyBroadException
+                    try:
+                        if service.enabled and stage == ServiceStage.Off:
+                            # Enable this service's dependencies
+                            self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
+                            for _n, dependency in service.dependencies.items():
+                                dependency.container.image = Template(dependency.container.image) \
+                                    .safe_substitute(image_variables)
+                                self.controller.start_stateful_container(
+                                    service_name=service.name,
+                                    container_name=_n,
+                                    spec=dependency,
+                                    labels={'dependency_for': service.name},
+                                )
+
+                            # Move to the next service stage
+                            if service.update_config and service.update_config.wait_for_update:
+                                self._service_stage_hash.set(name, ServiceStage.Update)
+                            else:
+                                self._service_stage_hash.set(name, ServiceStage.Running)
+
+                        if not service.enabled:
+                            self.stop_service(service.name, stage)
+                            continue
+
+                        # Check that all enabled services are enabled
+                        if service.enabled and stage == ServiceStage.Running:
+                            # Compute a hash of service properties not include in the docker config, that
+                            # should still result in a service being restarted when changed
+                            config_hash = hash(str(sorted(service.config.items())))
+                            config_hash = hash((config_hash, str(service.submission_params)))
+
+                            # Build the docker config for the service, we are going to either create it or
+                            # update it so we need to know what the current configuration is either way
+                            docker_config = service.docker_config
+                            docker_config.image = Template(docker_config.image).safe_substitute(image_variables)
+                            set_keys = set(var.name for var in docker_config.environment)
+                            for var in default_settings.environment:
+                                if var.name not in set_keys:
+                                    docker_config.environment.append(var)
+
+                            # Add the service to the list of services being scaled
+                            with self.profiles_lock:
+                                if name not in self.profiles:
+                                    self.log.info(f'Adding {service.name} to scaling')
+                                    self.add_service(ServiceProfile(
+                                        name=name,
+                                        min_instances=default_settings.min_instances,
+                                        growth=default_settings.growth,
+                                        shrink=default_settings.shrink,
+                                        config_hash=config_hash,
+                                        backlog=default_settings.backlog,
+                                        max_instances=service.licence_count,
+                                        container_config=docker_config,
+                                        queue=get_service_queue(name, self.redis),
+                                        # Give service an extra 30 seconds to upload results
+                                        shutdown_seconds=service.timeout + 30,
+                                    ))
+
+                                # Update RAM, CPU, licence requirements for running services
+                                else:
+                                    profile = self.profiles[name]
+                                    if service.licence_count == 0:
+                                        profile._max_instances = float('inf')
+                                    else:
+                                        profile._max_instances = service.licence_count
+
+                                    if profile.container_config != docker_config or profile.config_hash != config_hash:
+                                        self.log.info(f"Updating deployment information for {name}")
+                                        profile.container_config = docker_config
+                                        profile.config_hash = config_hash
+                                        self.controller.restart(profile)
+                                        self.log.info(f"Deployment information for {name} replaced")
+
+                    except Exception:
+                        self.log.exception(f"Error applying service settings from: {service.name}")
+                        self.handle_service_error(service.name)
+
 
                 # Find any services we have running, that are no longer in the database and remove them
                 for stray_service in current_services - set(discovered_services):

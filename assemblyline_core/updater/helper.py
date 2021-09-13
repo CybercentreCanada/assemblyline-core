@@ -26,7 +26,14 @@ class DockerRegistry(ContainerRegistry):
         headers = {}
         if auth:
             headers["Authorization"] = auth
-        resp = requests.get(url, headers=headers, verify=verify)
+
+        try:
+            resp = requests.get(url, headers=headers, verify=verify)
+        except requests.exceptions.SSLError:
+            # Connect to insecure registry over HTTP (development only)
+            if not verify:
+                url = f"http://{server}/v2/{image_name}/tags/list"
+                resp = requests.get(url, headers=headers, verify=verify)
 
         # Test for valid response
         if resp.ok:
@@ -40,15 +47,23 @@ class HarborRegistry(ContainerRegistry):
     def _get_proprietary_registry_tags(self, server, image_name, auth, verify):
         # Determine project/repo IDs from image name
         project_id, repo_id = image_name.split('/', 1)
-        url = f"https://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts"
+        repo_id = repo_id.replace('/', "%2F")
+        url = f"https://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts?page_size=0"
 
         headers = {}
         if auth:
             headers["Authorization"] = auth
-        resp = requests.get(url, headers=headers, verify=verify)
+
+        try:
+            resp = requests.get(url, headers=headers, verify=verify)
+        except requests.exceptions.SSLError:
+            # Connect to insecure registry over HTTP (development only)
+            if not verify:
+                url = f"http://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts"
+                resp = requests.get(url, headers=headers, verify=verify)
 
         if resp.ok:
-            return [tag['name'] for tag in resp.json()[0]['tags']]
+            return [tag['name'] for image in resp.json() for tag in image['tags']]
         return []
 
 
@@ -59,15 +74,38 @@ REGISTRY_TYPE_MAPPING = {
 
 
 def get_latest_tag_for_service(service_config, system_config, logger):
+    def process_image(image):
+        # Find which server to search in
+        server = image.split("/")[0]
+        if server != "cccs":
+            if ":" in server:
+                image_name = image[len(server) + 1:]
+            else:
+                try:
+                    socket.gethostbyname_ex(server)
+                    image_name = image[len(server) + 1:]
+                except socket.gaierror:
+                    server = DEFAULT_DOCKER_REGISTRY
+                    image_name = image
+        else:
+            server = DEFAULT_DOCKER_REGISTRY
+            image_name = image
+
+        # Split repo name without the tag
+        image_name = image_name.rsplit(":", 1)[0]
+
+        return server, image_name
+
     # Extract info
     service_name = service_config.name
     image = service_config.docker_config.image
     update_channel = service_config.update_channel
 
-    # Fix service image
+    # Fix service image for calling Docker API
     image_variables = defaultdict(str)
     image_variables.update(system_config.services.image_variables)
-    image = string.Template(image).safe_substitute(image_variables)
+    image_variables.update(system_config.services.update_image_variables)
+    searchable_image = string.Template(image).safe_substitute(image_variables)
 
     # Get authentication
     auth = None
@@ -80,24 +118,7 @@ def get_latest_tag_for_service(service_config, system_config, logger):
         upass = f"{service_config.docker_config.registry_username}:{service_config.docker_config.registry_password}"
         auth = f"Basic {b64encode(upass.encode()).decode()}"
 
-    # Find which server to search in
-    server = image.split("/")[0]
-    if server != "cccs":
-        if ":" in server:
-            image_name = image[len(server) + 1:]
-        else:
-            try:
-                socket.gethostbyname_ex(server)
-                image_name = image[len(server) + 1:]
-            except socket.gaierror:
-                server = DEFAULT_DOCKER_REGISTRY
-                image_name = image
-    else:
-        server = DEFAULT_DOCKER_REGISTRY
-        image_name = image
-
-    # Split repo name without the tag
-    image_name = image_name.rsplit(":", 1)[0]
+    server, image_name = process_image(searchable_image)
     registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
 
     if server == DEFAULT_DOCKER_REGISTRY:
@@ -108,7 +129,7 @@ def get_latest_tag_for_service(service_config, system_config, logger):
 
     tag_name = None
     if not tags:
-        logger.warning(f"Cannot fetch latest tag for service {service_name} - {image}"
+        logger.warning(f"Cannot fetch latest tag for service {service_name} - {image_name}"
                        f" => [server: {server}, repo_name: {image_name}, channel: {update_channel}]")
     else:
         tag_name = f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.0.{update_channel}0"
@@ -120,6 +141,12 @@ def get_latest_tag_for_service(service_config, system_config, logger):
                     tag_name = t
 
         logger.info(f"Latest {service_name} tag on {update_channel.upper()} channel is: {tag_name}")
+
+    # Fix service image for use in Kubernetes
+    image_variables = defaultdict(str)
+    image_variables.update(system_config.services.image_variables)
+    image = string.Template(image).safe_substitute(image_variables)
+    server, image_name = process_image(image)
 
     # Append server to image if not the default server
     if server != "registry.hub.docker.com":
