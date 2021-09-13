@@ -21,10 +21,6 @@ from kubernetes.client.rest import ApiException
 
 from assemblyline_core.scaler.controllers.interface import ControllerInterface
 
-
-# How to identify the update volume as a whole, in a way that the underlying container system recognizes.
-CONTAINER_UPDATE_DIRECTORY = '/mount/updates/'
-
 # RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
 
 API_TIMEOUT = 90
@@ -243,8 +239,7 @@ class KubernetesController(ControllerInterface):
     def add_profile(self, profile, scale=0):
         """Tell the controller about a service profile it needs to manage."""
         self._create_deployment(profile.name, self._deployment_name(profile.name),
-                                profile.container_config, profile.shutdown_seconds, scale,
-                                mount_updates=profile.mount_updates)
+                                profile.container_config, profile.shutdown_seconds, scale)
         self._external_profiles[profile.name] = profile
 
     def _loop_forever(self, function):
@@ -442,7 +437,7 @@ class KubernetesController(ControllerInterface):
     def _create_metadata(deployment_name: str, labels: Dict[str, str]):
         return V1ObjectMeta(name=deployment_name, labels=labels)
 
-    def _create_volumes(self, service_name, mount_updates=False, core_mounts=False):
+    def _create_volumes(self, core_mounts=False):
         volumes, mounts = [], []
 
         # Attach the mount that provides the config file
@@ -461,15 +456,14 @@ class KubernetesController(ControllerInterface):
         memory = container_config.ram_mb
         min_memory = min(container_config.ram_mb_min, container_config.ram_mb)
         environment_variables: list[V1EnvVar] = []
-        # If we are launching a core container, include the scalers environment
+        # If we are launching a core container, include environment variables related to authentication for DBs
         if core_container:
-            environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in os.environ.items()]
+            environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in os.environ.items()
+                                      if any(term in _n for term in ['ELASTIC', 'FILESTORE', 'UI_SERVER'])]
         # Overwrite them with configured special environment variables
         environment_variables += [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]
         # Overwrite those with special hard coded variables
         environment_variables += [
-            V1EnvVar(name='UPDATE_PATH', value=CONTAINER_UPDATE_DIRECTORY),
-            V1EnvVar(name='FILE_UPDATE_DIRECTORY', value=CONTAINER_UPDATE_DIRECTORY),
             V1EnvVar(name='AL_SERVICE_NAME', value=service_name),
             V1EnvVar(name='LOG_LEVEL', value=self.log_level)
         ]
@@ -491,7 +485,7 @@ class KubernetesController(ControllerInterface):
 
     def _create_deployment(self, service_name: str, deployment_name: str, docker_config,
                            shutdown_seconds, scale: int, labels=None, volumes=None, mounts=None,
-                           mount_updates=True, core_mounts=False):
+                           core_mounts=False):
 
         replace = False
         resources = self.apps_api.list_namespaced_deployment(namespace=self.namespace, _request_timeout=API_TIMEOUT)
@@ -544,7 +538,7 @@ class KubernetesController(ControllerInterface):
             all_labels['section'] = 'core'
         all_labels.update(labels or {})
 
-        all_volumes, all_mounts = self._create_volumes(service_name, mount_updates, core_mounts)
+        all_volumes, all_mounts = self._create_volumes(core_mounts)
         all_volumes.extend(volumes or [])
         all_mounts.extend(mounts or [])
         metadata = self._create_metadata(deployment_name=deployment_name, labels=all_labels)
@@ -636,8 +630,7 @@ class KubernetesController(ControllerInterface):
 
     def restart(self, service):
         self._create_deployment(service.name, self._deployment_name(service.name), service.container_config,
-                                service.shutdown_seconds, self.get_target(service.name),
-                                mount_updates=service.mount_updates)
+                                service.shutdown_seconds, self.get_target(service.name))
 
     def get_running_container_names(self):
         pods = self.api.list_pod_for_all_namespaces(field_selector='status.phase==Running',
@@ -664,7 +657,7 @@ class KubernetesController(ControllerInterface):
         return new
 
     def start_stateful_container(self, service_name: str, container_name: str,
-                                 spec, labels: dict[str, str], mount_updates: bool = False):
+                                 spec, labels: dict[str, str]):
         # Setup PVC
         deployment_name = self._dependency_name(service_name, container_name)
         mounts, volumes = [], []
@@ -687,7 +680,7 @@ class KubernetesController(ControllerInterface):
         spec.container.environment.append({'name': 'AL_INSTANCE_KEY', 'value': instance_key})
         self._create_deployment(service_name, deployment_name, spec.container,
                                 30, 1, labels, volumes=volumes, mounts=mounts,
-                                mount_updates=mount_updates, core_mounts=spec.run_as_core)
+                                core_mounts=spec.run_as_core)
 
         # Setup a service to direct to the deployment
         try:

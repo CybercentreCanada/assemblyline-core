@@ -48,7 +48,7 @@ class HarborRegistry(ContainerRegistry):
         # Determine project/repo IDs from image name
         project_id, repo_id = image_name.split('/', 1)
         repo_id = repo_id.replace('/', "%2F")
-        url = f"https://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts"
+        url = f"https://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts?page_size=0"
 
         headers = {}
         if auth:
@@ -129,7 +129,7 @@ def get_latest_tag_for_service(service_config, system_config, logger):
 
     tag_name = None
     if not tags:
-        logger.warning(f"Cannot fetch latest tag for service {service_name} - {image}"
+        logger.warning(f"Cannot fetch latest tag for service {service_name} - {image_name}"
                        f" => [server: {server}, repo_name: {image_name}, channel: {update_channel}]")
     else:
         tag_name = f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.0.{update_channel}0"
