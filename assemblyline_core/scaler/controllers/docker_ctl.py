@@ -243,7 +243,7 @@ class DockerController(ControllerInterface):
         self.log.debug(f'Total Memory available {mem}/{self._info["MemTotal"]/mega}')
         return mem, total_mem
 
-    def get_target(self, service_name):
+    def get_target(self, service_name: str) -> int:
         """Get how many instances of a service we expect to be running.
 
         Since we start our containers with 'restart always' we just need to count how many
