@@ -232,6 +232,12 @@ class ThreadedCoreBase(CoreBase):
         super().stop()
         self.main_loop_exit.wait(30)
 
+
+    def sleep(self, timeout: float):
+        self.stopping.wait(timeout)
+        return self.running
+
+
     def log_crashes(self, fn):
         @functools.wraps(fn)
         def with_logs(*args, **kwargs):
