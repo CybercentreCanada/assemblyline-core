@@ -6,7 +6,7 @@ import functools
 import threading
 from collections import defaultdict
 from string import Template
-from typing import Dict, List, Optional, Any
+from typing import Optional, Any
 import os
 import math
 import time
@@ -164,12 +164,12 @@ class ServiceProfile:
         return self._max_instances
 
     @property
-    def max_instances(self):
+    def max_instances(self) -> int:
         # Adjust the max_instances based on the number that is already requested
         # this keeps the scaler from running way ahead with its demands when resource caps are reached
         return min(self._max_instances, self.target_instances + 2)
 
-    def update(self, delta, instances, backlog, duty_cycle):
+    def update(self, delta: float, instances: int, backlog: int, duty_cycle: float):
         self.last_update = time.time()
         self.running_instances = instances
         self.queue_length = backlog
@@ -235,7 +235,7 @@ class ScalerServer(ThreadedCoreBase):
 
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
         self.error_count_lock = threading.Lock()
-        self.error_count: Dict[str, List[float]] = {}
+        self.error_count: dict[str, list[float]] = {}
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
         self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
@@ -274,7 +274,7 @@ class ScalerServer(ThreadedCoreBase):
                 self.controller.global_mounts.append((CLASSIFICATION_HOST_PATH, '/etc/assemblyline/classification.yml'))
 
         # Information about services
-        self.profiles: Dict[str, ServiceProfile] = {}
+        self.profiles: dict[str, ServiceProfile] = {}
         self.profiles_lock = threading.RLock()
 
         # Prepare a single threaded scheduler
@@ -364,7 +364,7 @@ class ScalerServer(ThreadedCoreBase):
         name = service.name
         stage = self.get_service_stage(service.name)
         default_settings = self.config.core.scaler.service_defaults
-        image_variables = defaultdict(str)
+        image_variables: defaultdict[str, str] = defaultdict(str)
         image_variables.update(self.config.services.image_variables)
 
         def prepare_container(docker_config: DockerConfig) -> DockerConfig:
@@ -473,7 +473,7 @@ class ScalerServer(ThreadedCoreBase):
                 # Figure out what services are expected to be running and how many
                 with elasticapm.capture_span('read_profiles'):
                     with self.profiles_lock:
-                        all_profiles: Dict[str, ServiceProfile] = copy.deepcopy(self.profiles)
+                        all_profiles: dict[str, ServiceProfile] = copy.deepcopy(self.profiles)
                     raw_targets = self.controller.get_targets()
                     targets = {_p.name: raw_targets.get(_p.name, 0) for _p in all_profiles.values()}
 
@@ -516,7 +516,7 @@ class ScalerServer(ThreadedCoreBase):
                 free_memory = self.controller.free_memory()
 
                 #
-                def trim(prof: List[ServiceProfile]):
+                def trim(prof: list[ServiceProfile]):
                     prof = [_p for _p in prof if _p.desired_instances > targets[_p.name]]
                     drop = [_p for _p in prof if _p.cpu > free_cpu or _p.ram > free_memory]
                     if drop:
@@ -525,7 +525,7 @@ class ScalerServer(ThreadedCoreBase):
                     prof = [_p for _p in prof if _p.cpu <= free_cpu and _p.ram <= free_memory]
                     return prof
 
-                remaining_profiles: List[ServiceProfile] = trim(list(all_profiles.values()))
+                remaining_profiles: list[ServiceProfile] = trim(list(all_profiles.values()))
                 # The target values up until now should be in sync with the container orchestrator
                 # create a copy, so we can track which ones change in the following loop
                 old_targets = dict(targets)
@@ -553,7 +553,7 @@ class ScalerServer(ThreadedCoreBase):
                                 pool.call(self.controller.set_target, name, value)
 
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
-    def handle_service_error(self, service_name):
+    def handle_service_error(self, service_name: str):
         """Handle an error occurring in the *analysis* service.
 
         Errors for core systems should simply be logged, and a best effort to continue made.

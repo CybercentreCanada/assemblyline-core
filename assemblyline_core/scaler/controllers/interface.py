@@ -24,11 +24,11 @@ class ControllerInterface:
         """Return free and total memory in the system."""
         raise NotImplementedError()
 
-    def free_cpu(self):
+    def free_cpu(self) -> float:
         """Number of cores available for reservation."""
         return self.cpu_info()[0]
 
-    def free_memory(self):
+    def free_memory(self) -> float:
         """Megabytes of RAM that has not been reserved."""
         return self.memory_info()[0]
 

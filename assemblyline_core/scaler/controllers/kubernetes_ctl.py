@@ -7,7 +7,7 @@ import uuid
 import os
 import threading
 import weakref
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import urllib3
 import kubernetes
@@ -48,7 +48,7 @@ class TypelessWatch(kubernetes.watch.Watch):
         return None
 
 
-def median(values: List[float]) -> float:
+def median(values: list[float]) -> float:
     if len(values) == 0:
         return 0
     return values[len(values)//2]
@@ -149,15 +149,15 @@ class KubernetesController(ControllerInterface):
         self.cpu_reservation: float = max(0.0, min(cpu_reservation, 1.0))
         self.logger = logger
         self.log_level: str = log_level
-        self._labels: Dict[str, str] = labels or {}
+        self._labels: dict[str, str] = labels or {}
         self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
         self.net_api = client.NetworkingV1Api()
         self.namespace: str = namespace
-        self.config_volumes: Dict[str, V1Volume] = {}
-        self.config_mounts: Dict[str, V1VolumeMount] = {}
-        self.core_config_volumes: Dict[str, V1Volume] = {}
-        self.core_config_mounts: Dict[str, V1VolumeMount] = {}
+        self.config_volumes: dict[str, V1Volume] = {}
+        self.config_mounts: dict[str, V1VolumeMount] = {}
+        self.core_config_volumes: dict[str, V1Volume] = {}
+        self.core_config_mounts: dict[str, V1VolumeMount] = {}
         self._external_profiles = weakref.WeakValueDictionary()
         self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
 
@@ -191,7 +191,7 @@ class KubernetesController(ControllerInterface):
         pod_background = threading.Thread(target=self._loop_forever(self._monitor_pods), daemon=True)
         pod_background.start()
 
-        self._deployment_targets: Dict[str, int] = {}
+        self._deployment_targets: dict[str, int] = {}
         deployment_background = threading.Thread(target=self._loop_forever(self._monitor_deployments), daemon=True)
         deployment_background.start()
 
@@ -434,7 +434,7 @@ class KubernetesController(ControllerInterface):
         return self._node_pool_max_ram - self._pod_used_ram, self._node_pool_max_ram
 
     @staticmethod
-    def _create_metadata(deployment_name: str, labels: Dict[str, str]):
+    def _create_metadata(deployment_name: str, labels: dict[str, str]):
         return V1ObjectMeta(name=deployment_name, labels=labels)
 
     def _create_volumes(self, core_mounts=False):
@@ -585,7 +585,7 @@ class KubernetesController(ControllerInterface):
         """Get the target for running instances of a service."""
         return self._deployment_targets.get(service_name, 0)
 
-    def get_targets(self) -> Dict[str, int]:
+    def get_targets(self) -> dict[str, int]:
         """Get the target for running instances of all services."""
         return self._deployment_targets
 
