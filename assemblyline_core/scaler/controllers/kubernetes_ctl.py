@@ -674,8 +674,20 @@ class KubernetesController(ControllerInterface):
             ))
             mounts.append(V1VolumeMount(mount_path=volume_spec.mount_path, name=mount_name))
 
+        # Read the key being used for the deployment instance or generate a new one
+        try:
+            instance_key = uuid.uuid4().hex
+            old_deployment = self.apps_api.read_namespaced_deployment(deployment_name, self.namespace)
+            for container in old_deployment.spec.template.spec.containers:
+                for env in container.env:
+                    if env.name == 'AL_INSTANCE_KEY':
+                        instance_key = env.value
+                        break
+        except ApiException as error:
+            if error.status != 404:
+                raise
+
         # Setup the deployment itself
-        instance_key = uuid.uuid4().hex
         labels['container'] = container_name
         spec.container.environment.append({'name': 'AL_INSTANCE_KEY', 'value': instance_key})
         self._create_deployment(service_name, deployment_name, spec.container,

@@ -21,6 +21,7 @@ from assemblyline.common import forge, log as al_log
 
 if TYPE_CHECKING:
     from assemblyline.datastore.helper import AssemblylineDatastore
+    from assemblyline.odm.models.config import Config
 
 
 SHUTDOWN_SECONDS_LIMIT = 10
@@ -40,7 +41,7 @@ class ServerBase(threading.Thread):
                  shutdown_timeout: float = SHUTDOWN_SECONDS_LIMIT, config=None):
         super().__init__(name=component_name)
         al_log.init_logging(component_name)
-        self.config = config or forge.get_config()
+        self.config: Config = config or forge.get_config()
 
         self.running = None
         self.stopping = threading.Event()
