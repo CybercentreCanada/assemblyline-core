@@ -12,7 +12,7 @@ import signal
 import sys
 import io
 import os
-from typing import cast, Callable, TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
@@ -208,7 +208,7 @@ class CoreBase(ServerBase):
         )
 
         # Create a cached service data object, and access to the service status
-        self.service_info = cast(dict[str, Service], forge.CachedObject(self._get_services))
+        self.service_info: dict[str, Service] = forge.CachedObject(self._get_services)
         self._service_stage_hash = get_service_stage_hash(self.redis)
 
     def _get_services(self):
