@@ -181,7 +181,7 @@ class ServiceStage(enum.IntEnum):
     # If at any time a service is disabled, scaler will stop the dependent containers
 
 
-def get_service_stage_hash(redis):
+def get_service_stage_hash(redis) -> Hash[int]:
     """A hash from service name to ServiceStage enum values."""
     return Hash('service-stage', redis)
 
