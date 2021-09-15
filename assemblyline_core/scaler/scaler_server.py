@@ -110,7 +110,8 @@ class ServiceProfile:
     """
 
     def __init__(self, name: str, container_config: DockerConfig, config_blob:str='', min_instances:int=0, max_instances:int=None,
-                 growth: float = 600, shrink: Optional[float] = None, backlog:int=500, queue=None, shutdown_seconds:int=30):
+                 growth: float = 600, shrink: Optional[float] = None, backlog:int=500, queue=None, shutdown_seconds:int=30,
+                 dependency_blobs:dict[str, str]=None):
         """
         :param name: Name of the service to manage
         :param container_config: Instructions on how to start this service
@@ -128,6 +129,7 @@ class ServiceProfile:
         self.low_duty_cycle = 0.5
         self.shutdown_seconds = shutdown_seconds
         self.config_blob = config_blob
+        self.dependency_blobs = dependency_blobs or {}
 
         # How many instances we want, and can have
         self.min_instances: int = max(0, int(min_instances))
@@ -168,6 +170,12 @@ class ServiceProfile:
         # Adjust the max_instances based on the number that is already requested
         # this keeps the scaler from running way ahead with its demands when resource caps are reached
         return min(self._max_instances, self.target_instances + 2)
+
+    def set_max_instances(self, value:int):
+        if value == 0:
+            self._max_instances = float('inf')
+        else:
+            self._max_instances = value
 
     def update(self, delta: float, instances: int, backlog: int, duty_cycle: float):
         self.last_update = time.time()
@@ -378,6 +386,12 @@ class ScalerServer(ThreadedCoreBase):
         # noinspection PyBroadException
         try:
             if service.enabled and (stage == ServiceStage.Off or name not in self.profiles):
+                # Move to the next service stage (do this first because the container we are starting may care)
+                if service.update_config and service.update_config.wait_for_update:
+                    self._service_stage_hash.set(name, ServiceStage.Update)
+                else:
+                    self._service_stage_hash.set(name, ServiceStage.Running)
+
                 # Enable this service's dependencies before trying to launch the service containers
                 self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
                 for _n, dependency in service.dependencies.items():
@@ -388,12 +402,6 @@ class ScalerServer(ThreadedCoreBase):
                         spec=dependency,
                         labels={'dependency_for': service.name}
                     )
-
-                # Move to the next service stage
-                if service.update_config and service.update_config.wait_for_update:
-                    self._service_stage_hash.set(name, ServiceStage.Update)
-                else:
-                    self._service_stage_hash.set(name, ServiceStage.Running)
 
             if not service.enabled:
                 self.stop_service(service.name, stage)
@@ -411,12 +419,16 @@ class ScalerServer(ThreadedCoreBase):
                 docker_config = prepare_container(service.docker_config)
                 config_blob += str(docker_config)
 
-                # Build the docker config for the dependencies.
-                dependency_config = {}                
+                # Build the docker config for the dependencies. 
+                # TODO This could be different from when the start_stateful_container above ran
+                # because that call would have been on a different call to this function, in the time
+                # between calls something could change in UI
+                dependency_config = {}        
+                dependency_blobs: dict[str, str] = {}        
                 for _n, dependency in service.dependencies.items():
                     dependency.container = prepare_container(dependency.container)
                     dependency_config[_n] = dependency
-                config_blob += str(sorted(dependency_config.items()))
+                    dependency_blobs[_n] = str(dependency)
 
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:
@@ -428,6 +440,7 @@ class ScalerServer(ThreadedCoreBase):
                             growth=default_settings.growth,
                             shrink=default_settings.shrink,
                             config_blob=config_blob,
+                            dependency_blobs=dependency_blobs,
                             backlog=default_settings.backlog,
                             max_instances=service.licence_count,
                             container_config=docker_config,
@@ -439,24 +452,21 @@ class ScalerServer(ThreadedCoreBase):
                     # Update RAM, CPU, licence requirements for running services
                     else:
                         profile = self.profiles[name]
-                        if service.licence_count == 0:
-                            profile._max_instances = float('inf')
-                        else:
-                            profile._max_instances = service.licence_count
+                        profile.set_max_instances(service.licence_count)
 
-                        if profile.config_blob != config_blob:
-                            self.log.info(f"Updating deployment information for {name}")
-                            # Update the dependencies. Should do nothing if container spec is the same.
-                            # let kubernetes decide if anything needs to change though.
-                            for _n, dependency in dependency_config.items():
+                        for dependency_name, dependency_blob in dependency_blobs.items():
+                            if profile.dependency_blobs[dependency_name] != dependency_blob:  
+                                self.log.info(f"Updating deployment information for {name}/{dependency_name}")
+                                profile.dependency_blobs[dependency_name] = dependency_blob
                                 self.controller.start_stateful_container(
                                     service_name=service.name,
-                                    container_name=_n,
-                                    spec=dependency,
+                                    container_name=dependency_name,
+                                    spec=dependency_config[dependency_name],
                                     labels={'dependency_for': service.name}
                                 )
 
-                            # Update the service itself
+                        if profile.config_blob != config_blob:
+                            self.log.info(f"Updating deployment information for {name}")
                             profile.container_config = docker_config
                             profile.config_blob = config_blob
                             self.controller.restart(profile)
