@@ -385,6 +385,18 @@ class ScalerServer(ThreadedCoreBase):
 
         # noinspection PyBroadException
         try:
+            # Build the docker config for the dependencies. For now the dependency blob values
+            # aren't set for the change key going to kubernetes because everything about
+            # the dependency config should be captured in change key that the function generates
+            # internally. A change key is set for the service deployment as that includes 
+            # things like the submission params
+            dependency_config: dict[str, Any] = {}        
+            dependency_blobs: dict[str, str] = {}        
+            for _n, dependency in service.dependencies.items():
+                dependency.container = prepare_container(dependency.container)
+                dependency_config[_n] = dependency
+                dependency_blobs[_n] = str(dependency)
+
             if service.enabled and (stage == ServiceStage.Off or name not in self.profiles):
                 # Move to the next service stage (do this first because the container we are starting may care)
                 if service.update_config and service.update_config.wait_for_update:
@@ -394,13 +406,13 @@ class ScalerServer(ThreadedCoreBase):
 
                 # Enable this service's dependencies before trying to launch the service containers
                 self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
-                for _n, dependency in service.dependencies.items():
-                    dependency.container = prepare_container(dependency.container)
+                for _n, dependency in dependency_config.items():
                     self.controller.start_stateful_container(
                         service_name=service.name,
                         container_name=_n,
                         spec=dependency,
-                        labels={'dependency_for': service.name}
+                        labels={'dependency_for': service.name},
+                        change_key=''
                     )
 
             if not service.enabled:
@@ -418,17 +430,6 @@ class ScalerServer(ThreadedCoreBase):
                 # update it so we need to know what the current configuration is either way
                 docker_config = prepare_container(service.docker_config)
                 config_blob += str(docker_config)
-
-                # Build the docker config for the dependencies. 
-                # TODO This could be different from when the start_stateful_container above ran
-                # because that call would have been on a different call to this function, in the time
-                # between calls something could change in UI
-                dependency_config = {}        
-                dependency_blobs: dict[str, str] = {}        
-                for _n, dependency in service.dependencies.items():
-                    dependency.container = prepare_container(dependency.container)
-                    dependency_config[_n] = dependency
-                    dependency_blobs[_n] = str(dependency)
 
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:
@@ -462,7 +463,8 @@ class ScalerServer(ThreadedCoreBase):
                                     service_name=service.name,
                                     container_name=dependency_name,
                                     spec=dependency_config[dependency_name],
-                                    labels={'dependency_for': service.name}
+                                    labels={'dependency_for': service.name},
+                                    change_key=''
                                 )
 
                         if profile.config_blob != config_blob:

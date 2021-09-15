@@ -241,7 +241,8 @@ class KubernetesController(ControllerInterface):
     def add_profile(self, profile, scale=0):
         """Tell the controller about a service profile it needs to manage."""
         self._create_deployment(profile.name, self._deployment_name(profile.name),
-                                profile.container_config, profile.shutdown_seconds, scale)
+                                profile.container_config, profile.shutdown_seconds, scale,
+                                change_key=profile.config_blob)
         self._external_profiles[profile.name] = profile
 
     def _loop_forever(self, function):
@@ -477,13 +478,13 @@ class KubernetesController(ControllerInterface):
     def _create_deployment(self, service_name: str, deployment_name: str, docker_config: DockerConfig,
                            shutdown_seconds: int, scale: int, labels:dict[str,str]=None, 
                            volumes:list[V1Volume]=None, mounts:list[V1VolumeMount]=None,
-                           core_mounts:bool=False):
+                           core_mounts:bool=False, change_key:str=''):
         # Build a cache key to check for changes, just trying to only patch what changed 
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
         change_key = (
-            deployment_name + str(docker_config) + str(shutdown_seconds) + str(sorted((labels or {}).items())) + 
-            str(volumes) + str(mounts) + str(core_mounts)
+            deployment_name + change_key + str(docker_config) + str(shutdown_seconds) + 
+            str(sorted((labels or {}).items())) + str(volumes) + str(mounts) + str(core_mounts)
         )         
 
         # Check if a deployment already exists, and if it does check if it has the same change key set
@@ -588,8 +589,8 @@ class KubernetesController(ControllerInterface):
 
         if replace:
             self.logger.info("Requesting kubernetes replace deployment info for: " + metadata.name)
-            self.apps_api.patch_namespaced_deployment(namespace=self.namespace, body=deployment,
-                                                      name=metadata.name, _request_timeout=API_TIMEOUT)
+            self.apps_api.replace_namespaced_deployment(namespace=self.namespace, body=deployment,
+                                                        name=metadata.name, _request_timeout=API_TIMEOUT)
         else:
             self.logger.info("Requesting kubernetes create deployment info for: " + metadata.name)
             self.apps_api.create_namespaced_deployment(namespace=self.namespace, body=deployment,
@@ -644,7 +645,8 @@ class KubernetesController(ControllerInterface):
 
     def restart(self, service):
         self._create_deployment(service.name, self._deployment_name(service.name), service.container_config,
-                                service.shutdown_seconds, self.get_target(service.name))
+                                service.shutdown_seconds, self.get_target(service.name), 
+                                change_key=service.config_blob)
 
     def get_running_container_names(self):
         pods = self.api.list_pod_for_all_namespaces(field_selector='status.phase==Running',
@@ -671,7 +673,7 @@ class KubernetesController(ControllerInterface):
         return new
 
     def start_stateful_container(self, service_name: str, container_name: str,
-                                 spec, labels: dict[str, str]):
+                                 spec, labels: dict[str, str], change_key:str):
         # Setup PVC
         deployment_name = self._dependency_name(service_name, container_name)
         mounts, volumes = [], []
@@ -706,7 +708,7 @@ class KubernetesController(ControllerInterface):
         spec.container.environment.append({'name': 'AL_INSTANCE_KEY', 'value': instance_key})
         self._create_deployment(service_name, deployment_name, spec.container,
                                 30, 1, labels, volumes=volumes, mounts=mounts,
-                                core_mounts=spec.run_as_core)
+                                core_mounts=spec.run_as_core, change_key=change_key)
 
         # Setup a service to direct to the deployment
         try:
