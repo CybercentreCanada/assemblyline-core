@@ -719,7 +719,7 @@ class Dispatcher(ThreadedCoreBase):
         task.service_errors[(sha256, service_name)] = error_key
 
         export_metrics_once(service_name, ServiceMetrics, dict(fail_nonrecoverable=1),
-                            counter_type='service', host='dispatcher')
+                            counter_type='service', host='dispatcher', redis=self.redis)
 
         # Send the result key to any watching systems
         msg = {'status': 'FAIL', 'cache_key': error_key}
@@ -1040,7 +1040,7 @@ class Dispatcher(ThreadedCoreBase):
 
             # Report to the metrics system that a recoverable error has occurred for that service
             export_metrics_once(service_name, ServiceMetrics, dict(fail_recoverable=1),
-                                host=worker_id, counter_type='service')
+                                host=worker_id, counter_type='service', redis=self.redis)
 
     def work_guard(self):
         check_interval = GUARD_TIMEOUT/8
@@ -1244,7 +1244,7 @@ class Dispatcher(ThreadedCoreBase):
 
                     # Report to the metrics system that a recoverable error has occurred for that service
                     export_metrics_once(task.service_name, ServiceMetrics, dict(fail_recoverable=1),
-                                        host=task.metadata['worker__'], counter_type='service')
+                                        host=task.metadata['worker__'], counter_type='service', redis=self.redis)
 
             # Look for unassigned submissions in the datastore if we don't have a
             # large number of outstanding things in the queue already.

@@ -11,6 +11,7 @@ be created.
 
 import threading
 import time
+from os import environ
 from random import random
 from typing import Iterable, List, Optional, Dict, Tuple
 
@@ -48,6 +49,8 @@ _max_retries = 10
 _retry_delay = 60 * 4  # Wait 4 minutes to retry
 _max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
 HOUR_IN_SECONDS = 60 * 60
+INGEST_THREADS = environ.get('INGESTER_INGEST_THREADS', 1)
+SUBMIT_THREADS = environ.get('INGESTER_SUBMIT_THREADS', 4)
 
 
 def must_drop(length: int, maximum: int) -> bool:
@@ -219,13 +222,14 @@ class Ingester(ThreadedCoreBase):
             self.apm_client = None
 
     def try_run(self):
-        self.maintain_threads({
-            'Ingest': self.handle_ingest,
-            'Submit': self.handle_submit,
+        threads_to_maintain = {
             'Complete': self.handle_complete,
             'Retries': self.handle_retries,
-            'Timeouts': self.handle_timeouts,
-        })
+            'Timeouts': self.handle_timeouts
+        }
+        threads_to_maintain.update({f'Ingest_{n}': self.handle_ingest for n in range(INGEST_THREADS)})
+        threads_to_maintain.update({f'Submit_{n}': self.handle_submit for n in range(SUBMIT_THREADS)})
+        self.maintain_threads(threads_to_maintain)
 
     def handle_ingest(self):
         cpu_mark = time.process_time()

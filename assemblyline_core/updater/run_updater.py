@@ -1,115 +1,44 @@
 """
 A process that manages tracking and running update commands for the AL services.
-
-TODO:
-    - docker build updates
-    - If the service update interval changes in datastore move the next update time
-
 """
-from collections import defaultdict
+from __future__ import annotations
 
 import os
-import json
 import uuid
-import random
 import sched
-import shutil
-import string
-import tempfile
 import time
-from contextlib import contextmanager
-from threading import Thread
-from typing import Dict
+from typing import Any
 
 import docker
-import yaml
 
 from assemblyline.common import isotime
-from assemblyline.remote.datatypes.lock import Lock
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
     V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
     V1ConfigMapVolumeSource, V1Secret, V1LocalObjectReference
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
-from passlib.hash import bcrypt
-
-from assemblyline.common.isotime import now_as_iso
-from assemblyline.common.security import get_random_password, get_password_hash
-from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.models.service import DockerConfig
-from assemblyline.odm.models.user import User
-from assemblyline.odm.models.user_settings import UserSettings
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config
-from assemblyline_core.server_base import CoreBase, ServiceStage
+from assemblyline_core.server_base import CoreBase
 from assemblyline_core.updater.helper import get_latest_tag_for_service
 
-SERVICE_SYNC_INTERVAL = 30  # How many seconds between checking for new services, or changes in service status
 UPDATE_CHECK_INTERVAL = 60  # How many seconds per check for outstanding updates
 CONTAINER_CHECK_INTERVAL = 60 * 5  # How many seconds to wait for checking for new service versions
 API_TIMEOUT = 90
 HEARTBEAT_INTERVAL = 5
-UPDATE_STAGES = [ServiceStage.Update, ServiceStage.Running]
-
-# Where to find the update directory inside this container.
-FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
-# How to identify the update volume as a whole, in a way that the underlying container system recognizes.
-FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', FILE_UPDATE_DIRECTORY)
 
 # How many past updates to keep for file based updates
-UPDATE_FOLDER_LIMIT = 5
 NAMESPACE = os.getenv('NAMESPACE', None)
-UI_SERVER = os.getenv('UI_SERVER', 'https://nginx')
 INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
 CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
 CLASSIFICATION_CONFIGMAP = os.getenv('CLASSIFICATION_CONFIGMAP', None)
 CLASSIFICATION_CONFIGMAP_KEY = os.getenv('CLASSIFICATION_CONFIGMAP_KEY', 'classification.yml')
 
 
-@contextmanager
-def temporary_api_key(ds: AssemblylineDatastore, user_name: str, permissions=('R', 'W')):
-    """Creates a context where a temporary API key is available."""
-    with Lock(f'user-{user_name}', timeout=10):
-        name = ''.join(random.choices(string.ascii_lowercase, k=20))
-        random_pass = get_random_password(length=48)
-        user = ds.user.get(user_name)
-        user.apikeys[name] = {
-            "password": bcrypt.hash(random_pass),
-            "acl": permissions
-        }
-        ds.user.save(user_name, user)
-
-    try:
-        yield f"{name}:{random_pass}"
-    finally:
-        with Lock(f'user-{user_name}', timeout=10):
-            user = ds.user.get(user_name)
-            user.apikeys.pop(name)
-            ds.user.save(user_name, user)
-
-
-def chmod(directory, mask):
-    try:
-        os.chmod(directory, mask)
-    except PermissionError as error:
-        # If we are using an azure file share, we may not be able to change the permissions
-        # on files, everything might be set to a pre defined permission level by the file share
-        if "Operation not permitted" in str(error):
-            return
-        raise
-
-
 class DockerUpdateInterface:
-    """Wrap docker interface for the commands used in the update process.
-
-    Volumes used for file updating on the docker interface are simply a host directory that gets
-    mounted at different depths and locations in each container.
-
-    FILE_UPDATE_VOLUME gives us the path of the directory on the host, so that we can mount
-    it properly on new containers we launch. FILE_UPDATE_DIRECTORY gives us the path
-    that it is mounted at in the update manager container.
-    """
+    """Wrap docker interface for the commands used in the update process."""
 
     def __init__(self, log_level="INFO"):
         self.client = docker.from_env()
@@ -439,28 +368,8 @@ class ServiceUpdater(CoreBase):
         super().__init__('assemblyline.service.updater', logger=logger, datastore=datastore,
                          redis_persist=redis_persist, redis=redis)
 
-        if not FILE_UPDATE_DIRECTORY:
-            raise RuntimeError("The updater process must be run within the orchestration environment, "
-                               "the update volume must be mounted, and the path to the volume must be "
-                               "set in the environment variable FILE_UPDATE_DIRECTORY. Setting "
-                               "FILE_UPDATE_DIRECTORY directly may be done for testing.")
-
-        # The directory where we want working temporary directories to be created.
-        # Building our temporary directories in the persistent update volume may
-        # have some performance down sides, but may help us run into fewer docker FS overlay
-        # cleanup issues. Try to flush it out every time we start. This service should
-        # be a singleton anyway.
-
-        ################################# DELETE FOR PSU CHANGE#########################
-        # self.temporary_directory = os.path.join(FILE_UPDATE_DIRECTORY, '.tmp')
-        # shutil.rmtree(self.temporary_directory, ignore_errors=True)
-        # os.makedirs(self.temporary_directory)
-        ################################# DELETE FOR PSU CHANGE#########################
-
-        self.container_update = Hash('container-update', self.redis_persist)
-        self.services = Hash('service-updates', self.redis_persist)
-        self.latest_service_tags = Hash('service-tags', self.redis_persist)
-        self.running_updates: Dict[str, Thread] = {}
+        self.container_update: Hash[dict[str, Any]] = Hash('container-update', self.redis_persist)
+        self.latest_service_tags: Hash[dict[str, str]] = Hash('service-tags', self.redis_persist)
 
         # Prepare a single threaded scheduler
         self.scheduler = sched.scheduler()
@@ -476,67 +385,6 @@ class ServiceUpdater(CoreBase):
                                                         log_level=self.config.logging.log_level)
         else:
             self.controller = DockerUpdateInterface(log_level=self.config.logging.log_level)
-
-    def sync_services(self):
-        """Download the service list and make sure our settings are up to date"""
-        self.scheduler.enter(SERVICE_SYNC_INTERVAL, 0, self.sync_services)
-        existing_services = (set(self.services.keys()) |
-                             set(self.container_update.keys()) |
-                             set(self.latest_service_tags.keys()))
-        discovered_services = []
-
-        # Get all the service data
-        for service in self.datastore.list_all_services(full=True):
-            discovered_services.append(service.name)
-
-            # Ensure that any disabled services are not being updated
-            if not service.enabled and self.services.exists(service.name):
-                self.log.info(f"Service updates disabled for {service.name}")
-                self.services.pop(service.name)
-
-            if not service.enabled:
-                continue
-
-            # Ensure that any enabled services with an update config are being updated
-            stage = self.get_service_stage(service.name)
-            record = self.services.get(service.name)
-
-            if stage in UPDATE_STAGES and service.update_config:
-                # Stringify and hash the the current update configuration
-                config_hash = hash(json.dumps(service.update_config.as_primitives()))
-
-                # If we can update, but there is no record, create one
-                if not record:
-                    self.log.info(f"Service updates enabled for {service.name}")
-                    self.services.add(
-                        service.name,
-                        dict(
-                            next_update=now_as_iso(),
-                            previous_update=now_as_iso(-10**10),
-                            config_hash=config_hash,
-                            sha256=None,
-                        )
-                    )
-                else:
-                    # If there is a record, check that its configuration hash is still good
-                    # If an update is in progress, it may overwrite this, but we will just come back
-                    # and reapply this again in the iteration after that
-                    if record.get('config_hash', None) != config_hash:
-                        record['next_update'] = now_as_iso()
-                        record['config_hash'] = config_hash
-                        self.services.set(service.name, record)
-
-            if stage == ServiceStage.Update:
-                if (record and record.get('sha256', None) is not None) or not service.update_config:
-                    self._service_stage_hash.set(service.name, ServiceStage.Running)
-
-        # Remove services we have locally or in redis that have been deleted from the database
-        for stray_service in existing_services - set(discovered_services):
-            self.log.info(f"Service updates disabled for {stray_service}")
-            self.services.pop(stray_service)
-            self._service_stage_hash.pop(stray_service)
-            self.container_update.pop(stray_service)
-            self.latest_service_tags.pop(stray_service)
 
     def container_updates(self):
         """Go through the list of services and check what are the latest tags for it"""
@@ -601,8 +449,11 @@ class ServiceUpdater(CoreBase):
     def container_versions(self):
         """Go through the list of services and check what are the latest tags for it"""
         self.scheduler.enter(CONTAINER_CHECK_INTERVAL, 0, self.container_versions)
+        existing_services = set(self.container_update.keys()) | set(self.latest_service_tags.keys())
+        discovered_services: list[str] = []
 
         for service in self.datastore.list_all_services(full=True):
+            discovered_services.append(service.name)
             if not service.enabled:
                 continue
 
@@ -611,11 +462,16 @@ class ServiceUpdater(CoreBase):
             self.latest_service_tags.set(service.name,
                                          {'auth': auth, 'image': image_name, service.update_channel: tag_name})
 
+        # Remove services we have locally or in redis that have been deleted from the database
+        for stray_service in existing_services - set(discovered_services):
+            self.log.info(f"Service updates disabled for {stray_service}")
+            self._service_stage_hash.pop(stray_service)
+            self.container_update.pop(stray_service)
+            self.latest_service_tags.pop(stray_service)
+
     def try_run(self):
         """Run the scheduler loop until told to stop."""
         # Do an initial call to the main methods, who will then be registered with the scheduler
-        self.sync_services()
-        # self.update_services()
         self.container_versions()
         self.container_updates()
         self.heartbeat()
@@ -623,9 +479,10 @@ class ServiceUpdater(CoreBase):
         # Run as long as we need to
         while self.running:
             delay = self.scheduler.run(False)
-            time.sleep(min(delay, 0.1))
+            if delay:
+                time.sleep(min(delay, 0.1))
 
-    def heartbeat(self):
+    def heartbeat(self, timestamp: int = None):
         """Periodically touch a file on disk.
 
         Since tasks are run serially, the delay between touches will be the maximum of
@@ -633,191 +490,7 @@ class ServiceUpdater(CoreBase):
         """
         if self.config.logging.heartbeat_file:
             self.scheduler.enter(HEARTBEAT_INTERVAL, 0, self.heartbeat)
-            super().heartbeat()
-
-    def update_services(self):
-        """Check if we need to update any services.
-
-        Spin off a thread to actually perform any updates. Don't allow multiple threads per service.
-        """
-        self.scheduler.enter(UPDATE_CHECK_INTERVAL, 0, self.update_services)
-
-        # Check for finished update threads
-        self.running_updates = {name: thread for name, thread in self.running_updates.items() if thread.is_alive()}
-
-        # Check if its time to try to update the service
-        for service_name, data in self.services.items().items():
-            if data['next_update'] <= now_as_iso() and service_name not in self.running_updates:
-                self.log.info(f"Time to update {service_name}")
-                self.running_updates[service_name] = Thread(
-                    target=self.run_update,
-                    kwargs=dict(service_name=service_name)
-                )
-                self.running_updates[service_name].start()
-
-    def run_update(self, service_name):
-        """Common setup and tear down for all update types."""
-        # noinspection PyBroadException
-        try:
-            # Check for new update with service specified update method
-            service = self.datastore.get_service_with_delta(service_name)
-            update_method = service.update_config.method
-            update_data = self.services.get(service_name)
-            update_hash = None
-
-            try:
-                # Actually run the update method
-                if update_method == 'run':
-                    update_hash = self.do_file_update(
-                        service=service,
-                        previous_hash=update_data['sha256'],
-                        previous_update=update_data['previous_update']
-                    )
-                elif update_method == 'build':
-                    update_hash = self.do_build_update()
-
-                # If we have performed an update, write that data
-                if update_hash is not None and update_hash != update_data['sha256']:
-                    update_data['sha256'] = update_hash
-                    update_data['previous_update'] = now_as_iso()
-                else:
-                    update_hash = None
-
-            finally:
-                # Update the next service update check time, don't update the config_hash,
-                # as we don't want to disrupt being re-run if our config has changed during this run
-                update_data['next_update'] = now_as_iso(service.update_config.update_interval_seconds)
-                self.services.set(service_name, update_data)
-
-            if update_hash:
-                self.log.info(f"New update applied for {service_name}. Restarting service.")
-                self.controller.restart(service_name=service_name)
-
-        except BaseException:
-            self.log.exception("An error occurred while running an update for: " + service_name)
-
-    def do_build_update(self):
-        """Update a service by building a new container to run."""
-        raise NotImplementedError()
-
-    def do_file_update(self, service, previous_hash, previous_update):
-        """Update a service by running a container to get new files."""
-        temp_directory = tempfile.mkdtemp(dir=self.temporary_directory)
-        chmod(temp_directory, 0o777)
-        input_directory = os.path.join(temp_directory, 'input_directory')
-        output_directory = os.path.join(temp_directory, 'output_directory')
-        service_dir = os.path.join(FILE_UPDATE_DIRECTORY, service.name)
-        image_variables = defaultdict(str)
-        image_variables.update(self.config.services.image_variables)
-
-        try:
-            # Use chmod directly to avoid effects of umask
-            os.makedirs(input_directory)
-            chmod(input_directory, 0o755)
-            os.makedirs(output_directory)
-            chmod(output_directory, 0o777)
-
-            username = self.ensure_service_account()
-
-            with temporary_api_key(self.datastore, username) as api_key:
-
-                # Write out the parameters we want to pass to the update container
-                with open(os.path.join(input_directory, 'config.yaml'), 'w') as fh:
-                    yaml.safe_dump({
-                        'previous_update': previous_update,
-                        'previous_hash': previous_hash,
-                        'sources': [x.as_primitives() for x in service.update_config.sources],
-                        'api_user': username,
-                        'api_key': api_key,
-                        'ui_server': UI_SERVER
-                    }, fh)
-
-                # Run the update container
-                run_options = service.update_config.run_options
-                run_options.image = string.Template(run_options.image).safe_substitute(image_variables)
-                self.controller.launch(
-                    name=service.name,
-                    docker_config=run_options,
-                    mounts=[
-                        {
-                            'volume': FILE_UPDATE_VOLUME,
-                            'source_path': os.path.relpath(temp_directory, start=FILE_UPDATE_DIRECTORY),
-                            'dest_path': '/mount/'
-                        },
-                    ],
-                    env={
-                        'UPDATE_CONFIGURATION_PATH': '/mount/input_directory/config.yaml',
-                        'UPDATE_OUTPUT_PATH': '/mount/output_directory/'
-                    },
-                    network=f'service-net-{service.name}',
-                    blocking=True,
-                )
-
-                # Read out the results from the output container
-                results_meta_file = os.path.join(output_directory, 'response.yaml')
-
-                if not os.path.exists(results_meta_file) or not os.path.isfile(results_meta_file):
-                    self.log.warning(f"Update produced no output for {service.name}")
-                    return None
-
-                with open(results_meta_file) as rf:
-                    results_meta = yaml.safe_load(rf)
-                update_hash = results_meta.get('hash', None)
-
-                # Erase the results meta file
-                os.unlink(results_meta_file)
-
-                # Get a timestamp for now, and switch it to basic format representation of time
-                # Still valid iso 8601, and : is sometimes a restricted character
-                timestamp = now_as_iso().replace(":", "")
-
-                # FILE_UPDATE_DIRECTORY/{service_name} is the directory mounted to the service,
-                # the service sees multiple directories in that directory, each with a timestamp
-                destination_dir = os.path.join(service_dir, service.name + '_' + timestamp)
-                shutil.move(output_directory, destination_dir)
-
-                # Remove older update files, due to the naming scheme, older ones will sort first lexically
-                existing_folders = []
-                for folder_name in os.listdir(service_dir):
-                    folder_path = os.path.join(service_dir, folder_name)
-                    if os.path.isdir(folder_path) and folder_name.startswith(service.name):
-                        existing_folders.append(folder_name)
-                existing_folders.sort()
-
-                self.log.info(f'There are {len(existing_folders)} update folders for {service.name} in cache.')
-                if len(existing_folders) > UPDATE_FOLDER_LIMIT:
-                    extra_count = len(existing_folders) - UPDATE_FOLDER_LIMIT
-                    self.log.info(f'We will only keep {UPDATE_FOLDER_LIMIT} updates, deleting {extra_count}.')
-                    for extra_folder in existing_folders[:extra_count]:
-                        # noinspection PyBroadException
-                        try:
-                            shutil.rmtree(os.path.join(service_dir, extra_folder))
-                        except Exception:
-                            self.log.exception('Failed to delete update folder')
-
-                return update_hash
-        finally:
-            # If the working directory is still there for any reason erase it
-            shutil.rmtree(temp_directory, ignore_errors=True)
-
-    def ensure_service_account(self):
-        """Check that the update service account exists, if it doesn't, create it."""
-        uname = 'update_service_account'
-
-        if self.datastore.user.get_if_exists(uname):
-            return uname
-
-        user_data = User({
-            "agrees_with_tos": "NOW",
-            "classification": "RESTRICTED",
-            "name": "Update Account",
-            "password": get_password_hash(''.join(random.choices(string.ascii_letters, k=20))),
-            "uname": uname,
-            "type": ["signature_importer"]
-        })
-        self.datastore.user.save(uname, user_data)
-        self.datastore.user_settings.save(uname, UserSettings())
-        return uname
+            super().heartbeat(timestamp)
 
 
 if __name__ == '__main__':
