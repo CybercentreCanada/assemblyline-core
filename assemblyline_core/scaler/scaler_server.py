@@ -396,12 +396,14 @@ class ScalerServer(ThreadedCoreBase):
                 dependency_config[_n] = dependency
                 dependency_blobs[_n] = str(dependency)
 
-            if service.enabled and (stage == ServiceStage.Off or name not in self.profiles):
+            if service.enabled and stage == ServiceStage.Off:
                 # Move to the next service stage (do this first because the container we are starting may care)
                 if service.update_config and service.update_config.wait_for_update:
                     self._service_stage_hash.set(name, ServiceStage.Update)
+                    stage = ServiceStage.Update
                 else:
                     self._service_stage_hash.set(name, ServiceStage.Running)
+                    stage = ServiceStage.Running
 
                 # Enable this service's dependencies before trying to launch the service containers
                 self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
