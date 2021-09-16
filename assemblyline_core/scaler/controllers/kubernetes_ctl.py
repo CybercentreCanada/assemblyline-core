@@ -10,9 +10,9 @@ import weakref
 from typing import Optional, Tuple
 
 import urllib3
-import kubernetes
-from kubernetes import client, config
-from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
+
+from kubernetes import client, config, watch
+from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec, \
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
@@ -43,7 +43,7 @@ _exponents = {
 }
 
 
-class TypelessWatch(kubernetes.watch.Watch):
+class TypelessWatch(watch.Watch):
     """A kubernetes watch object that doesn't marshal the response."""
 
     def get_return_type(self, func):
@@ -476,16 +476,16 @@ class KubernetesController(ControllerInterface):
         )]
 
     def _create_deployment(self, service_name: str, deployment_name: str, docker_config: DockerConfig,
-                           shutdown_seconds: int, scale: int, labels:dict[str,str]=None, 
+                           shutdown_seconds: int, scale: int, labels:dict[str,str]=None,
                            volumes:list[V1Volume]=None, mounts:list[V1VolumeMount]=None,
                            core_mounts:bool=False, change_key:str=''):
-        # Build a cache key to check for changes, just trying to only patch what changed 
+        # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
         change_key = (
-            deployment_name + change_key + str(docker_config) + str(shutdown_seconds) + 
+            deployment_name + change_key + str(docker_config) + str(shutdown_seconds) +
             str(sorted((labels or {}).items())) + str(volumes) + str(mounts) + str(core_mounts)
-        )         
+        )
 
         # Check if a deployment already exists, and if it does check if it has the same change key set
         replace = None
@@ -498,7 +498,7 @@ class KubernetesController(ControllerInterface):
         except ApiException as error:
             if error.status != 404:
                 raise
-    
+
         # If we have been given a username or password for the registry, we have to
         # update it, if we haven't been, make sure its been cleaned up in the system
         # so we don't leave passwords lying around
@@ -543,7 +543,7 @@ class KubernetesController(ControllerInterface):
             all_labels['section'] = 'core'
         all_labels.update(labels or {})
 
-        # Build set of volumes, first the global mounts, then the core specific ones, 
+        # Build set of volumes, first the global mounts, then the core specific ones,
         # then the ones specific to this container only
         all_volumes: list[V1Volume] = []
         all_mounts: list[V1VolumeMount] = []
@@ -574,14 +574,14 @@ class KubernetesController(ControllerInterface):
             spec=pod,
         )
 
-        spec = ExtensionsV1beta1DeploymentSpec(
+        spec = V1DeploymentSpec(
             replicas=int(scale),
             revision_history_limit=0,
             selector=V1LabelSelector(match_labels=all_labels),
             template=template,
         )
 
-        deployment = ExtensionsV1beta1Deployment(
+        deployment = V1Deployment(
             kind="Deployment",
             metadata=metadata,
             spec=spec,
@@ -645,7 +645,7 @@ class KubernetesController(ControllerInterface):
 
     def restart(self, service):
         self._create_deployment(service.name, self._deployment_name(service.name), service.container_config,
-                                service.shutdown_seconds, self.get_target(service.name), 
+                                service.shutdown_seconds, self.get_target(service.name),
                                 change_key=service.config_blob)
 
     def get_running_container_names(self):
