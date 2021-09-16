@@ -22,6 +22,7 @@ from assemblyline.common import forge, log as al_log
 if TYPE_CHECKING:
     from assemblyline.datastore.helper import AssemblylineDatastore
     from assemblyline.odm.models.config import Config
+    from redis import Redis
 
 
 SHUTDOWN_SECONDS_LIMIT = 10
@@ -100,10 +101,10 @@ class ServerBase(threading.Thread):
     def sleep(self, timeout: float):
         self.stopping.wait(timeout)
         return self.running
-        
+
     def serve_forever(self):
         self.start()
-        # We may not want to let the main thread block on a single join call. 
+        # We may not want to let the main thread block on a single join call.
         # It can interfere with signal handling.
         while self.sleep(1):
             pass
@@ -196,12 +197,12 @@ class CoreBase(ServerBase):
         self.datastore: AssemblylineDatastore = datastore or forge.get_datastore(self.config)
 
         # Connect to all of our persistent redis structures
-        self.redis = redis or get_client(
+        self.redis: Redis = redis or get_client(
             host=self.config.core.redis.nonpersistent.host,
             port=self.config.core.redis.nonpersistent.port,
             private=False,
         )
-        self.redis_persist = redis_persist or get_client(
+        self.redis_persist: Redis = redis_persist or get_client(
             host=self.config.core.redis.persistent.host,
             port=self.config.core.redis.persistent.port,
             private=False,

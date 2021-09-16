@@ -109,9 +109,10 @@ class ServiceProfile:
     This includes how the service should be run, and conditions related to the scaling of the service.
     """
 
-    def __init__(self, name: str, container_config: DockerConfig, config_blob:str='', min_instances:int=0, max_instances:int=None,
-                 growth: float = 600, shrink: Optional[float] = None, backlog:int=500, queue=None, shutdown_seconds:int=30,
-                 dependency_blobs:dict[str, str]=None):
+    def __init__(self, name: str, container_config: DockerConfig, config_blob: str = '',
+                 min_instances: int = 0, max_instances: int = None, growth: float = 600,
+                 shrink: Optional[float] = None, backlog: int = 500, queue=None,
+                 shutdown_seconds: int = 30, dependency_blobs: dict[str, str] = None):
         """
         :param name: Name of the service to manage
         :param container_config: Instructions on how to start this service
@@ -134,7 +135,7 @@ class ServiceProfile:
         # How many instances we want, and can have
         self.min_instances: int = max(0, int(min_instances))
         self._min_instances: int = self.min_instances
-        self._max_instances: float = max(0, int(max_instances)) if max_instances else float('inf')
+        self._max_instances: int = max(0, int(max_instances or 0))
         self.desired_instances: int = 0
         self.target_instances: int = 0
         self.running_instances: int = 0
@@ -148,8 +149,8 @@ class ServiceProfile:
         # How long does a backlog need to be before we are concerned
         self.backlog = int(backlog)
         self.queue_length = 0
-        self.duty_cycle = 0
-        self.last_update = 0
+        self.duty_cycle = 0.0
+        self.last_update = 0.0
 
     @property
     def cpu(self):
@@ -161,21 +162,19 @@ class ServiceProfile:
 
     @property
     def instance_limit(self):
-        if self._max_instances == float('inf'):
-            return 0
         return self._max_instances
 
     @property
     def max_instances(self) -> int:
         # Adjust the max_instances based on the number that is already requested
         # this keeps the scaler from running way ahead with its demands when resource caps are reached
+        if self._max_instances == 0:
+            return self.target_instances + 2
         return min(self._max_instances, self.target_instances + 2)
 
-    def set_max_instances(self, value:int):
-        if value == 0:
-            self._max_instances = float('inf')
-        else:
-            self._max_instances = value
+    @max_instances.setter
+    def max_instances(self, value: int):
+        self._max_instances = max(0, value)
 
     def update(self, delta: float, instances: int, backlog: int, duty_cycle: float):
         self.last_update = time.time()
@@ -388,21 +387,23 @@ class ScalerServer(ThreadedCoreBase):
             # Build the docker config for the dependencies. For now the dependency blob values
             # aren't set for the change key going to kubernetes because everything about
             # the dependency config should be captured in change key that the function generates
-            # internally. A change key is set for the service deployment as that includes 
+            # internally. A change key is set for the service deployment as that includes
             # things like the submission params
-            dependency_config: dict[str, Any] = {}        
-            dependency_blobs: dict[str, str] = {}        
+            dependency_config: dict[str, Any] = {}
+            dependency_blobs: dict[str, str] = {}
             for _n, dependency in service.dependencies.items():
                 dependency.container = prepare_container(dependency.container)
                 dependency_config[_n] = dependency
                 dependency_blobs[_n] = str(dependency)
 
-            if service.enabled and (stage == ServiceStage.Off or name not in self.profiles):
+            if service.enabled and stage == ServiceStage.Off:
                 # Move to the next service stage (do this first because the container we are starting may care)
                 if service.update_config and service.update_config.wait_for_update:
                     self._service_stage_hash.set(name, ServiceStage.Update)
+                    stage = ServiceStage.Update
                 else:
                     self._service_stage_hash.set(name, ServiceStage.Running)
+                    stage = ServiceStage.Running
 
                 # Enable this service's dependencies before trying to launch the service containers
                 self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
@@ -453,10 +454,10 @@ class ScalerServer(ThreadedCoreBase):
                     # Update RAM, CPU, licence requirements for running services
                     else:
                         profile = self.profiles[name]
-                        profile.set_max_instances(service.licence_count)
+                        profile.max_instances = service.licence_count
 
                         for dependency_name, dependency_blob in dependency_blobs.items():
-                            if profile.dependency_blobs[dependency_name] != dependency_blob:  
+                            if profile.dependency_blobs[dependency_name] != dependency_blob:
                                 self.log.info(f"Updating deployment information for {name}/{dependency_name}")
                                 profile.dependency_blobs[dependency_name] = dependency_blob
                                 self.controller.start_stateful_container(
@@ -473,7 +474,6 @@ class ScalerServer(ThreadedCoreBase):
                             profile.config_blob = config_blob
                             self.controller.restart(profile)
                             self.log.info(f"Deployment information for {name} replaced")
-
 
         except Exception:
             self.log.exception(f"Error applying service settings from: {service.name}")
@@ -552,8 +552,8 @@ class ScalerServer(ThreadedCoreBase):
                     prof = [_p for _p in prof if _p.desired_instances > targets[_p.name]]
                     drop = [_p for _p in prof if _p.cpu > free_cpu or _p.ram > free_memory]
                     if drop:
-                        drop = {_p.name: (_p.cpu, _p.ram) for _p in drop}
-                        self.log.debug(f"Can't make more because not enough resources {drop}")
+                        summary = {_p.name: (_p.cpu, _p.ram) for _p in drop}
+                        self.log.debug(f"Can't make more because not enough resources {summary}")
                     prof = [_p for _p in prof if _p.cpu <= free_cpu and _p.ram <= free_memory]
                     return prof
 

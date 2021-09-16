@@ -49,8 +49,8 @@ _max_retries = 10
 _retry_delay = 60 * 4  # Wait 4 minutes to retry
 _max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
 HOUR_IN_SECONDS = 60 * 60
-INGEST_THREADS = environ.get('INGESTER_INGEST_THREADS', 1)
-SUBMIT_THREADS = environ.get('INGESTER_SUBMIT_THREADS', 4)
+INGEST_THREADS = int(environ.get('INGESTER_INGEST_THREADS', 1))
+SUBMIT_THREADS = int(environ.get('INGESTER_SUBMIT_THREADS', 4))
 
 
 def must_drop(length: int, maximum: int) -> bool:
@@ -79,11 +79,11 @@ def must_drop(length: int, maximum: int) -> bool:
 def determine_resubmit_selected(selected: List[str], resubmit_to: List[str]) -> Optional[List[str]]:
     resubmit_selected = None
 
-    selected = set(selected)
-    resubmit_to = set(resubmit_to)
+    _selected = set(selected)
+    _resubmit_to = set(resubmit_to)
 
-    if not selected.issuperset(resubmit_to):
-        resubmit_selected = sorted(selected.union(resubmit_to))
+    if not _selected.issuperset(_resubmit_to):
+        resubmit_selected = sorted(_selected.union(_resubmit_to))
 
     return resubmit_selected
 
@@ -196,7 +196,7 @@ class Ingester(ThreadedCoreBase):
         self.retry_queue = PriorityQueue('m-retry', self.redis_persist)
 
         # Internal, timeout watch queue
-        self.timeout_queue = PriorityQueue('m-timeout', self.redis)
+        self.timeout_queue: PriorityQueue[str] = PriorityQueue('m-timeout', self.redis)
 
         # Internal, queue for processing duplicates
         #   When a duplicate file is detected (same cache key => same file, and same

@@ -1,27 +1,28 @@
 """
 A data structure encapsulating the timeout logic for the dispatcher.
 """
+from __future__ import annotations
 import queue
 import time
 from queue import PriorityQueue
 from dataclasses import dataclass, field
-from typing import TypeVar, Dict
+from typing import TypeVar, Generic, Hashable
 
-KeyType = TypeVar('KeyType')
+KeyType = TypeVar('KeyType', bound=Hashable)
 DataType = TypeVar('DataType')
 
 
 @dataclass(order=True)
-class TimeoutItem:
+class TimeoutItem(Generic[KeyType, DataType]):
     expiry: float
     key: KeyType = field(compare=False)
     data: DataType = field(compare=False)
 
 
-class TimeoutTable:
+class TimeoutTable(Generic[KeyType, DataType]):
     def __init__(self):
         self.timeout_queue: PriorityQueue[TimeoutItem] = PriorityQueue()
-        self.event_data: Dict[KeyType, TimeoutItem] = {}
+        self.event_data: dict[KeyType, TimeoutItem] = {}
 
     def set(self, key: KeyType, timeout: float, data: DataType):
         # If a timeout is set repeatedly with the same key, only the last one will count
@@ -37,7 +38,7 @@ class TimeoutTable:
     def __contains__(self, item):
         return item in self.event_data
 
-    def timeouts(self) -> Dict[KeyType, DataType]:
+    def timeouts(self) -> dict[KeyType, DataType]:
         found = {}
         try:
             now = time.time()
