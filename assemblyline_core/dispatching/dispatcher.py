@@ -1,3 +1,4 @@
+from __future__ import annotations
 import uuid
 import os
 import threading
@@ -57,9 +58,9 @@ class Action(enum.IntEnum):
 class DispatchAction:
     kind: Action
     sid: str = dataclasses.field(compare=False)
-    sha: str = dataclasses.field(compare=False, default=None)
-    service_name: str = dataclasses.field(compare=False, default=None)
-    worker_id: str = dataclasses.field(compare=False, default=None)
+    sha: Optional[str] = dataclasses.field(compare=False, default=None)
+    service_name: Optional[str] = dataclasses.field(compare=False, default=None)
+    worker_id: Optional[str] = dataclasses.field(compare=False, default=None)
     data: Any = dataclasses.field(compare=False, default=None)
 
 
@@ -103,7 +104,7 @@ class SubmissionTask:
         self.dropped_files = set()
 
         self.service_results: Dict[Tuple[str, str], ResultSummary] = {}
-        self.service_errors: Dict[Tuple[str, str], dict] = {}
+        self.service_errors: Dict[Tuple[str, str], str] = {}
         self.service_attempts: Dict[Tuple[str, str], int] = defaultdict(int)
         self.queue_keys: Dict[Tuple[str, str], bytes] = {}
         self.running_services: Set[Tuple[str, str]] = set()
@@ -198,8 +199,8 @@ class Dispatcher(ThreadedCoreBase):
             self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
                                                 service_name="dispatcher")
 
-        self._service_timeouts = TimeoutTable()
-        self._submission_timeouts = TimeoutTable()
+        self._service_timeouts: TimeoutTable[Tuple[str, str, str], str] = TimeoutTable()
+        self._submission_timeouts: TimeoutTable[str, None] = TimeoutTable()
 
         # Setup queues for work to be divided into
         self.process_queues: List[PriorityQueue[DispatchAction]] = [PriorityQueue() for _ in range(RESULT_THREADS)]
@@ -403,7 +404,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Go through each round of the schedule removing complete/failed services
         # Break when we find a stage that still needs processing
-        outstanding = {}
+        outstanding: dict[str, Service] = {}
         started_stages = []
         with elasticapm.capture_span('check_result_table'):
             while schedule and not outstanding:
@@ -1155,8 +1156,8 @@ class Dispatcher(ThreadedCoreBase):
 
                 command = DispatcherCommandMessage(message)
                 if command.kind == CREATE_WATCH:
-                    payload: CreateWatch = command.payload()
-                    self.setup_watch_queue(payload.submission, payload.queue_name)
+                    watch_payload: CreateWatch = command.payload()
+                    self.setup_watch_queue(watch_payload.submission, watch_payload.queue_name)
                 elif command.kind == LIST_OUTSTANDING:
                     payload: ListOutstanding = command.payload()
                     self.list_outstanding(payload.submission, payload.response_queue)
@@ -1191,7 +1192,7 @@ class Dispatcher(ThreadedCoreBase):
     @elasticapm.capture_span(span_type='dispatcher')
     def list_outstanding(self, sid: str, queue_name: str):
         response_queue = NamedQueue(queue_name, host=self.redis)
-        outstanding = defaultdict(int)
+        outstanding: defaultdict[str, int] = defaultdict(int)
         task = self.tasks.get(sid)
         if task:
             for sha, service_name in list(task.queue_keys.keys()):
@@ -1289,7 +1290,7 @@ class Dispatcher(ThreadedCoreBase):
 
     def recover_submission(self, sid: str, message: str) -> bool:
         # Make sure we can load the submission body
-        submission: Submission = self.datastore.submission.get_if_exists(sid)
+        submission: Optional[Submission] = self.datastore.submission.get_if_exists(sid)
         if not submission:
             return False
         if submission.state != 'submitted':
