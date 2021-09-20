@@ -147,7 +147,7 @@ class Ingester(ThreadedCoreBase):
                          datastore=datastore, config=config)
 
         # Cache the user groups
-        self.cache_lock = threading.RLock()  # TODO are middle man instances single threaded now?
+        self.cache_lock = threading.RLock()
         self._user_groups = {}
         self._user_groups_reset = time.time()//HOUR_IN_SECONDS
         self.cache = {}
