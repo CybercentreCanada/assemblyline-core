@@ -63,7 +63,7 @@ class HarborRegistry(ContainerRegistry):
                 resp = requests.get(url, headers=headers, verify=verify)
 
         if resp.ok:
-            return [tag['name'] for image in resp.json() for tag in image['tags']]
+            return [tag['name'] for image in resp.json() if image['tags'] for tag in image['tags']]
         return []
 
 

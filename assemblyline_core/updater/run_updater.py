@@ -17,8 +17,10 @@ from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec,
     V1ConfigMapVolumeSource, V1Secret, V1LocalObjectReference
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
+from assemblyline.odm.messages.changes import Operation
 
 from assemblyline.odm.models.service import DockerConfig
+from assemblyline.remote.datatypes.events import EventSender
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config
 from assemblyline_core.server_base import CoreBase
@@ -370,6 +372,7 @@ class ServiceUpdater(CoreBase):
 
         self.container_update: Hash[dict[str, Any]] = Hash('container-update', self.redis_persist)
         self.latest_service_tags: Hash[dict[str, str]] = Hash('service-tags', self.redis_persist)
+        self.service_events = EventSender('changes.services', host=self.redis)
 
         # Prepare a single threaded scheduler
         self.scheduler = sched.scheduler()
@@ -431,6 +434,10 @@ class ServiceUpdater(CoreBase):
                     operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
                     if self.datastore.service_delta.update(service_name, operations):
                         # Update completed, cleanup
+                        self.service_events.send(service_name, {
+                            'operation': Operation.Modified,
+                            'name': service_name
+                        })
                         self.log.info(f"Service {service_name} update successful!")
                     else:
                         self.log.error(f"Service {service_name} has failed to update because it cannot set "
