@@ -1,25 +1,25 @@
+from __future__ import annotations
 import os
 import threading
 import time
+from collections import defaultdict
 from typing import List, Tuple, Dict
+import uuid
 
-from assemblyline.odm.models.service import DockerConfig
+from assemblyline.odm.models.service import DependencyConfig, DockerConfig
 from .interface import ControllerInterface, ServiceControlError
 
-# How to identify the update volume as a whole, in a way that the underlying container system recognizes.
-FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
-
 # Where to find the update directory inside this container.
-FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
 
 # Every this many seconds, check that the services can actually reach the service server.
 NETWORK_REFRESH_INTERVAL = 60 * 3
+CHANGE_KEY_NAME = 'al_change_key'
 
 
 class DockerController(ControllerInterface):
     """A controller for *non* swarm mode docker."""
-    def __init__(self, logger, prefix='', labels=None, cpu_overallocation=1, memory_overallocation=1, log_level="INFO"):
+    def __init__(self, logger, prefix='', labels: dict[str, str] = None, cpu_overallocation=1, memory_overallocation=1, log_level="INFO"):
         """
         :param logger: A logger to report status and debug information.
         :param prefix: A prefix used to distinguish containers launched by this controller.
@@ -32,9 +32,11 @@ class DockerController(ControllerInterface):
         self.log = logger
         self.log_level = log_level
         self.global_mounts: List[Tuple[str, str]] = []
+        self.core_mounts: List[Tuple[str, str]] = []
         self._prefix: str = prefix
-        self._labels = labels
+        self._labels: dict[str, str] = labels or {}
         self.prune_lock = threading.Lock()
+        self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
 
         for network in self.client.networks.list(names=['external']):
             self.external_network = network
@@ -109,8 +111,8 @@ class DockerController(ControllerInterface):
 
     def add_profile(self, profile, scale=0):
         """Tell the controller about a service profile it needs to manage."""
-        self._pull_image(profile)
         self._profiles[profile.name] = profile
+        self._pull_image(profile)
 
     def _start(self, service_name):
         """Launch a docker container in a manner suitable for Assemblyline."""
@@ -124,15 +126,13 @@ class DockerController(ControllerInterface):
 
         # Prepare the volumes and folders
         volumes = {row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.global_mounts}
-        volumes[os.path.join(FILE_UPDATE_VOLUME, service_name)] = {'bind': '/mount/updates/', 'mode': 'ro'}
-        if not os.path.exists(os.path.join(FILE_UPDATE_DIRECTORY, service_name)):
-            os.makedirs(os.path.join(FILE_UPDATE_DIRECTORY, service_name), 0x777)
 
         # Define environment variables
         env = [f'{_e.name}={_e.value}' for _e in cfg.environment]
         env += ['UPDATE_PATH=/mount/updates/']
         env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
         env += [f'LOG_LEVEL={self.log_level}']
+        env += [f'{_n}={_v}' for _n, _v in self._service_limited_env[service_name].items()]
 
         container = self.client.containers.run(
             image=cfg.image,
@@ -152,7 +152,7 @@ class DockerController(ControllerInterface):
         if cfg.allow_internet_access:
             self.external_network.connect(container)
 
-    def _start_container(self, name, labels, volumes, cfg: DockerConfig, network, hostname):
+    def _start_container(self, service_name, name, labels, volumes, cfg: DockerConfig, network, hostname, core_container=False):
         """Launch a docker container."""
         # Take the port strings and convert them to a dictionary
         ports = {}
@@ -174,9 +174,13 @@ class DockerController(ControllerInterface):
             self.log.warning(f"Not sure how to parse port string {port_string} for container {name} not using it...")
 
         # Put together the environment variables
-        env = [f'{_e.name}={_e.value}' for _e in cfg.environment]
+        env = []
+        if core_container:
+            env += [f'{_n}={_v}' for _n, _v in os.environ.items()
+                    if any(term in _n for term in ['ELASTIC', 'FILESTORE', 'UI_SERVER'])]
+        env += [f'{_e.name}={_e.value}' for _e in cfg.environment]
         env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
-        env += [f'LOG_LEVEL={self.log_level}']
+        env += [f'LOG_LEVEL={self.log_level}', f'AL_SERVICE_NAME={service_name}']
 
         container = self.client.containers.run(
             image=cfg.image,
@@ -192,8 +196,9 @@ class DockerController(ControllerInterface):
             network=network,
             environment=env,
             detach=True,
-            ports=ports,
+            # ports=ports,
         )
+
         if cfg.allow_internet_access:
             self.external_network.connect(container, aliases=[hostname])
 
@@ -324,16 +329,44 @@ class DockerController(ControllerInterface):
             out.append(container.name)
         return out
 
-    def start_stateful_container(self, service_name, container_name, spec, labels, mount_updates=False, change_key=''):
-        volumes = {_n: {'bind': _v.mount_path, 'mode': 'rw'} for _n, _v in spec.volumes.items()}
+    def start_stateful_container(self, service_name: str, container_name: str, spec: DependencyConfig,
+                                 labels: dict[str, str], change_key: str):
+        import docker.errors
         deployment_name = f'{service_name}-dep-{container_name}'
 
+        change_check = change_key + service_name + container_name + str(spec)
+
+        try:
+            old_container = self.client.containers.get(deployment_name)
+            instance_key = old_container.attrs["Config"]["Env"]['AL_INSTANCE_KEY']
+            if old_container.labels.get(CHANGE_KEY_NAME) == change_check and old_container.status == 'running':
+                self._service_limited_env[service_name][f'{container_name}_host'] = deployment_name
+                self._service_limited_env[service_name][f'{container_name}_key'] = instance_key
+                if spec.container.ports:
+                    self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
+                return
+            else:
+                old_container.kill()
+        except docker.errors.NotFound:
+            instance_key = uuid.uuid4().hex
+
+        volumes = {_n: {'bind': _v.mount_path, 'mode': 'rw'} for _n, _v in spec.volumes.items()}
+        if spec.run_as_core:
+            volumes.update({row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.core_mounts})
+
         all_labels = dict(self._labels)
-        all_labels.update({'component': service_name})
+        all_labels.update({'component': service_name, CHANGE_KEY_NAME: change_check})
         all_labels.update(labels)
 
-        self._start_container(name=deployment_name, labels=all_labels, volumes=volumes, hostname=container_name,
-                              cfg=spec.container, network=self._get_network(service_name).name)
+        spec.container.environment.append({'name': 'AL_INSTANCE_KEY', 'value': instance_key})
+
+        self._service_limited_env[service_name][f'{container_name}_host'] = deployment_name
+        self._service_limited_env[service_name][f'{container_name}_key'] = instance_key
+        if spec.container.ports:
+            self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
+
+        self._start_container(service_name=service_name, name=deployment_name, labels=all_labels, volumes=volumes, hostname=container_name,
+                              cfg=spec.container, core_container=spec.run_as_core, network=self._get_network(service_name).name)
 
     def stop_containers(self, labels):
         label_strings = [f'{name}={value}' for name, value in labels.items()]
@@ -368,6 +401,7 @@ class DockerController(ControllerInterface):
 
         This lets us override the auth_config on a per image basis.
         """
+        from docker.errors import ImageNotFound
         # Split the image string into "[registry/]image_name" and "tag"
         repository, _, tag = service.container_config.image.rpartition(':')
         if '/' in tag:
@@ -385,4 +419,13 @@ class DockerController(ControllerInterface):
                 'password': service.container_config.registry_password
             }
 
-        self.client.images.pull(repository, tag, auth_config=auth_config)
+        try:
+            self.client.images.pull(repository, tag, auth_config=auth_config)
+        except ImageNotFound:
+            self.log.error(f"Couldn't pull image {repository}:{tag} check authentication settings. "
+                           "Will try to use local copy.")
+
+            try:
+                self.client.images.get(repository + ':' + tag)
+            except ImageNotFound:
+                self.log.error(f"Couldn't find local image {repository}:{tag}")

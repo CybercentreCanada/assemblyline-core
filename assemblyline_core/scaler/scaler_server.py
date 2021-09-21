@@ -16,6 +16,7 @@ import copy
 from contextlib import contextmanager
 
 import elasticapm
+import yaml
 
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue, length as pq_length
@@ -26,7 +27,7 @@ from assemblyline.odm.models.service import Service, DockerConfig
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
 from assemblyline.odm.messages.scaler_status_heartbeat import Status
 from assemblyline.odm.messages.changes import ServiceChange, Operation
-from assemblyline.common.forge import get_service_queue
+from assemblyline.common.forge import get_classification, get_service_queue
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline_core.scaler.controllers import KubernetesController
 from assemblyline_core.scaler.controllers.interface import ServiceControlError
@@ -60,6 +61,8 @@ CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
 CLASSIFICATION_CONFIGMAP = os.getenv('CLASSIFICATION_CONFIGMAP', None)
 CLASSIFICATION_CONFIGMAP_KEY = os.getenv('CLASSIFICATION_CONFIGMAP_KEY', 'classification.yml')
 
+DOCKER_CONFIGURATION_PATH = os.getenv('DOCKER_CONFIGURATION_PATH', None)
+DOCKER_CONFIGURATION_VOLUME = os.getenv('DOCKER_CONFIGURATION_VOLUME', None)
 CONFIGURATION_CONFIGMAP = os.getenv('CONFIGURATION_CONFIGMAP', None)
 CONFIGURATION_CONFIGMAP_KEY = os.getenv('CONFIGURATION_CONFIGMAP_KEY', 'config')
 
@@ -276,6 +279,16 @@ class ScalerServer(ThreadedCoreBase):
                                                cpu_overallocation=self.config.core.scaler.cpu_overallocation,
                                                memory_overallocation=self.config.core.scaler.memory_overallocation,
                                                labels=labels, log_level=self.config.logging.log_level)
+
+            if DOCKER_CONFIGURATION_PATH and DOCKER_CONFIGURATION_VOLUME:
+                self.controller.core_mounts.append((DOCKER_CONFIGURATION_VOLUME, '/etc/assemblyline/'))
+
+                with open(os.path.join(DOCKER_CONFIGURATION_PATH, 'config.yml'), 'w') as handle:
+                    yaml.dump(self.config.as_primitives(), handle)
+
+                with open(os.path.join(DOCKER_CONFIGURATION_PATH, 'classification.yml'), 'w') as handle:
+                    yaml.dump(get_classification().original_definition, handle)
+
             # If we know where to find it, mount the classification into the service containers
             if CLASSIFICATION_HOST_PATH:
                 self.controller.global_mounts.append((CLASSIFICATION_HOST_PATH, '/etc/assemblyline/classification.yml'))
@@ -397,6 +410,7 @@ class ScalerServer(ThreadedCoreBase):
                 dependency_blobs[_n] = str(dependency)
 
             if service.enabled and stage == ServiceStage.Off:
+                self.log.info(f'Preparing environment for {service.name}')
                 # Move to the next service stage (do this first because the container we are starting may care)
                 if service.update_config and service.update_config.wait_for_update:
                     self._service_stage_hash.set(name, ServiceStage.Update)
@@ -408,6 +422,7 @@ class ScalerServer(ThreadedCoreBase):
                 # Enable this service's dependencies before trying to launch the service containers
                 self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
                 for _n, dependency in dependency_config.items():
+                    self.log.info(f'Launching {service.name} dependency {_n}')
                     self.controller.start_stateful_container(
                         service_name=service.name,
                         container_name=_n,

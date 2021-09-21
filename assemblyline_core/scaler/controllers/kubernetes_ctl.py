@@ -673,7 +673,7 @@ class KubernetesController(ControllerInterface):
         return new
 
     def start_stateful_container(self, service_name: str, container_name: str,
-                                 spec, labels: dict[str, str], change_key:str):
+                                 spec, labels: dict[str, str], change_key: str):
         # Setup PVC
         deployment_name = self._dependency_name(service_name, container_name)
         mounts, volumes = [], []
