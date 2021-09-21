@@ -13,6 +13,7 @@ import sys
 import io
 import os
 from typing import Callable, TYPE_CHECKING
+import typing
 
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
@@ -39,7 +40,7 @@ class ServerBase(threading.Thread):
     makes a blocking call that would normally stop this.
     """
     def __init__(self, component_name: str, logger: logging.Logger = None,
-                 shutdown_timeout: float = SHUTDOWN_SECONDS_LIMIT, config=None):
+                 shutdown_timeout: float = None, config=None):
         super().__init__(name=component_name)
         al_log.init_logging(component_name)
         self.config: Config = config or forge.get_config()
@@ -209,7 +210,7 @@ class CoreBase(ServerBase):
         )
 
         # Create a cached service data object, and access to the service status
-        self.service_info: dict[str, Service] = forge.CachedObject(self._get_services)
+        self.service_info = typing.cast(typing.Dict[str, Service], forge.CachedObject(self._get_services))
         self._service_stage_hash = get_service_stage_hash(self.redis)
 
     def _get_services(self):
@@ -234,11 +235,9 @@ class ThreadedCoreBase(CoreBase):
         super().stop()
         self.main_loop_exit.wait(30)
 
-
     def sleep(self, timeout: float):
         self.stopping.wait(timeout)
         return self.running
-
 
     def log_crashes(self, fn):
         @functools.wraps(fn)
@@ -252,7 +251,7 @@ class ThreadedCoreBase(CoreBase):
 
     def maintain_threads(self, expected_threads: dict[str, Callable[..., None]]):
         expected_threads = {name: self.log_crashes(start) for name, start in expected_threads.items()}
-        threads = {}
+        threads: dict[str, threading.Thread] = {}
 
         # Run as long as we need to
         while self.running:
