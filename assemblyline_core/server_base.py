@@ -13,6 +13,8 @@ import sys
 import io
 import os
 from typing import Callable, TYPE_CHECKING
+import typing
+from assemblyline.odm.base import Optional
 
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
@@ -39,7 +41,7 @@ class ServerBase(threading.Thread):
     makes a blocking call that would normally stop this.
     """
     def __init__(self, component_name: str, logger: logging.Logger = None,
-                 shutdown_timeout: float = SHUTDOWN_SECONDS_LIMIT, config=None):
+                 shutdown_timeout: float = None, config=None):
         super().__init__(name=component_name)
         al_log.init_logging(component_name)
         self.config: Config = config or forge.get_config()
@@ -51,25 +53,26 @@ class ServerBase(threading.Thread):
         self._exception = None
         self._traceback = None
         self._shutdown_timeout = shutdown_timeout if shutdown_timeout is not None else SHUTDOWN_SECONDS_LIMIT
-        self._old_sigint = None
-        self._old_sigterm = None
+        self._old_sigint: Optional[Callable[..., None]] = None
+        self._old_sigterm: Optional[Callable[..., None]] = None
         self._stopped = False
-        self._last_heartbeat = 0
+        self._last_heartbeat = 0.0
 
     def __enter__(self):
-        self.log.info(f"Initialized")
+        self.log.info("Initialized")
         return self
 
     def __exit__(self, _exc_type, _exc_val, _exc_tb):
         if _exc_type is not None:
             self.log.exception(f'Terminated because of an {_exc_type} exception')
         else:
-            self.log.info(f'Terminated')
+            self.log.info('Terminated')
 
     def __stop(self):
         """Hard stop, can still be blocked in some cases, but we should try to avoid them."""
         time.sleep(self._shutdown_timeout)
-        self.log.error(f"Server {self.__class__.__name__} has shutdown hard after waiting {self._shutdown_timeout} seconds to stop")
+        self.log.error(f"Server {self.__class__.__name__} has shutdown hard after "
+                       f"waiting {self._shutdown_timeout} seconds to stop")
 
         if not self._stopped:
             self._stopped = True
@@ -78,7 +81,7 @@ class ServerBase(threading.Thread):
         ctypes.string_at(0)  # SEGFAULT out of here
 
     def interrupt_handler(self, signum, stack_frame):
-        self.log.info(f"Instance caught signal. Coming down...")
+        self.log.info("Instance caught signal. Coming down...")
         self.stop()
         if signum == signal.SIGINT and self._old_sigint:
             self._old_sigint(signum, stack_frame)
@@ -113,7 +116,7 @@ class ServerBase(threading.Thread):
         """Start the server workload."""
         self.running = True
         super().start()
-        self.log.info(f"Started")
+        self.log.info("Started")
         self._old_sigint = signal.signal(signal.SIGINT, self.interrupt_handler)
         self._old_sigterm = signal.signal(signal.SIGTERM, self.interrupt_handler)
 
@@ -141,8 +144,9 @@ class ServerBase(threading.Thread):
         a background thread defeats the purpose. Ideally it should be called at least a couple
         times a minute.
         """
+        utime_timestamp = None
         if timestamp is not None:
-            timestamp = (timestamp, timestamp)
+            utime_timestamp = (timestamp, timestamp)
 
         if self.config.logging.heartbeat_file:
             # Only do the heartbeat every few seconds at most. If a fast component is
@@ -153,7 +157,7 @@ class ServerBase(threading.Thread):
                 return
             self._last_heartbeat = now
             with io.open(self.config.logging.heartbeat_file, 'ab'):
-                os.utime(self.config.logging.heartbeat_file, times=timestamp)
+                os.utime(self.config.logging.heartbeat_file, times=utime_timestamp)
 
     def sleep_with_heartbeat(self, duration):
         """Sleep while calling heartbeat periodically."""
@@ -209,7 +213,7 @@ class CoreBase(ServerBase):
         )
 
         # Create a cached service data object, and access to the service status
-        self.service_info: dict[str, Service] = forge.CachedObject(self._get_services)
+        self.service_info = typing.cast(typing.Dict[str, Service], forge.CachedObject(self._get_services))
         self._service_stage_hash = get_service_stage_hash(self.redis)
 
     def _get_services(self):
@@ -234,11 +238,9 @@ class ThreadedCoreBase(CoreBase):
         super().stop()
         self.main_loop_exit.wait(30)
 
-
     def sleep(self, timeout: float):
         self.stopping.wait(timeout)
         return self.running
-
 
     def log_crashes(self, fn):
         @functools.wraps(fn)
@@ -252,7 +254,7 @@ class ThreadedCoreBase(CoreBase):
 
     def maintain_threads(self, expected_threads: dict[str, Callable[..., None]]):
         expected_threads = {name: self.log_crashes(start) for name, start in expected_threads.items()}
-        threads = {}
+        threads: dict[str, threading.Thread] = {}
 
         # Run as long as we need to
         while self.running:

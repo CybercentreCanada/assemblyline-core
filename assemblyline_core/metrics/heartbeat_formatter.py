@@ -23,6 +23,7 @@ from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue
+from assemblyline_core.ingester.constants import COMPLETE_QUEUE_NAME
 
 STATUS_QUEUE = "status"
 
@@ -68,6 +69,7 @@ class HeartbeatFormatter(object):
         self.ingest_scanning = Hash('m-scanning-table', self.redis_persist)
         self.ingest_unique_queue = PriorityQueue('m-unique', self.redis_persist)
         self.ingest_queue = NamedQueue(INGEST_QUEUE_NAME, self.redis_persist)
+        self.ingest_complete_queue = NamedQueue(COMPLETE_QUEUE_NAME, self.redis)
         self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.redis_persist)
 
         constants = forge.get_constants(self.config)
@@ -162,6 +164,7 @@ class HeartbeatFormatter(object):
                             "critical": c_q_len,
                             "high": h_q_len,
                             "ingest": self.ingest_queue.length(),
+                            "complete": self.ingest_complete_queue.length(),
                             "low": l_q_len,
                             "medium": m_q_len
                         }

@@ -381,7 +381,7 @@ class ServiceUpdater(CoreBase):
         if 'KUBERNETES_SERVICE_HOST' in os.environ and NAMESPACE:
             extra_labels = {}
             if self.config.core.scaler.additional_labels:
-                extra_labels = {k: v for k, v in (l.split("=") for l in self.config.core.scaler.additional_labels)}
+                extra_labels = {k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)}
             self.controller = KubernetesUpdateInterface(prefix='alsvc_', namespace=NAMESPACE,
                                                         priority_class='al-core-priority',
                                                         extra_labels=extra_labels,

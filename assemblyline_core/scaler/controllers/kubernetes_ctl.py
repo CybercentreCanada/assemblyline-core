@@ -436,12 +436,6 @@ class KubernetesController(ControllerInterface):
             return self._quota_mem_limit - self._pod_used_namespace_ram, self._quota_mem_limit
         return self._node_pool_max_ram - self._pod_used_ram, self._node_pool_max_ram
 
-    def _create_volumes(self, core_mounts=False):
-        volumes, mounts = [], []
-
-
-        return volumes, mounts
-
     def _create_containers(self, service_name: str, deployment_name: str, container_config, mounts,
                            core_container=False):
         cores = container_config.cpu_cores
@@ -476,9 +470,9 @@ class KubernetesController(ControllerInterface):
         )]
 
     def _create_deployment(self, service_name: str, deployment_name: str, docker_config: DockerConfig,
-                           shutdown_seconds: int, scale: int, labels:dict[str,str]=None,
-                           volumes:list[V1Volume]=None, mounts:list[V1VolumeMount]=None,
-                           core_mounts:bool=False, change_key:str=''):
+                           shutdown_seconds: int, scale: int, labels: dict[str, str] = None,
+                           volumes: list[V1Volume] = None, mounts: list[V1VolumeMount] = None,
+                           core_mounts: bool = False, change_key: str = ''):
         # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
@@ -490,7 +484,8 @@ class KubernetesController(ControllerInterface):
         # Check if a deployment already exists, and if it does check if it has the same change key set
         replace = None
         try:
-            replace = self.apps_api.read_namespaced_deployment(deployment_name, namespace=self.namespace, _request_timeout=API_TIMEOUT)
+            replace = self.apps_api.read_namespaced_deployment(
+                deployment_name, namespace=self.namespace, _request_timeout=API_TIMEOUT)
             if replace.metadata.annotations.get(CHANGE_KEY_NAME) == change_key:
                 if replace.spec.replicas != scale:
                     self.set_target(service_name, scale)
@@ -530,7 +525,7 @@ class KubernetesController(ControllerInterface):
             # Send it to the server
             if current_pull_secret:
                 self.api.patch_namespaced_secret(pull_secret_name, namespace=self.namespace, body=new_pull_secret,
-                                                   _request_timeout=API_TIMEOUT)
+                                                 _request_timeout=API_TIMEOUT)
             else:
                 self.api.create_namespaced_secret(namespace=self.namespace, body=new_pull_secret,
                                                   _request_timeout=API_TIMEOUT)
@@ -613,7 +608,7 @@ class KubernetesController(ControllerInterface):
                                                                        _request_timeout=API_TIMEOUT)
                 scale.spec.replicas = target
                 self.apps_api.patch_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale,
-                                                                  _request_timeout=API_TIMEOUT)
+                                                                _request_timeout=API_TIMEOUT)
                 return
             except client.ApiException as error:
                 # If the error is a conflict, it means multiple attempts to scale a deployment
@@ -673,7 +668,7 @@ class KubernetesController(ControllerInterface):
         return new
 
     def start_stateful_container(self, service_name: str, container_name: str,
-                                 spec, labels: dict[str, str], change_key:str):
+                                 spec, labels: dict[str, str], change_key: str):
         # Setup PVC
         deployment_name = self._dependency_name(service_name, container_name)
         mounts, volumes = [], []

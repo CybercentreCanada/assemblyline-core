@@ -6,7 +6,7 @@ import string
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
 from collections import defaultdict
 from base64 import b64encode
-from packaging.version import parse
+from packaging.version import parse, Version
 
 DEFAULT_DOCKER_REGISTRY = "registry.hub.docker.com"
 
@@ -27,6 +27,7 @@ class DockerRegistry(ContainerRegistry):
         if auth:
             headers["Authorization"] = auth
 
+        resp = None
         try:
             resp = requests.get(url, headers=headers, verify=verify)
         except requests.exceptions.SSLError:
@@ -36,7 +37,7 @@ class DockerRegistry(ContainerRegistry):
                 resp = requests.get(url, headers=headers, verify=verify)
 
         # Test for valid response
-        if resp.ok:
+        if resp and resp.ok:
             # Test for positive list of tags
             resp_data = resp.json()
             return resp_data['tags']
@@ -54,6 +55,7 @@ class HarborRegistry(ContainerRegistry):
         if auth:
             headers["Authorization"] = auth
 
+        resp = None
         try:
             resp = requests.get(url, headers=headers, verify=verify)
         except requests.exceptions.SSLError:
@@ -62,7 +64,7 @@ class HarborRegistry(ContainerRegistry):
                 url = f"http://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts"
                 resp = requests.get(url, headers=headers, verify=verify)
 
-        if resp.ok:
+        if resp and resp.ok:
             return [tag['name'] for image in resp.json() if image['tags'] for tag in image['tags']]
         return []
 
@@ -134,8 +136,8 @@ def get_latest_tag_for_service(service_config, system_config, logger):
     else:
         tag_name = f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.0.{update_channel}0"
         for t in tags:
-            if re.match(f"({FRAMEWORK_VERSION})[.]({SYSTEM_VERSION})[.]\d+[.]({update_channel})\d+", t):
-                t_version = parse(t.replace(update_channel, ""))
+            if re.match(f"({FRAMEWORK_VERSION})[.]({SYSTEM_VERSION})[.]\\d+[.]({update_channel})\\d+", t):
+                t_version = Version(t.replace(update_channel, ""))
                 if t_version.major == FRAMEWORK_VERSION and t_version.minor == SYSTEM_VERSION and \
                         t_version > parse(tag_name.replace(update_channel, "")):
                     tag_name = t

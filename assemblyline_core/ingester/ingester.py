@@ -49,6 +49,7 @@ _max_retries = 10
 _retry_delay = 60 * 4  # Wait 4 minutes to retry
 _max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
 HOUR_IN_SECONDS = 60 * 60
+COMPLETE_THREADS = int(environ.get('INGESTER_COMPLETE_THREADS', 4))
 INGEST_THREADS = int(environ.get('INGESTER_INGEST_THREADS', 1))
 SUBMIT_THREADS = int(environ.get('INGESTER_SUBMIT_THREADS', 4))
 
@@ -147,7 +148,7 @@ class Ingester(ThreadedCoreBase):
                          datastore=datastore, config=config)
 
         # Cache the user groups
-        self.cache_lock = threading.RLock()  # TODO are middle man instances single threaded now?
+        self.cache_lock = threading.RLock()
         self._user_groups = {}
         self._user_groups_reset = time.time()//HOUR_IN_SECONDS
         self.cache = {}
@@ -223,10 +224,10 @@ class Ingester(ThreadedCoreBase):
 
     def try_run(self):
         threads_to_maintain = {
-            'Complete': self.handle_complete,
             'Retries': self.handle_retries,
             'Timeouts': self.handle_timeouts
         }
+        threads_to_maintain.update({f'Complete_{n}': self.handle_complete for n in range(COMPLETE_THREADS)})
         threads_to_maintain.update({f'Ingest_{n}': self.handle_ingest for n in range(INGEST_THREADS)})
         threads_to_maintain.update({f'Submit_{n}': self.handle_submit for n in range(SUBMIT_THREADS)})
         self.maintain_threads(threads_to_maintain)
