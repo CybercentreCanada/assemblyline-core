@@ -3,7 +3,7 @@ import re
 import socket
 import string
 
-from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
+from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION, BUILD_MINOR
 from collections import defaultdict
 from base64 import b64encode
 from packaging.version import parse
@@ -112,7 +112,7 @@ def get_latest_tag_for_service(service_config, system_config, logger):
         logger.warning(f"Cannot fetch latest tag for service {service_name} - {image}"
                        f" => [server: {server}, repo_name: {image_name}, channel: {update_channel}]")
     else:
-        tag_name = f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.0.{update_channel}0"
+        tag_name = f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.{BUILD_MINOR}.{update_channel}0"
         for t in tags:
             if re.match(f"({FRAMEWORK_VERSION})[.]({SYSTEM_VERSION})[.]\d+[.]({update_channel})\d+", t):
                 t_version = parse(t.replace(update_channel, ""))
