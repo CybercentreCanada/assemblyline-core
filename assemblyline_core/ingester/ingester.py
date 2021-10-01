@@ -726,7 +726,7 @@ class Ingester(ThreadedCoreBase):
                 'sid': sid,
                 'time': now(),
             })
-            self.datastore.filescore.save(scan_key, fs)
+        self.datastore.filescore.save(scan_key, fs)
 
         self.finalize(psid, sid, score, task)
 
