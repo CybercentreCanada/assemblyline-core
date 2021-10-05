@@ -461,11 +461,7 @@ class ServiceUpdater(CoreBase):
 
         for service in self.datastore.list_all_services(full=True):
             discovered_services.append(service.name)
-            if not service.enabled:
-                continue
-
             image_name, tag_name, auth = get_latest_tag_for_service(service, self.config, self.log)
-
             self.latest_service_tags.set(service.name,
                                          {'auth': auth, 'image': image_name, service.update_channel: tag_name})
 

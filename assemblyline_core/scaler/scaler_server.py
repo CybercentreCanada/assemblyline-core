@@ -29,6 +29,7 @@ from assemblyline.odm.messages.scaler_status_heartbeat import Status
 from assemblyline.odm.messages.changes import ServiceChange, Operation
 from assemblyline.common.forge import get_classification, get_service_queue
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
+from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
 from assemblyline_core.scaler.controllers import KubernetesController
 from assemblyline_core.scaler.controllers.interface import ServiceControlError
 from assemblyline_core.server_base import ServiceStage, ThreadedCoreBase
@@ -397,6 +398,18 @@ class ScalerServer(ThreadedCoreBase):
 
         # noinspection PyBroadException
         try:
+            # Is this service considered compatible to run on this version of Assemblyline?
+            system_spec = f'{FRAMEWORK_VERSION}.{SYSTEM_VERSION}'
+            if not service.version.startswith(system_spec):
+                # Raise awareness to other components by editing document in datastore
+                service.enabled = False
+                if self.datastore.service.save(key=f'{service.name}_{service.version}', data=service):
+                    self.stop_service(service.name, stage)
+                    raise Exception("Service version isn't compatible with system.\n"
+                                    f"Expected: '{system_spec}.X.{service.update_channel}Y'.\n"
+                                    f"Got: {service.version}\n"
+                                    "Service will be disabled.")
+
             # Build the docker config for the dependencies. For now the dependency blob values
             # aren't set for the change key going to kubernetes because everything about
             # the dependency config should be captured in change key that the function generates
