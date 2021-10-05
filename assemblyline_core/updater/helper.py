@@ -3,7 +3,7 @@ import re
 import socket
 import string
 
-from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
+from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION, BUILD_MINOR
 from collections import defaultdict
 from base64 import b64encode
 from packaging.version import parse, Version

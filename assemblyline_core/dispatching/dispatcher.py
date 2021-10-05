@@ -359,6 +359,7 @@ class Dispatcher(ThreadedCoreBase):
 
         :param task: Submission task object.
         :param sha256: hash of the file to check.
+        :param timed_out_host: Name of the host that timed out after maximum service attempts.
         :return: true if submission is finished.
         """
         submission = task.submission
