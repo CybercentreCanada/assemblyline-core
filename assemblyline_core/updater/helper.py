@@ -134,11 +134,13 @@ def get_latest_tag_for_service(service_config, system_config, logger):
         logger.warning(f"Cannot fetch latest tag for service {service_name} - {image_name}"
                        f" => [server: {server}, repo_name: {image_name}, channel: {update_channel}]")
     else:
-        tag_name = f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.{BUILD_MINOR}.{update_channel}0"
         for t in tags:
             if re.match(f"({FRAMEWORK_VERSION})[.]({SYSTEM_VERSION})[.]\\d+[.]({update_channel})\\d+", t):
                 t_version = Version(t.replace(update_channel, ""))
-                if t_version.major == FRAMEWORK_VERSION and t_version.minor == SYSTEM_VERSION and \
+                # Tag name gets assigned to the first viable option then relies on comparison to get the latest
+                if not tag_name:
+                    tag_name = t
+                elif t_version.major == FRAMEWORK_VERSION and t_version.minor == SYSTEM_VERSION and \
                         t_version > parse(tag_name.replace(update_channel, "")):
                     tag_name = t
 
