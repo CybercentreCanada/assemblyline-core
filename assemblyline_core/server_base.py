@@ -93,6 +93,7 @@ class ServerBase(threading.Thread):
         except Exception:
             _, self._exception, self._traceback = sys.exc_info()
             self.log.exception("Exiting:")
+            self.stop()
 
     def serve_forever(self):
         self.start()
