@@ -27,12 +27,13 @@ class Scheduler:
         self.services = cast(Dict[str, Service], CachedObject(self._get_services))
         self.service_stage = get_service_stage_hash(redis)
 
-    def build_schedule(self, submission: Submission, file_type: str) -> list[dict[str, Service]]:
+    def build_schedule(self, submission: Submission, file_type: str, exclude) -> list[dict[str, Service]]:
         all_services = dict(self.services)
 
         # Load the selected and excluded services by category
         excluded = self.expand_categories(submission.params.services.excluded)
         runtime_excluded = self.expand_categories(submission.params.services.runtime_excluded)
+        runtime_excluded.extend(exclude)
         if not submission.params.services.selected:
             selected = [s for s in all_services.keys()]
         else:

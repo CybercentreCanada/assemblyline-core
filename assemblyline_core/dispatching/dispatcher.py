@@ -102,12 +102,16 @@ class SubmissionTask:
         self.extra_errors = []
         self.active_files: Set[str] = set()
         self.dropped_files = set()
+        self.dynamic_extracted = set()
 
         self.service_results: Dict[Tuple[str, str], ResultSummary] = {}
         self.service_errors: Dict[Tuple[str, str], str] = {}
         self.service_attempts: Dict[Tuple[str, str], int] = defaultdict(int)
         self.queue_keys: Dict[Tuple[str, str], bytes] = {}
         self.running_services: Set[Tuple[str, str]] = set()
+
+    def is_dynamic_child(self, sha256: str) -> bool:
+        return sha256 in self.dynamic_extracted
 
     @property
     def sid(self):
@@ -399,7 +403,15 @@ class Dispatcher(ThreadedCoreBase):
                         size=filestore_info.size,
                         type=filestore_info.type,
                     ))
-                    task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type)
+
+                    # If the file we are building is marked as a dynamic child don't allow dynamic analysis
+                    if not task.is_dynamic_child(sha256) or task.submission.params.ignore_dynamic_recursion_prevention:
+                        excluded = []
+                    else:
+                        excluded = ['Dynamic Analysis']
+
+                    task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
+                                                                                exclude=excluded)
         file_info = task.file_info[sha256]
         schedule = list(task.file_schedules[sha256])
 
@@ -842,9 +854,14 @@ class Dispatcher(ThreadedCoreBase):
 
         # Check if the service is a candidate for dynamic recursion prevention
         if not submission.params.ignore_dynamic_recursion_prevention:
+            # If this result is from a dynamic service
             service_info = self.scheduler.services.get(result.response.service_name, None)
-            if service_info and service_info.category == "Dynamic Analysis":
-                submission.params.services.runtime_excluded.append(result.response.service_name)
+            dynamic_service = service_info and service_info.category == "Dynamic Analysis"
+            # or the file we just processed was from a dynamic service (recursively)
+            if task.is_dynamic_child(result.sha256) or dynamic_service:
+                # mark all the extracted children as dynamic extracted
+                for extracted_data in result.response.extracted:
+                    task.dynamic_extracted.add(extracted_data.sha256)
 
         # Save the tags
         for section in result.result.sections:
