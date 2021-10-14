@@ -28,9 +28,10 @@ class WorkflowManager(ServerBase):
         else:
             self.apm_client = None
 
-    def close(self):
+    def stop(self):
         if self.apm_client:
             elasticapm.uninstrument()
+        super().stop()
 
     def get_last_reporting_ts(self, p_start_ts):
         # Start of transaction

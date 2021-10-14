@@ -36,12 +36,13 @@ class Alerter(ServerBase):
         else:
             self.apm_client = None
 
-    def close(self):
+    def stop(self):
         if self.counter:
             self.counter.stop()
 
         if self.apm_client:
             elasticapm.uninstrument()
+        super().stop()
 
     def run_once(self):
         alert = self.alert_queue.pop(timeout=1)

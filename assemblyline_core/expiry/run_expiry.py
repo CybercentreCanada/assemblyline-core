@@ -49,12 +49,13 @@ class ExpiryManager(ServerBase):
         else:
             self.apm_client = None
 
-    def close(self):
+    def stop(self):
         if self.counter:
             self.counter.stop()
 
         if self.apm_client:
             elasticapm.uninstrument()
+        super().stop()
 
     def run_expiry_once(self):
         now = now_as_iso()

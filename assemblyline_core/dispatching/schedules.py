@@ -1,4 +1,5 @@
-from typing import List, Dict, cast
+from __future__ import annotations
+from typing import Dict, cast
 
 import logging
 import os
@@ -26,7 +27,7 @@ class Scheduler:
         self.services = cast(Dict[str, Service], CachedObject(self._get_services))
         self.service_stage = get_service_stage_hash(redis)
 
-    def build_schedule(self, submission: Submission, file_type: str) -> List[Dict[str, Service]]:
+    def build_schedule(self, submission: Submission, file_type: str) -> list[dict[str, Service]]:
         all_services = dict(self.services)
 
         # Load the selected and excluded services by category
@@ -38,7 +39,7 @@ class Scheduler:
             selected = self.expand_categories(submission.params.services.selected)
 
         # Add all selected, accepted, and not rejected services to the schedule
-        schedule: List[Dict[str, Service]] = [{} for _ in self.config.services.stages]
+        schedule: list[dict[str, Service]] = [{} for _ in self.config.services.stages]
         services = list(set(selected) - set(excluded) - set(runtime_excluded))
         selected = []
         skipped = []
@@ -61,7 +62,7 @@ class Scheduler:
 
         return schedule
 
-    def expand_categories(self, services: List[str]) -> List[str]:
+    def expand_categories(self, services: list[str]) -> list[str]:
         """Expands the names of service categories found in the list of services.
 
         Args:
@@ -74,7 +75,7 @@ class Scheduler:
         categories = self.categories()
 
         found_services = []
-        seen_categories = set()
+        seen_categories: set[str] = set()
         while services:
             name = services.pop()
 
@@ -94,8 +95,8 @@ class Scheduler:
         # Use set to remove duplicates, set is more efficient in batches
         return list(set(found_services))
 
-    def categories(self) -> Dict[str, List[str]]:
-        all_categories = {}
+    def categories(self) -> Dict[str, list[str]]:
+        all_categories: dict[str, list[str]] = {}
         for service in self.services.values():
             try:
                 all_categories[service.category].append(service.name)

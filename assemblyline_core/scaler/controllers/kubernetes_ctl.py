@@ -1,35 +1,33 @@
+from __future__ import annotations
 import base64
+from collections import defaultdict
 import functools
 import json
+import uuid
 import os
 import threading
 import weakref
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import urllib3
-import kubernetes
-from kubernetes import client, config
-from kubernetes.client import ExtensionsV1beta1Deployment, ExtensionsV1beta1DeploymentSpec, V1PodTemplateSpec, \
+
+from kubernetes import client, config, watch
+from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec, \
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
-    V1NetworkPolicyIngressRule, V1Secret, V1LocalObjectReference
+    V1NetworkPolicyIngressRule, V1Secret, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort
 from kubernetes.client.rest import ApiException
+from assemblyline.odm.models.service import DockerConfig
 
 from assemblyline_core.scaler.controllers.interface import ControllerInterface
 
-
-# How to identify the update volume as a whole, in a way that the underlying container system recognizes.
-FILE_UPDATE_VOLUME = os.environ.get('FILE_UPDATE_VOLUME', None)
-CONTAINER_UPDATE_DIRECTORY = '/mount/updates/'
-
-# Where to find the update directory inside this container.
-FILE_UPDATE_DIRECTORY = os.environ.get('FILE_UPDATE_DIRECTORY', None)
 # RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
 
 API_TIMEOUT = 90
 WATCH_TIMEOUT = 10 * 60
 WATCH_API_TIMEOUT = WATCH_TIMEOUT + 10
+CHANGE_KEY_NAME = 'al_change_key'
 
 _exponents = {
     'Ki': 2**10,
@@ -45,13 +43,14 @@ _exponents = {
 }
 
 
-class TypelessWatch(kubernetes.watch.Watch):
+class TypelessWatch(watch.Watch):
     """A kubernetes watch object that doesn't marshal the response."""
+
     def get_return_type(self, func):
         return None
 
 
-def median(values: List[float]) -> float:
+def median(values: list[float]) -> float:
     if len(values) == 0:
         return 0
     return values[len(values)//2]
@@ -152,14 +151,17 @@ class KubernetesController(ControllerInterface):
         self.cpu_reservation: float = max(0.0, min(cpu_reservation, 1.0))
         self.logger = logger
         self.log_level: str = log_level
-        self._labels: Dict[str, str] = labels
+        self._labels: dict[str, str] = labels or {}
         self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
         self.net_api = client.NetworkingV1Api()
         self.namespace: str = namespace
-        self.config_volumes: Dict[str, V1Volume] = {}
-        self.config_mounts: Dict[str, V1VolumeMount] = {}
+        self.config_volumes: dict[str, V1Volume] = {}
+        self.config_mounts: dict[str, V1VolumeMount] = {}
+        self.core_config_volumes: dict[str, V1Volume] = {}
+        self.core_config_mounts: dict[str, V1VolumeMount] = {}
         self._external_profiles = weakref.WeakValueDictionary()
+        self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
 
         # A record of previously reported events so that we don't report the same message repeatedly, fill it with
         # existing messages so we don't have a huge dump of duplicates on restart
@@ -191,17 +193,20 @@ class KubernetesController(ControllerInterface):
         pod_background = threading.Thread(target=self._loop_forever(self._monitor_pods), daemon=True)
         pod_background.start()
 
-        self._deployment_targets: Dict[str, int] = {}
+        self._deployment_targets: dict[str, int] = {}
         deployment_background = threading.Thread(target=self._loop_forever(self._monitor_deployments), daemon=True)
         deployment_background.start()
 
     def stop(self):
         self.running = False
 
-    def _deployment_name(self, service_name):
+    def _deployment_name(self, service_name: str):
         return (self.prefix + service_name).lower().replace('_', '-')
 
-    def config_mount(self, name, config_map, key, target_path):
+    def _dependency_name(self, service_name: str, container_name: str):
+        return f"{self._deployment_name(service_name)}-{container_name}".lower()
+
+    def config_mount(self, name: str, config_map: str, key: str, target_path: str):
         if name not in self.config_volumes:
             self.config_volumes[name] = V1Volume(
                 name=name,
@@ -217,11 +222,27 @@ class KubernetesController(ControllerInterface):
             sub_path=key
         )
 
+    def core_config_mount(self, name, config_map, key, target_path):
+        if name not in self.core_config_volumes:
+            self.core_config_volumes[name] = V1Volume(
+                name=name,
+                config_map=V1ConfigMapVolumeSource(
+                    name=config_map,
+                    optional=False
+                )
+            )
+
+        self.core_config_mounts[target_path] = V1VolumeMount(
+            name=name,
+            mount_path=target_path,
+            sub_path=key
+        )
+
     def add_profile(self, profile, scale=0):
         """Tell the controller about a service profile it needs to manage."""
         self._create_deployment(profile.name, self._deployment_name(profile.name),
                                 profile.container_config, profile.shutdown_seconds, scale,
-                                mount_updates=profile.mount_updates)
+                                change_key=profile.config_blob)
         self._external_profiles[profile.name] = profile
 
     def _loop_forever(self, function):
@@ -415,44 +436,26 @@ class KubernetesController(ControllerInterface):
             return self._quota_mem_limit - self._pod_used_namespace_ram, self._quota_mem_limit
         return self._node_pool_max_ram - self._pod_used_ram, self._node_pool_max_ram
 
-    @staticmethod
-    def _create_metadata(deployment_name: str, labels: Dict[str, str]):
-        return V1ObjectMeta(name=deployment_name, labels=labels)
-
-    def _create_volumes(self, service_name, mount_updates=False):
-        volumes, mounts = [], []
-
-        # Attach the mount that provides the config file
-        volumes.extend(self.config_volumes.values())
-        mounts.extend(self.config_mounts.values())
-
-        if mount_updates:
-            # Attach the mount that provides the update
-            volumes.append(V1Volume(
-                name='update-directory',
-                persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
-                    claim_name=FILE_UPDATE_VOLUME
-                ),
-            ))
-
-            mounts.append(V1VolumeMount(
-                name='update-directory',
-                mount_path=CONTAINER_UPDATE_DIRECTORY,
-                sub_path=service_name
-            ))
-
-        return volumes, mounts
-
-    def _create_containers(self, deployment_name, container_config, mounts):
+    def _create_containers(self, service_name: str, deployment_name: str, container_config, mounts,
+                           core_container=False):
         cores = container_config.cpu_cores
         memory = container_config.ram_mb
         min_memory = min(container_config.ram_mb_min, container_config.ram_mb)
-        environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]
+        environment_variables: list[V1EnvVar] = []
+        # If we are launching a core container, include environment variables related to authentication for DBs
+        if core_container:
+            environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in os.environ.items()
+                                      if any(term in _n for term in ['ELASTIC', 'FILESTORE', 'UI_SERVER'])]
+        # Overwrite them with configured special environment variables
+        environment_variables += [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]
+        # Overwrite those with special hard coded variables
         environment_variables += [
-            V1EnvVar(name='UPDATE_PATH', value=CONTAINER_UPDATE_DIRECTORY),
-            V1EnvVar(name='FILE_UPDATE_DIRECTORY', value=CONTAINER_UPDATE_DIRECTORY),
+            V1EnvVar(name='AL_SERVICE_NAME', value=service_name),
             V1EnvVar(name='LOG_LEVEL', value=self.log_level)
         ]
+        # Overwrite ones defined dynamically by dependency container launches
+        for name, value in self._service_limited_env[service_name].items():
+            environment_variables.append(V1EnvVar(name=name, value=value))
         return [V1Container(
             name=deployment_name,
             image=container_config.image,
@@ -466,19 +469,30 @@ class KubernetesController(ControllerInterface):
             )
         )]
 
-    def _create_deployment(self, service_name: str, deployment_name: str, docker_config,
-                           shutdown_seconds, scale: int, labels=None, volumes=None, mounts=None, mount_updates=True):
+    def _create_deployment(self, service_name: str, deployment_name: str, docker_config: DockerConfig,
+                           shutdown_seconds: int, scale: int, labels: dict[str, str] = None,
+                           volumes: list[V1Volume] = None, mounts: list[V1VolumeMount] = None,
+                           core_mounts: bool = False, change_key: str = ''):
+        # Build a cache key to check for changes, just trying to only patch what changed
+        # will still potentially result in a lot of restarts due to different kubernetes
+        # systems returning differently formatted data
+        change_key = (
+            deployment_name + change_key + str(docker_config) + str(shutdown_seconds) +
+            str(sorted((labels or {}).items())) + str(volumes) + str(mounts) + str(core_mounts)
+        )
 
-        replace = False
-
-        if not os.path.exists(os.path.join(FILE_UPDATE_DIRECTORY, service_name)):
-            os.makedirs(os.path.join(FILE_UPDATE_DIRECTORY, service_name), 0x777)
-
-        resources = self.apps_api.list_namespaced_deployment(namespace=self.namespace, _request_timeout=API_TIMEOUT)
-        for dep in resources.items:
-            if dep.metadata.name == deployment_name:
-                replace = True
-                break
+        # Check if a deployment already exists, and if it does check if it has the same change key set
+        replace = None
+        try:
+            replace = self.apps_api.read_namespaced_deployment(
+                deployment_name, namespace=self.namespace, _request_timeout=API_TIMEOUT)
+            if replace.metadata.annotations.get(CHANGE_KEY_NAME) == change_key:
+                if replace.spec.replicas != scale:
+                    self.set_target(service_name, scale)
+                return
+        except ApiException as error:
+            if error.status != 404:
+                raise
 
         # If we have been given a username or password for the registry, we have to
         # update it, if we haven't been, make sure its been cleaned up in the system
@@ -510,8 +524,8 @@ class KubernetesController(ControllerInterface):
 
             # Send it to the server
             if current_pull_secret:
-                self.api.replace_namespaced_secret(pull_secret_name, namespace=self.namespace, body=new_pull_secret,
-                                                   _request_timeout=API_TIMEOUT)
+                self.api.patch_namespaced_secret(pull_secret_name, namespace=self.namespace, body=new_pull_secret,
+                                                 _request_timeout=API_TIMEOUT)
             else:
                 self.api.create_namespaced_secret(namespace=self.namespace, body=new_pull_secret,
                                                   _request_timeout=API_TIMEOUT)
@@ -520,16 +534,29 @@ class KubernetesController(ControllerInterface):
 
         all_labels = dict(self._labels)
         all_labels['component'] = service_name
+        if core_mounts:
+            all_labels['section'] = 'core'
         all_labels.update(labels or {})
 
-        all_volumes, all_mounts = self._create_volumes(service_name, mount_updates)
+        # Build set of volumes, first the global mounts, then the core specific ones,
+        # then the ones specific to this container only
+        all_volumes: list[V1Volume] = []
+        all_mounts: list[V1VolumeMount] = []
+        all_volumes.extend(self.config_volumes.values())
+        all_mounts.extend(self.config_mounts.values())
+        if core_mounts:
+            all_volumes.extend(self.core_config_volumes.values())
+            all_mounts.extend(self.core_config_mounts.values())
         all_volumes.extend(volumes or [])
         all_mounts.extend(mounts or [])
-        metadata = self._create_metadata(deployment_name=deployment_name, labels=all_labels)
+
+        # Build metadata
+        metadata = V1ObjectMeta(name=deployment_name, labels=all_labels, annotations={CHANGE_KEY_NAME: change_key})
 
         pod = V1PodSpec(
             volumes=all_volumes,
-            containers=self._create_containers(deployment_name, docker_config, all_mounts),
+            containers=self._create_containers(service_name, deployment_name, docker_config,
+                                               all_mounts, core_container=core_mounts),
             priority_class_name=self.priority,
             termination_grace_period_seconds=shutdown_seconds,
         )
@@ -542,14 +569,14 @@ class KubernetesController(ControllerInterface):
             spec=pod,
         )
 
-        spec = ExtensionsV1beta1DeploymentSpec(
+        spec = V1DeploymentSpec(
             replicas=int(scale),
             revision_history_limit=0,
             selector=V1LabelSelector(match_labels=all_labels),
             template=template,
         )
 
-        deployment = ExtensionsV1beta1Deployment(
+        deployment = V1Deployment(
             kind="Deployment",
             metadata=metadata,
             spec=spec,
@@ -568,7 +595,7 @@ class KubernetesController(ControllerInterface):
         """Get the target for running instances of a service."""
         return self._deployment_targets.get(service_name, 0)
 
-    def get_targets(self) -> Dict[str, int]:
+    def get_targets(self) -> dict[str, int]:
         """Get the target for running instances of all services."""
         return self._deployment_targets
 
@@ -580,8 +607,8 @@ class KubernetesController(ControllerInterface):
                 scale = self.apps_api.read_namespaced_deployment_scale(name=name, namespace=self.namespace,
                                                                        _request_timeout=API_TIMEOUT)
                 scale.spec.replicas = target
-                self.apps_api.replace_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale,
-                                                                  _request_timeout=API_TIMEOUT)
+                self.apps_api.patch_namespaced_deployment_scale(name=name, namespace=self.namespace, body=scale,
+                                                                _request_timeout=API_TIMEOUT)
                 return
             except client.ApiException as error:
                 # If the error is a conflict, it means multiple attempts to scale a deployment
@@ -614,7 +641,7 @@ class KubernetesController(ControllerInterface):
     def restart(self, service):
         self._create_deployment(service.name, self._deployment_name(service.name), service.container_config,
                                 service.shutdown_seconds, self.get_target(service.name),
-                                mount_updates=service.mount_updates)
+                                change_key=service.config_blob)
 
     def get_running_container_names(self):
         pods = self.api.list_pod_for_all_namespaces(field_selector='status.phase==Running',
@@ -640,9 +667,10 @@ class KubernetesController(ControllerInterface):
 
         return new
 
-    def start_stateful_container(self, service_name, container_name, spec, labels, mount_updates=False):
+    def start_stateful_container(self, service_name: str, container_name: str,
+                                 spec, labels: dict[str, str], change_key: str):
         # Setup PVC
-        deployment_name = service_name + '-' + container_name
+        deployment_name = self._dependency_name(service_name, container_name)
         mounts, volumes = [], []
         for volume_name, volume_spec in spec.volumes.items():
             mount_name = deployment_name + volume_name
@@ -657,8 +685,51 @@ class KubernetesController(ControllerInterface):
             ))
             mounts.append(V1VolumeMount(mount_path=volume_spec.mount_path, name=mount_name))
 
+        # Read the key being used for the deployment instance or generate a new one
+        try:
+            instance_key = uuid.uuid4().hex
+            old_deployment = self.apps_api.read_namespaced_deployment(deployment_name, self.namespace)
+            for container in old_deployment.spec.template.spec.containers:
+                for env in container.env:
+                    if env.name == 'AL_INSTANCE_KEY':
+                        instance_key = env.value
+                        break
+        except ApiException as error:
+            if error.status != 404:
+                raise
+
+        # Setup the deployment itself
+        labels['container'] = container_name
+        spec.container.environment.append({'name': 'AL_INSTANCE_KEY', 'value': instance_key})
         self._create_deployment(service_name, deployment_name, spec.container,
-                                30, 1, labels, volumes=volumes, mounts=mounts, mount_updates=mount_updates)
+                                30, 1, labels, volumes=volumes, mounts=mounts,
+                                core_mounts=spec.run_as_core, change_key=change_key)
+
+        # Setup a service to direct to the deployment
+        try:
+            service = self.api.read_namespaced_service(deployment_name, self.namespace)
+            service.metadata.labels = labels
+            service.spec.selector = labels
+            service.spec.ports = [V1ServicePort(port=int(_p)) for _p in spec.container.ports]
+            self.api.patch_namespaced_service(deployment_name, self.namespace, service)
+        except ApiException as error:
+            if error.status != 404:
+                raise
+            service = V1Service(
+                metadata=V1ObjectMeta(name=deployment_name, labels=labels),
+                spec=V1ServiceSpec(
+                    cluster_ip='None',
+                    selector=labels,
+                    ports=[V1ServicePort(port=int(_p)) for _p in spec.container.ports]
+                )
+            )
+            self.api.create_namespaced_service(self.namespace, service)
+
+        # Add entries to the environment variable list to point to this container
+        self._service_limited_env[service_name][f'{container_name}_host'] = deployment_name
+        self._service_limited_env[service_name][f'{container_name}_key'] = instance_key
+        if spec.container.ports:
+            self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
 
     def _ensure_pvc(self, name, storage_class, size):
         request = V1ResourceRequirements(requests={'storage': size})

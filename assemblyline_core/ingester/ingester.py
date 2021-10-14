@@ -11,11 +11,13 @@ be created.
 
 import threading
 import time
+from os import environ
 from random import random
 from typing import Iterable, List, Optional, Dict, Tuple
 
 import elasticapm
 
+from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
@@ -39,7 +41,6 @@ from assemblyline.odm.messages.submission import Submission as MessageSubmission
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from assemblyline_core.submission_client import SubmissionClient
 from .constants import INGEST_QUEUE_NAME, drop_chance, COMPLETE_QUEUE_NAME
-from ..server_base import ThreadedCoreBase
 
 _dup_prefix = 'w-m-'
 _notification_queue_prefix = 'nq-'
@@ -48,6 +49,9 @@ _max_retries = 10
 _retry_delay = 60 * 4  # Wait 4 minutes to retry
 _max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
 HOUR_IN_SECONDS = 60 * 60
+COMPLETE_THREADS = int(environ.get('INGESTER_COMPLETE_THREADS', 4))
+INGEST_THREADS = int(environ.get('INGESTER_INGEST_THREADS', 1))
+SUBMIT_THREADS = int(environ.get('INGESTER_SUBMIT_THREADS', 4))
 
 
 def must_drop(length: int, maximum: int) -> bool:
@@ -76,11 +80,11 @@ def must_drop(length: int, maximum: int) -> bool:
 def determine_resubmit_selected(selected: List[str], resubmit_to: List[str]) -> Optional[List[str]]:
     resubmit_selected = None
 
-    selected = set(selected)
-    resubmit_to = set(resubmit_to)
+    _selected = set(selected)
+    _resubmit_to = set(resubmit_to)
 
-    if not selected.issuperset(resubmit_to):
-        resubmit_selected = sorted(selected.union(resubmit_to))
+    if not _selected.issuperset(_resubmit_to):
+        resubmit_selected = sorted(_selected.union(_resubmit_to))
 
     return resubmit_selected
 
@@ -144,7 +148,7 @@ class Ingester(ThreadedCoreBase):
                          datastore=datastore, config=config)
 
         # Cache the user groups
-        self.cache_lock = threading.RLock()  # TODO are middle man instances single threaded now?
+        self.cache_lock = threading.RLock()
         self._user_groups = {}
         self._user_groups_reset = time.time()//HOUR_IN_SECONDS
         self.cache = {}
@@ -193,7 +197,7 @@ class Ingester(ThreadedCoreBase):
         self.retry_queue = PriorityQueue('m-retry', self.redis_persist)
 
         # Internal, timeout watch queue
-        self.timeout_queue = PriorityQueue('m-timeout', self.redis)
+        self.timeout_queue: PriorityQueue[str] = PriorityQueue('m-timeout', self.redis)
 
         # Internal, queue for processing duplicates
         #   When a duplicate file is detected (same cache key => same file, and same
@@ -219,13 +223,14 @@ class Ingester(ThreadedCoreBase):
             self.apm_client = None
 
     def try_run(self):
-        self.maintain_threads({
-            'Ingest': self.handle_ingest,
-            'Submit': self.handle_submit,
-            'Complete': self.handle_complete,
+        threads_to_maintain = {
             'Retries': self.handle_retries,
-            'Timeouts': self.handle_timeouts,
-        })
+            'Timeouts': self.handle_timeouts
+        }
+        threads_to_maintain.update({f'Complete_{n}': self.handle_complete for n in range(COMPLETE_THREADS)})
+        threads_to_maintain.update({f'Ingest_{n}': self.handle_ingest for n in range(INGEST_THREADS)})
+        threads_to_maintain.update({f'Submit_{n}': self.handle_submit for n in range(SUBMIT_THREADS)})
+        self.maintain_threads(threads_to_maintain)
 
     def handle_ingest(self):
         cpu_mark = time.process_time()
@@ -721,7 +726,7 @@ class Ingester(ThreadedCoreBase):
                 'sid': sid,
                 'time': now(),
             })
-            self.datastore.filescore.save(scan_key, fs)
+        self.datastore.filescore.save(scan_key, fs)
 
         self.finalize(psid, sid, score, task)
 

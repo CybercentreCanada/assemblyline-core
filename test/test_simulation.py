@@ -3,7 +3,7 @@ A test of ingest+dispatch running in one process.
 
 Needs the datastore and filestore to be running, otherwise these test are stand alone.
 """
-
+from __future__ import annotations
 import hashlib
 import json
 import typing
@@ -11,7 +11,7 @@ import time
 import threading
 import logging
 from tempfile import NamedTemporaryFile
-from typing import List
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -39,11 +39,14 @@ from assemblyline_core.server_base import ServerBase, get_service_stage_hash, Se
 from mocking import MockCollection
 from test_scheduler import dummy_service
 
+if TYPE_CHECKING:
+    from redis import Redis
+
 RESPONSE_TIMEOUT = 60
 
 
 @pytest.fixture(scope='module')
-def redis(redis_connection):
+def redis(redis_connection: Redis[Any]):
     redis_connection.flushdb()
     yield redis_connection
     redis_connection.flushdb()
@@ -85,8 +88,12 @@ class MockService(ServerBase):
             if instructions.get('hold', False):
                 queue = get_service_queue(self.service_name, self.dispatch_client.redis)
                 queue.push(0, task.as_primitives())
+                self.log.info(f"{self.service_name} Requeued task to {queue.name} holding for {instructions['hold']}")
                 _global_semaphore.acquire(blocking=True, timeout=instructions['hold'])
                 continue
+
+            if instructions.get('lock', False):
+                _global_semaphore.acquire(blocking=True, timeout=instructions['lock'])
 
             if 'drop' in instructions:
                 if instructions['drop'] >= hits:
@@ -208,8 +215,8 @@ def core(request, redis, filestore, config):
     # Block logs from being initialized, it breaks under pytest if you create new stream handlers
     from assemblyline.common import log as al_log
     al_log.init_logging = lambda *args: None
-    dispatcher.TIMEOUT_EXTRA_TIME = 0
-    dispatcher.TIMEOUT_TEST_INTERVAL = 1
+    dispatcher.TIMEOUT_EXTRA_TIME = 1
+    dispatcher.TIMEOUT_TEST_INTERVAL = 3
     # al_log.init_logging("simulation")
 
     ds = forge.get_datastore()
@@ -224,7 +231,7 @@ def core(request, redis, filestore, config):
 
     threads = []
     fields.filestore = filestore
-    threads: List[ServerBase] = [
+    threads: list[ServerBase] = [
         # Start the ingester components
         ingester,
 
@@ -265,7 +272,6 @@ def core(request, redis, filestore, config):
         t.start()
 
     def stop_core():
-        [tr.close() for tr in threads]
         [tr.stop() for tr in threads]
         [tr.raising_join() for tr in threads]
     request.addfinalizer(stop_core)
@@ -311,9 +317,14 @@ def ready_extract(core, children):
 
 
 def test_deduplication(core, metrics):
+    global _global_semaphore
     # -------------------------------------------------------------------------------
     # Submit two identical jobs, check that they get deduped by ingester
-    sha, size = ready_body(core)
+    sha, size = ready_body(core, {
+        'pre': {'lock': 60}
+    })
+
+    _global_semaphore = threading.Semaphore(value=0)
 
     for _ in range(2):
         core.ingest_queue.push(SubmissionInput(dict(
@@ -334,6 +345,9 @@ def test_deduplication(core, metrics):
                 name='abc123'
             )]
         )).as_primitives())
+
+    metrics.expect('ingester', 'duplicates', 1)
+    _global_semaphore.release()
 
     notification_queue = NamedQueue('nq-output-queue-one', core.redis)
     first_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
@@ -374,6 +388,7 @@ def test_deduplication(core, metrics):
             name='abc123'
         )]
     )).as_primitives())
+    _global_semaphore.release()
 
     notification_queue = NamedQueue('nq-2', core.redis)
     third_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
@@ -390,7 +405,6 @@ def test_deduplication(core, metrics):
     metrics.expect('ingester', 'submissions_ingested', 3)
     metrics.expect('ingester', 'submissions_completed', 2)
     metrics.expect('ingester', 'files_completed', 2)
-    metrics.expect('ingester', 'duplicates', 1)
     metrics.expect('dispatcher', 'submissions_completed', 2)
     metrics.expect('dispatcher', 'files_completed', 2)
 
@@ -959,7 +973,11 @@ def test_plumber_clearing(core, metrics):
 
         metrics.expect('ingester', 'submissions_ingested', 1)
         service_queue = get_service_queue('pre', core.redis)
-        while service_queue.length() != 1:
+
+        start = time.time()
+        while service_queue.length() < 1:
+            if time.time() - start > RESPONSE_TIMEOUT:
+                pytest.fail(f'Found { service_queue.length()}')
             time.sleep(0.1)
 
         service_delta = core.ds.service_delta.get('pre')
