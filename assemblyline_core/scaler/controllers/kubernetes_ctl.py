@@ -461,7 +461,6 @@ class KubernetesController(ControllerInterface):
             image=container_config.image,
             command=container_config.command,
             env=environment_variables,
-            image_pull_policy='Always',
             volume_mounts=mounts,
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
@@ -686,8 +685,8 @@ class KubernetesController(ControllerInterface):
             mounts.append(V1VolumeMount(mount_path=volume_spec.mount_path, name=mount_name))
 
         # Read the key being used for the deployment instance or generate a new one
+        instance_key = uuid.uuid4().hex
         try:
-            instance_key = uuid.uuid4().hex
             old_deployment = self.apps_api.read_namespaced_deployment(deployment_name, self.namespace)
             for container in old_deployment.spec.template.spec.containers:
                 for env in container.env:
