@@ -30,16 +30,16 @@ WATCH_API_TIMEOUT = WATCH_TIMEOUT + 10
 CHANGE_KEY_NAME = 'al_change_key'
 
 _exponents = {
-    'Ki': 2**10,
-    'K': 2**10,
-    'Mi': 2**20,
-    'M': 2**20,
-    'Gi': 2**30,
-    'G': 2**30,
-    'Ti': 2**40,
-    'T': 2**40,
-    'Pi': 2**50,
-    'P': 2 ** 50,
+    'ki': 2**10,
+    'k': 2**10,
+    'mi': 2**20,
+    'm': 2**20,
+    'gi': 2**30,
+    'g': 2**30,
+    'ti': 2**40,
+    't': 2**40,
+    'pi': 2**50,
+    'p': 2 ** 50,
 }
 
 
@@ -101,12 +101,12 @@ def parse_memory(string: str) -> float:
         return float(string)/2**20
     except ValueError:
         pass
-
+    lower = string.lower()
     # Try parsing a unit'd number then
-    if string[-2:] in _exponents:
-        return (float(string[:-2]) * _exponents[string[-2:]])/(2**20)
-    if string[-1:] in _exponents:
-        return (float(string[:-1]) * _exponents[string[-1:]])/(2**20)
+    if lower[-2:] in _exponents:
+        return (float(string[:-2]) * _exponents[lower[-2:]])/(2**20)
+    if lower[-1:] in _exponents:
+        return (float(string[:-1]) * _exponents[lower[-1:]])/(2**20)
 
     raise ValueError(string)
 
@@ -292,20 +292,24 @@ class KubernetesController(ControllerInterface):
             if not self.running:
                 break
 
+            pod_name = event['raw_object']['metadata']['name']
             uid = event['raw_object']['metadata']['uid']
             namespace = event['raw_object']['metadata']['namespace']
 
-            if event['type'] in ['ADDED', 'MODIFIED']:
-                for container in event['raw_object']['spec']['containers']:
-                    containers[f"{uid}-{container['name']}"] = get_resources(container)
-                    if namespace == self.namespace:
-                        namespaced_containers[f"{uid}-{container['name']}"] = get_resources(container)
-            elif event['type'] == 'DELETED':
-                for container in event['raw_object']['spec']['containers']:
-                    containers.pop(f"{uid}-{container['name']}", None)
-                    namespaced_containers.pop(f"{uid}-{container['name']}", None)
-            else:
-                continue
+            try:
+                if event['type'] in ['ADDED', 'MODIFIED']:
+                    for container in event['raw_object']['spec']['containers']:
+                        containers[f"{uid}-{container['name']}"] = get_resources(container)
+                        if namespace == self.namespace:
+                            namespaced_containers[f"{uid}-{container['name']}"] = get_resources(container)
+                elif event['type'] == 'DELETED':
+                    for container in event['raw_object']['spec']['containers']:
+                        containers.pop(f"{uid}-{container['name']}", None)
+                        namespaced_containers.pop(f"{uid}-{container['name']}", None)
+                else:
+                    continue
+            except Exception as e:
+                self.logger.exception(f"Couldn't parse container information for {pod_name}: {e}")
 
             memory_unrestricted = sum(1 for cpu, mem in containers.values() if mem is None)
             cpu_unrestricted = sum(1 for cpu, mem in containers.values() if cpu is None)
