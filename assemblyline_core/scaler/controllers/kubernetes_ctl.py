@@ -28,6 +28,7 @@ API_TIMEOUT = 90
 WATCH_TIMEOUT = 10 * 60
 WATCH_API_TIMEOUT = WATCH_TIMEOUT + 10
 CHANGE_KEY_NAME = 'al_change_key'
+DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() == 'true'
 
 _exponents = {
     'ki': 2**10,
@@ -460,11 +461,13 @@ class KubernetesController(ControllerInterface):
         # Overwrite ones defined dynamically by dependency container launches
         for name, value in self._service_limited_env[service_name].items():
             environment_variables.append(V1EnvVar(name=name, value=value))
+        image_pull_policy = 'Always' if DEV_MODE else 'IfNotPresent'
         return [V1Container(
             name=deployment_name,
             image=container_config.image,
             command=container_config.command,
             env=environment_variables,
+            image_pull_policy=image_pull_policy,
             volume_mounts=mounts,
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
