@@ -57,6 +57,12 @@ def median(values: list[float]) -> float:
     return values[len(values)//2]
 
 
+def mean(values: list[float]) -> float:
+    if len(values) == 0:
+        return 0
+    return sum(values)/len(values)
+
+
 def get_resources(container) -> Tuple[float, float]:
     requests = container['resources'].get('requests', {})
     limits = container['resources'].get('limits', {})
@@ -318,8 +324,8 @@ class KubernetesController(ControllerInterface):
             memory_used = [mem for cpu, mem in containers.values() if mem is not None]
             cpu_used = [cpu for cpu, mem in containers.values() if cpu is not None]
 
-            self._pod_used_cpu = sum(cpu_used) + cpu_unrestricted * median(cpu_used)
-            self._pod_used_ram = sum(memory_used) + memory_unrestricted * median(memory_used)
+            self._pod_used_cpu = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
+            self._pod_used_ram = sum(memory_used) + memory_unrestricted * mean(memory_used)
 
             memory_unrestricted = sum(1 for cpu, mem in namespaced_containers.values() if mem is None)
             cpu_unrestricted = sum(1 for cpu, mem in namespaced_containers.values() if cpu is None)
@@ -327,8 +333,8 @@ class KubernetesController(ControllerInterface):
             memory_used = [mem for cpu, mem in namespaced_containers.values() if mem is not None]
             cpu_used = [cpu for cpu, mem in namespaced_containers.values() if cpu is not None]
 
-            self._pod_used_namespace_cpu = sum(cpu_used) + cpu_unrestricted * median(cpu_used)
-            self._pod_used_namespace_ram = sum(memory_used) + memory_unrestricted * median(memory_used)
+            self._pod_used_namespace_cpu = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
+            self._pod_used_namespace_ram = sum(memory_used) + memory_unrestricted * mean(memory_used)
 
     def _monitor_quotas(self):
         watch = TypelessWatch()
