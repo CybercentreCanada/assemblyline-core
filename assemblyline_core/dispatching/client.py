@@ -8,6 +8,7 @@ import time
 from typing import Dict, Optional, Any, cast
 
 from assemblyline.common.forge import CachedObject, get_service_queue
+from assemblyline.datastore.exceptions import VersionConflictException
 from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, \
     CreateWatch, LIST_OUTSTANDING, ListOutstanding
 
@@ -22,7 +23,6 @@ from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.error import Error
 from assemblyline.remote.datatypes import get_client, reply_queue_name
 from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
-from assemblyline.remote.datatypes.lock import Lock
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline_core.dispatching.dispatcher import DISPATCH_START_EVENTS, DISPATCH_RESULT_QUEUE, \
@@ -193,14 +193,22 @@ class DispatchClient:
                 result_key, {"expiry_ts": result.archive_ts},
                 force_archive_access=self.config.datastore.ilm.update_archive)
         else:
-            with Lock(f"lock-{result_key}", 5, self.redis):
-                old = self.ds.result.get(result_key, force_archive_access=self.config.datastore.ilm.update_archive)
+            succeeded = False
+            while not succeeded:
+                old, version = self.ds.result.get(
+                    result_key, force_archive_access=self.config.datastore.ilm.update_archive, version=True)
                 if old:
                     if old.expiry_ts and result.expiry_ts:
                         result.expiry_ts = max(result.expiry_ts, old.expiry_ts)
                     else:
                         result.expiry_ts = None
-                self.ds.result.save(result_key, result, force_archive_access=self.config.datastore.ilm.update_archive)
+                try:
+                    self.ds.result.save(result_key, result,
+                                        force_archive_access=self.config.datastore.ilm.update_archive, version=version)
+                    succeeded = True
+                except VersionConflictException as vce:
+                    self.log.info(f"Retrying to save results due to version conflict: {str(vce)}")
+                    pass
 
         # Send the result key to any watching systems
         msg = {'status': 'OK', 'cache_key': result_key}
