@@ -193,8 +193,7 @@ class DispatchClient:
                 result_key, {"expiry_ts": result.archive_ts},
                 force_archive_access=self.config.datastore.ilm.update_archive)
         else:
-            succeeded = False
-            while not succeeded:
+            while True:
                 old, version = self.ds.result.get(
                     result_key, force_archive_access=self.config.datastore.ilm.update_archive, version=True)
                 if old:
@@ -205,10 +204,9 @@ class DispatchClient:
                 try:
                     self.ds.result.save(result_key, result,
                                         force_archive_access=self.config.datastore.ilm.update_archive, version=version)
-                    succeeded = True
+                    break
                 except VersionConflictException as vce:
                     self.log.info(f"Retrying to save results due to version conflict: {str(vce)}")
-                    pass
 
         # Send the result key to any watching systems
         msg = {'status': 'OK', 'cache_key': result_key}
