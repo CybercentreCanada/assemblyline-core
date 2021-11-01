@@ -153,6 +153,9 @@ class SubmissionClient:
             # that local_path points to) should be passed into the system.
             extracted_path, fileinfo, al_meta = decode_file(local_path, fileinfo)
             al_meta['classification'] = al_meta.get('classification', classification)
+            if not Classification.is_valid(al_meta['classification']):
+                raise SubmissionException(f"{al_meta['classification']} is not a valid classification for this system"
+                                          ", submission is cancelled...")
 
             if extracted_path:
                 local_path = extracted_path
