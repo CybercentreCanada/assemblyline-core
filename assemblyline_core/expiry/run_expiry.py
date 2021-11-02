@@ -23,6 +23,7 @@ class ExpiryManager(ServerBase):
 
         super().__init__('assemblyline.expiry', shutdown_timeout=self.config.core.expiry.sleep_time + 5)
         self.datastore = forge.get_datastore(config=self.config, archive_access=True)
+        self.hot_datastore = forge.get_datastore(config=self.config, archive_access=False)
         self.filestore = forge.get_filestore(config=self.config)
         self.cachestore = FileStore(*self.config.filestore.cache)
         self.expirable_collections = []
@@ -30,10 +31,16 @@ class ExpiryManager(ServerBase):
         self.counter = MetricsFactory('expiry', Metrics)
         self.counter_archive = MetricsFactory('archive', Metrics)
 
-        self.fs_hashmap = {
-            'file': self.filestore.delete,
-            'cached_file': self.cachestore.delete
-        }
+        if self.config.datastore.ilm.enabled:
+            self.fs_hashmap = {
+                'file': self.archive_filestore_delete,
+                'cached_file': self.archive_cachestore_delete
+            }
+        else:
+            self.fs_hashmap = {
+                'file': self.filestore_delete,
+                'cached_file': self.cachestore_delete
+            }
 
         for name, definition in self.datastore.ds.get_models().items():
             if hasattr(definition, 'archive_ts'):
@@ -56,6 +63,25 @@ class ExpiryManager(ServerBase):
         if self.apm_client:
             elasticapm.uninstrument()
         super().stop()
+
+    def filestore_delete(self, sha256, _):
+        self.filestore.delete(sha256)
+
+    def archive_filestore_delete(self, sha256, expiry_time):
+        # If we are working with an archive, their may be a hot entry that expires later.
+        doc = self.hot_datastore.file.get_if_exists(sha256, as_obj=False)
+        if doc and doc['expiry_ts'] > expiry_time:
+            return
+        self.filestore.delete(sha256)
+
+    def cachestore_delete(self, sha256, _):
+        self.filestore.delete(sha256)
+
+    def archive_cachestore_delete(self, sha256, expiry_time):
+        doc = self.hot_datastore.cached_file.get_if_exists(sha256, as_obj=False)
+        if doc and doc['expiry_ts'] > expiry_time:
+            return
+        self.cachestore.delete(sha256)
 
     def run_expiry_once(self):
         now = now_as_iso()
@@ -104,9 +130,9 @@ class ExpiryManager(ServerBase):
                         # Delete associated files
                         with concurrent.futures.ThreadPoolExecutor(self.config.core.expiry.workers,
                                                                    thread_name_prefix="file_delete") as executor:
-                            for item in collection.search(delete_query, fl='id', rows=number_to_delete, sort=sort,
-                                                          use_archive=True, as_obj=False)['items']:
-                                executor.submit(self.fs_hashmap[collection.name], item['id'])
+                            for item in collection.search(delete_query, fl='id,expiry_ts', rows=number_to_delete,
+                                                          sort=sort, use_archive=True, as_obj=False)['items']:
+                                executor.submit(self.fs_hashmap[collection.name], item['id'], item['expiry_ts'])
 
                         self.log.info(f'    Deleted associated files from the '
                                       f'{"cachestore" if "cache" in collection.name else "filestore"}...')
