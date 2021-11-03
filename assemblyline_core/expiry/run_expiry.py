@@ -12,6 +12,7 @@ from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.expiry_heartbeat import Metrics
 
+ARCHIVE_SIZE = 10000
 EXPIRY_SIZE = 10000
 
 
@@ -173,9 +174,11 @@ class ExpiryManager(ServerBase):
                 self.apm_client.begin_transaction("Archive older documents")
 
             archive_query = f"archive_ts:[* TO {now}]"
+            sort = ["archive_ts asc", "id asc"]
 
             number_to_archive = collection.search(archive_query, rows=0, as_obj=False,
-                                                  use_archive=False, track_total_hits="true")['total']
+                                                  use_archive=False, sort=sort,
+                                                  track_total_hits=ARCHIVE_SIZE)['total']
 
             if self.apm_client:
                 elasticapm.label(query=archive_query)
@@ -184,7 +187,7 @@ class ExpiryManager(ServerBase):
             self.log.info(f"Processing collection: {collection.name}")
             if number_to_archive != 0:
                 # Proceed with archiving
-                if collection.archive(archive_query):
+                if collection.archive(archive_query, max_docs=ARCHIVE_SIZE, sort=sort):
                     self.counter_archive.increment(f'{collection.name}', increment_by=number_to_archive)
                     self.log.info(f"    Archived {number_to_archive} documents...")
                 else:
