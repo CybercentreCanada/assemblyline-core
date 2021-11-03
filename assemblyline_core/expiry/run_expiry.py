@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 
 import concurrent.futures
+import elasticapm
 import time
 
-import elasticapm
+from datemath import dm
 
-from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.isotime import epoch_to_iso, now_as_iso
 from assemblyline_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
@@ -86,9 +87,6 @@ class ExpiryManager(ServerBase):
 
     def run_expiry_once(self):
         now = now_as_iso()
-        delay = self.config.core.expiry.delay
-        hour = self.datastore.ds.hour
-        day = self.datastore.ds.day
         reached_max = False
 
         # Expire data
@@ -104,9 +102,11 @@ class ExpiryManager(ServerBase):
                 self.apm_client.begin_transaction("Delete expired documents")
 
             if self.config.core.expiry.batch_delete:
-                delete_query = f"expiry_ts:[* TO {now}||-{delay}{hour}/{day}]"
+                computed_date = epoch_to_iso(dm(f"{now}||-{self.config.core.expiry.delay}h/d").float_timestamp)
             else:
-                delete_query = f"expiry_ts:[* TO {now}||-{delay}{hour}]"
+                computed_date = epoch_to_iso(dm(f"{now}||-{self.config.core.expiry.delay}h").float_timestamp)
+
+            delete_query = f"expiry_ts:[* TO {computed_date}]"
 
             if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
                 file_delete = True
@@ -131,9 +131,9 @@ class ExpiryManager(ServerBase):
                         # Delete associated files
                         with concurrent.futures.ThreadPoolExecutor(self.config.core.expiry.workers,
                                                                    thread_name_prefix="file_delete") as executor:
-                            for item in collection.search(delete_query, fl='id,expiry_ts', rows=number_to_delete,
+                            for item in collection.search(delete_query, fl='id', rows=number_to_delete,
                                                           sort=sort, use_archive=True, as_obj=False)['items']:
-                                executor.submit(self.fs_hashmap[collection.name], item['id'], item['expiry_ts'])
+                                executor.submit(self.fs_hashmap[collection.name], item['id'], computed_date)
 
                         self.log.info(f'    Deleted associated files from the '
                                       f'{"cachestore" if "cache" in collection.name else "filestore"}...')
