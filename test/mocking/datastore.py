@@ -33,7 +33,7 @@ class MockCollection:
         return key in self._docs
 
     # noinspection PyUnusedLocal
-    def save(self, key, doc, force_archive_access=False, version=None):
+    def save(self, key, doc, version=None):
         if not self.schema or isinstance(doc, self.schema):
             self._docs[key] = doc
             return

@@ -189,9 +189,7 @@ class DispatchClient:
         # most distant expiry time to prevent pulling it out from under another submission too early
         if result.is_empty():
             # Empty Result will not be archived therefore result.archive_ts drives their deletion
-            self.ds.emptyresult.save(
-                result_key, {"expiry_ts": result.archive_ts},
-                force_archive_access=self.config.datastore.ilm.update_archive)
+            self.ds.emptyresult.save(result_key, {"expiry_ts": result.archive_ts})
         else:
             while True:
                 old, version = self.ds.result.get(
@@ -202,8 +200,7 @@ class DispatchClient:
                     else:
                         result.expiry_ts = None
                 try:
-                    self.ds.result.save(result_key, result,
-                                        force_archive_access=self.config.datastore.ilm.update_archive, version=version)
+                    self.ds.result.save(result_key, result, version=version)
                     break
                 except VersionConflictException as vce:
                     self.log.info(f"Retrying to save results due to version conflict: {str(vce)}")
