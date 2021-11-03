@@ -1,17 +1,19 @@
 #!/usr/bin/env python
 
 import concurrent.futures
+import elasticapm
 import time
 
-import elasticapm
+from datemath import dm
 
-from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.isotime import epoch_to_iso, now_as_iso
 from assemblyline_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.expiry_heartbeat import Metrics
 
+ARCHIVE_SIZE = 10000
 EXPIRY_SIZE = 10000
 
 
@@ -85,9 +87,6 @@ class ExpiryManager(ServerBase):
 
     def run_expiry_once(self):
         now = now_as_iso()
-        delay = self.config.core.expiry.delay
-        hour = self.datastore.ds.hour
-        day = self.datastore.ds.day
         reached_max = False
 
         # Expire data
@@ -103,9 +102,11 @@ class ExpiryManager(ServerBase):
                 self.apm_client.begin_transaction("Delete expired documents")
 
             if self.config.core.expiry.batch_delete:
-                delete_query = f"expiry_ts:[* TO {now}||-{delay}{hour}/{day}]"
+                computed_date = epoch_to_iso(dm(f"{now}||-{self.config.core.expiry.delay}h/d").float_timestamp)
             else:
-                delete_query = f"expiry_ts:[* TO {now}||-{delay}{hour}]"
+                computed_date = epoch_to_iso(dm(f"{now}||-{self.config.core.expiry.delay}h").float_timestamp)
+
+            delete_query = f"expiry_ts:[* TO {computed_date}]"
 
             if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
                 file_delete = True
@@ -130,9 +131,9 @@ class ExpiryManager(ServerBase):
                         # Delete associated files
                         with concurrent.futures.ThreadPoolExecutor(self.config.core.expiry.workers,
                                                                    thread_name_prefix="file_delete") as executor:
-                            for item in collection.search(delete_query, fl='id,expiry_ts', rows=number_to_delete,
+                            for item in collection.search(delete_query, fl='id', rows=number_to_delete,
                                                           sort=sort, use_archive=True, as_obj=False)['items']:
-                                executor.submit(self.fs_hashmap[collection.name], item['id'], item['expiry_ts'])
+                                executor.submit(self.fs_hashmap[collection.name], item['id'], computed_date)
 
                         self.log.info(f'    Deleted associated files from the '
                                       f'{"cachestore" if "cache" in collection.name else "filestore"}...')
@@ -173,9 +174,11 @@ class ExpiryManager(ServerBase):
                 self.apm_client.begin_transaction("Archive older documents")
 
             archive_query = f"archive_ts:[* TO {now}]"
+            sort = ["archive_ts asc", "id asc"]
 
             number_to_archive = collection.search(archive_query, rows=0, as_obj=False,
-                                                  use_archive=False, track_total_hits="true")['total']
+                                                  use_archive=False, sort=sort,
+                                                  track_total_hits=ARCHIVE_SIZE)['total']
 
             if self.apm_client:
                 elasticapm.label(query=archive_query)
@@ -184,7 +187,7 @@ class ExpiryManager(ServerBase):
             self.log.info(f"Processing collection: {collection.name}")
             if number_to_archive != 0:
                 # Proceed with archiving
-                if collection.archive(archive_query):
+                if collection.archive(archive_query, max_docs=number_to_archive, sort=sort):
                     self.counter_archive.increment(f'{collection.name}', increment_by=number_to_archive)
                     self.log.info(f"    Archived {number_to_archive} documents...")
                 else:
