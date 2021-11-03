@@ -187,7 +187,7 @@ class ExpiryManager(ServerBase):
             self.log.info(f"Processing collection: {collection.name}")
             if number_to_archive != 0:
                 # Proceed with archiving
-                if collection.archive(archive_query, max_docs=ARCHIVE_SIZE, sort=sort):
+                if collection.archive(archive_query, max_docs=number_to_archive, sort=sort):
                     self.counter_archive.increment(f'{collection.name}', increment_by=number_to_archive)
                     self.log.info(f"    Archived {number_to_archive} documents...")
                 else:
