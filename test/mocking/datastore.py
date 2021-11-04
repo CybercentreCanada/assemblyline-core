@@ -6,11 +6,18 @@ class MockCollection:
         self.schema = schema
 
     # noinspection PyUnusedLocal
-    def get(self, key, as_obj=True, force_archive_access=False):
+    def get(self, key, as_obj=True, force_archive_access=False, version=False):
         if key not in self._docs:
+            if version:
+                return None, None
             return None
         if not as_obj:
+            if version:
+                return self._docs[key].as_primitives(), 1
             return self._docs[key].as_primitives()
+
+        if version:
+            return self._docs[key], 1
         return self._docs[key]
 
     def get_if_exists(self, *args, **kwargs):
@@ -26,7 +33,7 @@ class MockCollection:
         return key in self._docs
 
     # noinspection PyUnusedLocal
-    def save(self, key, doc, force_archive_access=False):
+    def save(self, key, doc, version=None):
         if not self.schema or isinstance(doc, self.schema):
             self._docs[key] = doc
             return
