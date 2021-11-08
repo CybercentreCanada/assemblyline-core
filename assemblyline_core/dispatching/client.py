@@ -26,7 +26,7 @@ from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline_core.dispatching.dispatcher import DISPATCH_START_EVENTS, DISPATCH_RESULT_QUEUE, \
-    DISPATCH_COMMAND_QUEUE
+    DISPATCH_COMMAND_QUEUE, QUEUE_EXPIRY
 
 from assemblyline_core.dispatching.dispatcher import ServiceTask, Dispatcher
 
@@ -168,7 +168,7 @@ class DispatchClient:
 
         if self.running_tasks.add(task.key(), task.as_primitives()):
             self.log.info(f"[{task.sid}/{task.fileinfo.sha256}] {service_name}:{worker_id} task found")
-            start_queue = NamedQueue(DISPATCH_START_EVENTS + dispatcher, host=self.redis)
+            start_queue = NamedQueue(DISPATCH_START_EVENTS + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
             start_queue.push((task.sid, task.fileinfo.sha256, service_name, worker_id))
             return task
         return None
@@ -212,7 +212,7 @@ class DispatchClient:
 
         #
         dispatcher = task.metadata['dispatcher__']
-        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis)
+        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
         result_queue.push({
             'service_task': task.as_primitives(),
             'result': result.as_primitives(),
@@ -240,7 +240,7 @@ class DispatchClient:
                 NamedQueue(w).push(msg)
 
         dispatcher = task.metadata['dispatcher__']
-        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis)
+        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
         result_queue.push({
             'service_task': task.as_primitives(),
             'error': error.as_primitives(),
