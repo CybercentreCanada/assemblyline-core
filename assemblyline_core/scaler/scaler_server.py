@@ -248,7 +248,7 @@ class ScalerServer(ThreadedCoreBase):
         self.error_count_lock = threading.Lock()
         self.error_count: dict[str, list[float]] = {}
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
-        self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
+        self.service_change_watcher = EventWatcher(self.redis_pubsub, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
 
         labels = {
@@ -739,7 +739,7 @@ class ScalerServer(ThreadedCoreBase):
 
                 for service_name, metrics in service_metrics.items():
                     export_metrics_once(service_name, Status, metrics, host=HOSTNAME,
-                                        counter_type='scaler_status', config=self.config, redis=self.redis)
+                                        counter_type='scaler_status', config=self.config, redis=self.redis_pubsub)
 
                 memory, memory_total = self.controller.memory_info()
                 cpu, cpu_total = self.controller.cpu_info()
@@ -750,7 +750,7 @@ class ScalerServer(ThreadedCoreBase):
                     'cpu_free': cpu
                 }
                 export_metrics_once('scaler', Metrics, metrics, host=HOSTNAME,
-                                    counter_type='scaler', config=self.config, redis=self.redis)
+                                    counter_type='scaler', config=self.config, redis=self.redis_pubsub)
 
     def log_container_events(self):
         """The service status table may have references to containers that have crashed. Try to remove them all."""

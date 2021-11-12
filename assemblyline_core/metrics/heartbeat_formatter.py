@@ -63,7 +63,12 @@ class HeartbeatFormatter(object):
             port=self.config.core.redis.persistent.port,
             private=False,
         )
-        self.status_queue = CommsQueue(STATUS_QUEUE, self.redis)
+        self.redis_pubsub = get_client(
+            host=self.config.core.redis.pubsub.host,
+            port=self.config.core.redis.pubsub.port,
+            private=False,
+        )
+        self.status_queue = CommsQueue(STATUS_QUEUE, self.redis_pubsub)
         self.dispatch_active_hash = Hash(DISPATCH_TASK_HASH, self.redis_persist)
         self.dispatcher_submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
         self.ingest_scanning = Hash('m-scanning-table', self.redis_persist)
