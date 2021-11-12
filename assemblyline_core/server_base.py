@@ -197,7 +197,7 @@ class CoreBase(ServerBase):
 
     def __init__(self, component_name: str, logger: logging.Logger = None,
                  shutdown_timeout: float = None, config=None, datastore=None,
-                 redis=None, redis_persist=None):
+                 redis=None, redis_persist=None, redis_pubsub=None):
         super().__init__(component_name=component_name, logger=logger, shutdown_timeout=shutdown_timeout, config=config)
         self.datastore: AssemblylineDatastore = datastore or forge.get_datastore(self.config)
 
@@ -210,6 +210,11 @@ class CoreBase(ServerBase):
         self.redis_persist: Redis = redis_persist or get_client(
             host=self.config.core.redis.persistent.host,
             port=self.config.core.redis.persistent.port,
+            private=False,
+        )
+        self.redis_pubsub: Redis = redis_pubsub or get_client(
+            host=self.config.core.redis.pubsub.host,
+            port=self.config.core.redis.pubsub.port,
             private=False,
         )
 

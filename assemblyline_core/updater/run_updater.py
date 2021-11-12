@@ -372,7 +372,7 @@ class ServiceUpdater(CoreBase):
 
         self.container_update: Hash[dict[str, Any]] = Hash('container-update', self.redis_persist)
         self.latest_service_tags: Hash[dict[str, str]] = Hash('service-tags', self.redis_persist)
-        self.service_events = EventSender('changes.services', host=self.redis)
+        self.service_events = EventSender('changes.services', host=self.redis_pubsub)
 
         # Prepare a single threaded scheduler
         self.scheduler = sched.scheduler()

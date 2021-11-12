@@ -171,7 +171,7 @@ class Ingester(ThreadedCoreBase):
         self.ce = classification or forge.get_classification()
 
         # Metrics gathering factory
-        self.counter = MetricsFactory(metrics_type='ingester', schema=Metrics, redis=self.redis,
+        self.counter = MetricsFactory(metrics_type='ingester', schema=Metrics, redis=self.redis_pubsub,
                                       config=self.config, name=metrics_name)
 
         # State. The submissions in progress are stored in Redis in order to
@@ -188,7 +188,7 @@ class Ingester(ThreadedCoreBase):
         self.ingest_queue = NamedQueue(INGEST_QUEUE_NAME, self.redis_persist)
 
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
-        self.traffic_queue = CommsQueue('submissions', self.redis)
+        self.traffic_queue = CommsQueue('submissions', self.redis_pubsub)
 
         # Internal. Unique requests are placed in and processed from this queue.
         self.unique_queue = PriorityQueue('m-unique', self.redis_persist)

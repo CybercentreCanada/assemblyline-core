@@ -171,7 +171,7 @@ class Dispatcher(ThreadedCoreBase):
         # self.classification_engine = forge.get_classification()
         #
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
-        self.traffic_queue = CommsQueue('submissions', self.redis)
+        self.traffic_queue = CommsQueue('submissions', self.redis_pubsub)
         self.quota_tracker = UserQuotaTracker('submissions', timeout=60 * 60, host=self.redis_persist)
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
 
@@ -191,7 +191,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Publish counters to the metrics sink.
         self.counter = MetricsFactory(metrics_type='dispatcher', schema=Metrics, name=counter_name,
-                                      redis=self.redis, config=self.config)
+                                      redis=self.redis_pubsub, config=self.config)
 
         self.apm_client = None
         if self.config.core.metrics.apm_server.server_url:
@@ -720,7 +720,7 @@ class Dispatcher(ThreadedCoreBase):
         task.service_errors[(sha256, service_name)] = error_key
 
         export_metrics_once(service_name, ServiceMetrics, dict(fail_nonrecoverable=1),
-                            counter_type='service', host='dispatcher', redis=self.redis)
+                            counter_type='service', host='dispatcher', redis=self.redis_pubsub)
 
         # Send the result key to any watching systems
         msg = {'status': 'FAIL', 'cache_key': error_key}
@@ -1041,7 +1041,7 @@ class Dispatcher(ThreadedCoreBase):
 
             # Report to the metrics system that a recoverable error has occurred for that service
             export_metrics_once(service_name, ServiceMetrics, dict(fail_recoverable=1),
-                                host=worker_id, counter_type='service', redis=self.redis)
+                                host=worker_id, counter_type='service', redis=self.redis_pubsub)
 
     def work_guard(self):
         check_interval = GUARD_TIMEOUT/8
@@ -1245,7 +1245,7 @@ class Dispatcher(ThreadedCoreBase):
 
                     # Report to the metrics system that a recoverable error has occurred for that service
                     export_metrics_once(task.service_name, ServiceMetrics, dict(fail_recoverable=1),
-                                        host=task.metadata['worker__'], counter_type='service', redis=self.redis)
+                                        host=task.metadata['worker__'], counter_type='service', redis=self.redis_pubsub)
 
             # Look for unassigned submissions in the datastore if we don't have a
             # large number of outstanding things in the queue already.
