@@ -22,7 +22,7 @@ resources:
   repositories:
     - repository: assemblyline-base
       type: github
-      endpoint: github
+      endpoint: github-repo-sa
       name: CybercentreCanada/assemblyline-base
 
 jobs:
