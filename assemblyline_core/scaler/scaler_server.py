@@ -147,7 +147,6 @@ class ServiceProfile:
         self.desired_instances: int = 0
         self.target_instances: int = 0
         self.running_instances: int = 0
-        self.previous_change: int = 0
 
         # Information tracking when we want to grow/shrink
         self.pressure: float = 0
@@ -216,26 +215,12 @@ class ServiceProfile:
 
         # Apply change with each step in the same direction being larger than the last by one
         if self.pressure >= self.growth_threshold:
-            change = self.next_increase()
-            self.desired_instances = min(self.max_instances, self.desired_instances + change)
+            self.desired_instances = min(self.max_instances, self.desired_instances + 1)
             self.pressure = 0
-            self.previous_change = change
 
         if self.pressure <= self.shrink_threshold:
-            change = self.next_decrease()
-            self.desired_instances = max(self.min_instances, self.desired_instances + change)
+            self.desired_instances = max(self.min_instances, self.desired_instances - 1)
             self.pressure = 0
-            self.previous_change = change
-
-    def next_increase(self):
-        if self.previous_change <= 0:
-            return 1
-        return self.previous_change + 1
-
-    def next_decrease(self):
-        if self.previous_change >= 0:
-            return -1
-        return self.previous_change - 1
 
     def __deepcopy__(self, memodict=None):
         """Copy properly, since the redis objects don't copy well."""
