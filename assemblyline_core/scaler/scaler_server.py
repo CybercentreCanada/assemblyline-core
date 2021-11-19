@@ -277,8 +277,6 @@ class ScalerServer(ThreadedCoreBase):
         else:
             self.log.info("Loading Docker cluster interface.")
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
-                                               cpu_overallocation=self.config.core.scaler.cpu_overallocation,
-                                               memory_overallocation=self.config.core.scaler.memory_overallocation,
                                                labels=labels, log_level=self.config.logging.log_level)
 
             if DOCKER_CONFIGURATION_PATH and DOCKER_CONFIGURATION_VOLUME:
@@ -572,8 +570,8 @@ class ScalerServer(ThreadedCoreBase):
                 #       pool might be spread across many nodes, we are going to treat it like
                 #       it is one big one, and let the orchestration layer sort out the details.
                 #
-                free_cpu = self.controller.free_cpu()
-                free_memory = self.controller.free_memory()
+                free_cpu = self.controller.free_cpu() * self.config.core.scaler.cpu_overallocation
+                free_memory = self.controller.free_memory() * self.config.core.scaler.memory_overallocation
 
                 #
                 def trim(prof: list[ServiceProfile]):

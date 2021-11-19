@@ -19,12 +19,10 @@ CHANGE_KEY_NAME = 'al_change_key'
 
 class DockerController(ControllerInterface):
     """A controller for *non* swarm mode docker."""
-    def __init__(self, logger, prefix='', labels: dict[str, str] = None, cpu_overallocation=1, memory_overallocation=1, log_level="INFO"):
+    def __init__(self, logger, prefix='', labels: dict[str, str] = None, log_level="INFO"):
         """
         :param logger: A logger to report status and debug information.
         :param prefix: A prefix used to distinguish containers launched by this controller.
-        :param cpu_overallocation: A multiplier on CPU usage. (2 means act like there are twice as many CPU present)
-        :param memory_overallocation: A multiplier on memory usage. (2 means act like there is twice as much memory)
         """
         # Connect to the host docker port
         import docker
@@ -48,8 +46,6 @@ class DockerController(ControllerInterface):
         # CPU and memory reserved for the host
         self._reserved_cpu = 0.3
         self._reserved_mem = 500
-        self.cpu_overallocation = cpu_overallocation
-        self.memory_overallocation = memory_overallocation
         self._profiles = {}
         self.service_server = self.find_service_server()
 
@@ -229,7 +225,7 @@ class DockerController(ControllerInterface):
 
         NOTE: There is probably a better way to do this.
         """
-        total_cpu = cpu = self._info['NCPU'] * self.cpu_overallocation - self._reserved_cpu
+        total_cpu = cpu = self._info['NCPU'] - self._reserved_cpu
         for container in self.client.containers.list(ignore_removed=True):
             if container.attrs['HostConfig']['CpuPeriod']:
                 cpu -= container.attrs['HostConfig']['CpuQuota']/container.attrs['HostConfig']['CpuPeriod']
@@ -242,7 +238,7 @@ class DockerController(ControllerInterface):
         NOTE: There is probably a better way to do this.
         """
         mega = 2**20
-        total_mem = mem = self._info['MemTotal']/mega * self.memory_overallocation - self._reserved_mem
+        total_mem = mem = self._info['MemTotal']/mega - self._reserved_mem
         for container in self.client.containers.list(ignore_removed=True):
             mem -= container.attrs['HostConfig']['Memory']/mega
         self.log.debug(f'Total Memory available {mem}/{self._info["MemTotal"]/mega}')
