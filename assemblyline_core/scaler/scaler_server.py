@@ -143,6 +143,7 @@ class ServiceProfile:
         self.desired_instances: int = 0
         self.target_instances: int = 0
         self.running_instances: int = 0
+        self.previous_change: int = 0
 
         # Information tracking when we want to grow/shrink
         self.pressure: float = 0
@@ -209,13 +210,28 @@ class ServiceProfile:
         if self.desired_instances == self.min_instances:
             self.pressure = max(0.0, self.pressure)
 
+        # Apply change with each step in the same direction being larger than the last by one
         if self.pressure >= self.growth_threshold:
-            self.desired_instances = min(self.max_instances, self.desired_instances + 1)
+            change = self.next_increase()
+            self.desired_instances = min(self.max_instances, self.desired_instances + change)
             self.pressure = 0
+            self.previous_change = change
 
         if self.pressure <= self.shrink_threshold:
-            self.desired_instances = max(self.min_instances, self.desired_instances - 1)
+            change = self.next_decrease()
+            self.desired_instances = max(self.min_instances, self.desired_instances + change)
             self.pressure = 0
+            self.previous_change = change
+
+    def next_increase(self):
+        if self.previous_change <= 0:
+            return 1
+        return self.previous_change + 1
+
+    def next_decrease(self):
+        if self.previous_change >= 0:
+            return -1
+        return self.previous_change - 1
 
     def __deepcopy__(self, memodict=None):
         """Copy properly, since the redis objects don't copy well."""
@@ -277,8 +293,6 @@ class ScalerServer(ThreadedCoreBase):
         else:
             self.log.info("Loading Docker cluster interface.")
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
-                                               cpu_overallocation=self.config.core.scaler.cpu_overallocation,
-                                               memory_overallocation=self.config.core.scaler.memory_overallocation,
                                                labels=labels, log_level=self.config.logging.log_level)
 
             if DOCKER_CONFIGURATION_PATH and DOCKER_CONFIGURATION_VOLUME:
@@ -572,8 +586,8 @@ class ScalerServer(ThreadedCoreBase):
                 #       pool might be spread across many nodes, we are going to treat it like
                 #       it is one big one, and let the orchestration layer sort out the details.
                 #
-                free_cpu = self.controller.free_cpu()
-                free_memory = self.controller.free_memory()
+                free_cpu = self.controller.free_cpu() * self.config.core.scaler.cpu_overallocation
+                free_memory = self.controller.free_memory() * self.config.core.scaler.memory_overallocation
 
                 #
                 def trim(prof: list[ServiceProfile]):
