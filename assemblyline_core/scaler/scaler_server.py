@@ -52,6 +52,10 @@ HEARTBEAT_INTERVAL = 5
 MAXIMUM_SERVICE_ERRORS = 5
 ERROR_EXPIRY_TIME = 60*60  # how long we wait before we forgive an error. (seconds)
 
+# The maximum containers we ask to be created in a single scaling iteration
+# This is to give kubernetes a chance to update our view of resource usage before we ask for more containers
+MAX_CONTAINER_ALLOCATION = 10
+
 # An environment variable that should be set when we are started with kubernetes, tells us how to attach
 # the global Assemblyline config to new things that we launch.
 KUBERNETES_AL_CONFIG = os.environ.get('KUBERNETES_AL_CONFIG')
@@ -174,8 +178,8 @@ class ServiceProfile:
         # Adjust the max_instances based on the number that is already requested
         # this keeps the scaler from running way ahead with its demands when resource caps are reached
         if self._max_instances == 0:
-            return self.target_instances + 2
-        return min(self._max_instances, self.target_instances + 2)
+            return self.target_instances + MAX_CONTAINER_ALLOCATION
+        return min(self._max_instances, self.target_instances + MAX_CONTAINER_ALLOCATION)
 
     @max_instances.setter
     def max_instances(self, value: int):
@@ -586,8 +590,15 @@ class ScalerServer(ThreadedCoreBase):
                 #       pool might be spread across many nodes, we are going to treat it like
                 #       it is one big one, and let the orchestration layer sort out the details.
                 #
-                free_cpu = self.controller.free_cpu() * self.config.core.scaler.cpu_overallocation
-                free_memory = self.controller.free_memory() * self.config.core.scaler.memory_overallocation
+
+                # Recalculate the amount of free resources expanding the total quantity by the overallocation
+                free_cpu, total_cpu = self.controller.cpu_info()
+                used_cpu = total_cpu - free_cpu
+                free_cpu = total_cpu * self.config.core.scaler.cpu_overallocation - used_cpu
+
+                free_memory, total_memory = self.controller.memory_info()
+                used_memory = total_memory - free_memory
+                free_memory = total_memory * self.config.core.scaler.memory_overallocation - used_memory
 
                 #
                 def trim(prof: list[ServiceProfile]):
