@@ -601,8 +601,13 @@ class ScalerServer(ThreadedCoreBase):
                 old_targets = dict(targets)
 
                 while remaining_profiles:
-                    # TODO do we need to add balancing metrics other than 'least running' for this? probably
-                    remaining_profiles.sort(key=lambda _p: targets[_p.name])
+                    # sort the sevices that can still recieve more pods so that 'least running' is first
+                    # remaining_profiles.sort(key=lambda _p: targets[_p.name])
+
+                    # sort the services that can still recieve more pods so that
+                    # 'most Queue lenth per pod' is first. Since queue length is
+                    # kept as at least one, if there are no queues this is the same as 'least running'
+                    remaining_profiles.sort(reverse=True, key=lambda _p: max(1, _p.queue_length)/targets[_p.name])
 
                     # Add one for the profile at the bottom
                     free_memory -= remaining_profiles[0].container_config.ram_mb
