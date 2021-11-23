@@ -16,7 +16,7 @@ def redis(redis_connection):
     redis_connection.flushdb()
 
 
-def dummy_service(name, stage, category='static', accepts='', rejects=None):
+def dummy_service(name, stage, category='static', accepts='', rejects=None, docid=None):
     return Service({
         'name': name,
         'stage': stage,
@@ -29,7 +29,7 @@ def dummy_service(name, stage, category='static', accepts='', rejects=None):
         'docker_config': {
             'image': 'somefakedockerimage:latest'
         }
-    })
+    }, docid=docid)
 
 
 # noinspection PyUnusedLocal,PyMethodMayBeStatic
