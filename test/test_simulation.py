@@ -990,7 +990,7 @@ def test_plumber_clearing(core, metrics):
         sub = core.ds.submission.get(dropped_task.submission.sid)
         assert len(sub.files) == 1
         assert len(sub.results) == 3
-        assert len(sub.errors) == 1
+        assert len(sub.errors) == 2
         error = core.ds.error.get(sub.errors[0])
         assert "disabled" in error.response.message
 
