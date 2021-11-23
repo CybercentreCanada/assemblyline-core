@@ -562,7 +562,7 @@ def test_service_crash_recovery(core, metrics):
     assert dropped_task
     dropped_task = IngestTask(dropped_task)
     sub = core.ds.submission.get(dropped_task.submission.sid)
-    assert len(sub.errors) == 0
+    assert len(sub.errors) == 1
     assert len(sub.results) == 4
     assert core.pre_service.drops[sha] == 1
     assert core.pre_service.hits[sha] == 2
@@ -607,7 +607,7 @@ def test_service_retry_limit(core, metrics):
     assert dropped_task
     dropped_task = IngestTask(dropped_task)
     sub = core.ds.submission.get(dropped_task.submission.sid)
-    assert len(sub.errors) == 1
+    assert len(sub.errors) == 4
     assert len(sub.results) == 3
     assert core.pre_service.drops[sha] == 3
     assert core.pre_service.hits[sha] == 3
