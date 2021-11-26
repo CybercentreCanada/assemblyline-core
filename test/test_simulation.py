@@ -220,6 +220,19 @@ def core(request, redis, filestore, config):
     # al_log.init_logging("simulation")
 
     ds = forge.get_datastore()
+
+    # Register services
+    ds.ds.service = MockCollection(Service)
+    ds.ds.service_delta = MockCollection(Service)
+    stages = get_service_stage_hash(redis)
+
+    services = []
+    for svc, stage in [('pre', 'EXTRACT'), ('core-a', 'CORE'), ('core-b', 'CORE'), ('finish', 'POST')]:
+        ds.service.save(f'{svc}_0', dummy_service(svc, stage, docid=f'{svc}_0'))
+        ds.service_delta.save(svc, dummy_service(svc, stage, docid=svc))
+        stages.set(svc, ServiceStage.Running)
+        services.append(MockService(svc, ds, redis, filestore))
+
     ingester = Ingester(datastore=ds, redis=redis, persistent_redis=redis, config=config)
 
     fields = CoreSession(config, ingester)
@@ -231,6 +244,7 @@ def core(request, redis, filestore, config):
 
     threads = []
     fields.filestore = filestore
+    fields.pre_service = services[0]
     threads: list[ServerBase] = [
         # Start the ingester components
         ingester,
@@ -242,30 +256,7 @@ def core(request, redis, filestore, config):
         Plumber(datastore=ds, redis=redis, redis_persist=redis, delay=0.5, config=config),
     ]
 
-    stages = get_service_stage_hash(redis)
-
-    ds.ds.service = MockCollection(Service)
-    ds.ds.service_delta = MockCollection(Service)
-    ds.service.save('pre_0', dummy_service('pre', 'EXTRACT'))
-    ds.service_delta.save('pre', dummy_service('pre', 'EXTRACT'))
-    stages.set('pre', ServiceStage.Running)
-
-    threads.append(MockService('pre', ds, redis, filestore))
-    fields.pre_service = threads[-1]
-    ds.service.save('core-a_0', dummy_service('core-a', 'CORE'))
-    ds.service_delta.save('core-a', dummy_service('core-a', 'CORE'))
-    stages.set('core-a', ServiceStage.Running)
-
-    threads.append(MockService('core-a', ds, redis, filestore))
-    ds.service.save('core-b_0', dummy_service('core-b', 'CORE'))
-    ds.service_delta.save('core-b', dummy_service('core-b', 'CORE'))
-    threads.append(MockService('core-b', ds, redis, filestore))
-    stages.set('core-b', ServiceStage.Running)
-
-    ds.service.save('finish_0', dummy_service('finish', 'POST'))
-    ds.service_delta.save('finish', dummy_service('finish', 'POST'))
-    threads.append(MockService('finish', ds, redis, filestore))
-    stages.set('finish', ServiceStage.Running)
+    threads = threads + services
 
     for t in threads:
         t.daemon = True

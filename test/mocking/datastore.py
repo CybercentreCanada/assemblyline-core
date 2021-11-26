@@ -6,7 +6,7 @@ class MockCollection:
         self.schema = schema
 
     # noinspection PyUnusedLocal
-    def get(self, key, as_obj=True, force_archive_access=False, version=False):
+    def get(self, key, as_obj=True, version=False, **__):
         if key not in self._docs:
             if version:
                 return None, None
@@ -33,13 +33,13 @@ class MockCollection:
         return key in self._docs
 
     # noinspection PyUnusedLocal
-    def save(self, key, doc, version=None):
+    def save(self, key, doc, **__):
         if not self.schema or isinstance(doc, self.schema):
             self._docs[key] = doc
             return
         self._docs[key] = self.schema(doc)
 
-    def search(self, query, fl=None, rows=None):
+    def search(self, *_, **__):
         if self.next_searches:
             return self.next_searches.pop(0)
         return {
@@ -49,11 +49,14 @@ class MockCollection:
             'rows': 0
         }
 
-    def stream_search(self, *_, **__):
+    def stream_search(self, *_, as_obj=True, **__):
         for key, doc in self._docs.items():
-            data = doc.as_primitives()
-            data['id'] = key
-            yield data
+            if as_obj:
+                yield doc
+            else:
+                data = doc.as_primitives()
+                data['id'] = key
+                yield data
 
     def delete(self, key):
         self._docs.pop(key, None)
