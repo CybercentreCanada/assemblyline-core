@@ -119,7 +119,7 @@ class DispatchClient:
         return {}
 
     def request_work(self, worker_id, service_name, service_version,
-                     timeout: float = 60, blocking=True) -> Optional[ServiceTask]:
+                     timeout: float = 60, blocking=True, low_priority=False) -> Optional[ServiceTask]:
         """Pull work from the service queue for the service in question.
 
         :param service_version:
@@ -134,13 +134,14 @@ class DispatchClient:
         remaining = timeout
         while int(remaining) > 0:
             work = self._request_work(worker_id, service_name, service_version,
-                                      blocking=blocking, timeout=remaining)
+                                      blocking=blocking, timeout=remaining, low_priority=low_priority)
             if work or not blocking:
                 return work
             remaining = timeout - (time.time() - start)
         return None
 
-    def _request_work(self, worker_id, service_name, service_version, timeout, blocking) -> Optional[ServiceTask]:
+    def _request_work(self, worker_id, service_name, service_version,
+                      timeout, blocking, low_priority=False) -> Optional[ServiceTask]:
         # For when we recursively retry on bad task dequeue-ing
         if int(timeout) <= 0:
             self.log.info(f"{service_name}:{worker_id} no task returned [timeout]")
@@ -149,9 +150,12 @@ class DispatchClient:
         # Get work from the queue
         work_queue = get_service_queue(service_name, self.redis)
         if blocking:
-            result = work_queue.blocking_pop(timeout=int(timeout))
+            result = work_queue.blocking_pop(timeout=int(timeout), low_priority=low_priority)
         else:
-            result = work_queue.pop(1)
+            if low_priority:
+                result = work_queue.unpush(1)
+            else:
+                result = work_queue.pop(1)
             if result:
                 result = result[0]
 
