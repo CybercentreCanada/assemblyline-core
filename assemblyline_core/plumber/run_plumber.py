@@ -70,15 +70,9 @@ class Plumber(CoreBase):
                         self.heartbeat()
 
                 # For services that are enabled but
-                if service and service.enabled and 'PLUMBER_MAX_QUEUE_SIZE' in service.config:
-                    try:
-                        max_size = int(service.config['PLUMBER_MAX_QUEUE_SIZE'])
-                    except ValueError:
-                        self.log.exception(f"Couldn't read parameter 'PLUMBER_MAX_QUEUE_SIZE' on {service_name}")
-                        continue
-
+                if service and service.enabled and service.max_queue_length > 0:
                     service_queue = get_service_queue(service_name, self.redis)
-                    while service_queue.length() > max_size:
+                    while service_queue.length() > service.max_queue_length:
                         task = self.dispatch_client.request_work('plumber', service_name=service_name,
                                                                  service_version='0', blocking=False, low_priority=True)
                         if task is None:
