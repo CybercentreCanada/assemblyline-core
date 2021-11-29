@@ -15,6 +15,7 @@ from mocking import TrueCountTimes
 def test_expire_missing_service():
     redis = mock.MagicMock(spec=Redis)
     redis.keys.return_value = [b'service-queue-not-service-a']
+    redis.zcard.return_value = 0
     redis_persist = mock.MagicMock(spec=Redis)
     datastore = mock.MagicMock()
 
@@ -23,26 +24,25 @@ def test_expire_missing_service():
     service_a.enabled = True
 
     datastore.list_all_services.return_value = [service_a]
+    plumber = Plumber(redis=redis, redis_persist=redis_persist, datastore=datastore, delay=1)
+    plumber.get_service_stage = mock.MagicMock(return_value=ServiceStage.Running)
+    plumber.dispatch_client = mock.MagicMock()
 
-    with mock.patch('assemblyline_core.plumber.run_plumber.time'):
-        plumber = Plumber(redis=redis, redis_persist=redis_persist, datastore=datastore)
-        plumber.get_service_stage = mock.MagicMock(return_value=ServiceStage.Running)
-        plumber.dispatch_client = mock.MagicMock()
+    task = random_model_obj(Task)
+    plumber.dispatch_client.request_work.side_effect = [task, None, None]
 
-        task = random_model_obj(Task)
-        plumber.dispatch_client.request_work.side_effect = [task, None, None]
+    plumber.running = TrueCountTimes(count=1)
+    plumber.try_run()
 
-        plumber.running = TrueCountTimes(count=1)
-        plumber.try_run()
-
-        assert plumber.dispatch_client.service_failed.call_count == 1
-        args = plumber.dispatch_client.service_failed.call_args
-        assert args[0][0] == task.sid
+    assert plumber.dispatch_client.service_failed.call_count == 1
+    args = plumber.dispatch_client.service_failed.call_args
+    assert args[0][0] == task.sid
 
 
 def test_flush_paused_queues():
     redis = mock.MagicMock(spec=Redis)
     redis.keys.return_value = [b'service-queue-a']
+    redis.zcard.return_value = 0
     redis_persist = mock.MagicMock(spec=Redis)
     datastore = mock.MagicMock()
 
@@ -52,24 +52,23 @@ def test_flush_paused_queues():
 
     datastore.list_all_services.return_value = [service_a]
 
-    with mock.patch('assemblyline_core.plumber.run_plumber.time'):
-        plumber = Plumber(redis=redis, redis_persist=redis_persist, datastore=datastore)
-        plumber.get_service_stage = mock.MagicMock(return_value=ServiceStage.Running)
-        plumber.dispatch_client = mock.MagicMock()
+    plumber = Plumber(redis=redis, redis_persist=redis_persist, datastore=datastore, delay=1)
+    plumber.get_service_stage = mock.MagicMock(return_value=ServiceStage.Running)
+    plumber.dispatch_client = mock.MagicMock()
 
-        task = random_model_obj(Task)
-        plumber.dispatch_client.request_work.side_effect = [task, None, None]
+    task = random_model_obj(Task)
+    plumber.dispatch_client.request_work.side_effect = [task, None, None]
 
-        plumber.running = TrueCountTimes(count=1)
-        plumber.try_run()
+    plumber.running = TrueCountTimes(count=1)
+    plumber.try_run()
 
-        assert plumber.dispatch_client.service_failed.call_count == 0
+    assert plumber.dispatch_client.service_failed.call_count == 0
 
-        plumber.get_service_stage = mock.MagicMock(return_value=ServiceStage.Paused)
+    plumber.get_service_stage = mock.MagicMock(return_value=ServiceStage.Paused)
 
-        plumber.running = TrueCountTimes(count=1)
-        plumber.try_run()
+    plumber.running = TrueCountTimes(count=1)
+    plumber.try_run()
 
-        assert plumber.dispatch_client.service_failed.call_count == 1
-        args = plumber.dispatch_client.service_failed.call_args
-        assert args[0][0] == task.sid
+    assert plumber.dispatch_client.service_failed.call_count == 1
+    args = plumber.dispatch_client.service_failed.call_args
+    assert args[0][0] == task.sid
