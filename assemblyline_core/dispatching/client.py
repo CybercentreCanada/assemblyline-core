@@ -193,7 +193,7 @@ class DispatchClient:
         else:
             while True:
                 old, version = self.ds.result.get(
-                    result_key, force_archive_access=self.config.datastore.ilm.update_archive, version=True)
+                    result_key, archive_access=self.config.datastore.ilm.update_archive, version=True)
                 if old:
                     if old.expiry_ts and result.expiry_ts:
                         result.expiry_ts = max(result.expiry_ts, old.expiry_ts)
