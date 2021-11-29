@@ -15,6 +15,7 @@ from mocking import TrueCountTimes
 def test_expire_missing_service():
     redis = mock.MagicMock(spec=Redis)
     redis.keys.return_value = [b'service-queue-not-service-a']
+    redis.zcard.return_value = 0
     redis_persist = mock.MagicMock(spec=Redis)
     datastore = mock.MagicMock()
 
@@ -41,6 +42,7 @@ def test_expire_missing_service():
 def test_flush_paused_queues():
     redis = mock.MagicMock(spec=Redis)
     redis.keys.return_value = [b'service-queue-a']
+    redis.zcard.return_value = 0
     redis_persist = mock.MagicMock(spec=Redis)
     datastore = mock.MagicMock()
 
