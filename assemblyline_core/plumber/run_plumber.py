@@ -6,11 +6,13 @@ emptied. The status of all the services will be periodically checked and any ser
 disabled or deleted for which a service queue exists, the dispatcher will be informed that the task(s)
 had an error.
 """
-import time
+from typing import Optional
+from assemblyline.common.forge import get_service_queue
 
 from assemblyline.odm.models.error import Error
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.constants import service_queue_name
+from assemblyline.odm.models.service import Service
 
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.server_base import CoreBase, ServiceStage
@@ -27,11 +29,11 @@ class Plumber(CoreBase):
 
     def try_run(self):
         # Get an initial list of all the service queues
+        service_queues: dict[str, Optional[Service]]
         service_queues = {queue.decode('utf-8').lstrip('service-queue-'): None
                           for queue in self.redis.keys(service_queue_name('*'))}
 
         while self.running:
-            self.heartbeat()
             # Reset the status of the service queues
             service_queues = {service_name: None for service_name in service_queues}
 
@@ -40,7 +42,9 @@ class Plumber(CoreBase):
                 service_queues[service.name] = service
 
             for service_name, service in service_queues.items():
-                if not service or not service.enabled or self.get_service_stage(service_name) != ServiceStage.Running:
+                # For disabled or othewise unavailable services purge the queue
+                current_stage = self.get_service_stage(service_name, ServiceStage.Running)
+                if not service or not service.enabled or current_stage != ServiceStage.Running:
                     while True:
                         task = self.dispatch_client.request_work('plumber', service_name=service_name,
                                                                  service_version='0', blocking=False)
@@ -63,9 +67,43 @@ class Plumber(CoreBase):
 
                         error_key = error.build_key(task=task)
                         self.dispatch_client.service_failed(task.sid, error_key, error)
+                        self.heartbeat()
+
+                # For services that are enabled but
+                if service and service.enabled and 'PLUMBER_MAX_QUEUE_SIZE' in service.config:
+                    try:
+                        max_size = int(service.config['PLUMBER_MAX_QUEUE_SIZE'])
+                    except ValueError:
+                        self.log.exception(f"Couldn't read parameter 'PLUMBER_MAX_QUEUE_SIZE' on {service_name}")
+                        continue
+
+                    service_queue = get_service_queue(service_name, self.redis)
+                    while service_queue.length() > max_size:
+                        task = self.dispatch_client.request_work('plumber', service_name=service_name,
+                                                                 service_version='0', blocking=False, low_priority=True)
+                        if task is None:
+                            break
+
+                        error = Error(dict(
+                            archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
+                            created='NOW',
+                            expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60) if task.ttl else None,
+                            response=dict(
+                                message="Task canceled due to execesive queuing.",
+                                service_name=task.service_name,
+                                service_version='0',
+                                status='FAIL_NONRECOVERABLE',
+                            ),
+                            sha256=task.fileinfo.sha256,
+                            type="TASK PRE-EMPTED",
+                        ))
+
+                        error_key = error.build_key(task=task)
+                        self.dispatch_client.service_failed(task.sid, error_key, error)
+                        self.heartbeat()
 
             # Wait a while before checking status of all services again
-            time.sleep(self.delay)
+            self.sleep_with_heartbeat(self.delay)
 
 
 if __name__ == '__main__':
