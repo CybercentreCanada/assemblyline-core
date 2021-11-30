@@ -6,6 +6,7 @@ emptied. The status of all the services will be periodically checked and any ser
 disabled or deleted for which a service queue exists, the dispatcher will be informed that the task(s)
 had an error.
 """
+import threading
 from typing import Optional
 from assemblyline.common.forge import get_service_queue
 
@@ -26,6 +27,15 @@ class Plumber(CoreBase):
         self.delay = float(delay)
         self.dispatch_client = DispatchClient(datastore=self.datastore, redis=self.redis,
                                               redis_persist=self.redis_persist, logger=self.log)
+
+        self.flush_threads: dict[str, threading.Thread] = {}
+        self.stop_signals: dict[str, threading.Event] = {}
+        self.service_limit: dict[str, int] = {}
+
+    def stop(self):
+        for sig in self.stop_signals.values():
+            sig.set()
+        super().stop()
 
     def try_run(self):
         # Get an initial list of all the service queues
@@ -69,35 +79,50 @@ class Plumber(CoreBase):
                         self.dispatch_client.service_failed(task.sid, error_key, error)
                         self.heartbeat()
 
-                # For services that are enabled but
-                if service and service.enabled and service.max_queue_length > 0:
-                    service_queue = get_service_queue(service_name, self.redis)
-                    while service_queue.length() > service.max_queue_length:
-                        task = self.dispatch_client.request_work('plumber', service_name=service_name,
-                                                                 service_version='0', blocking=False, low_priority=True)
-                        if task is None:
-                            break
-
-                        error = Error(dict(
-                            archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
-                            created='NOW',
-                            expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60) if task.ttl else None,
-                            response=dict(
-                                message="Task canceled due to execesive queuing.",
-                                service_name=task.service_name,
-                                service_version='0',
-                                status='FAIL_NONRECOVERABLE',
-                            ),
-                            sha256=task.fileinfo.sha256,
-                            type="TASK PRE-EMPTED",
-                        ))
-
-                        error_key = error.build_key(task=task)
-                        self.dispatch_client.service_failed(task.sid, error_key, error)
-                        self.heartbeat()
+                # For services that are enabled but limited
+                if not service or not service.enabled or service.max_queue_length == 0:
+                    if service_name in self.stop_signals:
+                        self.stop_signals[service_name].set()
+                        self.service_limit.pop(service_name)
+                        self.flush_threads.pop(service_name)
+                elif service and service.enabled and service.max_queue_length > 0:
+                    self.service_limit[service_name] = service.max_queue_length
+                    thread = self.flush_threads.get(service_name)
+                    if not thread or not thread.is_alive():
+                        self.stop_signals[service_name] = threading.Event()
+                        thread = threading.Thread(target=self.watch_service, args=[service_name], daemon=True)
+                        self.flush_threads[service_name] = thread
+                        thread.start()
 
             # Wait a while before checking status of all services again
             self.sleep_with_heartbeat(self.delay)
+
+    def watch_service(self, service_name):
+        service_queue = get_service_queue(service_name, self.redis)
+        while self.running and not self.stop_signals[service_name].is_set():
+            while service_queue.length() > self.service_limit[service_name]:
+                task = self.dispatch_client.request_work('plumber', service_name=service_name,
+                                                         service_version='0', blocking=False, low_priority=True)
+                if task is None:
+                    break
+
+                error = Error(dict(
+                    archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
+                    created='NOW',
+                    expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60) if task.ttl else None,
+                    response=dict(
+                        message="Task canceled due to execesive queuing.",
+                        service_name=task.service_name,
+                        service_version='0',
+                        status='FAIL_NONRECOVERABLE',
+                    ),
+                    sha256=task.fileinfo.sha256,
+                    type="TASK PRE-EMPTED",
+                ))
+
+                error_key = error.build_key(task=task)
+                self.dispatch_client.service_failed(task.sid, error_key, error)
+            self.sleep(2)
 
 
 if __name__ == '__main__':
