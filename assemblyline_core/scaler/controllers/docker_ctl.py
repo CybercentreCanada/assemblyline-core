@@ -6,6 +6,8 @@ from collections import defaultdict
 from typing import List, Tuple, Dict
 import uuid
 
+from docker.errors import create_unexpected_kwargs_error
+
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig
 from .interface import ControllerInterface, ServiceControlError
 
@@ -16,6 +18,13 @@ INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'h
 NETWORK_REFRESH_INTERVAL = 60 * 3
 CHANGE_KEY_NAME = 'al_change_key'
 AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'al_core')
+COMPOSE_PROJECT = os.environ.get('COMPOSE_PROJECT_NAME', None)
+
+COPY_LABELS = [
+    "com.docker.compose.config-hash",
+    "com.docker.compose.project.config_files",
+    "com.docker.compose.project.working_dir",
+]
 
 
 class DockerController(ControllerInterface):
@@ -32,8 +41,12 @@ class DockerController(ControllerInterface):
         self.log_level = log_level
         self.global_mounts: List[Tuple[str, str]] = []
         self.core_mounts: List[Tuple[str, str]] = []
-        self._prefix: str = prefix
         self._labels: dict[str, str] = labels or {}
+        self._prefix: str = prefix
+
+        if self._prefix and not self._prefix.endswith("_"):
+            self._prefix += "_"
+
         self.prune_lock = threading.Lock()
         self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
 
@@ -65,6 +78,19 @@ class DockerController(ControllerInterface):
         # Start a background thread to keep the service server connected
         threading.Thread(target=self._refresh_service_networks, daemon=True).start()
         self._flush_containers()  # Clear out any containers that are left over from a previous run
+
+        if COMPOSE_PROJECT:
+            self._prefix = COMPOSE_PROJECT + "_" + self._prefix
+            self._labels["com.docker.compose.project"] = COMPOSE_PROJECT
+            filters = {"com.docker.compose.project": COMPOSE_PROJECT}
+            container = None
+            for container in self.client.containers.list(filters=filters, limit=1):
+                break
+
+            if container is not None:
+                for label in COPY_LABELS:
+                    if label in container.labels:
+                        self._labels[label] = container.labels[label]
 
     def find_service_server(self):
         service_server_container = None
@@ -222,9 +248,7 @@ class DockerController(ControllerInterface):
         used_names = set(used_names)
         index = 0
         while True:
-            name = f'{service_name}_{index}'
-            if self._prefix:
-                name = self._prefix + '_' + name
+            name = f'{self._prefix}{service_name}_{index}'
             if name not in used_names:
                 return name
             index += 1
@@ -262,6 +286,8 @@ class DockerController(ControllerInterface):
         running = 0
         filters = {'label': f'component={service_name}'}
         for container in self.client.containers.list(filters=filters, ignore_removed=True):
+            if 'dependency_for' in container.labels:
+                continue  # Don't count dependency containers
             if container.status in {'restarting', 'running'}:
                 running += 1
             elif container.status in {'created', 'removing', 'paused', 'exited', 'dead'}:
@@ -288,7 +314,7 @@ class DockerController(ControllerInterface):
                 # Kill off delta instances of of the service
                 filters = {'label': f'component={service_name}'}
                 running = [container for container in self.client.containers.list(filters=filters, ignore_removed=True)
-                           if container.status in {'restarting', 'running'}]
+                           if container.status in {'restarting', 'running'} and 'dependency_for' not in container.labels]
                 running = running[0:-delta]
                 for container in running:
                     container.kill()
@@ -325,6 +351,8 @@ class DockerController(ControllerInterface):
         self._pull_image(service)
         filters = {'label': f'component={service.name}'}
         for container in self.client.containers.list(filters=filters, ignore_removed=True):
+            if 'dependency_for' in container.labels:
+                continue
             container.kill()
 
     def get_running_container_names(self):
@@ -338,7 +366,8 @@ class DockerController(ControllerInterface):
     def start_stateful_container(self, service_name: str, container_name: str, spec: DependencyConfig,
                                  labels: dict[str, str], change_key: str):
         import docker.errors
-        deployment_name = f'{service_name}-dep-{container_name}'
+        deployment_name = f'{self._prefix}{service_name}-dep-{container_name}'
+        self.log.info(f"Killing stale container...")
 
         change_check = change_key + service_name + container_name + str(spec)
 
@@ -352,7 +381,9 @@ class DockerController(ControllerInterface):
                     self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
                 return
             else:
+                self.log.info(f"Killing stale {deployment_name} container...")
                 old_container.kill()
+                old_container.wait()
         except docker.errors.NotFound:
             instance_key = uuid.uuid4().hex
 
@@ -371,8 +402,9 @@ class DockerController(ControllerInterface):
         if spec.container.ports:
             self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
 
-        self._start_container(service_name=service_name, name=deployment_name, labels=all_labels, volumes=volumes, hostname=container_name,
-                              cfg=spec.container, core_container=spec.run_as_core, network=self._get_network(service_name).name)
+        self._start_container(service_name=service_name, name=deployment_name, labels=all_labels,
+                              volumes=volumes, hostname=container_name, cfg=spec.container,
+                              core_container=spec.run_as_core, network=self._get_network(service_name).name)
 
     def stop_containers(self, labels):
         label_strings = [f'{name}={value}' for name, value in labels.items()]
