@@ -290,7 +290,7 @@ class DockerController(ControllerInterface):
                 # Kill off delta instances of of the service
                 filters = {'label': f'component={service_name}'}
                 running = [container for container in self.client.containers.list(filters=filters, ignore_removed=True)
-                           if container.status in {'restarting', 'running'}]
+                           if container.status in {'restarting', 'running'} and 'dependency_for' not in container.labels]
                 running = running[0:-delta]
                 for container in running:
                     container.kill()
@@ -327,6 +327,8 @@ class DockerController(ControllerInterface):
         self._pull_image(service)
         filters = {'label': f'component={service.name}'}
         for container in self.client.containers.list(filters=filters, ignore_removed=True):
+            if 'dependency_for' in container.labels:
+                continue
             container.kill()
 
     def get_running_container_names(self):
@@ -341,6 +343,7 @@ class DockerController(ControllerInterface):
                                  labels: dict[str, str], change_key: str):
         import docker.errors
         deployment_name = f'{service_name}-dep-{container_name}'
+        self.log.info(f"Killing stale container...")
 
         change_check = change_key + service_name + container_name + str(spec)
 
@@ -354,7 +357,9 @@ class DockerController(ControllerInterface):
                     self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
                 return
             else:
+                self.log.info(f"Killing stale {deployment_name} container...")
                 old_container.kill()
+                old_container.wait()
         except docker.errors.NotFound:
             instance_key = uuid.uuid4().hex
 
@@ -373,8 +378,9 @@ class DockerController(ControllerInterface):
         if spec.container.ports:
             self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
 
-        self._start_container(service_name=service_name, name=deployment_name, labels=all_labels, volumes=volumes, hostname=container_name,
-                              cfg=spec.container, core_container=spec.run_as_core, network=self._get_network(service_name).name)
+        self._start_container(service_name=service_name, name=deployment_name, labels=all_labels,
+                              volumes=volumes, hostname=container_name, cfg=spec.container,
+                              core_container=spec.run_as_core, network=self._get_network(service_name).name)
 
     def stop_containers(self, labels):
         label_strings = [f'{name}={value}' for name, value in labels.items()]
