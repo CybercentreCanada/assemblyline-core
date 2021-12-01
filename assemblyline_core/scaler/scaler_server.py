@@ -626,7 +626,6 @@ class ScalerServer(ThreadedCoreBase):
                                 self.log.info(f"Scaling service {name}: {old} -> {value}")
                                 pool.call(self.controller.set_target, name, value)
 
-
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
     def handle_service_error(self, service_name: str):
         """Handle an error occurring in the *analysis* service.
