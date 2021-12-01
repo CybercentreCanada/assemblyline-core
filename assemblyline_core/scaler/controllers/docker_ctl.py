@@ -16,6 +16,7 @@ INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'h
 NETWORK_REFRESH_INTERVAL = 60 * 3
 CHANGE_KEY_NAME = 'al_change_key'
 AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'al_core')
+COMPOSE_PROJECT = os.environ.get('COMPOSE_PROJECT_NAME', None)
 
 
 class DockerController(ControllerInterface):
@@ -32,8 +33,16 @@ class DockerController(ControllerInterface):
         self.log_level = log_level
         self.global_mounts: List[Tuple[str, str]] = []
         self.core_mounts: List[Tuple[str, str]] = []
-        self._prefix: str = prefix
         self._labels: dict[str, str] = labels or {}
+        self._prefix: str = prefix
+
+        if self._prefix and not self._prefix.endswith("_"):
+            self._prefix += "_"
+
+        if COMPOSE_PROJECT:
+            self._prefix = COMPOSE_PROJECT + "_" + self._prefix
+            self._labels["com.docker.compose.project"] = COMPOSE_PROJECT
+
         self.prune_lock = threading.Lock()
         self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
 
@@ -222,9 +231,7 @@ class DockerController(ControllerInterface):
         used_names = set(used_names)
         index = 0
         while True:
-            name = f'{service_name}_{index}'
-            if self._prefix:
-                name = self._prefix + '_' + name
+            name = f'{self._prefix}{service_name}_{index}'
             if name not in used_names:
                 return name
             index += 1
@@ -342,7 +349,7 @@ class DockerController(ControllerInterface):
     def start_stateful_container(self, service_name: str, container_name: str, spec: DependencyConfig,
                                  labels: dict[str, str], change_key: str):
         import docker.errors
-        deployment_name = f'{service_name}-dep-{container_name}'
+        deployment_name = f'{self._prefix}{service_name}-dep-{container_name}'
         self.log.info(f"Killing stale container...")
 
         change_check = change_key + service_name + container_name + str(spec)
