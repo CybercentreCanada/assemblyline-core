@@ -15,6 +15,7 @@ INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'h
 # Every this many seconds, check that the services can actually reach the service server.
 NETWORK_REFRESH_INTERVAL = 60 * 3
 CHANGE_KEY_NAME = 'al_change_key'
+AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'al_core')
 
 
 class DockerController(ControllerInterface):
@@ -41,6 +42,12 @@ class DockerController(ControllerInterface):
             break
         else:
             self.external_network = self.client.networks.create(name='external', internal=False)
+
+        for network in self.client.networks.list(names=[AL_CORE_NETWORK]):
+            self.core_network = network
+            break
+        else:
+            raise ValueError(f"Could not find network {AL_CORE_NETWORK}")
         self.networks = {}
 
         # CPU and memory reserved for the host
@@ -125,7 +132,6 @@ class DockerController(ControllerInterface):
 
         # Define environment variables
         env = [f'{_e.name}={_e.value}' for _e in cfg.environment]
-        env += ['UPDATE_PATH=/mount/updates/']
         env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
         env += [f'LOG_LEVEL={self.log_level}']
         env += [f'{_n}={_v}' for _n, _v in self._service_limited_env[service_name].items()]
@@ -195,6 +201,9 @@ class DockerController(ControllerInterface):
             # ports=ports,
         )
 
+        if core_container:
+            self.core_network.connect(container, aliases=[hostname])
+
         if cfg.allow_internet_access:
             self.external_network.connect(container, aliases=[hostname])
 
@@ -262,7 +271,8 @@ class DockerController(ControllerInterface):
         return running
 
     def get_targets(self) -> Dict[str, int]:
-        return {name: self.get_target(name) for name in self._profiles.keys()}
+        names = list(self._profiles.keys())
+        return {name: self.get_target(name) for name in names}
 
     def set_target(self, service_name, target):
         """Change how many instances of a service docker is trying to keep up.

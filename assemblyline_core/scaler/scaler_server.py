@@ -616,6 +616,10 @@ class ScalerServer(ThreadedCoreBase):
                 with elasticapm.capture_span('write_targets'):
                     with pool:
                         for name, value in targets.items():
+                            if name not in self.profiles:
+                                # A service was probably added/removed while we were
+                                # in the middle of this function
+                                continue
                             self.profiles[name].target_instances = value
                             old = old_targets[name]
                             if value != old:
