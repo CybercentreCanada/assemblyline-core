@@ -125,7 +125,6 @@ class DockerController(ControllerInterface):
 
         # Define environment variables
         env = [f'{_e.name}={_e.value}' for _e in cfg.environment]
-        env += ['UPDATE_PATH=/mount/updates/']
         env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
         env += [f'LOG_LEVEL={self.log_level}']
         env += [f'{_n}={_v}' for _n, _v in self._service_limited_env[service_name].items()]
