@@ -262,6 +262,8 @@ class DockerController(ControllerInterface):
         running = 0
         filters = {'label': f'component={service_name}'}
         for container in self.client.containers.list(filters=filters, ignore_removed=True):
+            if 'dependency_for' in container.labels:
+                continue  # Don't count dependency containers
             if container.status in {'restarting', 'running'}:
                 running += 1
             elif container.status in {'created', 'removing', 'paused', 'exited', 'dead'}:
