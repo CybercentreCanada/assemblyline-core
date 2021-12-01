@@ -6,6 +6,8 @@ from collections import defaultdict
 from typing import List, Tuple, Dict
 import uuid
 
+from docker.errors import create_unexpected_kwargs_error
+
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig
 from .interface import ControllerInterface, ServiceControlError
 
@@ -17,6 +19,12 @@ NETWORK_REFRESH_INTERVAL = 60 * 3
 CHANGE_KEY_NAME = 'al_change_key'
 AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'al_core')
 COMPOSE_PROJECT = os.environ.get('COMPOSE_PROJECT_NAME', None)
+
+COPY_LABELS = [
+    "com.docker.compose.config-hash",
+    "com.docker.compose.project.config_files",
+    "com.docker.compose.project.working_dir",
+]
 
 
 class DockerController(ControllerInterface):
@@ -38,10 +46,6 @@ class DockerController(ControllerInterface):
 
         if self._prefix and not self._prefix.endswith("_"):
             self._prefix += "_"
-
-        if COMPOSE_PROJECT:
-            self._prefix = COMPOSE_PROJECT + "_" + self._prefix
-            self._labels["com.docker.compose.project"] = COMPOSE_PROJECT
 
         self.prune_lock = threading.Lock()
         self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
@@ -74,6 +78,19 @@ class DockerController(ControllerInterface):
         # Start a background thread to keep the service server connected
         threading.Thread(target=self._refresh_service_networks, daemon=True).start()
         self._flush_containers()  # Clear out any containers that are left over from a previous run
+
+        if COMPOSE_PROJECT:
+            self._prefix = COMPOSE_PROJECT + "_" + self._prefix
+            self._labels["com.docker.compose.project"] = COMPOSE_PROJECT
+            filters = {"com.docker.compose.project": COMPOSE_PROJECT}
+            container = None
+            for container in self.client.containers.list(filters=filters, limit=1):
+                break
+
+            if container is not None:
+                for label in COPY_LABELS:
+                    if label in container.labels:
+                        self._labels[label] = container.labels[label]
 
     def find_service_server(self):
         service_server_container = None
