@@ -82,7 +82,7 @@ class DockerController(ControllerInterface):
         if COMPOSE_PROJECT:
             self._prefix = COMPOSE_PROJECT + "_" + self._prefix
             self._labels["com.docker.compose.project"] = COMPOSE_PROJECT
-            filters = {"com.docker.compose.project": COMPOSE_PROJECT}
+            filters = {"label": f"com.docker.compose.project={COMPOSE_PROJECT}"}
             container = None
             for container in self.client.containers.list(filters=filters, limit=1):
                 break
