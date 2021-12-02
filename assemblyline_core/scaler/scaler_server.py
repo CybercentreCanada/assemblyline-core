@@ -283,6 +283,7 @@ class ScalerServer(ThreadedCoreBase):
             self.log.info("Loading Docker cluster interface.")
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
                                                labels=labels, log_level=self.config.logging.log_level)
+            self._service_stage_hash.delete()
 
             if DOCKER_CONFIGURATION_PATH and DOCKER_CONFIGURATION_VOLUME:
                 self.controller.core_mounts.append((DOCKER_CONFIGURATION_VOLUME, '/etc/assemblyline/'))
