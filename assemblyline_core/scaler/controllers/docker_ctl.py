@@ -374,10 +374,11 @@ class DockerController(ControllerInterface):
         self.log.info("Killing stale container...")
 
         change_check = change_key + service_name + container_name + str(spec)
+        instance_key = None
 
         try:
             old_container = self.client.containers.get(deployment_name)
-            instance_key = None
+
             for env in old_container.attrs["Config"]["Env"]:
                 if env.startswith("AL_INSTANCE_KEY="):
                     instance_key = env.split("=")[1]
