@@ -377,8 +377,15 @@ class DockerController(ControllerInterface):
 
         try:
             old_container = self.client.containers.get(deployment_name)
-            instance_key = old_container.attrs["Config"]["Env"]['AL_INSTANCE_KEY']
-            if old_container.labels.get(CHANGE_KEY_NAME) == change_check and old_container.status == 'running':
+            instance_key = None
+            for env in old_container.attrs["Config"]["Env"]:
+                if env.startswith("AL_INSTANCE_KEY="):
+                    instance_key = env.split("=")[1]
+                    break
+
+            if instance_key is not None \
+                    and old_container.labels.get(CHANGE_KEY_NAME) == change_check \
+                    and old_container.status == 'running':
                 self._service_limited_env[service_name][f'{container_name}_host'] = deployment_name
                 self._service_limited_env[service_name][f'{container_name}_key'] = instance_key
                 if spec.container.ports:
@@ -389,6 +396,9 @@ class DockerController(ControllerInterface):
                 old_container.kill()
                 old_container.wait()
         except docker.errors.NotFound:
+            pass
+
+        if instance_key is None:
             instance_key = uuid.uuid4().hex
 
         volumes = {_n: {'bind': _v.mount_path, 'mode': 'rw'} for _n, _v in spec.volumes.items()}
