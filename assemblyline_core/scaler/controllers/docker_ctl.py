@@ -29,6 +29,7 @@ COPY_LABELS = [
 
 class DockerController(ControllerInterface):
     """A controller for *non* swarm mode docker."""
+
     def __init__(self, logger, prefix='', labels: dict[str, str] = None, log_level="INFO"):
         """
         :param logger: A logger to report status and debug information.
@@ -180,7 +181,8 @@ class DockerController(ControllerInterface):
         if cfg.allow_internet_access:
             self.external_network.connect(container)
 
-    def _start_container(self, service_name, name, labels, volumes, cfg: DockerConfig, network, hostname, core_container=False):
+    def _start_container(
+            self, service_name, name, labels, volumes, cfg: DockerConfig, network, hostname, core_container=False):
         """Launch a docker container."""
         # Take the port strings and convert them to a dictionary
         ports = {}
@@ -313,8 +315,10 @@ class DockerController(ControllerInterface):
             if delta < 0:
                 # Kill off delta instances of of the service
                 filters = {'label': f'component={service_name}'}
-                running = [container for container in self.client.containers.list(filters=filters, ignore_removed=True)
-                           if container.status in {'restarting', 'running'} and 'dependency_for' not in container.labels]
+                running = [container
+                           for container in self.client.containers.list(filters=filters, ignore_removed=True)
+                           if container.status in {'restarting', 'running'} and 'dependency_for' not in
+                           container.labels]
                 running = running[0:-delta]
                 for container in running:
                     container.kill()
@@ -367,7 +371,7 @@ class DockerController(ControllerInterface):
                                  labels: dict[str, str], change_key: str):
         import docker.errors
         deployment_name = f'{self._prefix}{service_name}-dep-{container_name}'
-        self.log.info(f"Killing stale container...")
+        self.log.info("Killing stale container...")
 
         change_check = change_key + service_name + container_name + str(spec)
 
@@ -419,7 +423,7 @@ class DockerController(ControllerInterface):
         """
         from docker.errors import NotFound
         # Create network for service
-        network_name = f'service-net-{service_name}'
+        network_name = f'{COMPOSE_PROJECT}_service-net-{service_name}'
         try:
             self.networks[service_name] = network = self.client.networks.get(network_name)
             network.reload()
