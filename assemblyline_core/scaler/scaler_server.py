@@ -283,6 +283,7 @@ class ScalerServer(ThreadedCoreBase):
             self.log.info("Loading Docker cluster interface.")
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
                                                labels=labels, log_level=self.config.logging.log_level)
+            self._service_stage_hash.delete()
 
             if DOCKER_CONFIGURATION_PATH and DOCKER_CONFIGURATION_VOLUME:
                 self.controller.core_mounts.append((DOCKER_CONFIGURATION_VOLUME, '/etc/assemblyline/'))
@@ -616,6 +617,10 @@ class ScalerServer(ThreadedCoreBase):
                 with elasticapm.capture_span('write_targets'):
                     with pool:
                         for name, value in targets.items():
+                            if name not in self.profiles:
+                                # A service was probably added/removed while we were
+                                # in the middle of this function
+                                continue
                             self.profiles[name].target_instances = value
                             old = old_targets[name]
                             if value != old:
