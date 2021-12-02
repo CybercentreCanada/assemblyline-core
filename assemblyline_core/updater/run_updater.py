@@ -41,6 +41,8 @@ CLASSIFICATION_CONFIGMAP_KEY = os.getenv('CLASSIFICATION_CONFIGMAP_KEY', 'classi
 SERVICE_API_HOST = os.environ.get('SERVICE_API_HOST', "http://al_service_server:5003")
 SERVICE_API_KEY = os.environ.get('SERVICE_API_KEY', 'ThisIsARandomAuthKey...ChangeMe!')
 
+AL_REGISTRATION_NETWORK = os.environ.get("AL_REGISTRATION_NETWORK", 'al_registration')
+
 
 class DockerUpdateInterface:
     """Wrap docker interface for the commands used in the update process."""
@@ -257,7 +259,7 @@ class KubernetesUpdateInterface:
             ))
 
         section = 'core'
-        if network == 'al_registration':
+        if network == AL_REGISTRATION_NETWORK:
             section = 'service'
             labels = {
                 'app': 'assemblyline',
@@ -425,7 +427,7 @@ class ServiceUpdater(CoreBase):
                         "SERVICE_API_KEY": SERVICE_API_KEY,
                         "REGISTER_ONLY": 'true'
                     },
-                    network='al_registration',
+                    network=AL_REGISTRATION_NETWORK,
                     blocking=True
                 )
 
