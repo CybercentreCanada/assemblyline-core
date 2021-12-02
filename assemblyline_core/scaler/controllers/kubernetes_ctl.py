@@ -490,7 +490,8 @@ class KubernetesController(ControllerInterface):
         # systems returning differently formatted data
         change_key = (
             deployment_name + change_key + str(docker_config) + str(shutdown_seconds) +
-            str(sorted((labels or {}).items())) + str(volumes) + str(mounts) + str(core_mounts)
+            str(sorted((labels or {}).items())) + str(volumes) + str(mounts) + str(core_mounts) +
+            str(sorted(self._service_limited_env[service_name].items()))
         )
 
         # Check if a deployment already exists, and if it does check if it has the same change key set
