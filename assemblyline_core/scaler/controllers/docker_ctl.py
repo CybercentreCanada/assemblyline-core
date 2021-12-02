@@ -394,8 +394,13 @@ class DockerController(ControllerInterface):
                 return
             else:
                 self.log.info(f"Killing stale {deployment_name} container...")
-                old_container.kill()
-                old_container.wait()
+                if old_container.status == "running":
+                    try:
+                        old_container.stop()
+                        old_container.wait()
+                    except docker.errors.APIError:
+                        pass
+                old_container.remove(force=True)
         except docker.errors.NotFound:
             pass
 
