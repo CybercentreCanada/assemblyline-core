@@ -22,6 +22,7 @@ COPY_LABELS = [
     "com.docker.compose.config-hash",
     "com.docker.compose.project.config_files",
     "com.docker.compose.project.working_dir",
+    "com.docker.compose.project.version",
 ]
 
 
@@ -150,7 +151,10 @@ class DockerController(ControllerInterface):
 
         # Set the list of labels
         labels = dict(self._labels)
-        labels.update({'component': service_name})
+        labels.update({
+            'component': service_name,
+            'com.docker.compose.service': service_name.lower()
+        })
 
         # Prepare the volumes and folders
         volumes = {row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.global_mounts}
@@ -437,7 +441,11 @@ class DockerController(ControllerInterface):
             volumes.update({row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.core_mounts})
 
         all_labels = dict(self._labels)
-        all_labels.update({'component': service_name, CHANGE_KEY_NAME: change_check})
+        all_labels.update({
+            'component': service_name,
+            CHANGE_KEY_NAME: change_check,
+            'com.docker.compose.service': deployment_name.lower()
+        })
         all_labels.update(labels)
 
         spec.container.environment.append({'name': 'AL_INSTANCE_KEY', 'value': instance_key})
