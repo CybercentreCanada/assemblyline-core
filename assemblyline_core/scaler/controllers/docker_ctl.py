@@ -22,6 +22,7 @@ COPY_LABELS = [
     "com.docker.compose.config-hash",
     "com.docker.compose.project.config_files",
     "com.docker.compose.project.working_dir",
+    "com.docker.compose.project.version",
 ]
 
 
@@ -79,7 +80,7 @@ class DockerController(ControllerInterface):
         self._flush_containers()  # Clear out any containers that are left over from a previous run
 
         if COMPOSE_PROJECT:
-            self._prefix = COMPOSE_PROJECT + "_" + self._prefix
+            self._prefix = COMPOSE_PROJECT + "_svc_"
             self._labels["com.docker.compose.project"] = COMPOSE_PROJECT
             filters = {"label": f"com.docker.compose.project={COMPOSE_PROJECT}"}
             container = None
@@ -144,13 +145,17 @@ class DockerController(ControllerInterface):
 
     def _start(self, service_name):
         """Launch a docker container in a manner suitable for Assemblyline."""
-        container_name = self._name_container(service_name)
+        container_name, container_index = self._name_container(service_name)
         prof = self._profiles[service_name]
         cfg = prof.container_config
 
         # Set the list of labels
         labels = dict(self._labels)
-        labels.update({'component': service_name})
+        labels.update({
+            'component': service_name,
+            'com.docker.compose.service': service_name.lower(),
+            'com.docker.compose.container-number': str(container_index)
+        })
 
         # Prepare the volumes and folders
         volumes = {row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.global_mounts}
@@ -246,11 +251,11 @@ class DockerController(ControllerInterface):
 
         # Try names until one works
         used_names = set(used_names)
-        index = 0
+        index = 1
         while True:
-            name = f'{self._prefix}{service_name}_{index}'
+            name = f'{self._prefix}{service_name.lower()}_{index}'
             if name not in used_names:
-                return name
+                return name, index
             index += 1
 
     def cpu_info(self):
@@ -396,7 +401,7 @@ class DockerController(ControllerInterface):
     def start_stateful_container(self, service_name: str, container_name: str, spec: DependencyConfig,
                                  labels: dict[str, str], change_key: str):
         import docker.errors
-        deployment_name = f'{self._prefix}{service_name}-dep-{container_name}'
+        deployment_name = f'{self._prefix}{service_name.lower()}_{container_name.lower()}'
         self.log.info("Killing stale container...")
 
         change_check = change_key + service_name + container_name + str(spec)
@@ -438,7 +443,11 @@ class DockerController(ControllerInterface):
             volumes.update({row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.core_mounts})
 
         all_labels = dict(self._labels)
-        all_labels.update({'component': service_name, CHANGE_KEY_NAME: change_check})
+        all_labels.update({
+            'component': service_name,
+            CHANGE_KEY_NAME: change_check,
+            'com.docker.compose.service': deployment_name.lower()
+        })
         all_labels.update(labels)
 
         spec.container.environment.append({'name': 'AL_INSTANCE_KEY', 'value': instance_key})
