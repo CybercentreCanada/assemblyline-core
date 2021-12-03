@@ -154,7 +154,7 @@ class DockerController(ControllerInterface):
         labels.update({
             'component': service_name,
             'com.docker.compose.service': service_name.lower(),
-            'com.docker.compose.container-number': container_index
+            'com.docker.compose.container-number': str(container_index)
         })
 
         # Prepare the volumes and folders
