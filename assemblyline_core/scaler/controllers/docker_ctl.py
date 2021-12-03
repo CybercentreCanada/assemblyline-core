@@ -82,7 +82,7 @@ class DockerController(ControllerInterface):
         self._flush_containers()  # Clear out any containers that are left over from a previous run
 
         if COMPOSE_PROJECT:
-            self._prefix = COMPOSE_PROJECT + "_" + self._prefix
+            self._prefix = COMPOSE_PROJECT + "_svc_"
             self._labels["com.docker.compose.project"] = COMPOSE_PROJECT
             filters = {"label": f"com.docker.compose.project={COMPOSE_PROJECT}"}
             container = None
@@ -254,7 +254,7 @@ class DockerController(ControllerInterface):
         used_names = set(used_names)
         index = 0
         while True:
-            name = f'{self._prefix}{service_name}_{index}'
+            name = f'{self._prefix}{service_name.lower()}_{index}'
             if name not in used_names:
                 return name
             index += 1
@@ -374,7 +374,7 @@ class DockerController(ControllerInterface):
     def start_stateful_container(self, service_name: str, container_name: str, spec: DependencyConfig,
                                  labels: dict[str, str], change_key: str):
         import docker.errors
-        deployment_name = f'{self._prefix}{service_name}-dep-{container_name}'
+        deployment_name = f'{self._prefix}{service_name.lower()}_{container_name.lower()}'
         self.log.info("Killing stale container...")
 
         change_check = change_key + service_name + container_name + str(spec)
