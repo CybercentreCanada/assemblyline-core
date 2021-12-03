@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from assemblyline_core.scaler.scaler_server import ServiceProfile
@@ -53,7 +53,7 @@ class ControllerInterface:
     def new_events(self):
         return []
 
-    def stateful_container_exists(self, service_name: str, container_name: str, spec, change_key: str) -> bool:
+    def stateful_container_key(self, service_name: str, container_name: str, spec, change_key: str) -> Optional[str]:
         raise NotImplementedError()
 
     def start_stateful_container(self, service_name: str, container_name: str, spec, labels, change_key):

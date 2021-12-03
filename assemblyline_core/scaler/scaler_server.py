@@ -431,10 +431,15 @@ class ScalerServer(ThreadedCoreBase):
                 dependency_blobs[_n] = str(dependency) + str(service.version)
 
             # Check if the service dependencies have been deployed.
+            dependency_keys = []
             updater_ready = stage == ServiceStage.Running
             if service.update_config:
                 for _n, dependency in dependency_config.items():
-                    updater_ready &= self.controller.stateful_container_exists(service.name, _n, dependency, '')
+                    key = self.controller.stateful_container_key(service.name, _n, dependency, '')
+                    if key:
+                        dependency_keys.append(_n + key)
+                    else:
+                        updater_ready = False
 
             # If stage is not set to running or a dependency container is missing start the setup process
             if not updater_ready:
@@ -465,6 +470,7 @@ class ScalerServer(ThreadedCoreBase):
                 # should still result in a service being restarted when changed
                 config_blob = str(sorted(service.config.items()))
                 config_blob += str(service.submission_params)
+                config_blob += ''.join(sorted(dependency_keys))
 
                 # Build the docker config for the service, we are going to either create it or
                 # update it so we need to know what the current configuration is either way
