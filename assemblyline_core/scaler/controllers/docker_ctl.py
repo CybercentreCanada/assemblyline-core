@@ -365,9 +365,10 @@ class DockerController(ControllerInterface):
             out.append(container.name)
         return out
 
-    def stateful_container_key(self, service_name: str, container_name: str, spec: DependencyConfig, change_key: str) -> Optional[str]:
+    def stateful_container_key(
+            self, service_name: str, container_name: str, spec: DependencyConfig, change_key: str) -> Optional[str]:
         import docker.errors
-        deployment_name = f'{self._prefix}{service_name}-dep-{container_name}'
+        deployment_name = f'{self._prefix}{service_name.lower()}_{container_name.lower()}'
 
         change_check = change_key + service_name + container_name + str(spec)
         instance_key = None
