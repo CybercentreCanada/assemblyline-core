@@ -680,6 +680,23 @@ class KubernetesController(ControllerInterface):
 
         return new
 
+    def stateful_container_exists(self, service_name: str, container_name: str, spec, change_key: str) -> bool:
+        deployment_name = self._dependency_name(service_name, container_name)
+        try:
+            old_deployment = self.apps_api.read_namespaced_deployment(deployment_name, self.namespace)
+            for container in old_deployment.spec.template.spec.containers:
+                for env in container.env:
+                    if env.name == 'AL_INSTANCE_KEY':
+                        self._service_limited_env[service_name][f'{container_name}_host'] = deployment_name
+                        self._service_limited_env[service_name][f'{container_name}_key'] = env.value
+                        if spec.container.ports:
+                            self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
+                        return True
+        except ApiException as error:
+            if error.status != 404:
+                raise
+        return False
+
     def start_stateful_container(self, service_name: str, container_name: str,
                                  spec, labels: dict[str, str], change_key: str):
         # Setup PVC

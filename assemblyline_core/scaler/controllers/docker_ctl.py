@@ -367,6 +367,33 @@ class DockerController(ControllerInterface):
             out.append(container.name)
         return out
 
+    def stateful_container_exists(self, service_name: str, container_name: str, spec: DependencyConfig, change_key: str) -> bool:
+        import docker.errors
+        deployment_name = f'{self._prefix}{service_name}-dep-{container_name}'
+
+        change_check = change_key + service_name + container_name + str(spec)
+        instance_key = None
+
+        try:
+            old_container = self.client.containers.get(deployment_name)
+
+            for env in old_container.attrs["Config"]["Env"]:
+                if env.startswith("AL_INSTANCE_KEY="):
+                    instance_key = env.split("=")[1]
+                    break
+
+            if instance_key is not None \
+                    and old_container.labels.get(CHANGE_KEY_NAME) == change_check \
+                    and old_container.status == 'running':
+                self._service_limited_env[service_name][f'{container_name}_host'] = deployment_name
+                self._service_limited_env[service_name][f'{container_name}_key'] = instance_key
+                if spec.container.ports:
+                    self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
+                return True
+        except docker.errors.NotFound:
+            pass
+        return False
+
     def start_stateful_container(self, service_name: str, container_name: str, spec: DependencyConfig,
                                  labels: dict[str, str], change_key: str):
         import docker.errors

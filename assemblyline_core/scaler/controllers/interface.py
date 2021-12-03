@@ -53,6 +53,9 @@ class ControllerInterface:
     def new_events(self):
         return []
 
+    def stateful_container_exists(self, service_name: str, container_name: str, spec, change_key: str) -> bool:
+        raise NotImplementedError()
+
     def start_stateful_container(self, service_name: str, container_name: str, spec, labels, change_key):
         raise NotImplementedError()
 
