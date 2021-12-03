@@ -3,10 +3,8 @@ import os
 import threading
 import time
 from collections import defaultdict
-from typing import List, Tuple, Dict
+from typing import List, Optional, Tuple, Dict
 import uuid
-
-from docker.errors import create_unexpected_kwargs_error
 
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig
 from .interface import ControllerInterface, ServiceControlError
@@ -366,6 +364,34 @@ class DockerController(ControllerInterface):
             out.append(container.id[:12])
             out.append(container.name)
         return out
+
+    def stateful_container_key(
+            self, service_name: str, container_name: str, spec: DependencyConfig, change_key: str) -> Optional[str]:
+        import docker.errors
+        deployment_name = f'{self._prefix}{service_name.lower()}_{container_name.lower()}'
+
+        change_check = change_key + service_name + container_name + str(spec)
+        instance_key = None
+
+        try:
+            old_container = self.client.containers.get(deployment_name)
+
+            for env in old_container.attrs["Config"]["Env"]:
+                if env.startswith("AL_INSTANCE_KEY="):
+                    instance_key = env.split("=")[1]
+                    break
+
+            if instance_key is not None \
+                    and old_container.labels.get(CHANGE_KEY_NAME) == change_check \
+                    and old_container.status == 'running':
+                self._service_limited_env[service_name][f'{container_name}_host'] = deployment_name
+                self._service_limited_env[service_name][f'{container_name}_key'] = instance_key
+                if spec.container.ports:
+                    self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
+                return instance_key
+        except docker.errors.NotFound:
+            pass
+        return None
 
     def start_stateful_container(self, service_name: str, container_name: str, spec: DependencyConfig,
                                  labels: dict[str, str], change_key: str):
