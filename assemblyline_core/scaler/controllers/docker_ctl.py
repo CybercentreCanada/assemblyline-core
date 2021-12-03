@@ -145,7 +145,7 @@ class DockerController(ControllerInterface):
 
     def _start(self, service_name):
         """Launch a docker container in a manner suitable for Assemblyline."""
-        container_name = self._name_container(service_name)
+        container_name, container_index = self._name_container(service_name)
         prof = self._profiles[service_name]
         cfg = prof.container_config
 
@@ -153,7 +153,8 @@ class DockerController(ControllerInterface):
         labels = dict(self._labels)
         labels.update({
             'component': service_name,
-            'com.docker.compose.service': service_name.lower()
+            'com.docker.compose.service': service_name.lower(),
+            'com.docker.compose.container-number': container_index
         })
 
         # Prepare the volumes and folders
@@ -250,11 +251,11 @@ class DockerController(ControllerInterface):
 
         # Try names until one works
         used_names = set(used_names)
-        index = 0
+        index = 1
         while True:
             name = f'{self._prefix}{service_name.lower()}_{index}'
             if name not in used_names:
-                return name
+                return name, index
             index += 1
 
     def cpu_info(self):
