@@ -3,10 +3,8 @@ import os
 import threading
 import time
 from collections import defaultdict
-from typing import List, Tuple, Dict
+from typing import List, Optional, Tuple, Dict
 import uuid
-
-from docker.errors import create_unexpected_kwargs_error
 
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig
 from .interface import ControllerInterface, ServiceControlError
@@ -367,7 +365,7 @@ class DockerController(ControllerInterface):
             out.append(container.name)
         return out
 
-    def stateful_container_exists(self, service_name: str, container_name: str, spec: DependencyConfig, change_key: str) -> bool:
+    def stateful_container_key(self, service_name: str, container_name: str, spec: DependencyConfig, change_key: str) -> Optional[str]:
         import docker.errors
         deployment_name = f'{self._prefix}{service_name}-dep-{container_name}'
 
@@ -389,10 +387,10 @@ class DockerController(ControllerInterface):
                 self._service_limited_env[service_name][f'{container_name}_key'] = instance_key
                 if spec.container.ports:
                     self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
-                return True
+                return instance_key
         except docker.errors.NotFound:
             pass
-        return False
+        return None
 
     def start_stateful_container(self, service_name: str, container_name: str, spec: DependencyConfig,
                                  labels: dict[str, str], change_key: str):
