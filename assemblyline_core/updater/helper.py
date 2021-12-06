@@ -121,8 +121,7 @@ def get_latest_tag_for_service(service_config, system_config, logger):
         auth = f"Basic {b64encode(upass.encode()).decode()}"
 
     server, image_name = process_image(searchable_image)
-    registry_type = service_config.docker_config.registry_type or system_config.services.preferred_registry_type
-    registry = REGISTRY_TYPE_MAPPING[registry_type]
+    registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
 
     if server == DEFAULT_DOCKER_REGISTRY:
         tags = _get_dockerhub_tags(image_name, update_channel)
