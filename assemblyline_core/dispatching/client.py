@@ -4,6 +4,7 @@ An interface to the core system for the edge services.
 
 """
 import logging
+import elasticapm
 import time
 from typing import Dict, Optional, Any, cast
 
@@ -79,6 +80,7 @@ class DispatchClient:
             self.dead_dispatchers.append(dispatcher_id)
             return False
 
+    @elasticapm.capture_span(span_type='dispatch_client')
     def dispatch_submission(self, submission: Submission, completed_queue: str = None):
         """Insert a submission into the dispatching system.
 
@@ -94,6 +96,7 @@ class DispatchClient:
             completed_queue=completed_queue,
         ))
 
+    @elasticapm.capture_span(span_type='dispatch_client')
     def outstanding_services(self, sid) -> Dict[str, int]:
         """
         List outstanding services for a given submission and the number of file each
@@ -118,6 +121,7 @@ class DispatchClient:
             return queue.pop(timeout=30)
         return {}
 
+    @elasticapm.capture_span(span_type='dispatch_client')
     def request_work(self, worker_id, service_name, service_version,
                      timeout: float = 60, blocking=True, low_priority=False) -> Optional[ServiceTask]:
         """Pull work from the service queue for the service in question.
@@ -177,6 +181,7 @@ class DispatchClient:
             return task
         return None
 
+    @elasticapm.capture_span(span_type='dispatch_client')
     def service_finished(self, sid: str, result_key: str, result: Result,
                          temporary_data: Optional[Dict[str, Any]] = None):
         """Notifies the dispatcher of service completion, and possible new files to dispatch."""
@@ -224,6 +229,7 @@ class DispatchClient:
             'temporary_data': temporary_data
         })
 
+    @elasticapm.capture_span(span_type='dispatch_client')
     def service_failed(self, sid: str, error_key: str, error: Error):
         task_key = ServiceTask.make_key(sid=sid, service_name=error.response.service_name, sha=error.sha256)
         task = self.running_tasks.pop(task_key)
@@ -251,6 +257,7 @@ class DispatchClient:
             'error_key': error_key
         })
 
+    @elasticapm.capture_span(span_type='dispatch_client')
     def setup_watch_queue(self, sid: str) -> Optional[str]:
         """
         This function takes a submission ID as a parameter and creates a unique queue where all service
