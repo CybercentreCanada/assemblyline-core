@@ -137,7 +137,6 @@ class SubmissionClient:
 
         return sub
 
-    @elasticapm.capture_span(span_type='submission_client')
     def _ready_file(self, local_path: str, expiry, classification) -> Tuple[str, int, dict]:
         """Take a file from local storage and prepare it for submission.
 
