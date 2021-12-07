@@ -201,7 +201,7 @@ class DispatchClient:
             self.ds.emptyresult.save(result_key, {"expiry_ts": result.archive_ts})
         else:
             while True:
-                old, version = self.ds.result.get(
+                old, version = self.ds.result.get_if_exists(
                     result_key, archive_access=self.config.datastore.ilm.update_archive, version=True)
                 if old:
                     if old.expiry_ts and result.expiry_ts:
