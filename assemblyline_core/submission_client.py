@@ -18,6 +18,7 @@ client from copying the file again. Once the client has copied the file
 (if required) it then issues a final 'submit'.
 
 """
+import elasticapm
 import logging
 import os
 from typing import List, Tuple
@@ -63,6 +64,7 @@ class SubmissionClient:
         # A client for interacting with the dispatcher
         self.dispatcher = DispatchClient(datastore, redis)
 
+    @elasticapm.capture_span(span_type='submission_client')
     def submit(self, submission_obj: SubmissionObject, local_files: List = None, completed_queue=None):
         """Submit several files in a single submission.
 
@@ -135,6 +137,7 @@ class SubmissionClient:
 
         return sub
 
+    @elasticapm.capture_span(span_type='submission_client')
     def _ready_file(self, local_path: str, expiry, classification) -> Tuple[str, int, dict]:
         """Take a file from local storage and prepare it for submission.
 
