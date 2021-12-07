@@ -80,7 +80,6 @@ class DispatchClient:
             self.dead_dispatchers.append(dispatcher_id)
             return False
 
-    @elasticapm.capture_span(span_type='dispatch_client')
     def dispatch_submission(self, submission: Submission, completed_queue: str = None):
         """Insert a submission into the dispatching system.
 
@@ -96,7 +95,6 @@ class DispatchClient:
             completed_queue=completed_queue,
         ))
 
-    @elasticapm.capture_span(span_type='dispatch_client')
     def outstanding_services(self, sid) -> Dict[str, int]:
         """
         List outstanding services for a given submission and the number of file each
@@ -257,7 +255,6 @@ class DispatchClient:
             'error_key': error_key
         })
 
-    @elasticapm.capture_span(span_type='dispatch_client')
     def setup_watch_queue(self, sid: str) -> Optional[str]:
         """
         This function takes a submission ID as a parameter and creates a unique queue where all service
