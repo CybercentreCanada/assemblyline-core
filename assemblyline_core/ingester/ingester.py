@@ -565,7 +565,7 @@ class Ingester(ThreadedCoreBase):
         self.stamp_filescore_key(task)
         pprevious, previous, score = None, None, None
         if not param.ignore_cache:
-            pprevious, previous, score, _ = self.check(task)
+            pprevious, previous, score, _ = self.check(task, count_miss=False)
 
         # Assign priority.
         low_priority = self.is_low_priority(task)
@@ -614,7 +614,7 @@ class Ingester(ThreadedCoreBase):
 
         self.unique_queue.push(priority, task.as_primitives())
 
-    def check(self, task: IngestTask) -> Tuple[Optional[str], Optional[str], Optional[float], str]:
+    def check(self, task: IngestTask, count_miss=True) -> Tuple[Optional[str], Optional[str], Optional[float], str]:
         key = self.stamp_filescore_key(task)
 
         with self.cache_lock:
@@ -629,7 +629,8 @@ class Ingester(ThreadedCoreBase):
                 self.counter.increment('cache_hit')
                 self.log.info(f'[{task.ingest_id} :: {task.sha256}] Remote cache hit')
             else:
-                self.counter.increment('cache_miss')
+                if count_miss:
+                    self.counter.increment('cache_miss')
                 return None, None, None, key
 
             with self.cache_lock:
