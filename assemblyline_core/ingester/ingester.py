@@ -181,9 +181,6 @@ class Ingester(ThreadedCoreBase):
         # Input. The dispatcher creates a record when any submission completes.
         self.complete_queue = NamedQueue(COMPLETE_QUEUE_NAME, self.redis)
 
-        # Internal. Dropped entries are placed on this queue.
-        # self.drop_queue = NamedQueue('m-drop', self.persistent_redis)
-
         # Input. An external process places submission requests on this queue.
         self.ingest_queue = NamedQueue(INGEST_QUEUE_NAME, self.redis_persist)
 
@@ -317,17 +314,9 @@ class Ingester(ThreadedCoreBase):
 
                 task = IngestTask(raw)
 
-                # noinspection PyBroadException
-                if any(len(file.sha256) != 64 for file in task.submission.files):
-                    self.log.error("Malformed entry on submission queue: %s", task.ingest_id)
-                    # End of ingest message (invalid_hash)
-                    if self.apm_client:
-                        self.apm_client.end_transaction('ingest_submit', 'invalid_hash')
-                    continue
-
-                # If between the initial ingestion and now the drop/whitelist status
-                # of this submission has changed, then drop it now
-                if self.drop(task):
+                # Check if we need to drop a file for capacity reasons, but only if the
+                # number of files in flight is alreay over 80%
+                if length >= self.config.core.ingester.max_inflight * 0.8 and self.drop(task):
                     # End of ingest message (dropped)
                     if self.apm_client:
                         self.apm_client.end_transaction('ingest_submit', 'dropped')
@@ -576,7 +565,7 @@ class Ingester(ThreadedCoreBase):
         self.stamp_filescore_key(task)
         pprevious, previous, score = None, None, None
         if not param.ignore_cache:
-            pprevious, previous, score, _ = self.check(task)
+            pprevious, previous, score, _ = self.check(task, count_miss=False)
 
         # Assign priority.
         low_priority = self.is_low_priority(task)
@@ -625,7 +614,7 @@ class Ingester(ThreadedCoreBase):
 
         self.unique_queue.push(priority, task.as_primitives())
 
-    def check(self, task: IngestTask) -> Tuple[Optional[str], Optional[str], Optional[float], str]:
+    def check(self, task: IngestTask, count_miss=True) -> Tuple[Optional[str], Optional[str], Optional[float], str]:
         key = self.stamp_filescore_key(task)
 
         with self.cache_lock:
@@ -640,7 +629,8 @@ class Ingester(ThreadedCoreBase):
                 self.counter.increment('cache_hit')
                 self.log.info(f'[{task.ingest_id} :: {task.sha256}] Remote cache hit')
             else:
-                self.counter.increment('cache_miss')
+                if count_miss:
+                    self.counter.increment('cache_miss')
                 return None, None, None, key
 
             with self.cache_lock:
