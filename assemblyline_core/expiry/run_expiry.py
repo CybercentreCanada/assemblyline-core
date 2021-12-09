@@ -163,12 +163,19 @@ class ExpiryManager(ServerBase):
         return reached_max
 
     def run_archive_once(self):
+        reached_max = False
         if not self.config.datastore.ilm.enabled:
-            return
+            return reached_max
 
         now = now_as_iso()
         # Archive data
         for collection in self.archiveable_collections:
+            # Call heartbeat pre-dated by 5 minutes. If a collection takes more than
+            # 5 minutes to expire, this container could be seen as unhealthy. The down
+            # side is if it is stuck on something it will be more than 5 minutes before
+            # the container is restarted.
+            self.heartbeat(int(time.time() + 5 * 60))
+
             # Start of expiry transaction
             if self.apm_client:
                 self.apm_client.begin_transaction("Archive older documents")
@@ -179,6 +186,9 @@ class ExpiryManager(ServerBase):
             number_to_archive = collection.search(archive_query, rows=0, as_obj=False,
                                                   use_archive=False, sort=sort,
                                                   track_total_hits=ARCHIVE_SIZE)['total']
+
+            if number_to_archive == ARCHIVE_SIZE:
+                reached_max = True
 
             if self.apm_client:
                 elasticapm.label(query=archive_query)
@@ -200,22 +210,23 @@ class ExpiryManager(ServerBase):
             if self.apm_client:
                 self.apm_client.end_transaction(collection.name, 'archived')
 
+        return reached_max
+
     def try_run(self):
         while self.running:
             expiry_maxed_out = False
+            archive_maxed_out = False
             try:
                 expiry_maxed_out = self.run_expiry_once()
             except Exception as e:
                 self.log.exception(str(e))
 
             try:
-                self.run_archive_once()
+                archive_maxed_out = self.run_archive_once()
             except Exception as e:
                 self.log.exception(str(e))
 
-            if expiry_maxed_out:
-                self.heartbeat()
-            else:
+            if not expiry_maxed_out and not archive_maxed_out:
                 self.sleep_with_heartbeat(self.config.core.expiry.sleep_time)
 
 
