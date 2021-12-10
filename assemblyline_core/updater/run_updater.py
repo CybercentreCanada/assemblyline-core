@@ -7,6 +7,7 @@ import os
 import uuid
 import sched
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import docker
@@ -397,7 +398,9 @@ class ServiceUpdater(CoreBase):
     def container_updates(self):
         """Go through the list of services and check what are the latest tags for it"""
         self.scheduler.enter(UPDATE_CHECK_INTERVAL, 0, self.container_updates)
-        for service_name, update_data in self.container_update.items().items():
+
+        # Update function for services
+        def update_service(service_name: str, update_data: dict) -> str:
             self.log.info(f"Service {service_name} is being updated to version {update_data['latest_tag']}...")
 
             # Load authentication params
@@ -408,6 +411,8 @@ class ServiceUpdater(CoreBase):
                 username = auth.get('username', None)
                 password = auth.get('password', None)
 
+            latest_tag = update_data['latest_tag'].replace('stable', '')
+            service_key = f"{service_name}_{latest_tag}"
             try:
                 self.controller.launch(
                     name=service_name,
@@ -430,29 +435,36 @@ class ServiceUpdater(CoreBase):
                     network=AL_REGISTRATION_NETWORK,
                     blocking=True
                 )
-
-                latest_tag = update_data['latest_tag'].replace('stable', '')
-
-                service_key = f"{service_name}_{latest_tag}"
-
-                if self.datastore.service.get_if_exists(service_key):
-                    operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
-                    if self.datastore.service_delta.update(service_name, operations):
-                        # Update completed, cleanup
-                        self.service_events.send(service_name, {
-                            'operation': Operation.Modified,
-                            'name': service_name
-                        })
-                        self.log.info(f"Service {service_name} update successful!")
-                    else:
-                        self.log.error(f"Service {service_name} has failed to update because it cannot set "
-                                       f"{latest_tag} as the new version. Update procedure cancelled...")
-                else:
-                    self.log.error(f"Service {service_name} has failed to update because resulting "
-                                   f"service key ({service_key}) does not exist. Update procedure cancelled...")
             except Exception as e:
                 self.log.error(f"Service {service_name} has failed to update. Update procedure cancelled... [{str(e)}]")
+            return service_key
 
+        # Start up updates for services in parallel
+        update_threads = []
+        with ThreadPoolExecutor() as service_updates_exec:
+            for service_name, update_data in self.container_update.items().items():
+                update_threads.append(service_updates_exec.submit(update_service, service_name, update_data))
+
+        # Once all threads are completed, check the status of the updates
+        for thread in update_threads:
+            service_key = thread.result()
+            service_name, latest_tag = service_key.split("_")
+
+            if self.datastore.service.get_if_exists(service_key):
+                operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
+                if self.datastore.service_delta.update(service_name, operations):
+                    # Update completed, cleanup
+                    self.service_events.send(service_name, {
+                        'operation': Operation.Modified,
+                        'name': service_name
+                    })
+                    self.log.info(f"Service {service_name} update successful!")
+                else:
+                    self.log.error(f"Service {service_name} has failed to update because it cannot set "
+                                   f"{latest_tag} as the new version. Update procedure cancelled...")
+            else:
+                self.log.error(f"Service {service_name} has failed to update because resulting "
+                               f"service key ({service_key}) does not exist. Update procedure cancelled...")
             self.container_update.pop(service_name)
 
         # Clear out any old dead containers
