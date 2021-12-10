@@ -731,13 +731,16 @@ class Dispatcher(ThreadedCoreBase):
         result_queue = self.result_queue
 
         while self.running:
-            message = result_queue.pop(timeout=1)
-            if not message:
-                continue
+            messages = result_queue.pop_batch(5)
+            if not messages:
+                message = result_queue.pop(timeout=1)
+                if message:
+                    messages = [message]
 
-            sid = message['service_task']['sid']
-            self.queue_ready_signals[self.process_queue_index(sid)].acquire()
-            self.find_process_queue(sid).put(DispatchAction(kind=Action.result, sid=sid, data=message))
+            for message in messages:
+                sid = message['service_task']['sid']
+                self.queue_ready_signals[self.process_queue_index(sid)].acquire()
+                self.find_process_queue(sid).put(DispatchAction(kind=Action.result, sid=sid, data=message))
 
     def service_worker(self, index: int):
         self.log.info(f"Start service worker {index}")
@@ -974,17 +977,19 @@ class Dispatcher(ThreadedCoreBase):
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
-            message = start_queue.pop(timeout=1)
+            messages = start_queue.pop_batch(100)
+            if not messages:
+                message = start_queue.pop(timeout=1)
+                if message:
+                    messages = [message]
 
             cpu_mark = time.process_time()
             time_mark = time.time()
 
-            if not message:
-                continue
-
-            sid, sha, service_name, worker_id = message
-            self.find_process_queue(sid).put(DispatchAction(kind=Action.start, sid=sid, sha=sha,
-                                                            service_name=service_name, worker_id=worker_id))
+            for message in messages:
+                sid, sha, service_name, worker_id = message
+                self.find_process_queue(sid).put(DispatchAction(kind=Action.start, sid=sid, sha=sha,
+                                                                service_name=service_name, worker_id=worker_id))
 
     @elasticapm.capture_span(span_type='dispatcher')
     def set_timeout(self, task: SubmissionTask, sha256, service_name, worker_id):
