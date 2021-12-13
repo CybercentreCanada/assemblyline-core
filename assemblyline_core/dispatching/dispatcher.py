@@ -462,6 +462,16 @@ class Dispatcher(ThreadedCoreBase):
                         self.retry_error(task, sha256, service_name)
                         continue
 
+                    # Load the list of tags we will pass
+                    tags = []
+                    if service.uses_tags:
+                        tags = task.file_tags.get(sha256, [])
+
+                    # Load the auxillary data we will pass
+                    aux_data = {}
+                    if service.uses_auxillary_data:
+                        aux_data = task.file_temporary_data[sha256]
+
                     # Build the actual service dispatch message
                     config = self.build_service_config(service, submission)
                     service_task = ServiceTask(dict(
@@ -477,11 +487,11 @@ class Dispatcher(ThreadedCoreBase):
                         ttl=submission.params.ttl,
                         ignore_cache=submission.params.ignore_cache,
                         ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
-                        tags=[{'type': x['type'], 'value': x['value'], 'short_type': x['short_type']}
-                              for x in task.file_tags.get(sha256, [])],
+                        tags=[
+                            {'type': x['type'], 'value': x['value'], 'short_type': x['short_type']} for x in tags
+                        ],
                         temporary_submission_data=[
-                            {'name': name, 'value': value}
-                            for name, value in task.file_temporary_data[sha256].items()
+                            {'name': name, 'value': value} for name, value in aux_data.items()
                         ],
                         deep_scan=submission.params.deep_scan,
                         priority=submission.params.priority,
