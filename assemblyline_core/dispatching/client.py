@@ -3,12 +3,15 @@ An interface to the core system for the edge services.
 
 
 """
+from collections import defaultdict
 import logging
 import elasticapm
 import time
 from typing import Dict, Optional, Any, cast
+from assemblyline.common.dict_utils import flatten
 
 from assemblyline.common.forge import CachedObject, get_service_queue
+from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.datastore.exceptions import VersionConflictException
 from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, \
     CreateWatch, LIST_OUTSTANDING, ListOutstanding
@@ -27,7 +30,7 @@ from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline_core.dispatching.dispatcher import DISPATCH_START_EVENTS, DISPATCH_RESULT_QUEUE, \
-    DISPATCH_COMMAND_QUEUE, QUEUE_EXPIRY
+    DISPATCH_COMMAND_QUEUE, QUEUE_EXPIRY, ResultSummary
 
 from assemblyline_core.dispatching.dispatcher import ServiceTask, Dispatcher
 
@@ -217,13 +220,38 @@ class DispatchClient:
         for w in self._get_watcher_list(task.sid).members():
             NamedQueue(w).push(msg)
 
+        # Save the tags
+        tags = defaultdict(list)
+        for section in result.result.sections:
+            tags[result.sha256].extend(tag_dict_to_list(flatten(section.tags.as_primitives())))
+
+        # Pull out file names if we have them
+        file_names = {}
+        for extracted_data in result.response.extracted:
+            if extracted_data.name:
+                file_names[extracted_data.sha256] = extracted_data.name
+
         #
         dispatcher = task.metadata['dispatcher__']
         result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
         result_queue.push({
-            'service_task': task.as_primitives(),
-            'result': result.as_primitives(),
-            'result_key': result_key,
+            # 'service_task': task.as_primitives(),
+            # 'result': result.as_primitives(),
+            'sid': task.sid,
+            'sha256': result.sha256,
+            'service_name': task.service_name,
+            'service_version': result.response.service_version,
+            'service_tool_version': result.response.service_tool_version,
+            'archive_ts': result.archive_ts,
+            'expiry_ts': result.expiry_ts,
+            'result_summary': {
+                'key': result_key,
+                'drop': result.drop_file,
+                'score': result.result.score,
+                'children': [r.sha256 for r in result.response.extracted],
+            },
+            'tags': tags,
+            'extracted_names': file_names,
             'temporary_data': temporary_data
         })
 
