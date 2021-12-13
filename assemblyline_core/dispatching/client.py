@@ -13,6 +13,7 @@ from assemblyline.common.dict_utils import flatten
 from assemblyline.common.forge import CachedObject, get_service_queue
 from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.datastore.exceptions import VersionConflictException
+from assemblyline.odm.base import DATEFORMAT
 from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, \
     CreateWatch, LIST_OUTSTANDING, ListOutstanding
 
@@ -242,8 +243,8 @@ class DispatchClient:
             'service_name': task.service_name,
             'service_version': result.response.service_version,
             'service_tool_version': result.response.service_tool_version,
-            'archive_ts': result.archive_ts,
-            'expiry_ts': result.expiry_ts,
+            'archive_ts': result.archive_ts.strftime(DATEFORMAT),
+            'expiry_ts': result.expiry_ts.strftime(DATEFORMAT) if result.expiry_ts else result.archive_ts.strftime(DATEFORMAT),
             'result_summary': {
                 'key': result_key,
                 'drop': result.drop_file,
@@ -278,6 +279,7 @@ class DispatchClient:
         dispatcher = task.metadata['dispatcher__']
         result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
         result_queue.push({
+            'sid': task.sid,
             'service_task': task.as_primitives(),
             'error': error.as_primitives(),
             'error_key': error_key
