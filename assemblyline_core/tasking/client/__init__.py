@@ -1,6 +1,6 @@
-from os import environ
+import re
 
-from flask import Flask
+from os import environ
 
 from assemblyline_core.tasking.client.api import file, safelist, service, task
 
@@ -18,3 +18,13 @@ PATH_MAPPING = {
     rf'GET {SERVICE_API_HOST}/api/v1/task/': (task.get_task, {}),
     rf'POST {SERVICE_API_HOST}/api/v1/task/': (task.task_finished, {}),
 }
+
+
+def request(path: str):
+    for path_regex, func_tuple in PATH_MAPPING.items():
+        if re.match(path_regex, path):
+            func, param_regex_dict = func_tuple
+            params = {}
+            for param, regex in param_regex_dict.items():
+                params[param] = re.findall(regex, path)[0]
+            return func, params

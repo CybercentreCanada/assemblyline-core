@@ -482,7 +482,9 @@ class ScalerServer(ThreadedCoreBase):
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:
                     if name not in self.profiles:
-                        self.log.info(f"Adding {'privileged' if service.privileged else ''} {service.name} to scaling")
+                        self.log.info(f"Adding "
+                                      f"{f'privileged {service.name}' if service.privileged else service.name}"
+                                      " to scaling")
                         self.add_service(ServiceProfile(
                             name=name,
                             min_instances=default_settings.min_instances,
