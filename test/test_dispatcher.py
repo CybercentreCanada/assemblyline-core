@@ -4,6 +4,7 @@ from unittest import mock
 
 import json
 import pytest
+from assemblyline.datastore.helper import AssemblylineDatastore
 
 import assemblyline.odm.models.file
 import assemblyline.odm.models.submission
@@ -23,15 +24,8 @@ from assemblyline_core.dispatching.schedules import Scheduler as RealScheduler
 
 # noinspection PyUnresolvedReferences
 from assemblyline_core.dispatching.timeout import TimeoutTable
-from mocking import MockDatastore, ToggleTrue
+from mocking import ToggleTrue
 from test_scheduler import dummy_service
-
-
-@pytest.fixture(scope='module')
-def redis(redis_connection):
-    redis_connection.flushdb()
-    yield redis_connection
-    redis_connection.flushdb()
 
 
 logger = logging.getLogger('assemblyline.test')
@@ -101,9 +95,11 @@ def log_config(caplog):
 
 @mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', Scheduler)
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', new=mock.MagicMock(spec=MetricsFactory))
-def test_simple(redis):
+def test_simple(clean_redis, clean_datastore):
+    ds = clean_datastore
+    redis = clean_redis
+
     def service_queue(name): return get_service_queue(name, redis)
-    ds = MockDatastore(collections=['submission', 'result', 'emptyresult', 'service', 'error', 'file', 'filescore'])
 
     file = random_model_obj(File)
     file_hash = file.sha256
@@ -205,17 +201,20 @@ def test_simple(redis):
 
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
 @mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', Scheduler)
-def test_dispatch_extracted(redis):
-    def service_queue(name): return get_service_queue(name, redis)
+def test_dispatch_extracted(clean_redis, clean_datastore):
+    redis = clean_redis
+    ds = clean_datastore
+
+    # def service_queue(name): return get_service_queue(name, redis)
 
     # Setup the fake datastore
-    ds = MockDatastore(collections=['submission', 'result', 'service', 'error', 'file'])
     file_hash = get_random_hash(64)
     second_file_hash = get_random_hash(64)
 
     for fh in [file_hash, second_file_hash]:
-        ds.file.save(fh, random_model_obj(models.file.File))
-        ds.file.get(fh).sha256 = fh
+        obj = random_model_obj(models.file.File)
+        obj.sha256 = fh
+        ds.file.save(fh, obj)
 
     # Inject the fake submission
     submission = random_model_obj(models.submission.Submission)

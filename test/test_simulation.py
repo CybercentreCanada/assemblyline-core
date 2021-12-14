@@ -24,6 +24,7 @@ from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
+from assemblyline.odm.models.service_delta import ServiceDelta
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.messages.submission import Submission as SubmissionInput
 from assemblyline.remote.datatypes.queues.named import NamedQueue
@@ -36,7 +37,6 @@ from assemblyline_core.dispatching.dispatcher import Dispatcher
 from assemblyline_core.ingester.ingester import IngestTask, Ingester
 from assemblyline_core.server_base import ServerBase, get_service_stage_hash, ServiceStage
 
-from mocking import MockCollection
 from test_scheduler import dummy_service
 
 if TYPE_CHECKING:
@@ -211,7 +211,7 @@ def metrics(redis):
 
 
 @pytest.fixture(scope='module')
-def core(request, redis, filestore, config):
+def core(request, redis, filestore, config, clean_datastore: AssemblylineDatastore):
     # Block logs from being initialized, it breaks under pytest if you create new stream handlers
     from assemblyline.common import log as al_log
     al_log.init_logging = lambda *args: None
@@ -219,19 +219,27 @@ def core(request, redis, filestore, config):
     dispatcher.TIMEOUT_TEST_INTERVAL = 3
     # al_log.init_logging("simulation")
 
-    ds = forge.get_datastore()
+    ds = clean_datastore
 
     # Register services
-    ds.ds.service = MockCollection(Service)
-    ds.ds.service_delta = MockCollection(Service)
     stages = get_service_stage_hash(redis)
 
     services = []
     for svc, stage in [('pre', 'EXTRACT'), ('core-a', 'CORE'), ('core-b', 'CORE'), ('finish', 'POST')]:
         ds.service.save(f'{svc}_0', dummy_service(svc, stage, docid=f'{svc}_0'))
-        ds.service_delta.save(svc, dummy_service(svc, stage, docid=svc))
+        ds.service_delta.save(svc, ServiceDelta({
+            'name': svc,
+            'version': '0',
+            'enabled': True
+        }))
         stages.set(svc, ServiceStage.Running)
         services.append(MockService(svc, ds, redis, filestore))
+
+    ds.service.commit()
+    ds.service_delta.commit()
+
+    listed_services = ds.list_all_services(full=True)
+    assert len(listed_services) == 4
 
     ingester = Ingester(datastore=ds, redis=redis, persistent_redis=redis, config=config)
 
