@@ -472,11 +472,16 @@ class Dispatcher(ThreadedCoreBase):
                     if service.uses_auxillary_data:
                         aux_data = task.file_temporary_data[sha256]
 
+                    # Load the metadata we will pass
+                    metadata = {}
+                    if service.uses_metadata:
+                        metadata = submission.metadata
+
                     # Build the actual service dispatch message
                     config = self.build_service_config(service, submission)
                     service_task = ServiceTask(dict(
                         sid=sid,
-                        metadata=submission.metadata,
+                        metadata=metadata,
                         min_classification=task.submission.classification,
                         service_name=service_name,
                         service_config=config,
