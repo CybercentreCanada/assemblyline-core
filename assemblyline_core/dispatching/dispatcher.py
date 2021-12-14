@@ -467,9 +467,9 @@ class Dispatcher(ThreadedCoreBase):
                     if service.uses_tags:
                         tags = task.file_tags.get(sha256, [])
 
-                    # Load the auxillary data we will pass
+                    # Load the auxiliary data we will pass
                     aux_data = {}
-                    if service.uses_auxillary_data:
+                    if service.uses_auxiliary_data:
                         aux_data = task.file_temporary_data[sha256]
 
                     # Load the metadata we will pass
