@@ -18,6 +18,7 @@ client from copying the file again. Once the client has copied the file
 (if required) it then issues a final 'submit'.
 
 """
+from assemblyline.common.classification import InvalidClassification
 import elasticapm
 import logging
 import os
@@ -84,11 +85,18 @@ class SubmissionClient:
 
         for local_file in local_files:
             # Upload/download, extract, analyze files
-            file_hash, size, new_metadata = self._ready_file(local_file, expiry,
-                                                             str(submission_obj.params.classification))
+            original_classification = str(submission_obj.params.classification)
+            file_hash, size, new_metadata = self._ready_file(local_file, expiry, original_classification)
             new_name = new_metadata.pop('name', safe_str(os.path.basename(local_file)))
-            submission_obj.params.classification = new_metadata.pop('classification',
-                                                                    submission_obj.params.classification)
+            meta_classification = new_metadata.pop('classification', original_classification)
+            if meta_classification != original_classification:
+                try:
+                    submission_obj.params.classification = Classification.max_classification(
+                        meta_classification, original_classification)
+                except InvalidClassification as ic:
+                    raise SubmissionException("The classification found inside the cart file cannot be merged with "
+                                              f"the classification the file was submitted as: {str(ic)}")
+
             submission_obj.metadata.update(**flatten(new_metadata))
 
             # Check that after we have resolved exactly what to pass on, that it
