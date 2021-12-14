@@ -3,7 +3,7 @@ import os
 import threading
 import time
 from collections import defaultdict
-from typing import List, Tuple, Dict
+from typing import List, Optional, Tuple, Dict
 import uuid
 
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig
@@ -15,16 +15,24 @@ INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'h
 # Every this many seconds, check that the services can actually reach the service server.
 NETWORK_REFRESH_INTERVAL = 60 * 3
 CHANGE_KEY_NAME = 'al_change_key'
+AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'al_core')
+COMPOSE_PROJECT = os.environ.get('COMPOSE_PROJECT_NAME', None)
+
+COPY_LABELS = [
+    "com.docker.compose.config-hash",
+    "com.docker.compose.project.config_files",
+    "com.docker.compose.project.working_dir",
+    "com.docker.compose.project.version",
+]
 
 
 class DockerController(ControllerInterface):
     """A controller for *non* swarm mode docker."""
-    def __init__(self, logger, prefix='', labels: dict[str, str] = None, cpu_overallocation=1, memory_overallocation=1, log_level="INFO"):
+
+    def __init__(self, logger, prefix='', labels: dict[str, str] = None, log_level="INFO"):
         """
         :param logger: A logger to report status and debug information.
         :param prefix: A prefix used to distinguish containers launched by this controller.
-        :param cpu_overallocation: A multiplier on CPU usage. (2 means act like there are twice as many CPU present)
-        :param memory_overallocation: A multiplier on memory usage. (2 means act like there is twice as much memory)
         """
         # Connect to the host docker port
         import docker
@@ -33,8 +41,12 @@ class DockerController(ControllerInterface):
         self.log_level = log_level
         self.global_mounts: List[Tuple[str, str]] = []
         self.core_mounts: List[Tuple[str, str]] = []
-        self._prefix: str = prefix
         self._labels: dict[str, str] = labels or {}
+        self._prefix: str = prefix
+
+        if self._prefix and not self._prefix.endswith("_"):
+            self._prefix += "_"
+
         self.prune_lock = threading.Lock()
         self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
 
@@ -43,13 +55,17 @@ class DockerController(ControllerInterface):
             break
         else:
             self.external_network = self.client.networks.create(name='external', internal=False)
+
+        for network in self.client.networks.list(names=[AL_CORE_NETWORK]):
+            self.core_network = network
+            break
+        else:
+            raise ValueError(f"Could not find network {AL_CORE_NETWORK}")
         self.networks = {}
 
         # CPU and memory reserved for the host
         self._reserved_cpu = 0.3
         self._reserved_mem = 500
-        self.cpu_overallocation = cpu_overallocation
-        self.memory_overallocation = memory_overallocation
         self._profiles = {}
         self.service_server = self.find_service_server()
 
@@ -62,6 +78,19 @@ class DockerController(ControllerInterface):
         # Start a background thread to keep the service server connected
         threading.Thread(target=self._refresh_service_networks, daemon=True).start()
         self._flush_containers()  # Clear out any containers that are left over from a previous run
+
+        if COMPOSE_PROJECT:
+            self._prefix = COMPOSE_PROJECT + "_svc_"
+            self._labels["com.docker.compose.project"] = COMPOSE_PROJECT
+            filters = {"label": f"com.docker.compose.project={COMPOSE_PROJECT}"}
+            container = None
+            for container in self.client.containers.list(filters=filters, limit=1):
+                break
+
+            if container is not None:
+                for label in COPY_LABELS:
+                    if label in container.labels:
+                        self._labels[label] = container.labels[label]
 
     def find_service_server(self):
         service_server_container = None
@@ -116,20 +145,23 @@ class DockerController(ControllerInterface):
 
     def _start(self, service_name):
         """Launch a docker container in a manner suitable for Assemblyline."""
-        container_name = self._name_container(service_name)
+        container_name, container_index = self._name_container(service_name)
         prof = self._profiles[service_name]
         cfg = prof.container_config
 
         # Set the list of labels
         labels = dict(self._labels)
-        labels.update({'component': service_name})
+        labels.update({
+            'component': service_name,
+            'com.docker.compose.service': service_name.lower(),
+            'com.docker.compose.container-number': str(container_index)
+        })
 
         # Prepare the volumes and folders
         volumes = {row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.global_mounts}
 
         # Define environment variables
         env = [f'{_e.name}={_e.value}' for _e in cfg.environment]
-        env += ['UPDATE_PATH=/mount/updates/']
         env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
         env += [f'LOG_LEVEL={self.log_level}']
         env += [f'{_n}={_v}' for _n, _v in self._service_limited_env[service_name].items()]
@@ -152,7 +184,8 @@ class DockerController(ControllerInterface):
         if cfg.allow_internet_access:
             self.external_network.connect(container)
 
-    def _start_container(self, service_name, name, labels, volumes, cfg: DockerConfig, network, hostname, core_container=False):
+    def _start_container(
+            self, service_name, name, labels, volumes, cfg: DockerConfig, network, hostname, core_container=False):
         """Launch a docker container."""
         # Take the port strings and convert them to a dictionary
         ports = {}
@@ -199,6 +232,9 @@ class DockerController(ControllerInterface):
             # ports=ports,
         )
 
+        if core_container:
+            self.core_network.connect(container, aliases=[hostname])
+
         if cfg.allow_internet_access:
             self.external_network.connect(container, aliases=[hostname])
 
@@ -215,13 +251,11 @@ class DockerController(ControllerInterface):
 
         # Try names until one works
         used_names = set(used_names)
-        index = 0
+        index = 1
         while True:
-            name = f'{service_name}_{index}'
-            if self._prefix:
-                name = self._prefix + '_' + name
+            name = f'{self._prefix}{service_name.lower()}_{index}'
             if name not in used_names:
-                return name
+                return name, index
             index += 1
 
     def cpu_info(self):
@@ -229,7 +263,7 @@ class DockerController(ControllerInterface):
 
         NOTE: There is probably a better way to do this.
         """
-        total_cpu = cpu = self._info['NCPU'] * self.cpu_overallocation - self._reserved_cpu
+        total_cpu = cpu = self._info['NCPU'] - self._reserved_cpu
         for container in self.client.containers.list(ignore_removed=True):
             if container.attrs['HostConfig']['CpuPeriod']:
                 cpu -= container.attrs['HostConfig']['CpuQuota']/container.attrs['HostConfig']['CpuPeriod']
@@ -242,7 +276,7 @@ class DockerController(ControllerInterface):
         NOTE: There is probably a better way to do this.
         """
         mega = 2**20
-        total_mem = mem = self._info['MemTotal']/mega * self.memory_overallocation - self._reserved_mem
+        total_mem = mem = self._info['MemTotal']/mega - self._reserved_mem
         for container in self.client.containers.list(ignore_removed=True):
             mem -= container.attrs['HostConfig']['Memory']/mega
         self.log.debug(f'Total Memory available {mem}/{self._info["MemTotal"]/mega}')
@@ -257,6 +291,8 @@ class DockerController(ControllerInterface):
         running = 0
         filters = {'label': f'component={service_name}'}
         for container in self.client.containers.list(filters=filters, ignore_removed=True):
+            if 'dependency_for' in container.labels:
+                continue  # Don't count dependency containers
             if container.status in {'restarting', 'running'}:
                 running += 1
             elif container.status in {'created', 'removing', 'paused', 'exited', 'dead'}:
@@ -266,7 +302,8 @@ class DockerController(ControllerInterface):
         return running
 
     def get_targets(self) -> Dict[str, int]:
-        return {name: self.get_target(name) for name in self._profiles.keys()}
+        names = list(self._profiles.keys())
+        return {name: self.get_target(name) for name in names}
 
     def set_target(self, service_name, target):
         """Change how many instances of a service docker is trying to keep up.
@@ -281,8 +318,10 @@ class DockerController(ControllerInterface):
             if delta < 0:
                 # Kill off delta instances of of the service
                 filters = {'label': f'component={service_name}'}
-                running = [container for container in self.client.containers.list(filters=filters, ignore_removed=True)
-                           if container.status in {'restarting', 'running'}]
+                running = [container
+                           for container in self.client.containers.list(filters=filters, ignore_removed=True)
+                           if container.status in {'restarting', 'running'} and 'dependency_for' not in
+                           container.labels]
                 running = running[0:-delta]
                 for container in running:
                     container.kill()
@@ -319,6 +358,8 @@ class DockerController(ControllerInterface):
         self._pull_image(service)
         filters = {'label': f'component={service.name}'}
         for container in self.client.containers.list(filters=filters, ignore_removed=True):
+            if 'dependency_for' in container.labels:
+                continue
             container.kill()
 
     def get_running_container_names(self):
@@ -329,25 +370,72 @@ class DockerController(ControllerInterface):
             out.append(container.name)
         return out
 
-    def start_stateful_container(self, service_name: str, container_name: str, spec: DependencyConfig,
-                                 labels: dict[str, str], change_key: str):
+    def stateful_container_key(
+            self, service_name: str, container_name: str, spec: DependencyConfig, change_key: str) -> Optional[str]:
         import docker.errors
-        deployment_name = f'{service_name}-dep-{container_name}'
+        deployment_name = f'{self._prefix}{service_name.lower()}_{container_name.lower()}'
 
         change_check = change_key + service_name + container_name + str(spec)
+        instance_key = None
 
         try:
             old_container = self.client.containers.get(deployment_name)
-            instance_key = old_container.attrs["Config"]["Env"]['AL_INSTANCE_KEY']
-            if old_container.labels.get(CHANGE_KEY_NAME) == change_check and old_container.status == 'running':
+
+            for env in old_container.attrs["Config"]["Env"]:
+                if env.startswith("AL_INSTANCE_KEY="):
+                    instance_key = env.split("=")[1]
+                    break
+
+            if instance_key is not None \
+                    and old_container.labels.get(CHANGE_KEY_NAME) == change_check \
+                    and old_container.status == 'running':
+                self._service_limited_env[service_name][f'{container_name}_host'] = deployment_name
+                self._service_limited_env[service_name][f'{container_name}_key'] = instance_key
+                if spec.container.ports:
+                    self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
+                return instance_key
+        except docker.errors.NotFound:
+            pass
+        return None
+
+    def start_stateful_container(self, service_name: str, container_name: str, spec: DependencyConfig,
+                                 labels: dict[str, str], change_key: str):
+        import docker.errors
+        deployment_name = f'{self._prefix}{service_name.lower()}_{container_name.lower()}'
+        self.log.info("Killing stale container...")
+
+        change_check = change_key + service_name + container_name + str(spec)
+        instance_key = None
+
+        try:
+            old_container = self.client.containers.get(deployment_name)
+
+            for env in old_container.attrs["Config"]["Env"]:
+                if env.startswith("AL_INSTANCE_KEY="):
+                    instance_key = env.split("=")[1]
+                    break
+
+            if instance_key is not None \
+                    and old_container.labels.get(CHANGE_KEY_NAME) == change_check \
+                    and old_container.status == 'running':
                 self._service_limited_env[service_name][f'{container_name}_host'] = deployment_name
                 self._service_limited_env[service_name][f'{container_name}_key'] = instance_key
                 if spec.container.ports:
                     self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
                 return
             else:
-                old_container.kill()
+                self.log.info(f"Killing stale {deployment_name} container...")
+                if old_container.status == "running":
+                    try:
+                        old_container.stop()
+                        old_container.wait()
+                    except docker.errors.APIError:
+                        pass
+                old_container.remove(force=True)
         except docker.errors.NotFound:
+            pass
+
+        if instance_key is None:
             instance_key = uuid.uuid4().hex
 
         volumes = {_n: {'bind': _v.mount_path, 'mode': 'rw'} for _n, _v in spec.volumes.items()}
@@ -355,7 +443,11 @@ class DockerController(ControllerInterface):
             volumes.update({row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.core_mounts})
 
         all_labels = dict(self._labels)
-        all_labels.update({'component': service_name, CHANGE_KEY_NAME: change_check})
+        all_labels.update({
+            'component': service_name,
+            CHANGE_KEY_NAME: change_check,
+            'com.docker.compose.service': deployment_name.lower()
+        })
         all_labels.update(labels)
 
         spec.container.environment.append({'name': 'AL_INSTANCE_KEY', 'value': instance_key})
@@ -365,8 +457,9 @@ class DockerController(ControllerInterface):
         if spec.container.ports:
             self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
 
-        self._start_container(service_name=service_name, name=deployment_name, labels=all_labels, volumes=volumes, hostname=container_name,
-                              cfg=spec.container, core_container=spec.run_as_core, network=self._get_network(service_name).name)
+        self._start_container(service_name=service_name, name=deployment_name, labels=all_labels,
+                              volumes=volumes, hostname=container_name, cfg=spec.container,
+                              core_container=spec.run_as_core, network=self._get_network(service_name).name)
 
     def stop_containers(self, labels):
         label_strings = [f'{name}={value}' for name, value in labels.items()]
@@ -381,7 +474,7 @@ class DockerController(ControllerInterface):
         """
         from docker.errors import NotFound
         # Create network for service
-        network_name = f'service-net-{service_name}'
+        network_name = f'{COMPOSE_PROJECT}_service-net-{service_name}'
         try:
             self.networks[service_name] = network = self.client.networks.get(network_name)
             network.reload()

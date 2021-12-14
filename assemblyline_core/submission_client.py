@@ -18,6 +18,7 @@ client from copying the file again. Once the client has copied the file
 (if required) it then issues a final 'submit'.
 
 """
+import elasticapm
 import logging
 import os
 from typing import List, Tuple
@@ -63,6 +64,7 @@ class SubmissionClient:
         # A client for interacting with the dispatcher
         self.dispatcher = DispatchClient(datastore, redis)
 
+    @elasticapm.capture_span(span_type='submission_client')
     def submit(self, submission_obj: SubmissionObject, local_files: List = None, completed_queue=None):
         """Submit several files in a single submission.
 
@@ -153,6 +155,9 @@ class SubmissionClient:
             # that local_path points to) should be passed into the system.
             extracted_path, fileinfo, al_meta = decode_file(local_path, fileinfo)
             al_meta['classification'] = al_meta.get('classification', classification)
+            if not Classification.is_valid(al_meta['classification']):
+                raise SubmissionException(f"{al_meta['classification']} is not a valid classification for this system"
+                                          ", submission is cancelled...")
 
             if extracted_path:
                 local_path = extracted_path

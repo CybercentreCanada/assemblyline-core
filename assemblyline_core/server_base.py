@@ -221,8 +221,8 @@ class CoreBase(ServerBase):
         # noinspection PyUnresolvedReferences
         return {x.name: x for x in self.datastore.list_all_services(full=True)}
 
-    def get_service_stage(self, service_name: str) -> ServiceStage:
-        return ServiceStage(self._service_stage_hash.get(service_name) or ServiceStage.Off)
+    def get_service_stage(self, service_name: str, default=ServiceStage.Off) -> ServiceStage:
+        return ServiceStage(self._service_stage_hash.get(service_name) or default)
 
 
 class ThreadedCoreBase(CoreBase):

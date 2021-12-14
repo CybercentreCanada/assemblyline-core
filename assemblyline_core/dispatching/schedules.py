@@ -24,6 +24,7 @@ class Scheduler:
     def __init__(self, datastore: AssemblylineDatastore, config: Config, redis):
         self.datastore = datastore
         self.config = config
+        self._services: dict[str, Service] = {}
         self.services = cast(Dict[str, Service], CachedObject(self._get_services))
         self.service_stage = get_service_stage_hash(redis)
 
@@ -108,8 +109,19 @@ class Scheduler:
         return self.config.services.stages.index(stage)
 
     def _get_services(self):
+        old, self._services = self._services, {}
         stages = self.service_stage.items()
-
-        # noinspection PyUnresolvedReferences
-        return {x.name: x for x in self.datastore.list_all_services(full=True)
-                if x.enabled and (stages.get(x.name) == ServiceStage.Running or SKIP_SERVICE_SETUP)}
+        services: list[Service] = self.datastore.list_all_services(full=True)
+        for service in services:
+            if service.enabled:
+                # Determine if this is a service we would wait for the first update run for
+                # Assume it is set to running so that in the case of a redis failure we fail
+                # on the side of waiting for the update and processing more, rather than skipping
+                wait_for = service.update_config and (service.update_config.wait_for_update and not SKIP_SERVICE_SETUP)
+                # This is a service that we wait for, and is new, so check if it has finished its update setup
+                if wait_for and service.name not in old:
+                    if stages.get(service.name, ServiceStage.Running) == ServiceStage.Running:
+                        self._services[service.name] = service
+                else:
+                    self._services[service.name] = service
+        return self._services

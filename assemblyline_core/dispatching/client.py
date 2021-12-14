@@ -3,11 +3,17 @@ An interface to the core system for the edge services.
 
 
 """
+from collections import defaultdict
 import logging
+import elasticapm
 import time
 from typing import Dict, Optional, Any, cast
+from assemblyline.common.dict_utils import flatten
 
 from assemblyline.common.forge import CachedObject, get_service_queue
+from assemblyline.common.tagging import tag_dict_to_list
+from assemblyline.datastore.exceptions import VersionConflictException
+from assemblyline.odm.base import DATEFORMAT
 from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, \
     CreateWatch, LIST_OUTSTANDING, ListOutstanding
 
@@ -22,11 +28,10 @@ from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.error import Error
 from assemblyline.remote.datatypes import get_client, reply_queue_name
 from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
-from assemblyline.remote.datatypes.lock import Lock
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline_core.dispatching.dispatcher import DISPATCH_START_EVENTS, DISPATCH_RESULT_QUEUE, \
-    DISPATCH_COMMAND_QUEUE
+    DISPATCH_COMMAND_QUEUE, QUEUE_EXPIRY, ResultSummary
 
 from assemblyline_core.dispatching.dispatcher import ServiceTask, Dispatcher
 
@@ -107,7 +112,7 @@ class DispatchClient:
         if dispatcher_id:
             queue_name = reply_queue_name(prefix="D", suffix="ResponseQueue")
             queue = NamedQueue(queue_name, host=self.redis, ttl=30)
-            command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+dispatcher_id)
+            command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+dispatcher_id, ttl=QUEUE_EXPIRY)
             command_queue.push(DispatcherCommandMessage({
                 'kind': LIST_OUTSTANDING,
                 'payload_data': ListOutstanding({
@@ -118,8 +123,9 @@ class DispatchClient:
             return queue.pop(timeout=30)
         return {}
 
+    @elasticapm.capture_span(span_type='dispatch_client')
     def request_work(self, worker_id, service_name, service_version,
-                     timeout: float = 60, blocking=True) -> Optional[ServiceTask]:
+                     timeout: float = 60, blocking=True, low_priority=False) -> Optional[ServiceTask]:
         """Pull work from the service queue for the service in question.
 
         :param service_version:
@@ -134,13 +140,14 @@ class DispatchClient:
         remaining = timeout
         while int(remaining) > 0:
             work = self._request_work(worker_id, service_name, service_version,
-                                      blocking=blocking, timeout=remaining)
+                                      blocking=blocking, timeout=remaining, low_priority=low_priority)
             if work or not blocking:
                 return work
             remaining = timeout - (time.time() - start)
         return None
 
-    def _request_work(self, worker_id, service_name, service_version, timeout, blocking) -> Optional[ServiceTask]:
+    def _request_work(self, worker_id, service_name, service_version,
+                      timeout, blocking, low_priority=False) -> Optional[ServiceTask]:
         # For when we recursively retry on bad task dequeue-ing
         if int(timeout) <= 0:
             self.log.info(f"{service_name}:{worker_id} no task returned [timeout]")
@@ -149,9 +156,12 @@ class DispatchClient:
         # Get work from the queue
         work_queue = get_service_queue(service_name, self.redis)
         if blocking:
-            result = work_queue.blocking_pop(timeout=int(timeout))
+            result = work_queue.blocking_pop(timeout=int(timeout), low_priority=low_priority)
         else:
-            result = work_queue.pop(1)
+            if low_priority:
+                result = work_queue.unpush(1)
+            else:
+                result = work_queue.pop(1)
             if result:
                 result = result[0]
 
@@ -168,11 +178,12 @@ class DispatchClient:
 
         if self.running_tasks.add(task.key(), task.as_primitives()):
             self.log.info(f"[{task.sid}/{task.fileinfo.sha256}] {service_name}:{worker_id} task found")
-            start_queue = NamedQueue(DISPATCH_START_EVENTS + dispatcher, host=self.redis)
+            start_queue = NamedQueue(DISPATCH_START_EVENTS + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
             start_queue.push((task.sid, task.fileinfo.sha256, service_name, worker_id))
             return task
         return None
 
+    @elasticapm.capture_span(span_type='dispatch_client')
     def service_finished(self, sid: str, result_key: str, result: Result,
                          temporary_data: Optional[Dict[str, Any]] = None):
         """Notifies the dispatcher of service completion, and possible new files to dispatch."""
@@ -189,34 +200,63 @@ class DispatchClient:
         # most distant expiry time to prevent pulling it out from under another submission too early
         if result.is_empty():
             # Empty Result will not be archived therefore result.archive_ts drives their deletion
-            self.ds.emptyresult.save(
-                result_key, {"expiry_ts": result.archive_ts},
-                force_archive_access=self.config.datastore.ilm.update_archive)
+            self.ds.emptyresult.save(result_key, {"expiry_ts": result.archive_ts})
         else:
-            with Lock(f"lock-{result_key}", 5, self.redis):
-                old = self.ds.result.get(result_key, force_archive_access=self.config.datastore.ilm.update_archive)
+            while True:
+                old, version = self.ds.result.get_if_exists(
+                    result_key, archive_access=self.config.datastore.ilm.update_archive, version=True)
                 if old:
                     if old.expiry_ts and result.expiry_ts:
                         result.expiry_ts = max(result.expiry_ts, old.expiry_ts)
                     else:
                         result.expiry_ts = None
-                self.ds.result.save(result_key, result, force_archive_access=self.config.datastore.ilm.update_archive)
+                try:
+                    self.ds.result.save(result_key, result, version=version)
+                    break
+                except VersionConflictException as vce:
+                    self.log.info(f"Retrying to save results due to version conflict: {str(vce)}")
 
         # Send the result key to any watching systems
         msg = {'status': 'OK', 'cache_key': result_key}
         for w in self._get_watcher_list(task.sid).members():
             NamedQueue(w).push(msg)
 
+        # Save the tags
+        tags = defaultdict(list)
+        for section in result.result.sections:
+            tags[result.sha256].extend(tag_dict_to_list(flatten(section.tags.as_primitives())))
+
+        # Pull out file names if we have them
+        file_names = {}
+        for extracted_data in result.response.extracted:
+            if extracted_data.name:
+                file_names[extracted_data.sha256] = extracted_data.name
+
         #
         dispatcher = task.metadata['dispatcher__']
-        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis)
+        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
         result_queue.push({
-            'service_task': task.as_primitives(),
-            'result': result.as_primitives(),
-            'result_key': result_key,
+            # 'service_task': task.as_primitives(),
+            # 'result': result.as_primitives(),
+            'sid': task.sid,
+            'sha256': result.sha256,
+            'service_name': task.service_name,
+            'service_version': result.response.service_version,
+            'service_tool_version': result.response.service_tool_version,
+            'archive_ts': result.archive_ts.strftime(DATEFORMAT),
+            'expiry_ts': result.expiry_ts.strftime(DATEFORMAT) if result.expiry_ts else result.archive_ts.strftime(DATEFORMAT),
+            'result_summary': {
+                'key': result_key,
+                'drop': result.drop_file,
+                'score': result.result.score,
+                'children': [r.sha256 for r in result.response.extracted],
+            },
+            'tags': tags,
+            'extracted_names': file_names,
             'temporary_data': temporary_data
         })
 
+    @elasticapm.capture_span(span_type='dispatch_client')
     def service_failed(self, sid: str, error_key: str, error: Error):
         task_key = ServiceTask.make_key(sid=sid, service_name=error.response.service_name, sha=error.sha256)
         task = self.running_tasks.pop(task_key)
@@ -237,8 +277,9 @@ class DispatchClient:
                 NamedQueue(w).push(msg)
 
         dispatcher = task.metadata['dispatcher__']
-        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis)
+        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
         result_queue.push({
+            'sid': task.sid,
             'service_task': task.as_primitives(),
             'error': error.as_primitives(),
             'error_key': error_key

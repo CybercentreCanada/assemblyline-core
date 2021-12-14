@@ -28,18 +28,19 @@ API_TIMEOUT = 90
 WATCH_TIMEOUT = 10 * 60
 WATCH_API_TIMEOUT = WATCH_TIMEOUT + 10
 CHANGE_KEY_NAME = 'al_change_key'
+DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() == 'true'
 
 _exponents = {
-    'Ki': 2**10,
-    'K': 2**10,
-    'Mi': 2**20,
-    'M': 2**20,
-    'Gi': 2**30,
-    'G': 2**30,
-    'Ti': 2**40,
-    'T': 2**40,
-    'Pi': 2**50,
-    'P': 2 ** 50,
+    'ki': 2**10,
+    'k': 2**10,
+    'mi': 2**20,
+    'm': 2**20,
+    'gi': 2**30,
+    'g': 2**30,
+    'ti': 2**40,
+    't': 2**40,
+    'pi': 2**50,
+    'p': 2 ** 50,
 }
 
 
@@ -54,6 +55,12 @@ def median(values: list[float]) -> float:
     if len(values) == 0:
         return 0
     return values[len(values)//2]
+
+
+def mean(values: list[float]) -> float:
+    if len(values) == 0:
+        return 0
+    return sum(values)/len(values)
 
 
 def get_resources(container) -> Tuple[float, float]:
@@ -101,12 +108,12 @@ def parse_memory(string: str) -> float:
         return float(string)/2**20
     except ValueError:
         pass
-
+    lower = string.lower()
     # Try parsing a unit'd number then
-    if string[-2:] in _exponents:
-        return (float(string[:-2]) * _exponents[string[-2:]])/(2**20)
-    if string[-1:] in _exponents:
-        return (float(string[:-1]) * _exponents[string[-1:]])/(2**20)
+    if lower[-2:] in _exponents:
+        return (float(string[:-2]) * _exponents[lower[-2:]])/(2**20)
+    if lower[-1:] in _exponents:
+        return (float(string[:-1]) * _exponents[lower[-1:]])/(2**20)
 
     raise ValueError(string)
 
@@ -292,20 +299,24 @@ class KubernetesController(ControllerInterface):
             if not self.running:
                 break
 
+            pod_name = event['raw_object']['metadata']['name']
             uid = event['raw_object']['metadata']['uid']
             namespace = event['raw_object']['metadata']['namespace']
 
-            if event['type'] in ['ADDED', 'MODIFIED']:
-                for container in event['raw_object']['spec']['containers']:
-                    containers[f"{uid}-{container['name']}"] = get_resources(container)
-                    if namespace == self.namespace:
-                        namespaced_containers[f"{uid}-{container['name']}"] = get_resources(container)
-            elif event['type'] == 'DELETED':
-                for container in event['raw_object']['spec']['containers']:
-                    containers.pop(f"{uid}-{container['name']}", None)
-                    namespaced_containers.pop(f"{uid}-{container['name']}", None)
-            else:
-                continue
+            try:
+                if event['type'] in ['ADDED', 'MODIFIED']:
+                    for container in event['raw_object']['spec']['containers']:
+                        containers[f"{uid}-{container['name']}"] = get_resources(container)
+                        if namespace == self.namespace:
+                            namespaced_containers[f"{uid}-{container['name']}"] = get_resources(container)
+                elif event['type'] == 'DELETED':
+                    for container in event['raw_object']['spec']['containers']:
+                        containers.pop(f"{uid}-{container['name']}", None)
+                        namespaced_containers.pop(f"{uid}-{container['name']}", None)
+                else:
+                    continue
+            except Exception as e:
+                self.logger.exception(f"Couldn't parse container information for {pod_name}: {e}")
 
             memory_unrestricted = sum(1 for cpu, mem in containers.values() if mem is None)
             cpu_unrestricted = sum(1 for cpu, mem in containers.values() if cpu is None)
@@ -313,8 +324,8 @@ class KubernetesController(ControllerInterface):
             memory_used = [mem for cpu, mem in containers.values() if mem is not None]
             cpu_used = [cpu for cpu, mem in containers.values() if cpu is not None]
 
-            self._pod_used_cpu = sum(cpu_used) + cpu_unrestricted * median(cpu_used)
-            self._pod_used_ram = sum(memory_used) + memory_unrestricted * median(memory_used)
+            self._pod_used_cpu = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
+            self._pod_used_ram = sum(memory_used) + memory_unrestricted * mean(memory_used)
 
             memory_unrestricted = sum(1 for cpu, mem in namespaced_containers.values() if mem is None)
             cpu_unrestricted = sum(1 for cpu, mem in namespaced_containers.values() if cpu is None)
@@ -322,8 +333,8 @@ class KubernetesController(ControllerInterface):
             memory_used = [mem for cpu, mem in namespaced_containers.values() if mem is not None]
             cpu_used = [cpu for cpu, mem in namespaced_containers.values() if cpu is not None]
 
-            self._pod_used_namespace_cpu = sum(cpu_used) + cpu_unrestricted * median(cpu_used)
-            self._pod_used_namespace_ram = sum(memory_used) + memory_unrestricted * median(memory_used)
+            self._pod_used_namespace_cpu = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
+            self._pod_used_namespace_ram = sum(memory_used) + memory_unrestricted * mean(memory_used)
 
     def _monitor_quotas(self):
         watch = TypelessWatch()
@@ -456,12 +467,13 @@ class KubernetesController(ControllerInterface):
         # Overwrite ones defined dynamically by dependency container launches
         for name, value in self._service_limited_env[service_name].items():
             environment_variables.append(V1EnvVar(name=name, value=value))
+        image_pull_policy = 'Always' if DEV_MODE else 'IfNotPresent'
         return [V1Container(
             name=deployment_name,
             image=container_config.image,
             command=container_config.command,
             env=environment_variables,
-            image_pull_policy='Always',
+            image_pull_policy=image_pull_policy,
             volume_mounts=mounts,
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
@@ -478,7 +490,8 @@ class KubernetesController(ControllerInterface):
         # systems returning differently formatted data
         change_key = (
             deployment_name + change_key + str(docker_config) + str(shutdown_seconds) +
-            str(sorted((labels or {}).items())) + str(volumes) + str(mounts) + str(core_mounts)
+            str(sorted((labels or {}).items())) + str(volumes) + str(mounts) + str(core_mounts) +
+            str(sorted(self._service_limited_env[service_name].items()))
         )
 
         # Check if a deployment already exists, and if it does check if it has the same change key set
@@ -667,6 +680,23 @@ class KubernetesController(ControllerInterface):
 
         return new
 
+    def stateful_container_key(self, service_name: str, container_name: str, spec, change_key: str) -> Optional[str]:
+        deployment_name = self._dependency_name(service_name, container_name)
+        try:
+            old_deployment = self.apps_api.read_namespaced_deployment(deployment_name, self.namespace)
+            for container in old_deployment.spec.template.spec.containers:
+                for env in container.env:
+                    if env.name == 'AL_INSTANCE_KEY':
+                        self._service_limited_env[service_name][f'{container_name}_host'] = deployment_name
+                        self._service_limited_env[service_name][f'{container_name}_key'] = env.value
+                        if spec.container.ports:
+                            self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
+                        return env.value
+        except ApiException as error:
+            if error.status != 404:
+                raise
+        return None
+
     def start_stateful_container(self, service_name: str, container_name: str,
                                  spec, labels: dict[str, str], change_key: str):
         # Setup PVC
@@ -686,8 +716,8 @@ class KubernetesController(ControllerInterface):
             mounts.append(V1VolumeMount(mount_path=volume_spec.mount_path, name=mount_name))
 
         # Read the key being used for the deployment instance or generate a new one
+        instance_key = uuid.uuid4().hex
         try:
-            instance_key = uuid.uuid4().hex
             old_deployment = self.apps_api.read_namespaced_deployment(deployment_name, self.namespace)
             for container in old_deployment.spec.template.spec.containers:
                 for env in container.env:

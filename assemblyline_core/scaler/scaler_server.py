@@ -52,6 +52,10 @@ HEARTBEAT_INTERVAL = 5
 MAXIMUM_SERVICE_ERRORS = 5
 ERROR_EXPIRY_TIME = 60*60  # how long we wait before we forgive an error. (seconds)
 
+# The maximum containers we ask to be created in a single scaling iteration
+# This is to give kubernetes a chance to update our view of resource usage before we ask for more containers
+MAX_CONTAINER_ALLOCATION = 10
+
 # An environment variable that should be set when we are started with kubernetes, tells us how to attach
 # the global Assemblyline config to new things that we launch.
 KUBERNETES_AL_CONFIG = os.environ.get('KUBERNETES_AL_CONFIG')
@@ -173,8 +177,8 @@ class ServiceProfile:
         # Adjust the max_instances based on the number that is already requested
         # this keeps the scaler from running way ahead with its demands when resource caps are reached
         if self._max_instances == 0:
-            return self.target_instances + 2
-        return min(self._max_instances, self.target_instances + 2)
+            return self.target_instances + MAX_CONTAINER_ALLOCATION
+        return min(self._max_instances, self.target_instances + MAX_CONTAINER_ALLOCATION)
 
     @max_instances.setter
     def max_instances(self, value: int):
@@ -209,6 +213,7 @@ class ServiceProfile:
         if self.desired_instances == self.min_instances:
             self.pressure = max(0.0, self.pressure)
 
+        # Apply change with each step in the same direction being larger than the last by one
         if self.pressure >= self.growth_threshold:
             self.desired_instances = min(self.max_instances, self.desired_instances + 1)
             self.pressure = 0
@@ -277,9 +282,8 @@ class ScalerServer(ThreadedCoreBase):
         else:
             self.log.info("Loading Docker cluster interface.")
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
-                                               cpu_overallocation=self.config.core.scaler.cpu_overallocation,
-                                               memory_overallocation=self.config.core.scaler.memory_overallocation,
                                                labels=labels, log_level=self.config.logging.log_level)
+            self._service_stage_hash.delete()
 
             if DOCKER_CONFIGURATION_PATH and DOCKER_CONFIGURATION_VOLUME:
                 self.controller.core_mounts.append((DOCKER_CONFIGURATION_VOLUME, '/etc/assemblyline/'))
@@ -410,6 +414,10 @@ class ScalerServer(ThreadedCoreBase):
                                     f"Got: {service.version}\n"
                                     "Service will be disabled.")
 
+            if not service.enabled:
+                self.stop_service(service.name, stage)
+                return
+
             # Build the docker config for the dependencies. For now the dependency blob values
             # aren't set for the change key going to kubernetes because everything about
             # the dependency config should be captured in change key that the function generates
@@ -420,9 +428,21 @@ class ScalerServer(ThreadedCoreBase):
             for _n, dependency in service.dependencies.items():
                 dependency.container = prepare_container(dependency.container)
                 dependency_config[_n] = dependency
-                dependency_blobs[_n] = str(dependency)
+                dependency_blobs[_n] = str(dependency) + str(service.version)
 
-            if service.enabled and stage == ServiceStage.Off:
+            # Check if the service dependencies have been deployed.
+            dependency_keys = []
+            updater_ready = stage == ServiceStage.Running
+            if service.update_config:
+                for _n, dependency in dependency_config.items():
+                    key = self.controller.stateful_container_key(service.name, _n, dependency, '')
+                    if key:
+                        dependency_keys.append(_n + key)
+                    else:
+                        updater_ready = False
+
+            # If stage is not set to running or a dependency container is missing start the setup process
+            if not updater_ready:
                 self.log.info(f'Preparing environment for {service.name}')
                 # Move to the next service stage (do this first because the container we are starting may care)
                 if service.update_config and service.update_config.wait_for_update:
@@ -444,16 +464,13 @@ class ScalerServer(ThreadedCoreBase):
                         change_key=''
                     )
 
-            if not service.enabled:
-                self.stop_service(service.name, stage)
-                return
-
-            # Check that all enabled services are enabled
-            if service.enabled and stage == ServiceStage.Running:
+            # If the conditions for running are met deploy or update service containers
+            if stage == ServiceStage.Running:
                 # Compute a blob of service properties not include in the docker config, that
                 # should still result in a service being restarted when changed
                 config_blob = str(sorted(service.config.items()))
                 config_blob += str(service.submission_params)
+                config_blob += ''.join(sorted(dependency_keys))
 
                 # Build the docker config for the service, we are going to either create it or
                 # update it so we need to know what the current configuration is either way
@@ -572,8 +589,15 @@ class ScalerServer(ThreadedCoreBase):
                 #       pool might be spread across many nodes, we are going to treat it like
                 #       it is one big one, and let the orchestration layer sort out the details.
                 #
-                free_cpu = self.controller.free_cpu()
-                free_memory = self.controller.free_memory()
+
+                # Recalculate the amount of free resources expanding the total quantity by the overallocation
+                free_cpu, total_cpu = self.controller.cpu_info()
+                used_cpu = total_cpu - free_cpu
+                free_cpu = total_cpu * self.config.core.scaler.cpu_overallocation - used_cpu
+
+                free_memory, total_memory = self.controller.memory_info()
+                used_memory = total_memory - free_memory
+                free_memory = total_memory * self.config.core.scaler.memory_overallocation - used_memory
 
                 #
                 def trim(prof: list[ServiceProfile]):
@@ -606,6 +630,10 @@ class ScalerServer(ThreadedCoreBase):
                 with elasticapm.capture_span('write_targets'):
                     with pool:
                         for name, value in targets.items():
+                            if name not in self.profiles:
+                                # A service was probably added/removed while we were
+                                # in the middle of this function
+                                continue
                             self.profiles[name].target_instances = value
                             old = old_targets[name]
                             if value != old:

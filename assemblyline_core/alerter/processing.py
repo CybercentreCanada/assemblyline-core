@@ -193,7 +193,7 @@ def perform_alert_update(datastore, logger, alert):
 
     with Lock(f"alert-update-{alert_id}", 5):
         old_alert = datastore.alert.get(
-            alert_id, as_obj=False, force_archive_access=config.datastore.ilm.update_archive)
+            alert_id, as_obj=False, archive_access=config.datastore.ilm.update_archive)
         if old_alert is None:
             raise KeyError(f"{alert_id} is missing from the alert collection.")
 
@@ -212,7 +212,7 @@ def perform_alert_update(datastore, logger, alert):
         old_alert = recursive_update(old_alert, alert)
         old_alert['al'] = recursive_update(old_alert['al'], merged)
 
-        datastore.alert.save(alert_id, old_alert, force_archive_access=config.datastore.ilm.update_archive)
+        datastore.alert.save(alert_id, old_alert)
 
     logger.info(f"Alert {alert_id} has been updated.")
 
