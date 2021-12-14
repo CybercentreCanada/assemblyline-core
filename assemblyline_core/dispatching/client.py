@@ -66,7 +66,7 @@ class DispatchClient:
         self.running_tasks = Hash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
         self.service_data = cast(Dict[str, Service], CachedObject(self._get_services))
         self.dispatcher_data = []
-        self.dispatcher_data_age = 0
+        self.dispatcher_data_age = 0.0
         self.dead_dispatchers = []
 
     def _get_services(self):
@@ -78,6 +78,7 @@ class DispatchClient:
             return False
         if time.time() - self.dispatcher_data_age > 120 or dispatcher_id not in self.dispatcher_data:
             self.dispatcher_data = Dispatcher.all_instances(self.redis_persist)
+            self.dispatcher_data_age = time.time()
         if dispatcher_id in self.dispatcher_data:
             return True
         else:
