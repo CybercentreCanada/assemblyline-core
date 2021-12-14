@@ -249,7 +249,7 @@ class KubernetesController(ControllerInterface):
         """Tell the controller about a service profile it needs to manage."""
         self._create_deployment(profile.name, self._deployment_name(profile.name),
                                 profile.container_config, profile.shutdown_seconds, scale,
-                                change_key=profile.config_blob)
+                                change_key=profile.config_blob, core_mounts=profile.privileged)
         self._external_profiles[profile.name] = profile
 
     def _loop_forever(self, function):
@@ -457,6 +457,7 @@ class KubernetesController(ControllerInterface):
         if core_container:
             environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in os.environ.items()
                                       if any(term in _n for term in ['ELASTIC', 'FILESTORE', 'UI_SERVER'])]
+            environment_variables.append(V1EnvVar(name='PRIVILEGED', value='true'))
         # Overwrite them with configured special environment variables
         environment_variables += [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]
         # Overwrite those with special hard coded variables

@@ -120,7 +120,7 @@ class ServiceProfile:
     def __init__(self, name: str, container_config: DockerConfig, config_blob: str = '',
                  min_instances: int = 0, max_instances: int = None, growth: float = 600,
                  shrink: Optional[float] = None, backlog: int = 500, queue=None,
-                 shutdown_seconds: int = 30, dependency_blobs: dict[str, str] = None):
+                 shutdown_seconds: int = 30, dependency_blobs: dict[str, str] = None, privileged: bool = False):
         """
         :param name: Name of the service to manage
         :param container_config: Instructions on how to start this service
@@ -130,6 +130,7 @@ class ServiceProfile:
         :param shrink: Delay before shrinking a service, unit-less, approximately seconds, defaults to -growth
         :param backlog: How long a queue backlog should be before it takes `growth` seconds to grow.
         :param queue: Queue name for monitoring
+        :param privileged: Is this service able to interact with core directly?
         """
         self.name = name
         self.queue: PriorityQueue = queue
@@ -139,6 +140,7 @@ class ServiceProfile:
         self.shutdown_seconds = shutdown_seconds
         self.config_blob = config_blob
         self.dependency_blobs = dependency_blobs or {}
+        self.privileged = privileged
 
         # How many instances we want, and can have
         self.min_instances: int = max(0, int(min_instances))
@@ -480,7 +482,7 @@ class ScalerServer(ThreadedCoreBase):
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:
                     if name not in self.profiles:
-                        self.log.info(f'Adding {service.name} to scaling')
+                        self.log.info(f"Adding {'privileged' if service.privileged else ''} {service.name} to scaling")
                         self.add_service(ServiceProfile(
                             name=name,
                             min_instances=default_settings.min_instances,
@@ -493,7 +495,8 @@ class ScalerServer(ThreadedCoreBase):
                             container_config=docker_config,
                             queue=get_service_queue(name, self.redis),
                             # Give service an extra 30 seconds to upload results
-                            shutdown_seconds=service.timeout + 30
+                            shutdown_seconds=service.timeout + 30,
+                            privileged=service.privileged
                         ))
 
                     # Update RAM, CPU, licence requirements for running services
