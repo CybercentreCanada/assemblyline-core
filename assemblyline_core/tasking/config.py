@@ -1,5 +1,7 @@
 import logging
 import os
+import threading
+
 from typing import Any, Dict, cast
 
 from assemblyline.common import forge
@@ -61,5 +63,6 @@ HEURISTICS = cast(Dict[str, Heuristic], CachedObject(get_heuristics, refresh=300
 HEURISTIC_HANDLER = HeuristicHandler(STORAGE)
 TAG_SAFELISTER = CachedObject(forge.get_tag_safelister, kwargs=dict(log=LOGGER, config=config, datastore=STORAGE),
                               refresh=300)
+LOCK = threading.Lock()
 # End global
 #################################################################
