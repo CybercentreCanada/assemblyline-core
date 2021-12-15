@@ -3,7 +3,6 @@ An interface to the core system for the edge services.
 
 
 """
-from collections import defaultdict
 import logging
 import elasticapm
 import time
@@ -31,7 +30,7 @@ from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline_core.dispatching.dispatcher import DISPATCH_START_EVENTS, DISPATCH_RESULT_QUEUE, \
-    DISPATCH_COMMAND_QUEUE, QUEUE_EXPIRY, ResultSummary
+    DISPATCH_COMMAND_QUEUE, QUEUE_EXPIRY
 
 from assemblyline_core.dispatching.dispatcher import ServiceTask, Dispatcher
 
@@ -223,9 +222,9 @@ class DispatchClient:
             NamedQueue(w).push(msg)
 
         # Save the tags
-        tags = defaultdict(list)
+        tags = []
         for section in result.result.sections:
-            tags[result.sha256].extend(tag_dict_to_list(flatten(section.tags.as_primitives())))
+            tags.extend(tag_dict_to_list(flatten(section.tags.as_primitives())))
 
         # Pull out file names if we have them
         file_names = {}
@@ -236,6 +235,7 @@ class DispatchClient:
         #
         dispatcher = task.metadata['dispatcher__']
         result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
+        ex_ts = result.expiry_ts.strftime(DATEFORMAT) if result.expiry_ts else result.archive_ts.strftime(DATEFORMAT)
         result_queue.push({
             # 'service_task': task.as_primitives(),
             # 'result': result.as_primitives(),
@@ -245,7 +245,7 @@ class DispatchClient:
             'service_version': result.response.service_version,
             'service_tool_version': result.response.service_tool_version,
             'archive_ts': result.archive_ts.strftime(DATEFORMAT),
-            'expiry_ts': result.expiry_ts.strftime(DATEFORMAT) if result.expiry_ts else result.archive_ts.strftime(DATEFORMAT),
+            'expiry_ts': ex_ts,
             'result_summary': {
                 'key': result_key,
                 'drop': result.drop_file,
