@@ -66,4 +66,4 @@ def upload_files(client_info, request, **_):
     LOGGER.info(f"{client_info['client_id']} - {client_info['service_name']} "
                 f"successfully uploaded file (SHA256: {file_info['sha256']})")
 
-    return True
+    return True, None
