@@ -22,7 +22,7 @@ def dummy_service(name, stage, category='static', accepts='', rejects=None, doci
         'stage': stage,
         'category': category,
         'accepts': accepts,
-        'uses_auxiliary_data': extra_data,
+        'uses_temp_submission_data': extra_data,
         'uses_tags': extra_data,
         'rejects': rejects,
         'version': '0',
