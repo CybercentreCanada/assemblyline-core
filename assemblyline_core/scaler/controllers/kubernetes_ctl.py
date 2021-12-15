@@ -420,7 +420,7 @@ class KubernetesController(ControllerInterface):
         watch = TypelessWatch()
 
         self._deployment_targets = {}
-        label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items())
+        label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items() if _n != 'privilege')
 
         for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
                                   namespace=self.namespace, label_selector=label_selector,
@@ -549,7 +549,7 @@ class KubernetesController(ControllerInterface):
         all_labels = dict(self._labels)
         all_labels['component'] = service_name
         if core_mounts:
-            all_labels['section'] = 'core'
+            all_labels['privilege'] = 'core'
         all_labels.update(labels or {})
 
         # Build set of volumes, first the global mounts, then the core specific ones,

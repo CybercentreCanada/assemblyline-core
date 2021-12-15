@@ -236,6 +236,7 @@ class ServiceProfile:
             shrink=self.shrink_threshold,
             backlog=self.backlog,
             shutdown_seconds=self.shutdown_seconds,
+            privileged=self.privileged
         )
         prof.desired_instances = self.desired_instances
         prof.running_instances = self.running_instances
@@ -261,6 +262,7 @@ class ScalerServer(ThreadedCoreBase):
         labels = {
             'app': 'assemblyline',
             'section': 'service',
+            'privilege': 'service'
         }
 
         if self.config.core.scaler.additional_labels:

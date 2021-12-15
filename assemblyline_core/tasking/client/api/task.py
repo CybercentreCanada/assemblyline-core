@@ -15,7 +15,8 @@ from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.tagging import Tagging
 
-from assemblyline_core.tasking.config import DISPATCH_CLIENT, FILESTORE, LOGGER, STATUS_TABLE, STORAGE, config
+from assemblyline_core.tasking.config import DISPATCH_CLIENT, FILESTORE, HEURISTICS, HEURISTIC_HANDLER, \
+    LOGGER, STATUS_TABLE, STORAGE, TAG_SAFELISTER, config
 from assemblyline_core.tasking.helper.metrics import get_metrics_factory
 
 
@@ -186,8 +187,8 @@ def handle_task_result(exec_time: int, task: ServiceTask, result: Dict[str, Any]
                 heur_id = f"{client_info['service_name'].upper()}.{str(section['heuristic']['heur_id'])}"
                 section['heuristic']['heur_id'] = heur_id
                 try:
-                    section['heuristic'], new_tags = heuristic_hander.service_heuristic_to_result_heuristic(
-                        section['heuristic'], heuristics, zeroize_on_sig_safe)
+                    section['heuristic'], new_tags = HEURISTIC_HANDLER.service_heuristic_to_result_heuristic(
+                        section['heuristic'], HEURISTICS, zeroize_on_sig_safe)
                     for tag in new_tags:
                         section['tags'].setdefault(tag[0], [])
                         if tag[1] not in section['tags'][tag[0]]:
@@ -212,7 +213,7 @@ def handle_task_result(exec_time: int, task: ServiceTask, result: Dict[str, Any]
                                  span_type="al_svc_server"):
         for section in result['result']['sections']:
             # Perform tag safelisting
-            tags, safelisted_tags = tag_safelister.get_validated_tag_map(section['tags'])
+            tags, safelisted_tags = TAG_SAFELISTER.get_validated_tag_map(section['tags'])
             section['tags'] = unflatten(tags)
             section['safelisted_tags'] = safelisted_tags
 
