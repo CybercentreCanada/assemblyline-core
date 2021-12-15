@@ -16,11 +16,9 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.dict_utils import flatten
 from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
-from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch, DispatcherCommandMessage, \
@@ -28,7 +26,6 @@ from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch
 from assemblyline.odm.messages.submission import SubmissionMessage, from_datastore_submission
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.error import Error
-from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
@@ -467,10 +464,10 @@ class Dispatcher(ThreadedCoreBase):
                     if service.uses_tags:
                         tags = task.file_tags.get(sha256, [])
 
-                    # Load the auxiliary data we will pass
-                    aux_data = {}
-                    if service.uses_auxiliary_data:
-                        aux_data = task.file_temporary_data[sha256]
+                    # Load the temp submission data we will pass
+                    temp_data = {}
+                    if service.uses_temp_submission_data:
+                        temp_data = task.file_temporary_data[sha256]
 
                     # Load the metadata we will pass
                     metadata = {}
@@ -496,7 +493,7 @@ class Dispatcher(ThreadedCoreBase):
                             {'type': x['type'], 'value': x['value'], 'short_type': x['short_type']} for x in tags
                         ],
                         temporary_submission_data=[
-                            {'name': name, 'value': value} for name, value in aux_data.items()
+                            {'name': name, 'value': value} for name, value in temp_data.items()
                         ],
                         deep_scan=submission.params.deep_scan,
                         priority=submission.params.priority,
