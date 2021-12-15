@@ -381,7 +381,7 @@ class ScalerServer(ThreadedCoreBase):
 
                 # Find any services we have running, that are no longer in the database and remove them
                 for stray_service in current_services - set(discovered_services):
-                    self.log.info(f'Service appears to be deleted, removing {stray_service}')
+                    self.log.info(f'Service appears to be deleted, removing stray {stray_service}')
                     stage = self.get_service_stage(stray_service)
                     self.stop_service(stray_service, stage)
 
