@@ -598,12 +598,19 @@ class KubernetesController(ControllerInterface):
 
         if replace:
             self.logger.info("Requesting kubernetes replace deployment info for: " + metadata.name)
-            self.apps_api.replace_namespaced_deployment(namespace=self.namespace, body=deployment,
-                                                        name=metadata.name, _request_timeout=API_TIMEOUT)
+            try:
+                self.apps_api.replace_namespaced_deployment(namespace=self.namespace, body=deployment,
+                                                            name=metadata.name, _request_timeout=API_TIMEOUT)
+                return
+            except ApiException as error:
+                if error.status == 422:
+                    # Replacement of an immutable field (ie. labels); Delete and re-create
+                    self.stop_containers(labels=dict(component=service_name))
+
         else:
             self.logger.info("Requesting kubernetes create deployment info for: " + metadata.name)
-            self.apps_api.create_namespaced_deployment(namespace=self.namespace, body=deployment,
-                                                       _request_timeout=API_TIMEOUT)
+        self.apps_api.create_namespaced_deployment(namespace=self.namespace, body=deployment,
+                                                   _request_timeout=API_TIMEOUT)
 
     def get_target(self, service_name: str) -> int:
         """Get the target for running instances of a service."""
