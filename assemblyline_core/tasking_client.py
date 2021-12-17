@@ -1,8 +1,5 @@
 import concurrent.futures
 import logging
-import os
-import shutil
-import tempfile
 import threading
 import time
 from typing import Any, Dict
@@ -10,14 +7,14 @@ from typing import Any, Dict
 import elasticapm
 import yaml
 
-from assemblyline.common import forge, heuristics, identify
+from assemblyline.common import forge, identify
 from assemblyline.common.constants import SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.dict_utils import flatten, unflatten
 from assemblyline.common.heuristics import HeuristicHandler, InvalidHeuristicException
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.datastore.helper import AssemblylineDatastore
-from assemblyline.filestore import FileStore, FileStoreException
+from assemblyline.filestore import FileStore
 from assemblyline.odm import construct_safe
 from assemblyline.odm.messages.changes import Operation
 from assemblyline.odm.messages.service_heartbeat import Metrics
@@ -47,6 +44,10 @@ def get_metrics_factory(service_name):
     return factory
 
 
+class TaskingClientException(Exception):
+    pass
+
+
 # Tasking class
 class TaskingClient:
     """A helper class to simplify tasking for privileged services and service-server.
@@ -71,77 +72,28 @@ class TaskingClient:
         self.tag_safelister = forge.CachedObject(forge.get_tag_safelister, kwargs=dict(
             log=self.log, config=config, datastore=self.datastore), refresh=300)
 
-    # File
-    def download_file(self, sha256, client_info, target_path=None) -> tuple:
-        try:
-            # Used by service task_handler
-            if target_path:
-                self.filestore.download(sha256, target_path)
-                return
+    def upload_file(self, file_path, classification, ttl, is_section_image, expected_sha256=None):
+        # Identify the file info of the uploaded file
+        file_info = identify.fileinfo(file_path)
 
-            # Used by service-server
-            with tempfile.NamedTemporaryFile() as temp_file:
-                self.filestore.download(sha256, temp_file.name)
-                f_size = os.path.getsize(temp_file.name)
-                return dict(reader=open(temp_file.name, 'rb'), name=sha256, size=f_size)
-
-        except FileStoreException:
-            self.log.exception(f"[{client_info['client_id']}] {client_info['service_name']} couldn't find file "
-                               f"{sha256} requested by service ")
-            raise
-
-    def upload_files(self, client_info, request, direct_upload={}, **_):
-        headers = direct_upload['headers'] if direct_upload else request.headers
-        sha256 = headers['sha256']
-        classification = headers['classification']
-        ttl = int(headers['ttl'])
-        is_section_image = headers.get('is_section_image', 'false').lower() == 'true'
-
-        with tempfile.NamedTemporaryFile(mode='wb') as temp_file:
-            if not direct_upload:
-                # Try reading multipart data from 'files' or a single file post from stream
-                if request.content_type.startswith('multipart'):
-                    file = request.files['file']
-                    file.save(temp_file.name)
-                elif request.stream.is_exhausted:
-                    if request.stream.limit == len(request.data):
-                        temp_file.write(request.data)
-                    else:
-                        raise ValueError("Cannot find the uploaded file...")
-                else:
-                    shutil.copyfileobj(request.stream, temp_file)
+        # Validate SHA256 of the uploaded file
+        if expected_sha256 is None or expected_sha256 == file_info['sha256']:
+            file_info['archive_ts'] = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
+            file_info['classification'] = classification
+            if ttl:
+                file_info['expiry_ts'] = now_as_iso(ttl * 24 * 60 * 60)
             else:
-                file = direct_upload['file']
-                temp_file.write(file.read())
+                file_info['expiry_ts'] = None
 
-            # Identify the file info of the uploaded file
-            file_info = identify.fileinfo(temp_file.name)
+            # Update the datastore with the uploaded file
+            self.datastore.save_or_freshen_file(file_info['sha256'], file_info, file_info['expiry_ts'],
+                                                file_info['classification'], is_section_image=is_section_image)
 
-            # Validate SHA256 of the uploaded file
-            if sha256 == file_info['sha256']:
-                file_info['archive_ts'] = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
-                file_info['classification'] = classification
-                if ttl:
-                    file_info['expiry_ts'] = now_as_iso(ttl * 24 * 60 * 60)
-                else:
-                    file_info['expiry_ts'] = None
-
-                # Update the datastore with the uploaded file
-                self.datastore.save_or_freshen_file(file_info['sha256'], file_info, file_info['expiry_ts'],
-                                                    file_info['classification'], is_section_image=is_section_image)
-
-                # Upload file to the filestore (upload already checks if the file exists)
-                self.filestore.upload(temp_file.name, file_info['sha256'])
-            else:
-                self.log.warning(f"{client_info['client_id']} - {client_info['service_name']} "
-                                 f"uploaded file (SHA256: {file_info['sha256']}) doesn't match "
-                                 f"expected file (SHA256: {sha256})")
-                return False, f"Uploaded file does not match expected file hash. [{file_info['sha256']} != {sha256}]"
-
-        self.log.info(f"{client_info['client_id']} - {client_info['service_name']} "
-                      f"successfully uploaded file (SHA256: {file_info['sha256']})")
-
-        return True, None
+            # Upload file to the filestore (upload already checks if the file exists)
+            self.filestore.upload(file_path, file_info['sha256'])
+        else:
+            raise TaskingClientException("Uploaded file does not match expected file hash. "
+                                         f"[{file_info['sha256']} != {expected_sha256}]")
 
     # Safelist
     def exists(self, qhash, **_):
