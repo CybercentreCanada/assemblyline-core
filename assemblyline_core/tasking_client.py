@@ -95,27 +95,29 @@ class TaskingClient:
                                          f"[{file_info['sha256']} != {expected_sha256}]")
 
     # Service
-    def register_service(self, client_info, json, **_):
+    def register_service(self, service_data, log_prefix=""):
         keep_alive = True
 
         try:
             # Get heuristics list
-            heuristics = json.pop('heuristics', None)
+            heuristics = service_data.pop('heuristics', None)
 
             # Patch update_channel, registry_type before Service registration object creation
-            json['update_channel'] = json.get('update_channel', self.config.services.preferred_update_channel)
-            json['docker_config']['registry_type'] = json['docker_config'] \
+            service_data['update_channel'] = service_data.get(
+                'update_channel', self.config.services.preferred_update_channel)
+            service_data['docker_config']['registry_type'] = service_data['docker_config'] \
                 .get('registry_type', self.config.services.preferred_registry_type)
-            for dep in json.get('dependencies', {}).values():
+            service_data['privileged'] = service_data.get('privileged', self.config.services.prefer_service_privileged)
+            for dep in service_data.get('dependencies', {}).values():
                 dep['container']['registry_type'] = dep.get(
                     'registry_type', self.config.services.preferred_registry_type)
 
-            # Pop unused registration json
+            # Pop unused registration service_data
             for x in ['file_required', 'tool_version']:
-                json.pop(x, None)
+                service_data.pop(x, None)
 
             # Create Service registration object
-            service = Service(json)
+            service = Service(service_data)
 
             # Fix service version, we don't need to see the stable label
             service.version = service.version.replace('stable', '')
@@ -124,14 +126,14 @@ class TaskingClient:
             if not self.datastore.service.exists(f'{service.name}_{service.version}'):
                 self.datastore.service.save(f'{service.name}_{service.version}', service)
                 self.datastore.service.commit()
-                self.log.info(f"{client_info['client_id']} - {client_info['service_name']} registered")
+                self.log.info(f"{log_prefix}{service.name} registered")
                 keep_alive = False
 
             # Save service delta if it doesn't already exist
             if not self.datastore.service_delta.exists(service.name):
                 self.datastore.service_delta.save(service.name, {'version': service.version})
                 self.datastore.service_delta.commit()
-                self.log.info(f"{client_info['client_id']} - {client_info['service_name']} "
+                self.log.info(f"{log_prefix}{service.name} "
                               f"version ({service.version}) registered")
 
             new_heuristics = []
@@ -152,14 +154,14 @@ class TaskingClient:
                         heuristic_id = heuristic.heur_id
                         plan.add_upsert_operation(heuristic_id, heuristic)
                     except Exception as e:
-                        self.log.exception(f"{client_info['client_id']} - {client_info['service_name']} "
-                                           f"invalid heuristic ({heuristic_id}) ignored: {str(e)}")
-                        raise ValueError("Error parsing heuristics")
+                        msg = f"{service.name} has an invalid heuristic ({heuristic_id}): {str(e)}"
+                        self.log.exception(f"{log_prefix}{msg}")
+                        raise ValueError(msg)
 
                 for item in self.datastore.heuristic.bulk(plan)['items']:
                     if item['update']['result'] != "noop":
                         new_heuristics.append(item['update']['_id'])
-                        self.log.info(f"{client_info['client_id']} - {client_info['service_name']} "
+                        self.log.info(f"{log_prefix}{service.name} "
                                       f"heuristic {item['update']['_id']}: {item['update']['result'].upper()}")
 
                 self.datastore.heuristic.commit()
