@@ -1,6 +1,5 @@
 import concurrent.futures
 import logging
-import threading
 import time
 from typing import Any, Dict
 
@@ -11,12 +10,10 @@ from assemblyline.common.constants import SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.dict_utils import flatten, unflatten
 from assemblyline.common.heuristics import HeuristicHandler, InvalidHeuristicException
 from assemblyline.common.isotime import now_as_iso
-from assemblyline.common.metrics import MetricsFactory
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.filestore import FileStore
 from assemblyline.odm import construct_safe
 from assemblyline.odm.messages.changes import Operation
-from assemblyline.odm.messages.service_heartbeat import Metrics
 from assemblyline.odm.messages.task import Task as ServiceTask
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.heuristic import Heuristic
@@ -27,23 +24,12 @@ from assemblyline.remote.datatypes.events import EventSender
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline_core.dispatching.client import DispatchClient
 
-METRICS_FACTORIES = {}
-LOCK = threading.Lock()
-
-
-# Helper functions
-def get_metrics_factory(service_name):
-    factory = METRICS_FACTORIES.get(service_name, None)
-
-    if factory is None:
-        with LOCK:
-            factory = MetricsFactory('service', Metrics, name=service_name, export_zero=False)
-            METRICS_FACTORIES[service_name] = factory
-
-    return factory
-
 
 class TaskingClientException(Exception):
+    pass
+
+
+class ServiceMissingException(Exception):
     pass
 
 
@@ -71,6 +57,7 @@ class TaskingClient:
         self.tag_safelister = forge.CachedObject(forge.get_tag_safelister, kwargs=dict(
             log=self.log, config=config, datastore=self.datastore), refresh=300)
 
+    @elasticapm.capture_span(span_type='tasking_client')
     def upload_file(self, file_path, classification, ttl, is_section_image, expected_sha256=None):
         # Identify the file info of the uploaded file
         file_info = identify.fileinfo(file_path)
@@ -95,6 +82,7 @@ class TaskingClient:
                                          f"[{file_info['sha256']} != {expected_sha256}]")
 
     # Service
+    @elasticapm.capture_span(span_type='tasking_client')
     def register_service(self, service_data, log_prefix=""):
         keep_alive = True
 
@@ -180,104 +168,95 @@ class TaskingClient:
         return dict(keep_alive=keep_alive, new_heuristics=new_heuristics, service_config=service_config or dict())
 
     # Task
-    def get_task(self, client_info, headers, **_):
-        service_name = client_info['service_name']
-        service_version = client_info['service_version']
-        service_tool_version = client_info['service_tool_version']
-        client_id = client_info['client_id']
-        remaining_time = timeout = int(float(headers.get('timeout', 30)))
-        metric_factory = get_metrics_factory(service_name)
+    @elasticapm.capture_span(span_type='tasking_client')
+    def get_task(self, client_id, service_name, service_version, service_tool_version,
+                 status_expiry, metric_factory, timeout=30):
+        cache_found = False
 
         try:
             service_data = self.dispatch_client.service_data[service_name]
         except KeyError:
-            raise
+            raise ServiceMissingException("The service you're asking task for does not exist, try later", 404)
 
-        start_time = time.time()
+        # Set the service status to Idle since we will be waiting for a task
+        self.status_table.set(client_id, (service_name, ServiceStatus.Idle, status_expiry))
 
-        while remaining_time > 0:
-            cache_found = False
+        # Getting a new task
+        task = self.dispatch_client.request_work(client_id, service_name, service_version, timeout=timeout)
 
-            # Set the service status to Idle since we will be waiting for a task
-            self.status_table.set(client_id, (service_name, ServiceStatus.Idle, start_time + timeout))
+        if not task:
+            # We've reached the timeout and no task found in service queue
+            return None, False
 
-            # Getting a new task
-            task = self.dispatch_client.request_work(client_id, service_name, service_version, timeout=remaining_time)
+        # We've got a task to process, consider us busy
+        self.status_table.set(client_id, (service_name, ServiceStatus.Running, time.time() + service_data.timeout))
+        metric_factory.increment('execute')
 
-            if not task:
-                # We've reached the timeout and no task found in service queue
-                return dict(task=False)
+        result_key = Result.help_build_key(sha256=task.fileinfo.sha256,
+                                           service_name=service_name,
+                                           service_version=service_version,
+                                           service_tool_version=service_tool_version,
+                                           is_empty=False,
+                                           task=task)
 
-            # We've got a task to process, consider us busy
-            self.status_table.set(client_id, (service_name, ServiceStatus.Running, time.time() + service_data.timeout))
-            metric_factory.increment('execute')
+        # If we are allowed, try to see if the result has been cached
+        if not task.ignore_cache and not service_data.disable_cache:
+            # Checking for previous results for this key
+            result = self.datastore.result.get_if_exists(result_key)
+            if result:
+                metric_factory.increment('cache_hit')
+                if result.result.score:
+                    metric_factory.increment('scored')
+                else:
+                    metric_factory.increment('not_scored')
 
-            result_key = Result.help_build_key(sha256=task.fileinfo.sha256,
-                                               service_name=service_name,
-                                               service_version=service_version,
-                                               service_tool_version=service_tool_version,
-                                               is_empty=False,
-                                               task=task)
+                result.archive_ts = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
+                if task.ttl:
+                    result.expiry_ts = now_as_iso(task.ttl * 24 * 60 * 60)
 
-            # If we are allowed, try to see if the result has been cached
-            if not task.ignore_cache and not service_data.disable_cache:
-                # Checking for previous results for this key
-                result = self.datastore.result.get_if_exists(result_key)
-                if result:
-                    metric_factory.increment('cache_hit')
-                    if result.result.score:
-                        metric_factory.increment('scored')
-                    else:
-                        metric_factory.increment('not_scored')
-
-                    result.archive_ts = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
-                    if task.ttl:
-                        result.expiry_ts = now_as_iso(task.ttl * 24 * 60 * 60)
-
-                    self.dispatch_client.service_finished(task.sid, result_key, result)
-                    cache_found = True
-
-                if not cache_found:
-                    # Checking for previous empty results for this key
-                    result = self.datastore.emptyresult.get_if_exists(f"{result_key}.e")
-                    if result:
-                        metric_factory.increment('cache_hit')
-                        metric_factory.increment('not_scored')
-                        result = self.datastore.create_empty_result_from_key(result_key)
-                        self.dispatch_client.service_finished(task.sid, f"{result_key}.e", result)
-                        cache_found = True
-
-                if not cache_found:
-                    metric_factory.increment('cache_miss')
-
-            else:
-                metric_factory.increment('cache_skipped')
+                self.dispatch_client.service_finished(task.sid, result_key, result)
+                cache_found = True
 
             if not cache_found:
-                # No luck with the cache, lets dispatch the task to a client
-                return dict(task=task.as_primitives())
+                # Checking for previous empty results for this key
+                result = self.datastore.emptyresult.get_if_exists(f"{result_key}.e")
+                if result:
+                    metric_factory.increment('cache_hit')
+                    metric_factory.increment('not_scored')
+                    result = self.datastore.create_empty_result_from_key(result_key)
+                    self.dispatch_client.service_finished(task.sid, f"{result_key}.e", result)
+                    cache_found = True
 
-            # Recalculating how much time we have left before we reach the timeout
-            remaining_time = start_time + timeout - time.time()
+            if not cache_found:
+                metric_factory.increment('cache_miss')
 
-        # We've been processing cache hit for the length of the timeout... bailing out!
-        return dict(task=False)
+        else:
+            metric_factory.increment('cache_skipped')
 
-    def task_finished(self, client_info, json, **_):
-        exec_time = json.get('exec_time')
+        if not cache_found:
+            # No luck with the cache, lets dispatch the task to a client
+            return task.as_primitives(), False
+
+        return None, True
+
+    @elasticapm.capture_span(span_type='tasking_client')
+    def task_finished(self, service_task, client_id, service_name, metric_factory):
+        exec_time = service_task.get('exec_time')
 
         try:
-            task = ServiceTask(json['task'])
+            task = ServiceTask(service_task['task'])
 
-            if 'result' in json:  # Task created a result
-                missing_files = self.handle_task_result(exec_time, task, json['result'], client_info, json['freshen'])
+            if 'result' in service_task:  # Task created a result
+                missing_files = self._handle_task_result(
+                    exec_time, task, service_task['result'],
+                    client_id, service_name, service_task['freshen'], metric_factory)
                 if missing_files:
                     return dict(success=False, missing_files=missing_files)
                 return dict(success=True)
 
-            elif 'error' in json:  # Task created an error
-                error = json['error']
-                self.handle_task_error(exec_time, task, error, client_info)
+            elif 'error' in service_task:  # Task created an error
+                error = service_task['error']
+                self._handle_task_error(exec_time, task, error, client_id, service_name, metric_factory)
                 return dict(success=True)
             else:
                 return None
@@ -285,9 +264,9 @@ class TaskingClient:
         except ValueError as e:  # Catch errors when building Task or Result model
             raise e
 
-    @elasticapm.capture_span(span_type='al_svc_server')
-    def handle_task_result(self, exec_time: int, task: ServiceTask, result: Dict[str, Any], client_info: Dict[str, str],
-                           freshen: bool):
+    @elasticapm.capture_span(span_type='tasking_client')
+    def _handle_task_result(self, exec_time: int, task: ServiceTask, result: Dict[str, Any], client_id, service_name,
+                            freshen: bool, metric_factory):
 
         def freshen_file(file_info_list, item):
             file_info = file_info_list.get(item['sha256'], None)
@@ -328,9 +307,6 @@ class TaskingClient:
             if missing_files:
                 return missing_files
 
-        service_name = client_info['service_name']
-        metric_factory = get_metrics_factory(service_name)
-
         # Add scores to the heuristics, if any section set a heuristic
         with elasticapm.capture_span(name="handle_task_result.process_heuristics",
                                      span_type="tasking_client"):
@@ -339,7 +315,7 @@ class TaskingClient:
                 zeroize_on_sig_safe = section.pop('zeroize_on_sig_safe', True)
                 section['tags'] = flatten(section['tags'])
                 if section.get('heuristic'):
-                    heur_id = f"{client_info['service_name'].upper()}.{str(section['heuristic']['heur_id'])}"
+                    heur_id = f"{service_name.upper()}.{str(section['heuristic']['heur_id'])}"
                     section['heuristic']['heur_id'] = heur_id
                     try:
                         section['heuristic'], new_tags = self.heuristic_handler.service_heuristic_to_result_heuristic(
@@ -384,7 +360,7 @@ class TaskingClient:
                     section['heuristic']['score'] = 0
 
                 if dropped:
-                    self.log.warning(f"[{task.sid}] Invalid tag data from {client_info['service_name']}: {dropped}")
+                    self.log.warning(f"[{task.sid}] Invalid tag data from {service_name}: {dropped}")
 
         result = Result(result)
         result_key = result.build_key(service_tool_version=result.response.service_tool_version, task=task)
@@ -396,17 +372,16 @@ class TaskingClient:
         else:
             metric_factory.increment('not_scored')
 
-        self.log.info(f"[{task.sid}] {client_info['client_id']} - {client_info['service_name']} "
+        self.log.info(f"[{task.sid}] {client_id} - {service_name} "
                       f"successfully completed task {f' in {exec_time}ms' if exec_time else ''}")
 
-    @elasticapm.capture_span(span_type='al_svc_server')
-    def handle_task_error(self,
-                          exec_time: int, task: ServiceTask, error: Dict[str, Any],
-                          client_info: Dict[str, str]) -> None:
-        service_name = client_info['service_name']
-        metric_factory = get_metrics_factory(service_name)
+        self.status_table.set(client_id, (service_name, ServiceStatus.Idle, time.time() + 5))
 
-        self.log.info(f"[{task.sid}] {client_info['client_id']} - {client_info['service_name']} "
+    @elasticapm.capture_span(span_type='tasking_client')
+    def _handle_task_error(
+            self, exec_time: int, task: ServiceTask, error: Dict[str, Any],
+            client_id, service_name, metric_factory) -> None:
+        self.log.info(f"[{task.sid}] {client_id} - {service_name} "
                       f"failed to complete task {f' in {exec_time}ms' if exec_time else ''}")
 
         # Add timestamps for creation, archive and expiry
@@ -424,3 +399,5 @@ class TaskingClient:
             metric_factory.increment('fail_recoverable')
         else:
             metric_factory.increment('fail_nonrecoverable')
+
+        self.status_table.set(client_id, (service_name, ServiceStatus.Idle, time.time() + 5))
