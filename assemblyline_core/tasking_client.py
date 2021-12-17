@@ -170,7 +170,10 @@ class TaskingClient:
     # Task
     @elasticapm.capture_span(span_type='tasking_client')
     def get_task(self, client_id, service_name, service_version, service_tool_version,
-                 status_expiry, metric_factory, timeout=30):
+                 metric_factory, status_expiry=None, timeout=30):
+        if status_expiry is None:
+            status_expiry = time.time() + timeout
+
         cache_found = False
 
         try:
