@@ -1,5 +1,4 @@
 import logging
-from typing import List
 
 import yaml
 
@@ -22,7 +21,10 @@ class SafelistClient:
     def exists(self, qhash):
         return self.datastore.safelist.get_if_exists(qhash, as_obj=False)
 
-    def get_safelisted_tags(self, tag_types: List[str]):
+    def get_safelisted_tags(self, tag_types):
+        if isinstance(tag_types, str):
+            tag_types = tag_types.split(',')
+
         with forge.get_cachestore('system', config=self.config, datastore=self.datastore) as cache:
             tag_safelist_yml = cache.get('tag_safelist_yml')
             if tag_safelist_yml:
