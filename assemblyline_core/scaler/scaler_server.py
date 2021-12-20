@@ -484,8 +484,8 @@ class ScalerServer(ThreadedCoreBase):
                 # should still result in a service being restarted when changed
                 cfg_items = sorted(service.config.items())
                 dep_keys = ''.join(sorted(dependency_keys))
-                config_blob = \
-                    f"c={cfg_items}sp={service.submission_params}dk={dep_keys}p={service.privileged}d={docker_config}"
+                config_blob = (f"c={cfg_items}sp={service.submission_params}"
+                               f"dk={dep_keys}p={service.privileged}d={docker_config}")
 
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:

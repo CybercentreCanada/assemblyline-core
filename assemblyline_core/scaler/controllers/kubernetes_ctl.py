@@ -491,9 +491,8 @@ class KubernetesController(ControllerInterface):
         # systems returning differently formatted data
         lbls = sorted((labels or {}).items())
         svc_env = sorted(self._service_limited_env[service_name].items())
-        change_key = \
-            f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}" + \
-            f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}"
+        change_key = (f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
+                      f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}")
 
         # Check if a deployment already exists, and if it does check if it has the same change key set
         replace = None
