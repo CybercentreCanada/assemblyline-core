@@ -249,7 +249,7 @@ class KubernetesController(ControllerInterface):
         """Tell the controller about a service profile it needs to manage."""
         self._create_deployment(profile.name, self._deployment_name(profile.name),
                                 profile.container_config, profile.shutdown_seconds, scale,
-                                change_key=profile.config_blob)
+                                change_key=profile.config_blob, core_mounts=profile.privileged)
         self._external_profiles[profile.name] = profile
 
     def _loop_forever(self, function):
@@ -420,7 +420,7 @@ class KubernetesController(ControllerInterface):
         watch = TypelessWatch()
 
         self._deployment_targets = {}
-        label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items())
+        label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items() if _n != 'privilege')
 
         for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
                                   namespace=self.namespace, label_selector=label_selector,
@@ -457,6 +457,7 @@ class KubernetesController(ControllerInterface):
         if core_container:
             environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in os.environ.items()
                                       if any(term in _n for term in ['ELASTIC', 'FILESTORE', 'UI_SERVER'])]
+            environment_variables.append(V1EnvVar(name='PRIVILEGED', value='true'))
         # Overwrite them with configured special environment variables
         environment_variables += [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]
         # Overwrite those with special hard coded variables
@@ -548,7 +549,7 @@ class KubernetesController(ControllerInterface):
         all_labels = dict(self._labels)
         all_labels['component'] = service_name
         if core_mounts:
-            all_labels['section'] = 'core'
+            all_labels['privilege'] = 'core'
         all_labels.update(labels or {})
 
         # Build set of volumes, first the global mounts, then the core specific ones,
@@ -597,12 +598,19 @@ class KubernetesController(ControllerInterface):
 
         if replace:
             self.logger.info("Requesting kubernetes replace deployment info for: " + metadata.name)
-            self.apps_api.replace_namespaced_deployment(namespace=self.namespace, body=deployment,
-                                                        name=metadata.name, _request_timeout=API_TIMEOUT)
+            try:
+                self.apps_api.replace_namespaced_deployment(namespace=self.namespace, body=deployment,
+                                                            name=metadata.name, _request_timeout=API_TIMEOUT)
+                return
+            except ApiException as error:
+                if error.status == 422:
+                    # Replacement of an immutable field (ie. labels); Delete and re-create
+                    self.stop_containers(labels=dict(component=service_name))
+
         else:
             self.logger.info("Requesting kubernetes create deployment info for: " + metadata.name)
-            self.apps_api.create_namespaced_deployment(namespace=self.namespace, body=deployment,
-                                                       _request_timeout=API_TIMEOUT)
+        self.apps_api.create_namespaced_deployment(namespace=self.namespace, body=deployment,
+                                                   _request_timeout=API_TIMEOUT)
 
     def get_target(self, service_name: str) -> int:
         """Get the target for running instances of a service."""

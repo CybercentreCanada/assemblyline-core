@@ -120,7 +120,7 @@ class ServiceProfile:
     def __init__(self, name: str, container_config: DockerConfig, config_blob: str = '',
                  min_instances: int = 0, max_instances: int = None, growth: float = 600,
                  shrink: Optional[float] = None, backlog: int = 500, queue=None,
-                 shutdown_seconds: int = 30, dependency_blobs: dict[str, str] = None):
+                 shutdown_seconds: int = 30, dependency_blobs: dict[str, str] = None, privileged: bool = False):
         """
         :param name: Name of the service to manage
         :param container_config: Instructions on how to start this service
@@ -130,6 +130,7 @@ class ServiceProfile:
         :param shrink: Delay before shrinking a service, unit-less, approximately seconds, defaults to -growth
         :param backlog: How long a queue backlog should be before it takes `growth` seconds to grow.
         :param queue: Queue name for monitoring
+        :param privileged: Is this service able to interact with core directly?
         """
         self.name = name
         self.queue: PriorityQueue = queue
@@ -139,6 +140,7 @@ class ServiceProfile:
         self.shutdown_seconds = shutdown_seconds
         self.config_blob = config_blob
         self.dependency_blobs = dependency_blobs or {}
+        self.privileged = privileged
 
         # How many instances we want, and can have
         self.min_instances: int = max(0, int(min_instances))
@@ -234,6 +236,7 @@ class ServiceProfile:
             shrink=self.shrink_threshold,
             backlog=self.backlog,
             shutdown_seconds=self.shutdown_seconds,
+            privileged=self.privileged
         )
         prof.desired_instances = self.desired_instances
         prof.running_instances = self.running_instances
@@ -259,6 +262,7 @@ class ScalerServer(ThreadedCoreBase):
         labels = {
             'app': 'assemblyline',
             'section': 'service',
+            'privilege': 'service'
         }
 
         if self.config.core.scaler.additional_labels:
@@ -379,7 +383,7 @@ class ScalerServer(ThreadedCoreBase):
 
                 # Find any services we have running, that are no longer in the database and remove them
                 for stray_service in current_services - set(discovered_services):
-                    self.log.info(f'Service appears to be deleted, removing {stray_service}')
+                    self.log.info(f'Service appears to be deleted, removing stray {stray_service}')
                     stage = self.get_service_stage(stray_service)
                     self.stop_service(stray_service, stage)
 
@@ -480,7 +484,9 @@ class ScalerServer(ThreadedCoreBase):
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:
                     if name not in self.profiles:
-                        self.log.info(f'Adding {service.name} to scaling')
+                        self.log.info(f"Adding "
+                                      f"{f'privileged {service.name}' if service.privileged else service.name}"
+                                      " to scaling")
                         self.add_service(ServiceProfile(
                             name=name,
                             min_instances=default_settings.min_instances,
@@ -493,7 +499,8 @@ class ScalerServer(ThreadedCoreBase):
                             container_config=docker_config,
                             queue=get_service_queue(name, self.redis),
                             # Give service an extra 30 seconds to upload results
-                            shutdown_seconds=service.timeout + 30
+                            shutdown_seconds=service.timeout + 30,
+                            privileged=service.privileged
                         ))
 
                     # Update RAM, CPU, licence requirements for running services
