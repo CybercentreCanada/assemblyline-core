@@ -432,7 +432,7 @@ class ScalerServer(ThreadedCoreBase):
             for _n, dependency in service.dependencies.items():
                 dependency.container = prepare_container(dependency.container)
                 dependency_config[_n] = dependency
-                dependency_blobs[_n] = str(dependency) + str(service.version)
+                dependency_blobs[_n] = str(dependency) + str(service.version) + f"priv={str(service.privileged)}"
 
             # Check if the service dependencies have been deployed.
             dependency_keys = []

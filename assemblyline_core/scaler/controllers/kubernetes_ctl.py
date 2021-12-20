@@ -868,6 +868,7 @@ class KubernetesController(ControllerInterface):
                         pod_selector=V1LabelSelector(match_labels={
                             'app': 'assemblyline',
                             'section': 'service',
+                            'dependency_for': service_name,
                             'container': dep_name,
                         }),
                         egress=[V1NetworkPolicyEgressRule(to=[])],
