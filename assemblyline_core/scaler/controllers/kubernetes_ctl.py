@@ -489,11 +489,10 @@ class KubernetesController(ControllerInterface):
         # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
-        change_key = (
-            deployment_name + change_key + str(docker_config) + str(shutdown_seconds) +
-            str(sorted((labels or {}).items())) + str(volumes) + str(mounts) + str(core_mounts) +
-            str(sorted(self._service_limited_env[service_name].items()))
-        )
+        lbls = sorted((labels or {}).items())
+        svc_env = sorted(self._service_limited_env[service_name].items())
+        change_key = (f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
+                      f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}")
 
         # Check if a deployment already exists, and if it does check if it has the same change key set
         replace = None
