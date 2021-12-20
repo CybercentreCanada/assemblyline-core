@@ -407,7 +407,7 @@ class DockerController(ControllerInterface):
         deployment_name = f'{self._prefix}{service_name.lower()}_{container_name.lower()}'
         self.log.info("Killing stale container...")
 
-        change_check = change_key + service_name + container_name + str(spec)
+        change_check = f"{change_key}sn={service_name}cn={container_name}spc={spec}"
         instance_key = None
 
         try:

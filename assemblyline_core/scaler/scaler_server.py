@@ -14,6 +14,7 @@ import platform
 import concurrent.futures
 import copy
 from contextlib import contextmanager
+from assemblyline.common.uid import get_id_from_data
 
 import elasticapm
 import yaml
@@ -432,7 +433,8 @@ class ScalerServer(ThreadedCoreBase):
             for _n, dependency in service.dependencies.items():
                 dependency.container = prepare_container(dependency.container)
                 dependency_config[_n] = dependency
-                dependency_blobs[_n] = str(hash(str(dependency))) + str(service.version) + f"priv={str(service.privileged)}"
+                dep_hash = get_id_from_data(dependency, length=16)
+                dependency_blobs[_n] = f"dh={dep_hash}v={service.version}p={service.privileged}"
 
             # Check if the service dependencies have been deployed.
             dependency_keys = []
@@ -474,17 +476,16 @@ class ScalerServer(ThreadedCoreBase):
 
             # If the conditions for running are met deploy or update service containers
             if stage == ServiceStage.Running:
-                # Compute a blob of service properties not include in the docker config, that
-                # should still result in a service being restarted when changed
-                config_blob = str(sorted(service.config.items()))
-                config_blob += str(service.submission_params)
-                config_blob += ''.join(sorted(dependency_keys))
-                config_blob += f"priv={service.privileged}"
-
                 # Build the docker config for the service, we are going to either create it or
                 # update it so we need to know what the current configuration is either way
                 docker_config = prepare_container(service.docker_config)
-                config_blob += str(docker_config)
+
+                # Compute a blob of service properties not include in the docker config, that
+                # should still result in a service being restarted when changed
+                cfg_items = sorted(service.config.items())
+                dep_keys = ''.join(sorted(dependency_keys))
+                config_blob = \
+                    f"c={cfg_items}sp={service.submission_params}dk={dep_keys}p={service.privileged}d={docker_config}"
 
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:
