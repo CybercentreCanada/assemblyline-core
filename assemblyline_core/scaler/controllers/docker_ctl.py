@@ -165,6 +165,8 @@ class DockerController(ControllerInterface):
         env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
         env += [f'LOG_LEVEL={self.log_level}']
         env += [f'{_n}={_v}' for _n, _v in self._service_limited_env[service_name].items()]
+        if prof.privileged:
+            env.append('PRIVILEGED=true')
 
         container = self.client.containers.run(
             image=cfg.image,
@@ -211,6 +213,7 @@ class DockerController(ControllerInterface):
         if core_container:
             env += [f'{_n}={_v}' for _n, _v in os.environ.items()
                     if any(term in _n for term in ['ELASTIC', 'FILESTORE', 'UI_SERVER'])]
+            env.append('PRIVILEGED=true')
         env += [f'{_e.name}={_e.value}' for _e in cfg.environment]
         env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
         env += [f'LOG_LEVEL={self.log_level}', f'AL_SERVICE_NAME={service_name}']
@@ -486,7 +489,7 @@ class DockerController(ControllerInterface):
 
         return network
 
-    def prepare_network(self, service_name, internet):
+    def prepare_network(self, service_name, *_):
         self._get_network(service_name)
 
     def _pull_image(self, service):

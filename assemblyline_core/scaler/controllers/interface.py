@@ -62,7 +62,7 @@ class ControllerInterface:
     def stop_containers(self, labels):
         raise NotImplementedError()
 
-    def prepare_network(self, service_name, internet):
+    def prepare_network(self, service_name, internet, dependency_internet):
         raise NotImplementedError()
 
     def stop(self):
