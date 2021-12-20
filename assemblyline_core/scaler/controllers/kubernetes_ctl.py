@@ -661,7 +661,7 @@ class KubernetesController(ControllerInterface):
 
     def restart(self, service):
         self._create_deployment(service.name, self._deployment_name(service.name), service.container_config,
-                                service.shutdown_seconds, self.get_target(service.name),
+                                service.shutdown_seconds, self.get_target(service.name), core_mounts=service.privileged,
                                 change_key=service.config_blob)
 
     def get_running_container_names(self):
@@ -785,7 +785,7 @@ class KubernetesController(ControllerInterface):
             self.apps_api.delete_namespaced_deployment(name=dep.metadata.name, namespace=self.namespace,
                                                        _request_timeout=API_TIMEOUT)
 
-    def prepare_network(self, service_name, internet):
+    def prepare_network(self, service_name, internet, dependency_internet):
         safe_name = service_name.lower().replace('_', '-')
 
         # Allow access to containers with dependency_for
@@ -858,3 +858,18 @@ class KubernetesController(ControllerInterface):
                     egress=[V1NetworkPolicyEgressRule(to=[])],
                 )
             ), _request_timeout=API_TIMEOUT)
+
+        for dep_name, dep_internet in dependency_internet:
+            if dep_internet:
+                safe_dep_name = dep_name.lower().replace('_', '-')
+                self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
+                    metadata=V1ObjectMeta(name=f'allow-{safe_dep_name}-{safe_name}-outgoing'),
+                    spec=V1NetworkPolicySpec(
+                        pod_selector=V1LabelSelector(match_labels={
+                            'app': 'assemblyline',
+                            'section': 'service',
+                            'container': dep_name,
+                        }),
+                        egress=[V1NetworkPolicyEgressRule(to=[])],
+                    )
+                ), _request_timeout=API_TIMEOUT)

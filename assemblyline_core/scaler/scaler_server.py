@@ -457,7 +457,11 @@ class ScalerServer(ThreadedCoreBase):
                     stage = ServiceStage.Running
 
                 # Enable this service's dependencies before trying to launch the service containers
-                self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
+                dependency_internet = [(name, dependency.container.allow_internet_access)
+                                       for name, dependency in dependency_config.items()]
+
+                self.controller.prepare_network(
+                    service.name, service.docker_config.allow_internet_access, dependency_internet)
                 for _n, dependency in dependency_config.items():
                     self.log.info(f'Launching {service.name} dependency {_n}')
                     self.controller.start_stateful_container(
