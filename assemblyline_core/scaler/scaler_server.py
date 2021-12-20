@@ -479,6 +479,7 @@ class ScalerServer(ThreadedCoreBase):
                 config_blob = str(sorted(service.config.items()))
                 config_blob += str(service.submission_params)
                 config_blob += ''.join(sorted(dependency_keys))
+                config_blob += f"priv={service.privileged}"
 
                 # Build the docker config for the service, we are going to either create it or
                 # update it so we need to know what the current configuration is either way
