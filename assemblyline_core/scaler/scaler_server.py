@@ -432,7 +432,7 @@ class ScalerServer(ThreadedCoreBase):
             for _n, dependency in service.dependencies.items():
                 dependency.container = prepare_container(dependency.container)
                 dependency_config[_n] = dependency
-                dependency_blobs[_n] = str(dependency) + str(service.version) + f"priv={str(service.privileged)}"
+                dependency_blobs[_n] = hash(str(dependency)) + str(service.version) + f"priv={str(service.privileged)}"
 
             # Check if the service dependencies have been deployed.
             dependency_keys = []
@@ -469,7 +469,7 @@ class ScalerServer(ThreadedCoreBase):
                         container_name=_n,
                         spec=dependency,
                         labels={'dependency_for': service.name},
-                        change_key=''
+                        change_key=dependency_blobs.get(_n, '')
                     )
 
             # If the conditions for running are met deploy or update service containers
@@ -512,6 +512,7 @@ class ScalerServer(ThreadedCoreBase):
                     else:
                         profile = self.profiles[name]
                         profile.max_instances = service.licence_count
+                        profile.privileged = service.privileged
 
                         for dependency_name, dependency_blob in dependency_blobs.items():
                             if profile.dependency_blobs[dependency_name] != dependency_blob:
@@ -522,7 +523,7 @@ class ScalerServer(ThreadedCoreBase):
                                     container_name=dependency_name,
                                     spec=dependency_config[dependency_name],
                                     labels={'dependency_for': service.name},
-                                    change_key=''
+                                    change_key=dependency_blob
                                 )
 
                         if profile.config_blob != config_blob:
