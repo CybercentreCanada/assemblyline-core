@@ -860,8 +860,15 @@ class KubernetesController(ControllerInterface):
             ), _request_timeout=API_TIMEOUT)
 
         for dep_name, dep_internet in dependency_internet:
+            safe_dep_name = dep_name.lower().replace('_', '-')
+            try:
+                self.net_api.delete_namespaced_network_policy(namespace=self.namespace,
+                                                              name=f'allow-{safe_dep_name}-{safe_name}-outgoing',
+                                                              _request_timeout=API_TIMEOUT)
+            except ApiException as error:
+                if error.status != 404:
+                    raise
             if dep_internet:
-                safe_dep_name = dep_name.lower().replace('_', '-')
                 self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
                     metadata=V1ObjectMeta(name=f'allow-{safe_dep_name}-{safe_name}-outgoing'),
                     spec=V1NetworkPolicySpec(
