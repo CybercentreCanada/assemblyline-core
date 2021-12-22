@@ -368,6 +368,8 @@ class ScalerServer(ThreadedCoreBase):
             self.log.info(f'Service appears to be deleted, removing {data.name}')
             stage = self.get_service_stage(data.name)
             self.stop_service(data.name, stage)
+        elif data.operation == Operation.Incompatible:
+            return
         else:
             self._sync_service(self.datastore.get_service_with_delta(data.name))
 
@@ -418,7 +420,7 @@ class ScalerServer(ThreadedCoreBase):
                                                        [(self.datastore.service_delta.UPDATE_SET, 'enabled', False)]):
                     # Raise awareness to oter components by sending an event for the service
                     self.service_event_sender.send(service.name, {
-                        'operation': Operation.Modified,
+                        'operation': Operation.Incompatible,
                         'name': service.name
                     })
 
