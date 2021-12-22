@@ -7,21 +7,22 @@ import os
 import uuid
 import sched
 import time
+
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import docker
 
-from assemblyline.common import isotime
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
     V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
     V1ConfigMapVolumeSource, V1Secret, V1LocalObjectReference
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
-from assemblyline.odm.messages.changes import Operation
 
+from assemblyline.common import isotime
+from assemblyline.odm.messages.changes import Operation, ServiceChange
 from assemblyline.odm.models.service import DockerConfig
-from assemblyline.remote.datatypes.events import EventSender
+from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config
 from assemblyline_core.server_base import CoreBase
@@ -380,10 +381,13 @@ class ServiceUpdater(CoreBase):
         self.latest_service_tags: Hash[dict[str, str]] = Hash('service-tags', self.redis_persist)
         self.service_events = EventSender('changes.services', host=self.redis)
 
+        self.incompatible_services = set()
+        self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
+        self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
+
         # Prepare a single threaded scheduler
         self.scheduler = sched.scheduler()
 
-        #
         if 'KUBERNETES_SERVICE_HOST' in os.environ and NAMESPACE:
             extra_labels = {}
             if self.config.core.scaler.additional_labels:
@@ -394,6 +398,10 @@ class ServiceUpdater(CoreBase):
                                                         log_level=self.config.logging.log_level)
         else:
             self.controller = DockerUpdateInterface(log_level=self.config.logging.log_level)
+
+    def _handle_service_change_event(self, data: ServiceChange):
+        if data.operation == Operation.Incompatible:
+            self.incompatible_services.add(data.name)
 
     def container_updates(self):
         """Go through the list of services and check what are the latest tags for it"""
@@ -452,6 +460,12 @@ class ServiceUpdater(CoreBase):
 
             if self.datastore.service.get_if_exists(service_key):
                 operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
+
+                # Check if a service waas previously disabled and re-enable it
+                if service_name in self.incompatible_services:
+                    self.incompatible_services.remove(service_name)
+                    operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
+
                 if self.datastore.service_delta.update(service_name, operations):
                     # Update completed, cleanup
                     self.service_events.send(service_name, {

@@ -23,7 +23,7 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue, length as pq_length
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import ExpiringHash
-from assemblyline.remote.datatypes.events import EventWatcher
+from assemblyline.remote.datatypes.events import EventWatcher, EventSender
 from assemblyline.odm.models.service import Service, DockerConfig
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
 from assemblyline.odm.messages.scaler_status_heartbeat import Status
@@ -257,6 +257,7 @@ class ScalerServer(ThreadedCoreBase):
         self.error_count_lock = threading.Lock()
         self.error_count: dict[str, list[float]] = {}
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
+        self.service_event_sender = EventSender('changes.services', host=self.redis)
         self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
 
@@ -367,6 +368,8 @@ class ScalerServer(ThreadedCoreBase):
             self.log.info(f'Service appears to be deleted, removing {data.name}')
             stage = self.get_service_stage(data.name)
             self.stop_service(data.name, stage)
+        elif data.operation == Operation.Incompatible:
+            return
         else:
             self._sync_service(self.datastore.get_service_with_delta(data.name))
 
@@ -410,14 +413,16 @@ class ScalerServer(ThreadedCoreBase):
             # Is this service considered compatible to run on this version of Assemblyline?
             system_spec = f'{FRAMEWORK_VERSION}.{SYSTEM_VERSION}'
             if not service.version.startswith(system_spec):
-                # Raise awareness to other components by editing document in datastore
+                self.log.warning("Disabling service with incompatible version. "
+                                 f"[{service.version} != '{system_spec}.X.{service.update_channel}Y'].")
                 service.enabled = False
-                if self.datastore.service.save(key=f'{service.name}_{service.version}', data=service):
-                    self.stop_service(service.name, stage)
-                    raise Exception("Service version isn't compatible with system.\n"
-                                    f"Expected: '{system_spec}.X.{service.update_channel}Y'.\n"
-                                    f"Got: {service.version}\n"
-                                    "Service will be disabled.")
+                if self.datastore.service_delta.update(service.name,
+                                                       [(self.datastore.service_delta.UPDATE_SET, 'enabled', False)]):
+                    # Raise awareness to other components by sending an event for the service
+                    self.service_event_sender.send(service.name, {
+                        'operation': Operation.Incompatible,
+                        'name': service.name
+                    })
 
             if not service.enabled:
                 self.stop_service(service.name, stage)
@@ -674,9 +679,15 @@ class ScalerServer(ThreadedCoreBase):
             ]
 
             if len(self.error_count[service_name]) >= MAXIMUM_SERVICE_ERRORS:
-                self.datastore.service_delta.update(service_name, [
-                    (self.datastore.service_delta.UPDATE_SET, 'enabled', False)
-                ])
+                self.log.warning("Scaler has encountered too many errors trying to load {service_name}. "
+                                 "The service will be permanently disabled...")
+                if self.datastore.service_delta.update(service_name, [(self.datastore.service_delta.UPDATE_SET,
+                                                                       'enabled', False)]):
+                    # Raise awareness to other components by sending an event for the service
+                    self.service_event_sender.send(service_name, {
+                        'operation': Operation.Modified,
+                        'name': service_name
+                    })
                 del self.error_count[service_name]
 
     def sync_metrics(self):
