@@ -681,7 +681,7 @@ class ScalerServer(ThreadedCoreBase):
             if len(self.error_count[service_name]) >= MAXIMUM_SERVICE_ERRORS:
                 if self.datastore.service_delta.update(service_name, [(self.datastore.service_delta.UPDATE_SET,
                                                                        'enabled', False)]):
-                    # Raise awareness to oter components by sending an event for the service
+                    # Raise awareness to other components by sending an event for the service
                     self.service_event_sender.send(service_name, {
                         'operation': Operation.Modified,
                         'name': service_name
