@@ -679,6 +679,8 @@ class ScalerServer(ThreadedCoreBase):
             ]
 
             if len(self.error_count[service_name]) >= MAXIMUM_SERVICE_ERRORS:
+                self.log.warning("Scaler has encountered too many errors trying to load {service_name}. "
+                                 "The service will be permanently disabled...")
                 if self.datastore.service_delta.update(service_name, [(self.datastore.service_delta.UPDATE_SET,
                                                                        'enabled', False)]):
                     # Raise awareness to other components by sending an event for the service
