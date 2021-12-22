@@ -418,7 +418,7 @@ class ScalerServer(ThreadedCoreBase):
                 service.enabled = False
                 if self.datastore.service_delta.update(service.name,
                                                        [(self.datastore.service_delta.UPDATE_SET, 'enabled', False)]):
-                    # Raise awareness to oter components by sending an event for the service
+                    # Raise awareness to other components by sending an event for the service
                     self.service_event_sender.send(service.name, {
                         'operation': Operation.Incompatible,
                         'name': service.name
