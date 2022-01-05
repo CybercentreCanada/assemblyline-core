@@ -131,7 +131,7 @@ def parse_cpu(string: str) -> float:
 
 
 class KubernetesController(ControllerInterface):
-    def __init__(self, logger, namespace, prefix, priority, cpu_reservation, labels=None, log_level="INFO"):
+    def __init__(self, logger, namespace, prefix, priority, cpu_reservation, labels=None, log_level="INFO", core_env={}):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
         try:
@@ -165,6 +165,7 @@ class KubernetesController(ControllerInterface):
         self.namespace: str = namespace
         self.config_volumes: dict[str, V1Volume] = {}
         self.config_mounts: dict[str, V1VolumeMount] = {}
+        self.core_env: dict[str, str] = core_env
         self.core_config_volumes: dict[str, V1Volume] = {}
         self.core_config_mounts: dict[str, V1VolumeMount] = {}
         self._external_profiles = weakref.WeakValueDictionary()
@@ -455,8 +456,7 @@ class KubernetesController(ControllerInterface):
         environment_variables: list[V1EnvVar] = []
         # If we are launching a core container, include environment variables related to authentication for DBs
         if core_container:
-            environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in os.environ.items()
-                                      if any(term in _n for term in ['ELASTIC', 'FILESTORE', 'UI_SERVER'])]
+            environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in self.core_env.items()]
             environment_variables.append(V1EnvVar(name='PRIVILEGED', value='true'))
         # Overwrite them with configured special environment variables
         environment_variables += [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]

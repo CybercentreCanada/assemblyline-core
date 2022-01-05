@@ -29,7 +29,7 @@ COPY_LABELS = [
 class DockerController(ControllerInterface):
     """A controller for *non* swarm mode docker."""
 
-    def __init__(self, logger, prefix='', labels: dict[str, str] = None, log_level="INFO"):
+    def __init__(self, logger, prefix='', labels: dict[str, str] = None, log_level="INFO", core_env={}):
         """
         :param logger: A logger to report status and debug information.
         :param prefix: A prefix used to distinguish containers launched by this controller.
@@ -41,6 +41,7 @@ class DockerController(ControllerInterface):
         self.log_level = log_level
         self.global_mounts: List[Tuple[str, str]] = []
         self.core_mounts: List[Tuple[str, str]] = []
+        self.core_env = core_env
         self._labels: dict[str, str] = labels or {}
         self._prefix: str = prefix
 
@@ -211,8 +212,7 @@ class DockerController(ControllerInterface):
         # Put together the environment variables
         env = []
         if core_container:
-            env += [f'{_n}={_v}' for _n, _v in os.environ.items()
-                    if any(term in _n for term in ['ELASTIC', 'FILESTORE', 'UI_SERVER'])]
+            env += [f'{_n}={_v}' for _n, _v in self.core_env.items()]
             env.append('PRIVILEGED=true')
         env += [f'{_e.name}={_e.value}' for _e in cfg.environment]
         env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
