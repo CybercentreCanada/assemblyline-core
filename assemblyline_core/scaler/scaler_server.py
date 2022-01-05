@@ -8,6 +8,7 @@ from collections import defaultdict
 from string import Template
 from typing import Optional, Any
 import os
+import re
 import math
 import time
 import platform
@@ -261,6 +262,13 @@ class ScalerServer(ThreadedCoreBase):
         self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
 
+        core_env: dict[str, str] = {}
+        # If we have privileged services, we must be able to pass the necessary environment variables for them to
+        # function properly.
+        for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']:
+            env_name = secret.strip("${}")
+            core_env[env_name] = os.environ[env_name]
+
         labels = {
             'app': 'assemblyline',
             'section': 'service',
@@ -275,7 +283,8 @@ class ScalerServer(ThreadedCoreBase):
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
                                                    namespace=NAMESPACE, priority='al-service-priority',
                                                    cpu_reservation=self.config.services.cpu_reservation,
-                                                   log_level=self.config.logging.log_level)
+                                                   log_level=self.config.logging.log_level,
+                                                   core_env=core_env)
             # If we know where to find it, mount the classification into the service containers
             if CLASSIFICATION_CONFIGMAP:
                 self.controller.config_mount('classification-config', config_map=CLASSIFICATION_CONFIGMAP,
@@ -288,7 +297,8 @@ class ScalerServer(ThreadedCoreBase):
         else:
             self.log.info("Loading Docker cluster interface.")
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
-                                               labels=labels, log_level=self.config.logging.log_level)
+                                               labels=labels, log_level=self.config.logging.log_level,
+                                               core_env=core_env)
             self._service_stage_hash.delete()
 
             if DOCKER_CONFIGURATION_PATH and DOCKER_CONFIGURATION_VOLUME:
