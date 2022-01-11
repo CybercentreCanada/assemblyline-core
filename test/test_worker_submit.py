@@ -8,13 +8,13 @@ from assemblyline.odm.models.filescore import FileScore
 
 from assemblyline_core.ingester.ingester import IngestTask, _dup_prefix, Ingester
 
-from mocking import TrueCountTimes, MockDatastore
+from mocking import TrueCountTimes
 
 
 @pytest.fixture
-def submit_harness(clean_redis):
+def submit_harness(clean_redis, clean_datastore: AssemblylineDatastore):
     """Setup a test environment just file for the ingest tests"""
-    datastore = AssemblylineDatastore(MockDatastore())
+    datastore = clean_datastore
     submitter = Ingester(datastore=datastore, redis=clean_redis, persistent_redis=clean_redis)
     submitter.running = TrueCountTimes(1)
     submitter.counter.increment = mock.MagicMock()
@@ -96,40 +96,43 @@ def test_submit_duplicate(submit_harness):
 
 def test_existing_score(submit_harness):
     datastore, submitter = submit_harness
+    get_if_exists = datastore.filescore.get_if_exists
+    try:
+        # Set everything to have an existing filestore
+        datastore.filescore.get_if_exists = mock.MagicMock(return_value=FileScore(
+            dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=time.time())))
 
-    # Set everything to have an existing filestore
-    datastore.filescore.get = mock.MagicMock(return_value=FileScore(
-        dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=time.time())))
+        # add task to internal queue
+        submitter.unique_queue.push(0, IngestTask({
+            'submission': {
+                'params': SubmissionParams({
+                    'classification': 'U',
+                    'description': 'file abc',
+                    'services': {
+                        'selected': [],
+                        'excluded': [],
+                        'resubmit': [],
+                    },
+                    'submitter': 'user',
+                }),
+                'files': [{
+                    'sha256': '0' * 64,
+                    'size': 100,
+                    'name': 'abc',
+                }],
+                'metadata': {},
+                'notification': {
+                    'queue': 'our_queue'
+                }
+            },
+            'ingest_id': 'abc123'
+        }).as_primitives())
 
-    # add task to internal queue
-    submitter.unique_queue.push(0, IngestTask({
-        'submission': {
-            'params': SubmissionParams({
-                'classification': 'U',
-                'description': 'file abc',
-                'services': {
-                    'selected': [],
-                    'excluded': [],
-                    'resubmit': [],
-                },
-                'submitter': 'user',
-            }),
-            'files': [{
-                'sha256': '0' * 64,
-                'size': 100,
-                'name': 'abc',
-            }],
-            'metadata': {},
-            'notification': {
-                'queue': 'our_queue'
-            }
-        },
-        'ingest_id': 'abc123'
-    }).as_primitives())
+        submitter.handle_submit()
 
-    submitter.handle_submit()
-
-    # No tasks should be left in the queue
-    assert submitter.unique_queue.pop() is None
-    # We should have received a notification about our task, since it was already 'done'
-    assert submitter.notification_queues['nq-our_queue'].length() == 1
+        # No tasks should be left in the queue
+        assert submitter.unique_queue.pop() is None
+        # We should have received a notification about our task, since it was already 'done'
+        assert submitter.notification_queues['nq-our_queue'].length() == 1
+    finally:
+        datastore.filescore.get_if_exists = get_if_exists

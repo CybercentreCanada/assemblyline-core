@@ -8,12 +8,14 @@ from collections import defaultdict
 from string import Template
 from typing import Optional, Any
 import os
+import re
 import math
 import time
 import platform
 import concurrent.futures
 import copy
 from contextlib import contextmanager
+from assemblyline.common.uid import get_id_from_data
 
 import elasticapm
 import yaml
@@ -22,7 +24,7 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue, length as pq_length
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import ExpiringHash
-from assemblyline.remote.datatypes.events import EventWatcher
+from assemblyline.remote.datatypes.events import EventWatcher, EventSender
 from assemblyline.odm.models.service import Service, DockerConfig
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
 from assemblyline.odm.messages.scaler_status_heartbeat import Status
@@ -120,7 +122,7 @@ class ServiceProfile:
     def __init__(self, name: str, container_config: DockerConfig, config_blob: str = '',
                  min_instances: int = 0, max_instances: int = None, growth: float = 600,
                  shrink: Optional[float] = None, backlog: int = 500, queue=None,
-                 shutdown_seconds: int = 30, dependency_blobs: dict[str, str] = None):
+                 shutdown_seconds: int = 30, dependency_blobs: dict[str, str] = None, privileged: bool = False):
         """
         :param name: Name of the service to manage
         :param container_config: Instructions on how to start this service
@@ -130,6 +132,7 @@ class ServiceProfile:
         :param shrink: Delay before shrinking a service, unit-less, approximately seconds, defaults to -growth
         :param backlog: How long a queue backlog should be before it takes `growth` seconds to grow.
         :param queue: Queue name for monitoring
+        :param privileged: Is this service able to interact with core directly?
         """
         self.name = name
         self.queue: PriorityQueue = queue
@@ -139,6 +142,7 @@ class ServiceProfile:
         self.shutdown_seconds = shutdown_seconds
         self.config_blob = config_blob
         self.dependency_blobs = dependency_blobs or {}
+        self.privileged = privileged
 
         # How many instances we want, and can have
         self.min_instances: int = max(0, int(min_instances))
@@ -234,6 +238,7 @@ class ServiceProfile:
             shrink=self.shrink_threshold,
             backlog=self.backlog,
             shutdown_seconds=self.shutdown_seconds,
+            privileged=self.privileged
         )
         prof.desired_instances = self.desired_instances
         prof.running_instances = self.running_instances
@@ -253,12 +258,21 @@ class ScalerServer(ThreadedCoreBase):
         self.error_count_lock = threading.Lock()
         self.error_count: dict[str, list[float]] = {}
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
+        self.service_event_sender = EventSender('changes.services', host=self.redis)
         self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
+
+        core_env: dict[str, str] = {}
+        # If we have privileged services, we must be able to pass the necessary environment variables for them to
+        # function properly.
+        for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']:
+            env_name = secret.strip("${}")
+            core_env[env_name] = os.environ[env_name]
 
         labels = {
             'app': 'assemblyline',
             'section': 'service',
+            'privilege': 'service'
         }
 
         if self.config.core.scaler.additional_labels:
@@ -269,7 +283,8 @@ class ScalerServer(ThreadedCoreBase):
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
                                                    namespace=NAMESPACE, priority='al-service-priority',
                                                    cpu_reservation=self.config.services.cpu_reservation,
-                                                   log_level=self.config.logging.log_level)
+                                                   log_level=self.config.logging.log_level,
+                                                   core_env=core_env)
             # If we know where to find it, mount the classification into the service containers
             if CLASSIFICATION_CONFIGMAP:
                 self.controller.config_mount('classification-config', config_map=CLASSIFICATION_CONFIGMAP,
@@ -282,7 +297,8 @@ class ScalerServer(ThreadedCoreBase):
         else:
             self.log.info("Loading Docker cluster interface.")
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
-                                               labels=labels, log_level=self.config.logging.log_level)
+                                               labels=labels, log_level=self.config.logging.log_level,
+                                               core_env=core_env)
             self._service_stage_hash.delete()
 
             if DOCKER_CONFIGURATION_PATH and DOCKER_CONFIGURATION_VOLUME:
@@ -362,6 +378,8 @@ class ScalerServer(ThreadedCoreBase):
             self.log.info(f'Service appears to be deleted, removing {data.name}')
             stage = self.get_service_stage(data.name)
             self.stop_service(data.name, stage)
+        elif data.operation == Operation.Incompatible:
+            return
         else:
             self._sync_service(self.datastore.get_service_with_delta(data.name))
 
@@ -379,7 +397,7 @@ class ScalerServer(ThreadedCoreBase):
 
                 # Find any services we have running, that are no longer in the database and remove them
                 for stray_service in current_services - set(discovered_services):
-                    self.log.info(f'Service appears to be deleted, removing {stray_service}')
+                    self.log.info(f'Service appears to be deleted, removing stray {stray_service}')
                     stage = self.get_service_stage(stray_service)
                     self.stop_service(stray_service, stage)
 
@@ -405,14 +423,16 @@ class ScalerServer(ThreadedCoreBase):
             # Is this service considered compatible to run on this version of Assemblyline?
             system_spec = f'{FRAMEWORK_VERSION}.{SYSTEM_VERSION}'
             if not service.version.startswith(system_spec):
-                # Raise awareness to other components by editing document in datastore
+                self.log.warning("Disabling service with incompatible version. "
+                                 f"[{service.version} != '{system_spec}.X.{service.update_channel}Y'].")
                 service.enabled = False
-                if self.datastore.service.save(key=f'{service.name}_{service.version}', data=service):
-                    self.stop_service(service.name, stage)
-                    raise Exception("Service version isn't compatible with system.\n"
-                                    f"Expected: '{system_spec}.X.{service.update_channel}Y'.\n"
-                                    f"Got: {service.version}\n"
-                                    "Service will be disabled.")
+                if self.datastore.service_delta.update(service.name,
+                                                       [(self.datastore.service_delta.UPDATE_SET, 'enabled', False)]):
+                    # Raise awareness to other components by sending an event for the service
+                    self.service_event_sender.send(service.name, {
+                        'operation': Operation.Incompatible,
+                        'name': service.name
+                    })
 
             if not service.enabled:
                 self.stop_service(service.name, stage)
@@ -428,7 +448,8 @@ class ScalerServer(ThreadedCoreBase):
             for _n, dependency in service.dependencies.items():
                 dependency.container = prepare_container(dependency.container)
                 dependency_config[_n] = dependency
-                dependency_blobs[_n] = str(dependency) + str(service.version)
+                dep_hash = get_id_from_data(dependency, length=16)
+                dependency_blobs[_n] = f"dh={dep_hash}v={service.version}p={service.privileged}"
 
             # Check if the service dependencies have been deployed.
             dependency_keys = []
@@ -453,7 +474,11 @@ class ScalerServer(ThreadedCoreBase):
                     stage = ServiceStage.Running
 
                 # Enable this service's dependencies before trying to launch the service containers
-                self.controller.prepare_network(service.name, service.docker_config.allow_internet_access)
+                dependency_internet = [(name, dependency.container.allow_internet_access)
+                                       for name, dependency in dependency_config.items()]
+
+                self.controller.prepare_network(
+                    service.name, service.docker_config.allow_internet_access, dependency_internet)
                 for _n, dependency in dependency_config.items():
                     self.log.info(f'Launching {service.name} dependency {_n}')
                     self.controller.start_stateful_container(
@@ -461,26 +486,28 @@ class ScalerServer(ThreadedCoreBase):
                         container_name=_n,
                         spec=dependency,
                         labels={'dependency_for': service.name},
-                        change_key=''
+                        change_key=dependency_blobs.get(_n, '')
                     )
 
             # If the conditions for running are met deploy or update service containers
             if stage == ServiceStage.Running:
-                # Compute a blob of service properties not include in the docker config, that
-                # should still result in a service being restarted when changed
-                config_blob = str(sorted(service.config.items()))
-                config_blob += str(service.submission_params)
-                config_blob += ''.join(sorted(dependency_keys))
-
                 # Build the docker config for the service, we are going to either create it or
                 # update it so we need to know what the current configuration is either way
                 docker_config = prepare_container(service.docker_config)
-                config_blob += str(docker_config)
+
+                # Compute a blob of service properties not include in the docker config, that
+                # should still result in a service being restarted when changed
+                cfg_items = sorted(service.config.items())
+                dep_keys = ''.join(sorted(dependency_keys))
+                config_blob = (f"c={cfg_items}sp={service.submission_params}"
+                               f"dk={dep_keys}p={service.privileged}d={docker_config}")
 
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:
                     if name not in self.profiles:
-                        self.log.info(f'Adding {service.name} to scaling')
+                        self.log.info(f"Adding "
+                                      f"{f'privileged {service.name}' if service.privileged else service.name}"
+                                      " to scaling")
                         self.add_service(ServiceProfile(
                             name=name,
                             min_instances=default_settings.min_instances,
@@ -493,13 +520,15 @@ class ScalerServer(ThreadedCoreBase):
                             container_config=docker_config,
                             queue=get_service_queue(name, self.redis),
                             # Give service an extra 30 seconds to upload results
-                            shutdown_seconds=service.timeout + 30
+                            shutdown_seconds=service.timeout + 30,
+                            privileged=service.privileged
                         ))
 
                     # Update RAM, CPU, licence requirements for running services
                     else:
                         profile = self.profiles[name]
                         profile.max_instances = service.licence_count
+                        profile.privileged = service.privileged
 
                         for dependency_name, dependency_blob in dependency_blobs.items():
                             if profile.dependency_blobs[dependency_name] != dependency_blob:
@@ -510,7 +539,7 @@ class ScalerServer(ThreadedCoreBase):
                                     container_name=dependency_name,
                                     spec=dependency_config[dependency_name],
                                     labels={'dependency_for': service.name},
-                                    change_key=''
+                                    change_key=dependency_blob
                                 )
 
                         if profile.config_blob != config_blob:
@@ -660,9 +689,15 @@ class ScalerServer(ThreadedCoreBase):
             ]
 
             if len(self.error_count[service_name]) >= MAXIMUM_SERVICE_ERRORS:
-                self.datastore.service_delta.update(service_name, [
-                    (self.datastore.service_delta.UPDATE_SET, 'enabled', False)
-                ])
+                self.log.warning("Scaler has encountered too many errors trying to load {service_name}. "
+                                 "The service will be permanently disabled...")
+                if self.datastore.service_delta.update(service_name, [(self.datastore.service_delta.UPDATE_SET,
+                                                                       'enabled', False)]):
+                    # Raise awareness to other components by sending an event for the service
+                    self.service_event_sender.send(service_name, {
+                        'operation': Operation.Modified,
+                        'name': service_name
+                    })
                 del self.error_count[service_name]
 
     def sync_metrics(self):
