@@ -4,9 +4,10 @@ A process that manages tracking and running update commands for the AL services.
 from __future__ import annotations
 
 import os
-import uuid
+import re
 import sched
 import time
+import uuid
 
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -35,10 +36,15 @@ HEARTBEAT_INTERVAL = 5
 
 # How many past updates to keep for file based updates
 NAMESPACE = os.getenv('NAMESPACE', None)
-INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
+INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] + \
+    [
+    secret.strip("${}")
+    for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']]
+
 CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
 CLASSIFICATION_CONFIGMAP = os.getenv('CLASSIFICATION_CONFIGMAP', None)
 CLASSIFICATION_CONFIGMAP_KEY = os.getenv('CLASSIFICATION_CONFIGMAP_KEY', 'classification.yml')
+CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 
 SERVICE_API_HOST = os.environ.get('SERVICE_API_HOST', "http://al_service_server:5003")
 SERVICE_API_KEY = os.environ.get('SERVICE_API_KEY', 'ThisIsARandomAuthKey...ChangeMe!')
@@ -260,12 +266,28 @@ class KubernetesUpdateInterface:
                 read_only=True,
             ))
 
+        if CONFIGURATION_CONFIGMAP:
+            volumes.append(V1Volume(
+                name='mount-configuration',
+                config_map=V1ConfigMapVolumeSource(
+                    name=CONFIGURATION_CONFIGMAP
+                ),
+            ))
+
+            volume_mounts.append(V1VolumeMount(
+                name='mount-configuration',
+                mount_path='/etc/assemblyline/config.yml',
+                sub_path="config",
+                read_only=True,
+            ))
+
         section = 'core'
         if network == AL_REGISTRATION_NETWORK:
             section = 'service'
             labels = {
                 'app': 'assemblyline',
                 'section': section,
+                'privilege': 'core',
                 'component': 'update-script',
             }
             labels.update(self.extra_labels)
@@ -277,7 +299,10 @@ class KubernetesUpdateInterface:
 
             environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in docker_config.environment]
             environment_variables.extend([V1EnvVar(name=k, value=v) for k, v in env.items()])
+            environment_variables.extend([V1EnvVar(name=k, value=os.environ[k])
+                                         for k in INHERITED_VARIABLES if k in os.environ])
             environment_variables.append(V1EnvVar(name="LOG_LEVEL", value=self.log_level))
+            environment_variables.append(V1EnvVar(name="PRIVILEGED", value="true"))
 
             cores = docker_config.cpu_cores
             memory = docker_config.ram_mb
@@ -436,8 +461,6 @@ class ServiceUpdater(CoreBase):
                     mounts=[],
                     env={
                         "SERVICE_TAG": update_data['latest_tag'],
-                        "SERVICE_API_HOST": SERVICE_API_HOST,
-                        "SERVICE_API_KEY": SERVICE_API_KEY,
                         "REGISTER_ONLY": 'true'
                     },
                     network=AL_REGISTRATION_NETWORK,
