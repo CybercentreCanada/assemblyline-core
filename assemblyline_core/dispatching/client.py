@@ -64,6 +64,15 @@ class DispatchClient:
         self.dispatcher_data = []
         self.dispatcher_data_age = 0
         self.dead_dispatchers = []
+        self.queue_cache = {}
+
+    def _get_queue_from_cache(self, name):
+        queue = self.queue_cache.get(name, None)
+
+        if not queue:
+            self.queue_cache[name] = queue = NamedQueue(name, host=self.redis, ttl=QUEUE_EXPIRY)
+
+        return queue
 
     def _get_services(self):
         # noinspection PyUnresolvedReferences
@@ -174,7 +183,7 @@ class DispatchClient:
 
         if self.running_tasks.add(task.key(), task.as_primitives()):
             self.log.info(f"[{task.sid}/{task.fileinfo.sha256}] {service_name}:{worker_id} task found")
-            start_queue = NamedQueue(DISPATCH_START_EVENTS + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
+            start_queue = self._get_queue_from_cache(DISPATCH_START_EVENTS + dispatcher)
             start_queue.push((task.sid, task.fileinfo.sha256, service_name, worker_id))
             return task
         return None
@@ -219,7 +228,7 @@ class DispatchClient:
 
         #
         dispatcher = task.metadata['dispatcher__']
-        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
+        result_queue = self._get_queue_from_cache(DISPATCH_RESULT_QUEUE + dispatcher)
         result_queue.push({
             'service_task': task.as_primitives(),
             'result': result.as_primitives(),
@@ -248,7 +257,7 @@ class DispatchClient:
                 NamedQueue(w).push(msg)
 
         dispatcher = task.metadata['dispatcher__']
-        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
+        result_queue = self._get_queue_from_cache(DISPATCH_RESULT_QUEUE + dispatcher)
         result_queue.push({
             'service_task': task.as_primitives(),
             'error': error.as_primitives(),
