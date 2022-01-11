@@ -34,16 +34,13 @@ CONTAINER_CHECK_INTERVAL = 60 * 5  # How many seconds to wait for checking for n
 API_TIMEOUT = 90
 HEARTBEAT_INTERVAL = 5
 
-# How many past updates to keep for file based updates
 NAMESPACE = os.getenv('NAMESPACE', None)
 INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] + \
     [
     secret.strip("${}")
     for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']]
 
-CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
-CLASSIFICATION_CONFIGMAP = os.getenv('CLASSIFICATION_CONFIGMAP', None)
-CLASSIFICATION_CONFIGMAP_KEY = os.getenv('CLASSIFICATION_CONFIGMAP_KEY', 'classification.yml')
+CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', None)
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 
 SERVICE_API_HOST = os.environ.get('SERVICE_API_HOST', "http://al_service_server:5003")
@@ -76,12 +73,12 @@ class DockerUpdateInterface:
 
     def launch(self, name, docker_config: DockerConfig, mounts, env, network, blocking: bool = True):
         """Run a container to completion."""
-        # Add the classification file if path is given
-        if CLASSIFICATION_HOST_PATH:
+        # Add the configuration file if path is given
+        if CONFIGURATION_HOST_PATH:
             mounts.append({
-                'volume': CLASSIFICATION_HOST_PATH,
+                'volume': CONFIGURATION_HOST_PATH,
                 'source_path': '',
-                'dest_path': '/etc/assemblyline/classification.yml',
+                'dest_path': '/etc/assemblyline/config.yml',
                 'mode': 'ro'
             })
 
@@ -249,21 +246,6 @@ class KubernetesUpdateInterface:
                 mount_path=mnt['dest_path'],
                 sub_path=mnt['source_path'],
                 read_only=False,
-            ))
-
-        if CLASSIFICATION_CONFIGMAP:
-            volumes.append(V1Volume(
-                name='mount-classification',
-                config_map=V1ConfigMapVolumeSource(
-                    name=CLASSIFICATION_CONFIGMAP
-                ),
-            ))
-
-            volume_mounts.append(V1VolumeMount(
-                name='mount-classification',
-                mount_path='/etc/assemblyline/classification.yml',
-                sub_path=CLASSIFICATION_CONFIGMAP_KEY,
-                read_only=True,
             ))
 
         if CONFIGURATION_CONFIGMAP:
