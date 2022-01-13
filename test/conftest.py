@@ -57,8 +57,21 @@ def datastore_connection(config):
     ret_val = store.ping()
     if not ret_val:
         pytest.skip("Could not connect to datastore")
-
     return AssemblylineDatastore(store)
+
+
+@pytest.fixture(scope='module')
+def clean_datastore(datastore_connection: AssemblylineDatastore):
+    for name in datastore_connection.ds.get_models():
+        datastore_connection.get_collection(name).wipe()
+    return datastore_connection
+
+
+@pytest.fixture(scope='function')
+def function_clean_datastore(datastore_connection: AssemblylineDatastore):
+    for name in datastore_connection.ds.get_models():
+        datastore_connection.get_collection(name).wipe()
+    return datastore_connection
 
 
 @pytest.fixture(scope='module')
@@ -71,7 +84,7 @@ def archive_connection(config):
     return AssemblylineDatastore(store)
 
 
-@pytest.fixture(scope='session')
+@pytest.fixture(scope='module')
 def redis_connection():
     from assemblyline.remote.datatypes import get_client
     c = get_client(None, None, False)
@@ -85,7 +98,7 @@ def redis_connection():
     return pytest.skip("Connection to the Redis server failed. This test cannot be performed...")
 
 
-@pytest.fixture
+@pytest.fixture(scope='function')
 def clean_redis(redis_connection):
     try:
         redis_connection.flushdb()

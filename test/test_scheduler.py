@@ -16,12 +16,14 @@ def redis(redis_connection):
     redis_connection.flushdb()
 
 
-def dummy_service(name, stage, category='static', accepts='', rejects=None, docid=None):
+def dummy_service(name, stage, category='static', accepts='', rejects=None, docid=None, extra_data=False):
     return Service({
         'name': name,
         'stage': stage,
         'category': category,
         'accepts': accepts,
+        'uses_temp_submission_data': extra_data,
+        'uses_tags': extra_data,
         'rejects': rejects,
         'version': '0',
         'enabled': True,

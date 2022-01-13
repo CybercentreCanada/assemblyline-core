@@ -1,8 +1,3 @@
-import time
-
-import pytest
-
-from .datastore import MockDatastore, MockCollection
 
 
 class MockFactory:
@@ -23,16 +18,6 @@ class MockFactory:
 
     def flush(self):
         self.mocks.clear()
-
-
-class RedisTime:
-    def __init__(self):
-        self.current = None
-
-    def __call__(self):
-        if self.current is not None:
-            return self.current, 0
-        return time.time(), 0
 
 
 class TrueCountTimes:
