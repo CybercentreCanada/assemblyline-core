@@ -5,6 +5,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from assemblyline.common.forge import get_service_queue
 from assemblyline.odm.messages.scaler_heartbeat import ScalerMessage
 from assemblyline.odm.messages.scaler_status_heartbeat import ScalerStatusMessage
+from assemblyline.remote.queues import get_rabbit_connection
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from assemblyline_core.dispatching.dispatcher import Dispatcher
 from assemblyline_core.ingester import INGEST_QUEUE_NAME, drop_chance
@@ -22,8 +23,8 @@ from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 from assemblyline_core.ingester.constants import COMPLETE_QUEUE_NAME
+from assemblyline_core.ingester.ingester import connect_ingest_backlog
 
 STATUS_QUEUE = "status"
 
@@ -63,20 +64,17 @@ class HeartbeatFormatter(object):
             port=self.config.core.redis.persistent.port,
             private=False,
         )
+        self.rabbit_connection = get_rabbit_connection(self.config.core.rabbit_mq)
+
         self.status_queue = CommsQueue(STATUS_QUEUE, self.redis)
         self.dispatch_active_hash = Hash(DISPATCH_TASK_HASH, self.redis_persist)
         self.dispatcher_submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
         self.ingest_scanning = Hash('m-scanning-table', self.redis_persist)
-        self.ingest_unique_queue = PriorityQueue('m-unique', self.redis_persist)
+        self.ingest_backlog = connect_ingest_backlog(self.rabbit_connection)
         self.ingest_queue = NamedQueue(INGEST_QUEUE_NAME, self.redis_persist)
         self.ingest_complete_queue = NamedQueue(COMPLETE_QUEUE_NAME, self.redis)
         self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.redis_persist)
 
-        constants = forge.get_constants(self.config)
-        self.c_rng = constants.PRIORITY_RANGES['critical']
-        self.h_rng = constants.PRIORITY_RANGES['high']
-        self.m_rng = constants.PRIORITY_RANGES['medium']
-        self.l_rng = constants.PRIORITY_RANGES['low']
         self.c_s_at = self.config.core.ingester.sampling_at['critical']
         self.h_s_at = self.config.core.ingester.sampling_at['high']
         self.m_s_at = self.config.core.ingester.sampling_at['medium']
@@ -141,10 +139,11 @@ class HeartbeatFormatter(object):
 
         elif m_type == "ingester":
             try:
-                c_q_len = self.ingest_unique_queue.count(*self.c_rng)
-                h_q_len = self.ingest_unique_queue.count(*self.h_rng)
-                m_q_len = self.ingest_unique_queue.count(*self.m_rng)
-                l_q_len = self.ingest_unique_queue.count(*self.l_rng)
+                self.rabbit_connection.process(0)
+                l_q_len = self.ingest_backlog[0]
+                m_q_len = self.ingest_backlog[1]
+                h_q_len = self.ingest_backlog[2]
+                c_q_len = self.ingest_backlog[3]
 
                 msg = {
                     "sender": self.sender,

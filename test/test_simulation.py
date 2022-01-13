@@ -33,7 +33,7 @@ from assemblyline_core.plumber.run_plumber import Plumber
 from assemblyline_core.dispatching import dispatcher
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.dispatching.dispatcher import Dispatcher
-from assemblyline_core.ingester.ingester import IngestTask, Ingester
+from assemblyline_core.ingester.ingester import IngestTask, Ingester, connect_ingest_queue
 from assemblyline_core.server_base import ServerBase, get_service_stage_hash, ServiceStage
 
 from mocking import MockCollection
@@ -129,8 +129,10 @@ class MockService(ServerBase):
 
 
 class CoreSession:
-    def __init__(self, config, ingest):
+    def __init__(self, config, ingest, rabbit_connection):
         self.ds: typing.Optional[AssemblylineDatastore] = None
+        self.rabbit = rabbit_connection
+        self._ingest_queue = connect_ingest_queue(self.rabbit)
         self.filestore = None
         self.redis = None
         self.config: Config = config
@@ -138,7 +140,8 @@ class CoreSession:
 
     @property
     def ingest_queue(self):
-        return self.ingest.ingest_queue
+        self.rabbit.process(0)
+        return self._ingest_queue
 
 
 @pytest.fixture(autouse=True)
@@ -211,7 +214,7 @@ def metrics(redis):
 
 
 @pytest.fixture(scope='module')
-def core(request, redis, filestore, config):
+def core(request, redis, filestore, config, rabbit_connection):
     # Block logs from being initialized, it breaks under pytest if you create new stream handlers
     from assemblyline.common import log as al_log
     al_log.init_logging = lambda *args: None
@@ -235,7 +238,7 @@ def core(request, redis, filestore, config):
 
     ingester = Ingester(datastore=ds, redis=redis, persistent_redis=redis, config=config)
 
-    fields = CoreSession(config, ingester)
+    fields = CoreSession(config, ingester, rabbit_connection)
     fields.redis = redis
     fields.ds = ds
 

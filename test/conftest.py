@@ -100,3 +100,16 @@ def filestore(config):
         return forge.get_filestore(config, connection_attempts=1)
     except ConnectionError as err:
         pytest.skip(str(err))
+
+
+@pytest.fixture(scope='module')
+def rabbit_connection(config):
+    from assemblyline.remote.queues import get_rabbit_connection
+    try:
+        connection = get_rabbit_connection(config.core.rabbit_mq, reconnect_limit=2)
+        if connection.is_open:
+            return connection
+    except Exception:
+        pass
+
+    return pytest.skip("Connection to the RabbitMQ server failed. This test cannot be performed...")

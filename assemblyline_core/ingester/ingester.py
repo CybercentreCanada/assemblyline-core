@@ -16,6 +16,7 @@ from random import random
 from typing import Iterable, List, Optional, Dict, Tuple
 
 import elasticapm
+from assemblyline.odm.models.user import User
 
 from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline.common.metrics import MetricsFactory
@@ -23,7 +24,7 @@ from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
 from assemblyline.common.isotime import now, now_as_iso
 from assemblyline.common.importing import load_module_by_path
-from assemblyline.common import forge, exceptions, isotime
+from assemblyline.common import forge, exceptions, isotime, constants
 from assemblyline.datastore import DataStoreException
 from assemblyline.filestore import CorruptedFileStoreException, FileStoreException
 from assemblyline.odm.models.filescore import FileScore
@@ -33,6 +34,7 @@ from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.multi import MultiQueue
 from assemblyline.remote.datatypes.hash import Hash
+from assemblyline.remote import queues as rabbit_queues
 from assemblyline import odm
 from assemblyline.odm.models.submission import SubmissionParams, Submission as DatabaseSubmission
 from assemblyline.odm.models.alert import EXTENDED_SCAN_VALUES
@@ -141,6 +143,26 @@ class IngestTask(odm.Model):
     ingest_time = odm.Date(default="NOW")
 
 
+def connect_ingest_queue(rabbit_connection):
+    return rabbit_queues.NamedQueue(INGEST_QUEUE_NAME, rabbit=rabbit_connection, durable=True)
+
+
+BINS = [
+    ('low', (0, constants.PRIORITIES['low'])),
+    ('medium', (constants.PRIORITIES['low'] + 1, constants.PRIORITIES['medium'])),
+    ('high', (constants.PRIORITIES['medium'] + 1, constants.PRIORITIES['high'])),
+    ('critical', (constants.PRIORITIES['high'] + 1, constants.MAX_PRIORITY)),
+]
+
+
+def connect_ingest_backlog(rabbit_connection):
+    return [
+        rabbit_queues.PriorityQueue(f'm-unique-{name}', rabbit=rabbit_connection,
+                                    durable=True, max_priority=value_range[1] - value_range[0])
+        for name, value_range in BINS
+    ]
+
+
 class Ingester(ThreadedCoreBase):
     def __init__(self, datastore=None, logger=None, classification=None, redis=None, persistent_redis=None,
                  metrics_name='ingester', config=None):
@@ -151,7 +173,7 @@ class Ingester(ThreadedCoreBase):
         self.cache_lock = threading.RLock()
         self._user_groups = {}
         self._user_groups_reset = time.time()//HOUR_IN_SECONDS
-        self.cache = {}
+        self.cache: dict[str, FileScore] = {}
         self.notification_queues = {}
         self.whitelisted = {}
         self.whitelisted_lock = threading.RLock()
@@ -164,7 +186,6 @@ class Ingester(ThreadedCoreBase):
         # Constants are loaded based on a non-constant path, so has to be done at init rather than load
         constants = forge.get_constants(self.config)
         self.priority_value: Dict[str, int] = constants.PRIORITIES
-        self.priority_range: Dict[str, Tuple[int, int]] = constants.PRIORITY_RANGES
         self.threshold_value: Dict[str, int] = constants.PRIORITY_THRESHOLDS
 
         # Classification engine
@@ -182,13 +203,13 @@ class Ingester(ThreadedCoreBase):
         self.complete_queue = NamedQueue(COMPLETE_QUEUE_NAME, self.redis)
 
         # Input. An external process places submission requests on this queue.
-        self.ingest_queue = NamedQueue(INGEST_QUEUE_NAME, self.redis_persist)
+        # self.ingest_queue = connect_ingest_queue(self.rabbit_connection)
 
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
         self.traffic_queue = CommsQueue('submissions', self.redis)
 
         # Internal. Unique requests are placed in and processed from this queue.
-        self.unique_queue = PriorityQueue('m-unique', self.redis_persist)
+        # self.backlog_queues = connect_ingest_backlog(self.rabbit_connection)
 
         # Internal, delay queue for retrying
         self.retry_queue = PriorityQueue('m-retry', self.redis_persist)
@@ -229,68 +250,83 @@ class Ingester(ThreadedCoreBase):
         threads_to_maintain.update({f'Submit_{n}': self.handle_submit for n in range(SUBMIT_THREADS)})
         self.maintain_threads(threads_to_maintain)
 
-    def handle_ingest(self):
+    def handle_single_ingest_message(self, backlog_queues, message):
+        if not message:
+            return
+
         cpu_mark = time.process_time()
         time_mark = time.time()
 
-        # Move from ingest to unique and waiting queues.
-        # While there are entries in the ingest queue we consume chunk_size
-        # entries at a time and move unique entries to uniqueq / queued and
-        # duplicates to their own queues / waiting.
-        while self.running:
-            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
-            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+        # Start of ingest message
+        if self.apm_client:
+            self.apm_client.begin_transaction('ingest_msg')
 
-            message = self.ingest_queue.pop(timeout=1)
+        try:
+            if 'submission' in message:
+                # A retried task
+                task = IngestTask(message)
+            else:
+                # A new submission
+                sub = MessageSubmission(message)
+                task = IngestTask(dict(
+                    submission=sub,
+                    ingest_id=sub.sid,
+                ))
+                task.submission.sid = None  # Reset to new random uuid
+                # Write all input to the traffic queue
+                self.traffic_queue.publish(SubmissionMessage({
+                    'msg': sub,
+                    'msg_type': 'SubmissionIngested',
+                    'sender': 'ingester',
+                }).as_primitives())
 
-            cpu_mark = time.process_time()
-            time_mark = time.time()
-
-            if not message:
-                continue
-
-            # Start of ingest message
-            if self.apm_client:
-                self.apm_client.begin_transaction('ingest_msg')
-
-            try:
-                if 'submission' in message:
-                    # A retried task
-                    task = IngestTask(message)
-                else:
-                    # A new submission
-                    sub = MessageSubmission(message)
-                    task = IngestTask(dict(
-                        submission=sub,
-                        ingest_id=sub.sid,
-                    ))
-                    task.submission.sid = None  # Reset to new random uuid
-                    # Write all input to the traffic queue
-                    self.traffic_queue.publish(SubmissionMessage({
-                        'msg': sub,
-                        'msg_type': 'SubmissionIngested',
-                        'sender': 'ingester',
-                    }).as_primitives())
-
-            except (ValueError, TypeError) as error:
-                self.counter.increment('error')
-                self.log.exception(f"Dropped ingest submission {message} because {str(error)}")
-
-                # End of ingest message (value_error)
-                if self.apm_client:
-                    self.apm_client.end_transaction('ingest_input', 'value_error')
-                continue
-
-            self.ingest(task)
+            self.ingest(backlog_queues, task)
 
             # End of ingest message (success)
             if self.apm_client:
                 self.apm_client.end_transaction('ingest_input', 'success')
 
+        except (ValueError, TypeError) as error:
+            self.counter.increment('error')
+            self.log.exception(f"Dropped ingest submission {message} because {str(error)}")
+
+            # End of ingest message (value_error)
+            if self.apm_client:
+                self.apm_client.end_transaction('ingest_input', 'value_error')
+
+        except Exception as error:
+            self.counter.increment('error')
+            self.log.exception(f"Dropped ingest submission {message} because {str(error)}")
+
+            if self.apm_client:
+                self.apm_client.end_transaction('ingest_input', 'unknown_error')
+
+        finally:
+            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+
+    def handle_ingest(self, wait_time=5):
+        # Get our own connection rabbit so we can handle messages in this thread
+        with rabbit_queues.get_rabbit_connection(self.config.core.rabbit_mq) as connection:
+            backlog_queues = connect_ingest_backlog(connection)
+            ingest_queue = connect_ingest_queue(connection)
+
+            def handle(message):
+                self.handle_single_ingest_message(backlog_queues, message)
+
+            ingest_queue.subscribe(handle)
+
+            while self.running:
+                connection.process(wait_time)
+
     def handle_submit(self):
         time_mark, cpu_mark = time.time(), time.process_time()
+        rabbit_connection = rabbit_queues.get_rabbit_connection(self.config.core.rabbit_mq)
+        backlog_queues = connect_ingest_backlog(rabbit_connection)
 
         while self.running:
+            rabbit_connection.process(0)
+
             # noinspection PyBroadException
             try:
                 self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
@@ -303,9 +339,15 @@ class Ingester(ThreadedCoreBase):
                     time_mark, cpu_mark = time.time(), time.process_time()
                     continue
 
-                raw = self.unique_queue.blocking_pop(timeout=3)
+                raw = None
+                for queue in reversed(backlog_queues):
+                    raw = queue.pop()
+                    if raw:
+                        break
+
                 time_mark, cpu_mark = time.time(), time.process_time()
                 if not raw:
+                    self.sleep(0.2)
                     continue
 
                 # Start of ingest message
@@ -316,7 +358,7 @@ class Ingester(ThreadedCoreBase):
 
                 # Check if we need to drop a file for capacity reasons, but only if the
                 # number of files in flight is alreay over 80%
-                if length >= self.config.core.ingester.max_inflight * 0.8 and self.drop(task):
+                if length >= self.config.core.ingester.max_inflight * 0.8 and self.drop(backlog_queues, task):
                     # End of ingest message (dropped)
                     if self.apm_client:
                         self.apm_client.end_transaction('ingest_submit', 'dropped')
@@ -342,7 +384,7 @@ class Ingester(ThreadedCoreBase):
                     if not task.submission.params.services.resubmit and not pprevious:
                         self.log.warning(f"No psid for what looks like a resubmission of "
                                          f"{task.submission.files[0].sha256}: {scan_key}")
-                    self.finalize(pprevious, previous, score, task)
+                    self.finalize(backlog_queues, pprevious, previous, score, task)
                     # End of ingest message (finalized)
                     if self.apm_client:
                         self.apm_client.end_transaction('ingest_submit', 'finalized')
@@ -422,7 +464,12 @@ class Ingester(ThreadedCoreBase):
                     self.apm_client.end_transaction('ingest_submit', 'exception')
 
     def handle_complete(self):
+        connection = rabbit_queues.get_rabbit_connection(self.config.core.rabbit_mq)
+        backlog_queues = connect_ingest_backlog(connection)
+
         while self.running:
+            connection.process(0)
+
             result = self.complete_queue.pop(timeout=3)
             if not result:
                 continue
@@ -435,7 +482,7 @@ class Ingester(ThreadedCoreBase):
                 self.apm_client.begin_transaction('ingest_msg')
 
             sub = DatabaseSubmission(result)
-            self.completed(sub)
+            self.completed(backlog_queues, sub)
 
             # End of ingest message (success)
             if self.apm_client:
@@ -446,10 +493,13 @@ class Ingester(ThreadedCoreBase):
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
     def handle_retries(self):
+        rabbit_connection = rabbit_queues.get_rabbit_connection(self.config.core.rabbit_mq)
+        ingest_queue = connect_ingest_queue(rabbit_connection)
         tasks = []
         while self.sleep(0 if tasks else 3):
             cpu_mark = time.process_time()
             time_mark = time.time()
+            rabbit_connection.process(0)
 
             # Start of ingest message
             if self.apm_client:
@@ -458,7 +508,7 @@ class Ingester(ThreadedCoreBase):
             tasks = self.retry_queue.dequeue_range(upper_limit=isotime.now(), num=100)
 
             for task in tasks:
-                self.ingest_queue.push(task)
+                ingest_queue.push(task)
 
             # End of ingest message (success)
             if self.apm_client:
@@ -520,14 +570,14 @@ class Ingester(ThreadedCoreBase):
 
         # Get the groups for this user if not known
         if username not in self._user_groups:
-            user_data = self.datastore.user.get(username)
+            user_data: User = self.datastore.user.get(username)
             if user_data:
                 self._user_groups[username] = user_data.groups
             else:
                 self._user_groups[username] = []
         return self._user_groups[username]
 
-    def ingest(self, task: IngestTask):
+    def ingest(self, backlog_queues, task: IngestTask):
         self.log.info(f"[{task.ingest_id} :: {task.sha256}] Task received for processing")
         # Load a snapshot of ingest parameters as of right now.
         max_file_size = self.config.submission.max_file_size
@@ -594,7 +644,7 @@ class Ingester(ThreadedCoreBase):
         # (So we don't end up dropping the resubmission).
         if previous:
             self.counter.increment('duplicates')
-            self.finalize(pprevious, previous, score, task)
+            self.finalize(backlog_queues, pprevious, previous, score, task)
 
             # On cache hits of any kind we want to send out a completed message
             self.traffic_queue.publish(SubmissionMessage({
@@ -604,7 +654,7 @@ class Ingester(ThreadedCoreBase):
             }).as_primitives())
             return
 
-        if self.drop(task):
+        if self.drop(backlog_queues, task):
             self.log.info(f"[{task.ingest_id} :: {task.sha256}] Dropped")
             return
 
@@ -612,19 +662,19 @@ class Ingester(ThreadedCoreBase):
             self.log.info(f"[{task.ingest_id} :: {task.sha256}] Whitelisted")
             return
 
-        self.unique_queue.push(priority, task.as_primitives())
+        self.push_to_backlog(backlog_queues, task)
 
     def check(self, task: IngestTask, count_miss=True) -> Tuple[Optional[str], Optional[str], Optional[float], str]:
         key = self.stamp_filescore_key(task)
 
         with self.cache_lock:
-            result = self.cache.get(key, None)
+            result: Optional[FileScore] = self.cache.get(key, None)
 
         if result:
             self.counter.increment('cache_hit_local')
             self.log.info(f'[{task.ingest_id} :: {task.sha256}] Local cache hit')
         else:
-            result = self.datastore.filescore.get_if_exists(key)
+            result: Optional[FileScore] = self.datastore.filescore.get_if_exists(key)
             if result:
                 self.counter.increment('cache_hit')
                 self.log.info(f'[{task.ingest_id} :: {task.sha256}] Remote cache hit')
@@ -677,7 +727,7 @@ class Ingester(ThreadedCoreBase):
 
         return key
 
-    def completed(self, sub: DatabaseSubmission):
+    def completed(self, backlog_queues, sub: DatabaseSubmission):
         """Invoked when notified that a submission has completed."""
         # There is only one file in the submissions we have made
         sha256 = sub.files[0].sha256
@@ -718,7 +768,7 @@ class Ingester(ThreadedCoreBase):
             })
         self.datastore.filescore.save(scan_key, fs)
 
-        self.finalize(psid, sid, score, task)
+        self.finalize(backlog_queues, psid, sid, score, task)
 
         def exhaust() -> Iterable[IngestTask]:
             while True:
@@ -736,7 +786,7 @@ class Ingester(ThreadedCoreBase):
         # potential infinite loop.
         dups = [dup for dup in exhaust()]
         for dup in dups:
-            self.finalize(psid, sid, score, dup)
+            self.finalize(backlog_queues, psid, sid, score, dup)
 
         return scan_key
 
@@ -771,7 +821,7 @@ class Ingester(ThreadedCoreBase):
         else:
             return delta >= self.config.core.ingester.expire_after
 
-    def drop(self, task: IngestTask) -> bool:
+    def drop(self, backlog_queues, task: IngestTask) -> bool:
         priority = task.params.priority
         sample_threshold = self.config.core.ingester.sampling_at
 
@@ -779,9 +829,9 @@ class Ingester(ThreadedCoreBase):
         if priority <= _min_priority:
             dropped = True
         else:
-            for level, rng in self.priority_range.items():
-                if rng[0] <= priority <= rng[1] and level in sample_threshold:
-                    dropped = must_drop(self.unique_queue.count(*rng), sample_threshold[level])
+            for (level, (low, high)), queue in zip(BINS, backlog_queues):
+                if low <= priority <= high and level in sample_threshold:
+                    dropped = must_drop(queue.length(), sample_threshold[level])
                     break
 
             if not dropped:
@@ -856,7 +906,7 @@ class Ingester(ThreadedCoreBase):
             task.retries = retries
             self.retry_queue.push(int(now(_retry_delay)), task.as_primitives())
 
-    def finalize(self, psid: str, sid: str, score: float, task: IngestTask):
+    def finalize(self, backlog_queues, psid: str, sid: str, score: float, task: IngestTask):
         self.log.info(f"[{task.ingest_id} :: {task.sha256}] Completed")
         if psid:
             task.params.psid = psid
@@ -886,8 +936,7 @@ class Ingester(ThreadedCoreBase):
             task.submission.scan_key = None
             task.params.services.resubmit = []
             task.params.services.selected = resubmit_selected
-
-            self.unique_queue.push(task.params.priority, task.as_primitives())
+            self.push_to_backlog(backlog_queues, task)
 
     def is_alert(self, task: IngestTask, score: float) -> bool:
         if not task.params.generate_alert:
@@ -897,3 +946,12 @@ class Ingester(ThreadedCoreBase):
             return False
 
         return True
+
+    def push_to_backlog(self, backlog_queues, task: IngestTask):
+        priority = task.params.priority
+        for (_, (low, high)), queue in zip(BINS, backlog_queues):
+            if low <= priority <= high:
+                queue.push(priority - low, task.as_primitives())
+                break
+        else:
+            backlog_queues[0].push(0, task.as_primitives())

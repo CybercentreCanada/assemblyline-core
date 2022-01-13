@@ -24,3 +24,8 @@ services:
     ports:
       - "6379:6379"
       - "6380:6379"
+
+  rabbit:
+    image: rabbitmq:3.9
+    ports:
+      - "5672:5672"
