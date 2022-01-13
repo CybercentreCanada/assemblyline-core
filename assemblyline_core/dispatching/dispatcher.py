@@ -16,11 +16,9 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.dict_utils import flatten
 from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
-from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch, DispatcherCommandMessage, \
@@ -28,7 +26,6 @@ from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch
 from assemblyline.odm.messages.submission import SubmissionMessage, from_datastore_submission
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.error import Error
-from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
@@ -462,11 +459,26 @@ class Dispatcher(ThreadedCoreBase):
                         self.retry_error(task, sha256, service_name)
                         continue
 
+                    # Load the list of tags we will pass
+                    tags = []
+                    if service.uses_tags:
+                        tags = task.file_tags.get(sha256, [])
+
+                    # Load the temp submission data we will pass
+                    temp_data = {}
+                    if service.uses_temp_submission_data:
+                        temp_data = task.file_temporary_data[sha256]
+
+                    # Load the metadata we will pass
+                    metadata = {}
+                    if service.uses_metadata:
+                        metadata = submission.metadata
+
                     # Build the actual service dispatch message
                     config = self.build_service_config(service, submission)
                     service_task = ServiceTask(dict(
                         sid=sid,
-                        metadata=submission.metadata,
+                        metadata=metadata,
                         min_classification=task.submission.classification,
                         service_name=service_name,
                         service_config=config,
@@ -477,11 +489,11 @@ class Dispatcher(ThreadedCoreBase):
                         ttl=submission.params.ttl,
                         ignore_cache=submission.params.ignore_cache,
                         ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
-                        tags=[{'type': x['type'], 'value': x['value'], 'short_type': x['short_type']}
-                              for x in task.file_tags.get(sha256, [])],
+                        tags=[
+                            {'type': x['type'], 'value': x['value'], 'short_type': x['short_type']} for x in tags
+                        ],
                         temporary_submission_data=[
-                            {'name': name, 'value': value}
-                            for name, value in task.file_temporary_data[sha256].items()
+                            {'name': name, 'value': value} for name, value in temp_data.items()
                         ],
                         deep_scan=submission.params.deep_scan,
                         priority=submission.params.priority,
@@ -738,7 +750,7 @@ class Dispatcher(ThreadedCoreBase):
                     messages = [message]
 
             for message in messages:
-                sid = message['service_task']['sid']
+                sid = message['sid']
                 self.queue_ready_signals[self.process_queue_index(sid)].acquire()
                 self.find_process_queue(sid).put(DispatchAction(kind=Action.result, sid=sid, data=message))
 
@@ -788,10 +800,8 @@ class Dispatcher(ThreadedCoreBase):
                         continue
                     self._submission_timeouts.set(message.sid, SUBMISSION_TOTAL_TIMEOUT, None)
 
-                    if 'result' in message.data:
-                        self.process_service_result(task, message.data['result_key'],
-                                                    Result(message.data['result']),
-                                                    message.data['temporary_data'])
+                    if 'result_summary' in message.data:
+                        self.process_service_result(task, message.data)
                     elif 'error' in message.data:
                         self.process_service_error(task, message.data['error_key'], Error(message.data['error']))
 
@@ -834,58 +844,70 @@ class Dispatcher(ThreadedCoreBase):
                 self.log.warning(f'Invalid work order kind {kind}')
 
     @elasticapm.capture_span(span_type='dispatcher')
-    def process_service_result(self, task: SubmissionTask, result_key, result, temporary_data):
-        submission: Submission = task.submission
-        sid = submission.sid
-        service_name = result.response.service_name
-        self.clear_timeout(task, result.sha256, service_name)
+    def process_service_result(self, task: SubmissionTask, data: dict):
+        try:
+            submission: Submission = task.submission
+            sid = submission.sid
+            service_name = data['service_name']
+            service_version = data['service_version']
+            service_tool_version = data['service_tool_version']
+            archive_ts = data['archive_ts']
+            expiry_ts = data['expiry_ts']
+
+            sha256 = data['sha256']
+            summary = ResultSummary(**data['result_summary'])
+            tags = data['tags']
+            temporary_data = data['temporary_data'] or {}
+            extracted_names = data['extracted_names']
+
+        except KeyError as missing:
+            self.log.exception(f"Malformed result message, missing key: {missing}")
+            return
+
+        # Immediately remove timeout so we don't cancel now
+        self.clear_timeout(task, sha256, service_name)
 
         # Don't process duplicates
-        if (result.sha256, service_name) in task.service_results:
+        if (sha256, service_name) in task.service_results:
             return
 
         # Let the logs know we have received a result for this task
-        if result.drop_file:
-            self.log.debug(f"[{sid}/{result.sha256}] {service_name} succeeded. "
-                           f"Result will be stored in {result_key} but processing will stop after this service.")
+        if summary.drop:
+            self.log.debug(f"[{sid}/{sha256}] {service_name} succeeded. "
+                           f"Result will be stored in {summary.key} but processing will stop after this service.")
         else:
-            self.log.debug(f"[{sid}/{result.sha256}] {service_name} succeeded. "
-                           f"Result will be stored in {result_key}")
+            self.log.debug(f"[{sid}/{sha256}] {service_name} succeeded. "
+                           f"Result will be stored in {summary.key}")
 
         # The depth is set for the root file, and for all extracted files whether we process them or not
-        if result.sha256 not in task.file_depth:
-            self.log.warning(f"[{sid}/{result.sha256}] {service_name} returned result for file that wasn't requested.")
+        if sha256 not in task.file_depth:
+            self.log.warning(f"[{sid}/{sha256}] {service_name} returned result for file that wasn't requested.")
             return
 
         # Check if the service is a candidate for dynamic recursion prevention
         if not submission.params.ignore_dynamic_recursion_prevention:
-            service_info = self.scheduler.services.get(result.response.service_name, None)
+            service_info = self.scheduler.services.get(service_name, None)
             if service_info and service_info.category == "Dynamic Analysis":
-                submission.params.services.runtime_excluded.append(result.response.service_name)
+                submission.params.services.runtime_excluded.append(service_name)
 
         # Save the tags
-        for section in result.result.sections:
-            task.file_tags[result.sha256].extend(tag_dict_to_list(flatten(section.tags.as_primitives())))
+        task.file_tags[sha256].extend(tags)
 
         # Update the temporary data table for this file
         for key, value in (temporary_data or {}).items():
-            task.file_temporary_data[result.sha256][key] = value
+            task.file_temporary_data[sha256][key] = value
 
         # Record the result as a summary
-        task.service_results[(result.sha256, service_name)] = ResultSummary(
-            key=result_key,
-            drop=result.drop_file,
-            score=result.result.score,
-            children=[r.sha256 for r in result.response.extracted]
-        )
+        task.service_results[(sha256, service_name)] = summary
 
         # Set the depth of all extracted files, even if we won't be processing them
         depth_limit = self.config.submission.max_extraction_depth
-        new_depth = task.file_depth[result.sha256] + 1
-        for extracted_data in result.response.extracted:
-            task.file_depth.setdefault(extracted_data.sha256, new_depth)
-            if extracted_data.name and extracted_data.sha256 not in task.file_names:
-                task.file_names[extracted_data.sha256] = extracted_data.name
+        new_depth = task.file_depth[sha256] + 1
+        for extracted_sha256 in summary.children:
+            task.file_depth.setdefault(extracted_sha256, new_depth)
+            extracted_name = extracted_names.get(extracted_sha256)
+            if extracted_name and extracted_sha256 not in task.file_names:
+                task.file_names[extracted_sha256] = extracted_name
 
         # Send the extracted files to the dispatcher
         with elasticapm.capture_span('process_extracted_files'):
@@ -893,63 +915,63 @@ class Dispatcher(ThreadedCoreBase):
             if new_depth < depth_limit:
                 # Prepare the temporary data from the parent to build the temporary data table for
                 # these newly extract files
-                parent_data = task.file_temporary_data[result.sha256]
+                parent_data = task.file_temporary_data[sha256]
 
-                for extracted_data in result.response.extracted:
-                    if extracted_data.sha256 in task.dropped_files or extracted_data.sha256 in task.active_files:
+                for extracted_sha256 in summary.children:
+                    if extracted_sha256 in task.dropped_files or extracted_sha256 in task.active_files:
                         continue
 
                     if len(task.active_files) > submission.params.max_extracted:
-                        self.log.info(f'[{sid}] hit extraction limit, dropping {extracted_data.sha256}')
-                        task.dropped_files.add(extracted_data.sha256)
+                        self.log.info(f'[{sid}] hit extraction limit, dropping {extracted_sha256}')
+                        task.dropped_files.add(extracted_sha256)
                         self._dispatching_error(task, Error({
-                            'archive_ts': result.archive_ts,
-                            'expiry_ts': result.expiry_ts,
+                            'archive_ts': archive_ts,
+                            'expiry_ts': expiry_ts,
                             'response': {
                                 'message': f"Too many files extracted for submission {sid} "
-                                           f"{extracted_data.sha256} extracted by "
+                                           f"{extracted_sha256} extracted by "
                                            f"{service_name} will be dropped",
                                 'service_name': service_name,
-                                'service_tool_version': result.response.service_tool_version,
-                                'service_version': result.response.service_version,
+                                'service_tool_version': service_tool_version,
+                                'service_version': service_version,
                                 'status': 'FAIL_NONRECOVERABLE'
                             },
-                            'sha256': extracted_data.sha256,
+                            'sha256': extracted_sha256,
                             'type': 'MAX FILES REACHED'
                         }))
                         continue
 
                     dispatched += 1
-                    task.active_files.add(extracted_data.sha256)
-                    task.file_temporary_data[extracted_data.sha256] = dict(parent_data)
+                    task.active_files.add(extracted_sha256)
+                    task.file_temporary_data[extracted_sha256] = dict(parent_data)
                     self.find_process_queue(sid).put(DispatchAction(kind=Action.dispatch_file, sid=sid,
-                                                                    sha=extracted_data.sha256))
+                                                                    sha=extracted_sha256))
             else:
-                for extracted_data in result.response.extracted:
+                for extracted_sha256 in summary.children:
                     self._dispatching_error(task, Error({
-                        'archive_ts': result.archive_ts,
-                        'expiry_ts': result.expiry_ts,
+                        'archive_ts': archive_ts,
+                        'expiry_ts': expiry_ts,
                         'response': {
                             'message': f"{service_name} has extracted a file "
-                                       f"{extracted_data.sha256} beyond the depth limits",
-                            'service_name': result.response.service_name,
-                            'service_tool_version': result.response.service_tool_version,
-                            'service_version': result.response.service_version,
+                                       f"{extracted_sha256} beyond the depth limits",
+                            'service_name': service_name,
+                            'service_tool_version': service_tool_version,
+                            'service_version': service_version,
                             'status': 'FAIL_NONRECOVERABLE'
                         },
-                        'sha256': extracted_data.sha256,
+                        'sha256': extracted_sha256,
                         'type': 'MAX DEPTH REACHED'
                     }))
 
         # Check if its worth trying to run the next stage
         # Not worth running if we know we are waiting for another service
-        if any(_s == result.sha256 for _s, _ in task.running_services):
+        if any(_s == sha256 for _s, _ in task.running_services):
             return
         # Not worth running if we know we have services in queue
-        if any(_s == result.sha256 for _s, _ in task.queue_keys.keys()):
+        if any(_s == sha256 for _s, _ in task.queue_keys.keys()):
             return
         # Try to run the next stage
-        self.dispatch_file(task, result.sha256)
+        self.dispatch_file(task, sha256)
 
     @elasticapm.capture_span(span_type='dispatcher')
     def _dispatching_error(self, task: SubmissionTask, error):

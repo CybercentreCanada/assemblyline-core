@@ -51,7 +51,7 @@ class Scheduler(RealScheduler):
     @property
     def services(self):
         return {
-            'extract': dummy_service('extract', 'pre'),
+            'extract': dummy_service('extract', 'pre', extra_data=True),
             'wrench': dummy_service('wrench', 'pre'),
             'av-a': dummy_service('av-a', 'core'),
             'av-b': dummy_service('av-b', 'core'),

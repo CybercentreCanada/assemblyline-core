@@ -7,9 +7,12 @@ import logging
 import elasticapm
 import time
 from typing import Dict, Optional, Any, cast
+from assemblyline.common.dict_utils import flatten
 
 from assemblyline.common.forge import CachedObject, get_service_queue
+from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.datastore.exceptions import VersionConflictException
+from assemblyline.odm.base import DATEFORMAT
 from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, \
     CreateWatch, LIST_OUTSTANDING, ListOutstanding
 
@@ -217,13 +220,39 @@ class DispatchClient:
         for w in self._get_watcher_list(task.sid).members():
             NamedQueue(w).push(msg)
 
+        # Save the tags
+        tags = []
+        for section in result.result.sections:
+            tags.extend(tag_dict_to_list(flatten(section.tags.as_primitives())))
+
+        # Pull out file names if we have them
+        file_names = {}
+        for extracted_data in result.response.extracted:
+            if extracted_data.name:
+                file_names[extracted_data.sha256] = extracted_data.name
+
         #
         dispatcher = task.metadata['dispatcher__']
         result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
+        ex_ts = result.expiry_ts.strftime(DATEFORMAT) if result.expiry_ts else result.archive_ts.strftime(DATEFORMAT)
         result_queue.push({
-            'service_task': task.as_primitives(),
-            'result': result.as_primitives(),
-            'result_key': result_key,
+            # 'service_task': task.as_primitives(),
+            # 'result': result.as_primitives(),
+            'sid': task.sid,
+            'sha256': result.sha256,
+            'service_name': task.service_name,
+            'service_version': result.response.service_version,
+            'service_tool_version': result.response.service_tool_version,
+            'archive_ts': result.archive_ts.strftime(DATEFORMAT),
+            'expiry_ts': ex_ts,
+            'result_summary': {
+                'key': result_key,
+                'drop': result.drop_file,
+                'score': result.result.score,
+                'children': [r.sha256 for r in result.response.extracted],
+            },
+            'tags': tags,
+            'extracted_names': file_names,
             'temporary_data': temporary_data
         })
 
@@ -250,6 +279,7 @@ class DispatchClient:
         dispatcher = task.metadata['dispatcher__']
         result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
         result_queue.push({
+            'sid': task.sid,
             'service_task': task.as_primitives(),
             'error': error.as_primitives(),
             'error_key': error_key
