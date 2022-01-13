@@ -131,7 +131,7 @@ def parse_cpu(string: str) -> float:
 
 
 class KubernetesController(ControllerInterface):
-    def __init__(self, logger, namespace, prefix, priority, cpu_reservation, labels=None, log_level="INFO"):
+    def __init__(self, logger, namespace, prefix, priority, cpu_reservation, labels=None, log_level="INFO", core_env={}):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
         try:
@@ -165,6 +165,7 @@ class KubernetesController(ControllerInterface):
         self.namespace: str = namespace
         self.config_volumes: dict[str, V1Volume] = {}
         self.config_mounts: dict[str, V1VolumeMount] = {}
+        self.core_env: dict[str, str] = core_env
         self.core_config_volumes: dict[str, V1Volume] = {}
         self.core_config_mounts: dict[str, V1VolumeMount] = {}
         self._external_profiles = weakref.WeakValueDictionary()
@@ -249,7 +250,7 @@ class KubernetesController(ControllerInterface):
         """Tell the controller about a service profile it needs to manage."""
         self._create_deployment(profile.name, self._deployment_name(profile.name),
                                 profile.container_config, profile.shutdown_seconds, scale,
-                                change_key=profile.config_blob)
+                                change_key=profile.config_blob, core_mounts=profile.privileged)
         self._external_profiles[profile.name] = profile
 
     def _loop_forever(self, function):
@@ -420,7 +421,7 @@ class KubernetesController(ControllerInterface):
         watch = TypelessWatch()
 
         self._deployment_targets = {}
-        label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items())
+        label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items() if _n != 'privilege')
 
         for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
                                   namespace=self.namespace, label_selector=label_selector,
@@ -455,8 +456,8 @@ class KubernetesController(ControllerInterface):
         environment_variables: list[V1EnvVar] = []
         # If we are launching a core container, include environment variables related to authentication for DBs
         if core_container:
-            environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in os.environ.items()
-                                      if any(term in _n for term in ['ELASTIC', 'FILESTORE', 'UI_SERVER'])]
+            environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in self.core_env.items()]
+            environment_variables.append(V1EnvVar(name='PRIVILEGED', value='true'))
         # Overwrite them with configured special environment variables
         environment_variables += [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]
         # Overwrite those with special hard coded variables
@@ -488,11 +489,10 @@ class KubernetesController(ControllerInterface):
         # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
-        change_key = (
-            deployment_name + change_key + str(docker_config) + str(shutdown_seconds) +
-            str(sorted((labels or {}).items())) + str(volumes) + str(mounts) + str(core_mounts) +
-            str(sorted(self._service_limited_env[service_name].items()))
-        )
+        lbls = sorted((labels or {}).items())
+        svc_env = sorted(self._service_limited_env[service_name].items())
+        change_key = (f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
+                      f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}")
 
         # Check if a deployment already exists, and if it does check if it has the same change key set
         replace = None
@@ -548,7 +548,7 @@ class KubernetesController(ControllerInterface):
         all_labels = dict(self._labels)
         all_labels['component'] = service_name
         if core_mounts:
-            all_labels['section'] = 'core'
+            all_labels['privilege'] = 'core'
         all_labels.update(labels or {})
 
         # Build set of volumes, first the global mounts, then the core specific ones,
@@ -597,12 +597,19 @@ class KubernetesController(ControllerInterface):
 
         if replace:
             self.logger.info("Requesting kubernetes replace deployment info for: " + metadata.name)
-            self.apps_api.replace_namespaced_deployment(namespace=self.namespace, body=deployment,
-                                                        name=metadata.name, _request_timeout=API_TIMEOUT)
+            try:
+                self.apps_api.replace_namespaced_deployment(namespace=self.namespace, body=deployment,
+                                                            name=metadata.name, _request_timeout=API_TIMEOUT)
+                return
+            except ApiException as error:
+                if error.status == 422:
+                    # Replacement of an immutable field (ie. labels); Delete and re-create
+                    self.stop_containers(labels=dict(component=service_name))
+
         else:
             self.logger.info("Requesting kubernetes create deployment info for: " + metadata.name)
-            self.apps_api.create_namespaced_deployment(namespace=self.namespace, body=deployment,
-                                                       _request_timeout=API_TIMEOUT)
+        self.apps_api.create_namespaced_deployment(namespace=self.namespace, body=deployment,
+                                                   _request_timeout=API_TIMEOUT)
 
     def get_target(self, service_name: str) -> int:
         """Get the target for running instances of a service."""
@@ -653,7 +660,7 @@ class KubernetesController(ControllerInterface):
 
     def restart(self, service):
         self._create_deployment(service.name, self._deployment_name(service.name), service.container_config,
-                                service.shutdown_seconds, self.get_target(service.name),
+                                service.shutdown_seconds, self.get_target(service.name), core_mounts=service.privileged,
                                 change_key=service.config_blob)
 
     def get_running_container_names(self):
@@ -777,7 +784,7 @@ class KubernetesController(ControllerInterface):
             self.apps_api.delete_namespaced_deployment(name=dep.metadata.name, namespace=self.namespace,
                                                        _request_timeout=API_TIMEOUT)
 
-    def prepare_network(self, service_name, internet):
+    def prepare_network(self, service_name, internet, dependency_internet):
         safe_name = service_name.lower().replace('_', '-')
 
         # Allow access to containers with dependency_for
@@ -850,3 +857,26 @@ class KubernetesController(ControllerInterface):
                     egress=[V1NetworkPolicyEgressRule(to=[])],
                 )
             ), _request_timeout=API_TIMEOUT)
+
+        for dep_name, dep_internet in dependency_internet:
+            safe_dep_name = dep_name.lower().replace('_', '-')
+            try:
+                self.net_api.delete_namespaced_network_policy(namespace=self.namespace,
+                                                              name=f'allow-{safe_dep_name}-{safe_name}-outgoing',
+                                                              _request_timeout=API_TIMEOUT)
+            except ApiException as error:
+                if error.status != 404:
+                    raise
+            if dep_internet:
+                self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
+                    metadata=V1ObjectMeta(name=f'allow-{safe_dep_name}-{safe_name}-outgoing'),
+                    spec=V1NetworkPolicySpec(
+                        pod_selector=V1LabelSelector(match_labels={
+                            'app': 'assemblyline',
+                            'section': 'service',
+                            'dependency_for': service_name,
+                            'container': dep_name,
+                        }),
+                        egress=[V1NetworkPolicyEgressRule(to=[])],
+                    )
+                ), _request_timeout=API_TIMEOUT)

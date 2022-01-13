@@ -4,24 +4,26 @@ A process that manages tracking and running update commands for the AL services.
 from __future__ import annotations
 
 import os
-import uuid
+import re
 import sched
 import time
+import uuid
+
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import docker
 
-from assemblyline.common import isotime
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
     V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
     V1ConfigMapVolumeSource, V1Secret, V1LocalObjectReference
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
-from assemblyline.odm.messages.changes import Operation
 
+from assemblyline.common import isotime
+from assemblyline.odm.messages.changes import Operation, ServiceChange
 from assemblyline.odm.models.service import DockerConfig
-from assemblyline.remote.datatypes.events import EventSender
+from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config
 from assemblyline_core.server_base import CoreBase
@@ -32,12 +34,14 @@ CONTAINER_CHECK_INTERVAL = 60 * 5  # How many seconds to wait for checking for n
 API_TIMEOUT = 90
 HEARTBEAT_INTERVAL = 5
 
-# How many past updates to keep for file based updates
 NAMESPACE = os.getenv('NAMESPACE', None)
-INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']
-CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
-CLASSIFICATION_CONFIGMAP = os.getenv('CLASSIFICATION_CONFIGMAP', None)
-CLASSIFICATION_CONFIGMAP_KEY = os.getenv('CLASSIFICATION_CONFIGMAP_KEY', 'classification.yml')
+INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] + \
+    [
+    secret.strip("${}")
+    for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']]
+
+CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', None)
+CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 
 SERVICE_API_HOST = os.environ.get('SERVICE_API_HOST', "http://al_service_server:5003")
 SERVICE_API_KEY = os.environ.get('SERVICE_API_KEY', 'ThisIsARandomAuthKey...ChangeMe!')
@@ -69,12 +73,12 @@ class DockerUpdateInterface:
 
     def launch(self, name, docker_config: DockerConfig, mounts, env, network, blocking: bool = True):
         """Run a container to completion."""
-        # Add the classification file if path is given
-        if CLASSIFICATION_HOST_PATH:
+        # Add the configuration file if path is given
+        if CONFIGURATION_HOST_PATH:
             mounts.append({
-                'volume': CLASSIFICATION_HOST_PATH,
+                'volume': CONFIGURATION_HOST_PATH,
                 'source_path': '',
-                'dest_path': '/etc/assemblyline/classification.yml',
+                'dest_path': '/etc/assemblyline/config.yml',
                 'mode': 'ro'
             })
 
@@ -244,18 +248,18 @@ class KubernetesUpdateInterface:
                 read_only=False,
             ))
 
-        if CLASSIFICATION_CONFIGMAP:
+        if CONFIGURATION_CONFIGMAP:
             volumes.append(V1Volume(
-                name='mount-classification',
+                name='mount-configuration',
                 config_map=V1ConfigMapVolumeSource(
-                    name=CLASSIFICATION_CONFIGMAP
+                    name=CONFIGURATION_CONFIGMAP
                 ),
             ))
 
             volume_mounts.append(V1VolumeMount(
-                name='mount-classification',
-                mount_path='/etc/assemblyline/classification.yml',
-                sub_path=CLASSIFICATION_CONFIGMAP_KEY,
+                name='mount-configuration',
+                mount_path='/etc/assemblyline/config.yml',
+                sub_path="config",
                 read_only=True,
             ))
 
@@ -265,6 +269,7 @@ class KubernetesUpdateInterface:
             labels = {
                 'app': 'assemblyline',
                 'section': section,
+                'privilege': 'core',
                 'component': 'update-script',
             }
             labels.update(self.extra_labels)
@@ -276,7 +281,10 @@ class KubernetesUpdateInterface:
 
             environment_variables = [V1EnvVar(name=_e.name, value=_e.value) for _e in docker_config.environment]
             environment_variables.extend([V1EnvVar(name=k, value=v) for k, v in env.items()])
+            environment_variables.extend([V1EnvVar(name=k, value=os.environ[k])
+                                         for k in INHERITED_VARIABLES if k in os.environ])
             environment_variables.append(V1EnvVar(name="LOG_LEVEL", value=self.log_level))
+            environment_variables.append(V1EnvVar(name="PRIVILEGED", value="true"))
 
             cores = docker_config.cpu_cores
             memory = docker_config.ram_mb
@@ -380,10 +388,13 @@ class ServiceUpdater(CoreBase):
         self.latest_service_tags: Hash[dict[str, str]] = Hash('service-tags', self.redis_persist)
         self.service_events = EventSender('changes.services', host=self.redis)
 
+        self.incompatible_services = set()
+        self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
+        self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
+
         # Prepare a single threaded scheduler
         self.scheduler = sched.scheduler()
 
-        #
         if 'KUBERNETES_SERVICE_HOST' in os.environ and NAMESPACE:
             extra_labels = {}
             if self.config.core.scaler.additional_labels:
@@ -394,6 +405,10 @@ class ServiceUpdater(CoreBase):
                                                         log_level=self.config.logging.log_level)
         else:
             self.controller = DockerUpdateInterface(log_level=self.config.logging.log_level)
+
+    def _handle_service_change_event(self, data: ServiceChange):
+        if data.operation == Operation.Incompatible:
+            self.incompatible_services.add(data.name)
 
     def container_updates(self):
         """Go through the list of services and check what are the latest tags for it"""
@@ -428,8 +443,6 @@ class ServiceUpdater(CoreBase):
                     mounts=[],
                     env={
                         "SERVICE_TAG": update_data['latest_tag'],
-                        "SERVICE_API_HOST": SERVICE_API_HOST,
-                        "SERVICE_API_KEY": SERVICE_API_KEY,
                         "REGISTER_ONLY": 'true'
                     },
                     network=AL_REGISTRATION_NETWORK,
@@ -452,6 +465,12 @@ class ServiceUpdater(CoreBase):
 
             if self.datastore.service.get_if_exists(service_key):
                 operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
+
+                # Check if a service waas previously disabled and re-enable it
+                if service_name in self.incompatible_services:
+                    self.incompatible_services.remove(service_name)
+                    operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
+
                 if self.datastore.service_delta.update(service_name, operations):
                     # Update completed, cleanup
                     self.service_events.send(service_name, {
