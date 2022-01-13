@@ -3,9 +3,12 @@ An interface to the core system for the edge services.
 
 
 """
-import logging
 import elasticapm
+import functools
+import logging
 import time
+import weakref
+
 from typing import Dict, Optional, Any, cast
 from assemblyline.common.dict_utils import flatten
 
@@ -15,10 +18,7 @@ from assemblyline.datastore.exceptions import VersionConflictException
 from assemblyline.odm.base import DATEFORMAT
 from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, \
     CreateWatch, LIST_OUTSTANDING, ListOutstanding
-
 from assemblyline.odm.models.service import Service
-
-
 from assemblyline.common import forge
 from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SUBMISSION_QUEUE, \
     make_watcher_list_name, DISPATCH_TASK_HASH
@@ -31,8 +31,24 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline_core.dispatching.dispatcher import DISPATCH_START_EVENTS, DISPATCH_RESULT_QUEUE, \
     DISPATCH_COMMAND_QUEUE, QUEUE_EXPIRY
-
 from assemblyline_core.dispatching.dispatcher import ServiceTask, Dispatcher
+
+
+def weak_lru(maxsize=128, typed=False):
+    'LRU Cache decorator that keeps a weak reference to "self"'
+    def wrapper(func):
+
+        @functools.lru_cache(maxsize, typed)
+        def _func(_self, *args, **kwargs):
+            return func(_self(), *args, **kwargs)
+
+        @functools.wraps(func)
+        def inner(self, *args, **kwargs):
+            return _func(weakref.ref(self), *args, **kwargs)
+
+        return inner
+
+    return wrapper
 
 
 class RetryRequestWork(Exception):
@@ -67,6 +83,10 @@ class DispatchClient:
         self.dispatcher_data = []
         self.dispatcher_data_age = 0.0
         self.dead_dispatchers = []
+
+    @weak_lru(maxsize=128)
+    def _get_queue_from_cache(self, name):
+        return NamedQueue(name, host=self.redis, ttl=QUEUE_EXPIRY)
 
     def _get_services(self):
         # noinspection PyUnresolvedReferences
@@ -178,7 +198,7 @@ class DispatchClient:
 
         if self.running_tasks.add(task.key(), task.as_primitives()):
             self.log.info(f"[{task.sid}/{task.fileinfo.sha256}] {service_name}:{worker_id} task found")
-            start_queue = NamedQueue(DISPATCH_START_EVENTS + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
+            start_queue = self._get_queue_from_cache(DISPATCH_START_EVENTS + dispatcher)
             start_queue.push((task.sid, task.fileinfo.sha256, service_name, worker_id))
             return task
         return None
@@ -234,7 +254,7 @@ class DispatchClient:
 
         #
         dispatcher = task.metadata['dispatcher__']
-        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
+        result_queue = self._get_queue_from_cache(DISPATCH_RESULT_QUEUE + dispatcher)
         ex_ts = result.expiry_ts.strftime(DATEFORMAT) if result.expiry_ts else result.archive_ts.strftime(DATEFORMAT)
         result_queue.push({
             # 'service_task': task.as_primitives(),
@@ -278,7 +298,7 @@ class DispatchClient:
                 NamedQueue(w).push(msg)
 
         dispatcher = task.metadata['dispatcher__']
-        result_queue = NamedQueue(DISPATCH_RESULT_QUEUE + dispatcher, host=self.redis, ttl=QUEUE_EXPIRY)
+        result_queue = self._get_queue_from_cache(DISPATCH_RESULT_QUEUE + dispatcher)
         result_queue.push({
             'sid': task.sid,
             'service_task': task.as_primitives(),
