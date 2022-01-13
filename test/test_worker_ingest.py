@@ -8,9 +8,8 @@ from assemblyline.odm.models.file import File
 from assemblyline.odm.randomizer import random_minimal_obj
 
 from assemblyline_core.ingester.ingester import IngestTask, _notification_queue_prefix, Ingester
-from assemblyline_core.submission_client import SubmissionClient
 
-from mocking import MockDatastore, TrueCountTimes
+from mocking import TrueCountTimes
 
 
 def make_message(message=None, files=None, params=None):
@@ -38,15 +37,8 @@ def make_message(message=None, files=None, params=None):
 
 
 @pytest.fixture
-def ingest_harness(clean_redis):
-    """"Setup a test environment.
-
-    By using a fake redis and datastore, we:
-        a) ensure that this test runs regardless of any code errors in replaced modules
-        b) ensure that the datastore and redis is EMPTY every time the test runs
-           isolating this test from any other test run at the same time
-    """
-    datastore = AssemblylineDatastore(MockDatastore())
+def ingest_harness(clean_redis, clean_datastore: AssemblylineDatastore):
+    datastore = clean_datastore
     ingester = Ingester(datastore=datastore, redis=clean_redis, persistent_redis=clean_redis)
     ingester.running = TrueCountTimes(1)
     ingester.counter.increment = mock.MagicMock()
@@ -101,49 +93,54 @@ def test_ingest_simple(ingest_harness):
 
 def test_ingest_stale_score_exists(ingest_harness):
     datastore, ingester, in_queue = ingest_harness
+    get_if_exists = datastore.filescore.get_if_exists
+    try:
+        # Add a stale file score to the database for every file always
+        from assemblyline.odm.models.filescore import FileScore
+        datastore.filescore.get_if_exists = mock.MagicMock(
+            return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=0))
+        )
 
-    # Add a stale file score to the database for every file always
-    from assemblyline.odm.models.filescore import FileScore
-    datastore.filescore.get = mock.MagicMock(
-        return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=0))
-    )
+        # Process a message that hits the stale score
+        in_queue.push(make_message())
+        ingester.handle_ingest()
 
-    # Process a message that hits the stale score
-    in_queue.push(make_message())
-    ingester.handle_ingest()
+        # The stale filescore was retrieved
+        datastore.filescore.get_if_exists.assert_called_once()
 
-    # The stale filescore was retrieved
-    datastore.filescore.get.assert_called_once()
+        # but message was ingested as a cache miss
+        task = ingester.unique_queue.pop()
+        assert task
+        task = IngestTask(task)
+        assert task.submission.files[0].sha256 == '0' * 64
 
-    # but message was ingested as a cache miss
-    task = ingester.unique_queue.pop()
-    assert task
-    task = IngestTask(task)
-    assert task.submission.files[0].sha256 == '0' * 64
-
-    assert ingester.unique_queue.length() == 0
-    assert ingester.ingest_queue.length() == 0
-
+        assert ingester.unique_queue.length() == 0
+        assert ingester.ingest_queue.length() == 0
+    finally:
+        datastore.filescore.get_if_exists = get_if_exists
 
 def test_ingest_score_exists(ingest_harness):
     datastore, ingester, in_queue = ingest_harness
+    get_if_exists = datastore.filescore.get_if_exists
+    try:
+        # Add a valid file score for all files
+        from assemblyline.odm.models.filescore import FileScore
+        datastore.filescore.get_if_exists = mock.MagicMock(
+            return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=time.time()))
+        )
 
-    # Add a valid file score for all files
-    from assemblyline.odm.models.filescore import FileScore
-    datastore.filescore.get = mock.MagicMock(
-        return_value=FileScore(dict(psid='000', expiry_ts=0, errors=0, score=10, sid='000', time=time.time()))
-    )
+        # Ingest a file
+        in_queue.push(make_message())
+        ingester.handle_ingest()
 
-    # Ingest a file
-    in_queue.push(make_message())
-    ingester.handle_ingest()
-
-    # No file has made it into the internal buffer => cache hit and drop
-    datastore.filescore.get.assert_called_once()
-    ingester.counter.increment.assert_any_call('cache_hit')
-    ingester.counter.increment.assert_any_call('duplicates')
-    assert ingester.unique_queue.length() == 0
-    assert ingester.ingest_queue.length() == 0
+        # No file has made it into the internal buffer => cache hit and drop
+        datastore.filescore.get_if_exists.assert_called_once()
+        ingester.counter.increment.assert_any_call('cache_hit')
+        ingester.counter.increment.assert_any_call('duplicates')
+        assert ingester.unique_queue.length() == 0
+        assert ingester.ingest_queue.length() == 0
+    finally:
+        datastore.filescore.get_if_exists = get_if_exists
 
 
 def test_ingest_groups_custom(ingest_harness):
