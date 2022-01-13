@@ -12,6 +12,10 @@ resources:
       image: redis
       ports:
         - 6379:6379
+    - container: rabbit
+      image: rabbitmq:3.9
+      ports:
+        - 5672:5672
     - container: elasticsearch
       image: cccs/elasticsearch:7.16.1
       env:
@@ -38,6 +42,7 @@ jobs:
     services:
       elasticsearch: elasticsearch
       redis: redis
+      rabbit: rabbit
 
     steps:
       - task: UsePythonVersion@0
@@ -79,7 +84,7 @@ jobs:
           sudo env "PATH=$PATH" python -m pip install --no-cache-dir -e .[test]
         displayName: Install assemblyline_core
         workingDirectory: $(Pipeline.Workspace)/s/assemblyline-core
-      - script: sudo env "PATH=$PATH" python -m pytest -x -rsx -vv --cov=assemblyline_core --cov=$(Pipeline.Workspace)/s/assemblyline-base/assemblyline --cov-report=xml
+      - script: sudo env "PATH=$PATH" "CI=true" python -m pytest -x -rsx -vv --cov=assemblyline_core --cov=$(Pipeline.Workspace)/s/assemblyline-base/assemblyline --cov-report=xml
         displayName: Test
         workingDirectory: $(Pipeline.Workspace)/s/assemblyline-core
       - script: python -m codecov
