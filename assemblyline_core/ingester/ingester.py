@@ -202,14 +202,8 @@ class Ingester(ThreadedCoreBase):
         # Input. The dispatcher creates a record when any submission completes.
         self.complete_queue = NamedQueue(COMPLETE_QUEUE_NAME, self.redis)
 
-        # Input. An external process places submission requests on this queue.
-        # self.ingest_queue = connect_ingest_queue(self.rabbit_connection)
-
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
         self.traffic_queue = CommsQueue('submissions', self.redis)
-
-        # Internal. Unique requests are placed in and processed from this queue.
-        # self.backlog_queues = connect_ingest_backlog(self.rabbit_connection)
 
         # Internal, delay queue for retrying
         self.retry_queue = PriorityQueue('m-retry', self.redis_persist)
