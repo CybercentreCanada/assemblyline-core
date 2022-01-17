@@ -15,6 +15,7 @@ import platform
 import concurrent.futures
 import copy
 from contextlib import contextmanager
+from assemblyline.common.dict_utils import get_recursive_sorted_tuples
 from assemblyline.common.uid import get_id_from_data
 
 import elasticapm
@@ -497,7 +498,7 @@ class ScalerServer(ThreadedCoreBase):
 
                 # Compute a blob of service properties not include in the docker config, that
                 # should still result in a service being restarted when changed
-                cfg_items = sorted(service.config.items())
+                cfg_items = get_recursive_sorted_tuples(service.config)
                 dep_keys = ''.join(sorted(dependency_keys))
                 config_blob = (f"c={cfg_items}sp={service.submission_params}"
                                f"dk={dep_keys}p={service.privileged}d={docker_config}")
