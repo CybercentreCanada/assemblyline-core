@@ -263,7 +263,7 @@ class Dispatcher(ThreadedCoreBase):
 
         while self.running:
             if self.finalizing.is_set():
-                if self.active_submissions.length() >= 0:
+                if self.active_submissions.length() > 0:
                     self.sleep(1)
                 else:
                     self.stop()
