@@ -819,21 +819,21 @@ class Dispatcher(ThreadedCoreBase):
             elif kind == Action.service_timeout:
                 task = self.tasks.get(message.sid)
                 if task:
-                    self.timeout_service(task, message.sha, message.service_name, message.worker_id)
-                    self._dispatching_error(task, Error({
-                        'archive_ts': task.submission.archive_ts,
-                        'expiry_ts': task.submission.expiry_ts,
-                        'response': {
-                            'message': f"{message.service_name} has timed out on "
-                                       f"{message.sha}",
-                            'service_name': message.service_name,
-                            'service_tool_version': "0",
-                            'service_version': "0",
-                            'status': 'FAIL_RECOVERABLE'
-                        },
-                        'sha256': message.sha,
-                        'type': 'UNKNOWN'
-                    }))
+                    if self.timeout_service(task, message.sha, message.service_name, message.worker_id):
+                        self._dispatching_error(task, Error({
+                            'archive_ts': task.submission.archive_ts,
+                            'expiry_ts': task.submission.expiry_ts,
+                            'response': {
+                                'message': f"{message.service_name} has timed out on "
+                                           f"{message.sha}",
+                                'service_name': message.service_name,
+                                'service_tool_version': "0",
+                                'service_version': "0",
+                                'status': 'FAIL_RECOVERABLE'
+                            },
+                            'sha256': message.sha,
+                            'type': 'UNKNOWN'
+                        }))
 
             elif kind == Action.dispatch_file:
                 task = self.tasks.get(message.sid)
@@ -1063,7 +1063,7 @@ class Dispatcher(ThreadedCoreBase):
         if not service_task and (sha256, service_name) not in task.running_services:
             self.log.debug(f"[{sid}] Service {service_name} "
                            f"timed out on {sha256} but task isn't running.")
-            return
+            return False
 
         # We can confirm that the task is ours now, even if the worker finished, the result will be ignored
         task.running_services.discard((sha256, service_name))
@@ -1083,6 +1083,7 @@ class Dispatcher(ThreadedCoreBase):
             # Report to the metrics system that a recoverable error has occurred for that service
             export_metrics_once(service_name, ServiceMetrics, dict(fail_recoverable=1),
                                 host=worker_id, counter_type='service', redis=self.redis)
+        return True
 
     def work_guard(self):
         check_interval = GUARD_TIMEOUT/8
