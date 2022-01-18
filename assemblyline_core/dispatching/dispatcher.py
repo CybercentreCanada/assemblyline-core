@@ -751,11 +751,8 @@ class Dispatcher(ThreadedCoreBase):
 
             for message in messages:
                 sid = message['sid']
-                if message.get('kind') == Action.service_timeout:
-                    self.find_process_queue(sid).put(DispatchAction(**message))
-                else:
-                    self.queue_ready_signals[self.process_queue_index(sid)].acquire()
-                    self.find_process_queue(sid).put(DispatchAction(kind=Action.result, sid=sid, data=message))
+                self.queue_ready_signals[self.process_queue_index(sid)].acquire()
+                self.find_process_queue(sid).put(DispatchAction(kind=Action.result, sid=sid, data=message))
 
     def service_worker(self, index: int):
         self.log.info(f"Start service worker {index}")
@@ -1047,13 +1044,9 @@ class Dispatcher(ThreadedCoreBase):
                 # Check for service timeouts
                 service_timeouts = self._service_timeouts.timeouts()
                 for (sid, sha, service_name), worker_id in service_timeouts.items():
-                    self.result_queue.push(dict(
-                        kind=Action.service_timeout,
-                        sid=sid,
-                        sha=sha,
-                        service_name=service_name,
-                        worker_id=worker_id
-                    ))
+                    _q = self.find_process_queue(sid)
+                    _q.put(DispatchAction(kind=Action.service_timeout, sid=sid, sha=sha,
+                                          service_name=service_name, worker_id=worker_id))
 
                 self.counter.increment('service_timeouts', len(service_timeouts))
                 self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
