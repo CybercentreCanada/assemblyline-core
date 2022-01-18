@@ -42,6 +42,10 @@ from ..ingester.constants import COMPLETE_QUEUE_NAME
 
 APM_SPAN_TYPE = 'handle_message'
 
+AL_SHUTDOWN_GRACE = int(os.environ.get('AL_SHUTDOWN_GRACE', '60'))
+AL_SHUTDOWN_QUIT = 60
+FINALIZING_WINDOW = max(AL_SHUTDOWN_GRACE - AL_SHUTDOWN_QUIT, 0)
+
 
 class Action(enum.IntEnum):
     start = 0
@@ -159,6 +163,7 @@ class Dispatcher(ThreadedCoreBase):
         self.instance_id = uuid.uuid4().hex
         self.tasks: Dict[str, SubmissionTask] = {}
         self.finalizing = threading.Event()
+        self.finalizing_start = 0.0
 
         #
         # # Build some utility classes
@@ -207,6 +212,7 @@ class Dispatcher(ThreadedCoreBase):
 
     def interrupt_handler(self, signum, stack_frame):
         self.log.info("Instance caught signal. Beginning to drain work.")
+        self.finalizing_start = time.time()
         self.finalizing.set()
 
     def process_queue_index(self, key: str) -> int:
@@ -263,7 +269,8 @@ class Dispatcher(ThreadedCoreBase):
 
         while self.running:
             if self.finalizing.is_set():
-                if self.active_submissions.length() > 0:
+                finalizing_time = time.time() - self.finalizing_start
+                if self.active_submissions.length() > 0 and finalizing_time < FINALIZING_WINDOW:
                     self.sleep(1)
                 else:
                     self.stop()
