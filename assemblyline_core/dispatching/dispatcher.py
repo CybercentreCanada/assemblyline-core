@@ -158,6 +158,7 @@ class Dispatcher(ThreadedCoreBase):
         # Load the datastore collections that we are going to be using
         self.instance_id = uuid.uuid4().hex
         self.tasks: Dict[str, SubmissionTask] = {}
+        self.finalizing = threading.Event()
 
         #
         # # Build some utility classes
@@ -203,6 +204,10 @@ class Dispatcher(ThreadedCoreBase):
         self.process_queues: List[PriorityQueue[DispatchAction]] = [PriorityQueue() for _ in range(RESULT_THREADS)]
         self.queue_ready_signals: List[threading.Semaphore] = [threading.Semaphore(MAX_RESULT_BUFFER)
                                                                for _ in range(RESULT_THREADS)]
+
+    def interrupt_handler(self, signum, stack_frame):
+        self.log.info("Instance caught signal. Beginning to drain work.")
+        self.finalizing.set()
 
     def process_queue_index(self, key: str) -> int:
         return sum(ord(_x) for _x in key) % RESULT_THREADS
@@ -257,39 +262,45 @@ class Dispatcher(ThreadedCoreBase):
         time_mark = time.time()
 
         while self.running:
-            self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
-            self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
+            if self.finalizing.is_set():
+                if self.active_submissions.length() >= 0:
+                    self.sleep(1)
+                else:
+                    self.stop()
+            else:
+                self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
+                self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
-            # Check if we are at the submission limit globally
-            if self.submissions_assignments.length() >= self.config.core.dispatcher.max_inflight:
-                self.sleep(1)
+                # Check if we are at the submission limit globally
+                if self.submissions_assignments.length() >= self.config.core.dispatcher.max_inflight:
+                    self.sleep(1)
+                    cpu_mark = time.process_time()
+                    time_mark = time.time()
+                    continue
+
+                # Check if we are maxing out our share of the submission limit
+                max_tasks = self.config.core.dispatcher.max_inflight / self.running_dispatchers_estimate
+                if self.active_submissions.length() >= max_tasks:
+                    self.sleep(1)
+                    cpu_mark = time.process_time()
+                    time_mark = time.time()
+                    continue
+
+                # Grab a submission message
+                message = sub_queue.pop(timeout=1)
                 cpu_mark = time.process_time()
                 time_mark = time.time()
-                continue
 
-            # Check if we are maxing out our share of the submission limit
-            max_tasks = self.config.core.dispatcher.max_inflight / self.running_dispatchers_estimate
-            if self.active_submissions.length() >= max_tasks:
-                self.sleep(1)
-                cpu_mark = time.process_time()
-                time_mark = time.time()
-                continue
+                if not message:
+                    continue
 
-            # Grab a submission message
-            message = sub_queue.pop(timeout=1)
-            cpu_mark = time.process_time()
-            time_mark = time.time()
-
-            if not message:
-                continue
-
-            # Start of process dispatcher transaction
-            with apm_span(self.apm_client, 'submission_message'):
-                # This is probably a complete task
-                task = SubmissionTask(**message)
-                if self.apm_client:
-                    elasticapm.label(sid=task.submission.sid)
-                self.dispatch_submission(task)
+                # Start of process dispatcher transaction
+                with apm_span(self.apm_client, 'submission_message'):
+                    # This is probably a complete task
+                    task = SubmissionTask(**message)
+                    if self.apm_client:
+                        elasticapm.label(sid=task.submission.sid)
+                    self.dispatch_submission(task)
 
     @elasticapm.capture_span(span_type='dispatcher')
     def dispatch_submission(self, task: SubmissionTask):
