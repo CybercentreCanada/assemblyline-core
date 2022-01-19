@@ -213,6 +213,7 @@ class Dispatcher(ThreadedCoreBase):
     def interrupt_handler(self, signum, stack_frame):
         self.log.info("Instance caught signal. Beginning to drain work.")
         self.finalizing_start = time.time()
+        self._shutdown_timeout = AL_SHUTDOWN_QUIT
         self.finalizing.set()
 
     def process_queue_index(self, key: str) -> int:
