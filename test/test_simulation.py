@@ -248,7 +248,7 @@ def core(request, redis, filestore, config, clean_datastore: AssemblylineDatasto
     fields.ds = ds
 
     fields.config = config
-    forge.config_singletons[False, None] = fields.config
+    forge.config_cache[None] = fields.config
 
     threads = []
     fields.filestore = filestore
