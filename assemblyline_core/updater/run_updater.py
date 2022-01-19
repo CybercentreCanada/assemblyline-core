@@ -494,7 +494,7 @@ class ServiceUpdater(ThreadedCoreBase):
     def container_versions(self):
         """Go through the list of services and check what are the latest tags for it"""
         while self.running:
-            self.log.info("[CV] Checing for new versions of all service containers...")
+            self.log.info("[CV] Checking for new versions of all service containers...")
             existing_services = set(self.container_update.keys()) | set(self.latest_service_tags.keys())
             discovered_services: list[str] = []
 
