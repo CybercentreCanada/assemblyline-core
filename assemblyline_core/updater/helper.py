@@ -3,7 +3,7 @@ import re
 import socket
 import string
 
-from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION, BUILD_MINOR
+from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
 from collections import defaultdict
 from base64 import b64encode
 from packaging.version import parse, Version
@@ -75,7 +75,7 @@ REGISTRY_TYPE_MAPPING = {
 }
 
 
-def get_latest_tag_for_service(service_config, system_config, logger):
+def get_latest_tag_for_service(service_config, system_config, logger, prefix=""):
     def process_image(image):
         # Find which server to search in
         server = image.split("/")[0]
@@ -131,7 +131,7 @@ def get_latest_tag_for_service(service_config, system_config, logger):
 
     tag_name = None
     if not tags:
-        logger.warning(f"Cannot fetch latest tag for service {service_name} - {image_name}"
+        logger.warning(f"{prefix}Cannot fetch latest tag for service {service_name} - {image_name}"
                        f" => [server: {server}, repo_name: {image_name}, channel: {update_channel}]")
     else:
         for t in tags:
@@ -144,7 +144,7 @@ def get_latest_tag_for_service(service_config, system_config, logger):
                         t_version > parse(tag_name.replace(update_channel, "")):
                     tag_name = t
 
-        logger.info(f"Latest {service_name} tag on {update_channel.upper()} channel is: {tag_name}")
+        logger.info(f"{prefix}Latest {service_name} tag on {update_channel.upper()} channel is: {tag_name}")
 
     # Fix service image for use in Kubernetes
     image_variables = defaultdict(str)

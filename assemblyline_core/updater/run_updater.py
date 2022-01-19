@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 import re
-import sched
 import time
 import uuid
 
@@ -26,14 +25,15 @@ from assemblyline.odm.models.service import DockerConfig
 from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config
-from assemblyline_core.server_base import CoreBase
+from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline_core.updater.helper import get_latest_tag_for_service
 
-UPDATE_CHECK_INTERVAL = 60  # How many seconds per check for outstanding updates
-CONTAINER_CHECK_INTERVAL = 60 * 5  # How many seconds to wait for checking for new service versions
-API_TIMEOUT = 90
-HEARTBEAT_INTERVAL = 5
+# How many seconds per check for outstanding updates
+UPDATE_CHECK_INTERVAL = int(os.getenv("UPDATE_CHECK_INTERVAL", "60"))
+# How many seconds to wait for checking for new service versions
+CONTAINER_CHECK_INTERVAL = int(os.getenv("CONTAINER_CHECK_INTERVAL", "300"))
 
+API_TIMEOUT = 90
 NAMESPACE = os.getenv('NAMESPACE', None)
 INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] + \
     [
@@ -379,7 +379,7 @@ class KubernetesUpdateInterface:
                 raise
 
 
-class ServiceUpdater(CoreBase):
+class ServiceUpdater(ThreadedCoreBase):
     def __init__(self, redis_persist=None, redis=None, logger=None, datastore=None):
         super().__init__('assemblyline.service.updater', logger=logger, datastore=datastore,
                          redis_persist=redis_persist, redis=redis)
@@ -391,9 +391,6 @@ class ServiceUpdater(CoreBase):
         self.incompatible_services = set()
         self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
-
-        # Prepare a single threaded scheduler
-        self.scheduler = sched.scheduler()
 
         if 'KUBERNETES_SERVICE_HOST' in os.environ and NAMESPACE:
             extra_labels = {}
@@ -412,124 +409,119 @@ class ServiceUpdater(CoreBase):
 
     def container_updates(self):
         """Go through the list of services and check what are the latest tags for it"""
-        self.scheduler.enter(UPDATE_CHECK_INTERVAL, 0, self.container_updates)
+        while self.running:
+            self.log.info("[CU] Updating all services marked for update...")
 
-        # Update function for services
-        def update_service(service_name: str, update_data: dict) -> str:
-            self.log.info(f"Service {service_name} is being updated to version {update_data['latest_tag']}...")
+            # Update function for services
+            def update_service(service_name: str, update_data: dict) -> str:
+                self.log.info(f"[CU] Service {service_name} is being updated to version {update_data['latest_tag']}...")
 
-            # Load authentication params
-            username = None
-            password = None
-            auth = update_data['auth'] or {}
-            if auth:
-                username = auth.get('username', None)
-                password = auth.get('password', None)
+                # Load authentication params
+                username = None
+                password = None
+                auth = update_data['auth'] or {}
+                if auth:
+                    username = auth.get('username', None)
+                    password = auth.get('password', None)
 
-            latest_tag = update_data['latest_tag'].replace('stable', '')
-            service_key = f"{service_name}_{latest_tag}"
-            try:
-                self.controller.launch(
-                    name=service_name,
-                    docker_config=DockerConfig(dict(
-                        allow_internet_access=True,
-                        registry_username=username,
-                        registry_password=password,
-                        cpu_cores=1,
-                        environment=[],
-                        image=update_data['image'],
-                        ports=[]
-                    )),
-                    mounts=[],
-                    env={
-                        "SERVICE_TAG": update_data['latest_tag'],
-                        "REGISTER_ONLY": 'true'
-                    },
-                    network=AL_REGISTRATION_NETWORK,
-                    blocking=True
-                )
-            except Exception as e:
-                self.log.error(f"Service {service_name} has failed to update. Update procedure cancelled... [{str(e)}]")
-            return service_key
+                latest_tag = update_data['latest_tag'].replace('stable', '')
+                service_key = f"{service_name}_{latest_tag}"
+                try:
+                    self.controller.launch(
+                        name=service_name,
+                        docker_config=DockerConfig(dict(
+                            allow_internet_access=True,
+                            registry_username=username,
+                            registry_password=password,
+                            cpu_cores=1,
+                            environment=[],
+                            image=update_data['image'],
+                            ports=[]
+                        )),
+                        mounts=[],
+                        env={
+                            "SERVICE_TAG": update_data['latest_tag'],
+                            "REGISTER_ONLY": 'true'
+                        },
+                        network=AL_REGISTRATION_NETWORK,
+                        blocking=True
+                    )
+                except Exception as e:
+                    self.log.error(
+                        f"[CU] Service {service_name} has failed to update. Update procedure cancelled... [{str(e)}]")
+                return service_key
 
-        # Start up updates for services in parallel
-        update_threads = []
-        with ThreadPoolExecutor() as service_updates_exec:
-            for service_name, update_data in self.container_update.items().items():
-                update_threads.append(service_updates_exec.submit(update_service, service_name, update_data))
+            # Start up updates for services in parallel
+            update_threads = []
+            with ThreadPoolExecutor() as service_updates_exec:
+                for service_name, update_data in self.container_update.items().items():
+                    update_threads.append(service_updates_exec.submit(update_service, service_name, update_data))
 
-        # Once all threads are completed, check the status of the updates
-        for thread in update_threads:
-            service_key = thread.result()
-            service_name, latest_tag = service_key.split("_")
+            # Once all threads are completed, check the status of the updates
+            for thread in update_threads:
+                service_key = thread.result()
+                service_name, latest_tag = service_key.split("_")
 
-            if self.datastore.service.get_if_exists(service_key):
-                operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
+                if self.datastore.service.get_if_exists(service_key):
+                    operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
 
-                # Check if a service waas previously disabled and re-enable it
-                if service_name in self.incompatible_services:
-                    self.incompatible_services.remove(service_name)
-                    operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
+                    # Check if a service waas previously disabled and re-enable it
+                    if service_name in self.incompatible_services:
+                        self.incompatible_services.remove(service_name)
+                        operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
 
-                if self.datastore.service_delta.update(service_name, operations):
-                    # Update completed, cleanup
-                    self.service_events.send(service_name, {
-                        'operation': Operation.Modified,
-                        'name': service_name
-                    })
-                    self.log.info(f"Service {service_name} update successful!")
+                    if self.datastore.service_delta.update(service_name, operations):
+                        # Update completed, cleanup
+                        self.service_events.send(service_name, {
+                            'operation': Operation.Modified,
+                            'name': service_name
+                        })
+                        self.log.info(f"[CU] Service {service_name} update successful!")
+                    else:
+                        self.log.error(f"[CU] Service {service_name} has failed to update because it cannot set "
+                                       f"{latest_tag} as the new version. Update procedure cancelled...")
                 else:
-                    self.log.error(f"Service {service_name} has failed to update because it cannot set "
-                                   f"{latest_tag} as the new version. Update procedure cancelled...")
-            else:
-                self.log.error(f"Service {service_name} has failed to update because resulting "
-                               f"service key ({service_key}) does not exist. Update procedure cancelled...")
-            self.container_update.pop(service_name)
+                    self.log.error(f"[CU] Service {service_name} has failed to update because resulting "
+                                   f"service key ({service_key}) does not exist. Update procedure cancelled...")
+                self.container_update.pop(service_name)
 
-        # Clear out any old dead containers
-        self.controller.cleanup_stale()
+            # Clear out any old dead containers
+            self.controller.cleanup_stale()
+
+            self.log.info(f"[CU] Done updating services, waiting {UPDATE_CHECK_INTERVAL} seconds for next update...")
+            time.sleep(UPDATE_CHECK_INTERVAL)
 
     def container_versions(self):
         """Go through the list of services and check what are the latest tags for it"""
-        self.scheduler.enter(CONTAINER_CHECK_INTERVAL, 0, self.container_versions)
-        existing_services = set(self.container_update.keys()) | set(self.latest_service_tags.keys())
-        discovered_services: list[str] = []
+        while self.running:
+            self.log.info("[CV] Checking for new versions of all service containers...")
+            existing_services = set(self.container_update.keys()) | set(self.latest_service_tags.keys())
+            discovered_services: list[str] = []
 
-        for service in self.datastore.list_all_services(full=True):
-            discovered_services.append(service.name)
-            image_name, tag_name, auth = get_latest_tag_for_service(service, self.config, self.log)
-            self.latest_service_tags.set(service.name,
-                                         {'auth': auth, 'image': image_name, service.update_channel: tag_name})
+            for service in self.datastore.list_all_services(full=True):
+                discovered_services.append(service.name)
+                image_name, tag_name, auth = get_latest_tag_for_service(service, self.config, self.log, prefix="[CV] ")
+                self.latest_service_tags.set(service.name,
+                                             {'auth': auth, 'image': image_name, service.update_channel: tag_name})
 
-        # Remove services we have locally or in redis that have been deleted from the database
-        for stray_service in existing_services - set(discovered_services):
-            self.log.info(f"Service updates disabled for {stray_service}")
-            self._service_stage_hash.pop(stray_service)
-            self.container_update.pop(stray_service)
-            self.latest_service_tags.pop(stray_service)
+            # Remove services we have locally or in redis that have been deleted from the database
+            for stray_service in existing_services - set(discovered_services):
+                self.log.info(f"[CV] Service updates disabled for {stray_service}")
+                self._service_stage_hash.pop(stray_service)
+                self.container_update.pop(stray_service)
+                self.latest_service_tags.pop(stray_service)
+
+            self.log.info("[CV] Done checking for new container versions, "
+                          f"waiting {CONTAINER_CHECK_INTERVAL} seconds for next run...")
+            time.sleep(CONTAINER_CHECK_INTERVAL)
 
     def try_run(self):
-        """Run the scheduler loop until told to stop."""
-        # Do an initial call to the main methods, who will then be registered with the scheduler
-        self.container_versions()
-        self.container_updates()
-        self.heartbeat()
-
-        # Run as long as we need to
-        while self.running:
-            delay = self.scheduler.run(False)
-            if delay:
-                time.sleep(min(delay, 0.1))
-
-    def heartbeat(self, timestamp: int = None):
-        """Periodically touch a file on disk.
-
-        Since tasks are run serially, the delay between touches will be the maximum of
-        HEARTBEAT_INTERVAL and the longest running task.
-        """
-        if self.config.logging.heartbeat_file:
-            self.scheduler.enter(HEARTBEAT_INTERVAL, 0, self.heartbeat)
-            super().heartbeat(timestamp)
+        # Load and maintain threads
+        threads = {
+            'Container version check': self.container_versions,
+            'Container updates': self.container_updates
+        }
+        self.maintain_threads(threads)
 
 
 if __name__ == '__main__':
