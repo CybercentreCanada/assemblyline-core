@@ -214,7 +214,7 @@ class KubernetesController(ControllerInterface):
     def _dependency_name(self, service_name: str, container_name: str):
         return f"{self._deployment_name(service_name)}-{container_name}".lower()
 
-    def config_mount(self, name: str, config_map: str, key: str, target_path: str):
+    def config_mount(self, name: str, config_map: str, key: str, target_path: str, read_only=True):
         if name not in self.config_volumes:
             self.config_volumes[name] = V1Volume(
                 name=name,
@@ -227,10 +227,11 @@ class KubernetesController(ControllerInterface):
         self.config_mounts[target_path] = V1VolumeMount(
             name=name,
             mount_path=target_path,
-            sub_path=key
+            sub_path=key,
+            read_only=read_only
         )
 
-    def core_config_mount(self, name, config_map, key, target_path):
+    def core_config_mount(self, name, config_map, key, target_path, read_only=True):
         if name not in self.core_config_volumes:
             self.core_config_volumes[name] = V1Volume(
                 name=name,
@@ -243,7 +244,8 @@ class KubernetesController(ControllerInterface):
         self.core_config_mounts[target_path] = V1VolumeMount(
             name=name,
             mount_path=target_path,
-            sub_path=key
+            sub_path=key,
+            read_only=read_only
         )
 
     def add_profile(self, profile, scale=0):
