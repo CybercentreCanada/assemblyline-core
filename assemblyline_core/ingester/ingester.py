@@ -874,7 +874,7 @@ class Ingester(ThreadedCoreBase):
 
         if self.is_alert(task, score):
             self.log.info(f"[{task.ingest_id} :: {task.sha256}] Notifying alerter "
-                          f"to {'update' if will_resubmit else 'create'} an alert")
+                          f"to {'update' if task.params.psid else 'create'} an alert")
             self.alert_queue.push(task.as_primitives())
 
         self.send_notification(task)
