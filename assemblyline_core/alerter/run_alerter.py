@@ -64,6 +64,7 @@ class Alerter(ServerBase):
             return alert_type
         except Exception as ex:  # pylint: disable=W0703
             retries = alert['alert_retries'] = alert.get('alert_retries', 0) + 1
+            self.counter.increment('error')
             if retries > MAX_RETRIES:
                 self.log.exception(f'Max retries exceeded for: {alert}')
             else:

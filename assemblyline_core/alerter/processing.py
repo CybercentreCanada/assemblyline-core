@@ -41,6 +41,10 @@ AV_TO_BEAVIOR = (
 )
 
 
+class AlertMissingError(Exception):
+    pass
+
+
 def service_name_from_key(key):
     # noinspection PyBroadException
     try:
@@ -197,7 +201,7 @@ def perform_alert_update(datastore, logger, alert):
         old_alert, version = datastore.alert.get_if_exists(
             alert_id, as_obj=False, archive_access=config.datastore.ilm.update_archive, version=True)
         if old_alert is None:
-            raise KeyError(f"{alert_id} is missing from the alert collection.")
+            raise AlertMissingError(f"{alert_id} is missing from the alert collection.")
 
         # Ensure alert keeps original timestamp
         alert['ts'] = old_alert['ts']
@@ -237,8 +241,8 @@ def save_alert(datastore, counter, logger, alert, psid):
             perform_alert_update(datastore, logger, alert)
             counter.increment('updated')
             ret_val = 'update'
-        except KeyError as e:
-            logger.warning(f"{str(e)}. Creating a new alert [{alert['alert_id']}]...")
+        except AlertMissingError as e:
+            logger.info(f"{str(e)}. Creating a new alert [{alert['alert_id']}]...")
             msg_type, ret_val = create_alert()
     else:
         msg_type, ret_val = create_alert()
