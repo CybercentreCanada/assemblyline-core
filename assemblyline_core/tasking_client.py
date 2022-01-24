@@ -42,18 +42,16 @@ class TaskingClient:
     """
 
     def __init__(self, datastore: AssemblylineDatastore = None, filestore: FileStore = None,
-                 config=None, redis=None):
+                 config=None, redis=None, redis_persist=None):
         self.log = logging.getLogger('assemblyline.tasking_client')
         self.config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
-        self.dispatch_client = DispatchClient(self.datastore)
-        self.event_sender = EventSender('changes.services',
-                                        host=self.config.core.redis.nonpersistent.host,
-                                        port=self.config.core.redis.nonpersistent.port)
+        self.dispatch_client = DispatchClient(self.datastore, redis=redis, redis_persist=redis_persist)
+        self.event_sender = EventSender('changes.services', redis)
         self.filestore = filestore or forge.get_filestore(self.config)
         self.heuristic_handler = HeuristicHandler(self.datastore)
         self.heuristics = {h.heur_id: h for h in self.datastore.list_all_heuristics()}
-        self.status_table = ExpiringHash(SERVICE_STATE_HASH, ttl=60*30)
+        self.status_table = ExpiringHash(SERVICE_STATE_HASH, ttl=60*30, host=redis)
         self.tag_safelister = forge.CachedObject(forge.get_tag_safelister, kwargs=dict(
             log=self.log, config=config, datastore=self.datastore), refresh=300)
 

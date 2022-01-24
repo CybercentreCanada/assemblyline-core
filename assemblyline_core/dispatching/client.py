@@ -132,7 +132,7 @@ class DispatchClient:
         if dispatcher_id:
             queue_name = reply_queue_name(prefix="D", suffix="ResponseQueue")
             queue = NamedQueue(queue_name, host=self.redis, ttl=30)
-            command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+dispatcher_id, ttl=QUEUE_EXPIRY)
+            command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+dispatcher_id, ttl=QUEUE_EXPIRY, host=self.redis)
             command_queue.push(DispatcherCommandMessage({
                 'kind': LIST_OUTSTANDING,
                 'payload_data': ListOutstanding({
@@ -239,7 +239,7 @@ class DispatchClient:
         # Send the result key to any watching systems
         msg = {'status': 'OK', 'cache_key': result_key}
         for w in self._get_watcher_list(task.sid).members():
-            NamedQueue(w).push(msg)
+            NamedQueue(w, host=self.redis).push(msg)
 
         # Save the tags
         tags = []
@@ -295,7 +295,7 @@ class DispatchClient:
             # Send the result key to any watching systems
             msg = {'status': 'FAIL', 'cache_key': error_key}
             for w in self._get_watcher_list(task.sid).members():
-                NamedQueue(w).push(msg)
+                NamedQueue(w, host=self.redis).push(msg)
 
         dispatcher = task.metadata['dispatcher__']
         result_queue = self._get_queue_from_cache(DISPATCH_RESULT_QUEUE + dispatcher)
@@ -320,7 +320,7 @@ class DispatchClient:
         dispatcher_id = self.submission_assignments.get(sid)
         if dispatcher_id:
             queue_name = reply_queue_name(prefix="D", suffix="WQ")
-            command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+dispatcher_id)
+            command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+dispatcher_id, host=self.redis)
             command_queue.push(DispatcherCommandMessage({
                 'kind': CREATE_WATCH,
                 'payload_data': CreateWatch({

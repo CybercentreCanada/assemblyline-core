@@ -13,7 +13,7 @@ import threading
 import time
 from os import environ
 from random import random
-from typing import Iterable, List, Optional, Dict, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import elasticapm
 
@@ -163,9 +163,9 @@ class Ingester(ThreadedCoreBase):
 
         # Constants are loaded based on a non-constant path, so has to be done at init rather than load
         constants = forge.get_constants(self.config)
-        self.priority_value: Dict[str, int] = constants.PRIORITIES
-        self.priority_range: Dict[str, Tuple[int, int]] = constants.PRIORITY_RANGES
-        self.threshold_value: Dict[str, int] = constants.PRIORITY_THRESHOLDS
+        self.priority_value: dict[str, int] = constants.PRIORITIES
+        self.priority_range: dict[str, Tuple[int, int]] = constants.PRIORITY_RANGES
+        self.threshold_value: dict[str, int] = constants.PRIORITY_THRESHOLDS
 
         # Classification engine
         self.ce = classification or forge.get_classification()
