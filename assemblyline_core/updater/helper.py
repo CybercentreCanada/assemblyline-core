@@ -130,19 +130,23 @@ def get_latest_tag_for_service(service_config, system_config, logger, prefix="")
                                                        not system_config.services.allow_insecure_registry)
 
     tag_name = None
+
+    # Pre-filter tags to only consider 'compatible' tags relative to the running system
+    tags = [t for t in tags
+            if re.match(f"({FRAMEWORK_VERSION})[.]({SYSTEM_VERSION})[.]\\d+[.]({update_channel})\\d+", t)]
+
     if not tags:
         logger.warning(f"{prefix}Cannot fetch latest tag for service {service_name} - {image_name}"
                        f" => [server: {server}, repo_name: {image_name}, channel: {update_channel}]")
     else:
         for t in tags:
-            if re.match(f"({FRAMEWORK_VERSION})[.]({SYSTEM_VERSION})[.]\\d+[.]({update_channel})\\d+", t):
-                t_version = Version(t.replace(update_channel, ""))
-                # Tag name gets assigned to the first viable option then relies on comparison to get the latest
-                if not tag_name:
-                    tag_name = t
-                elif t_version.major == FRAMEWORK_VERSION and t_version.minor == SYSTEM_VERSION and \
-                        t_version > parse(tag_name.replace(update_channel, "")):
-                    tag_name = t
+            t_version = Version(t.replace(update_channel, ""))
+            # Tag name gets assigned to the first viable option then relies on comparison to get the latest
+            if not tag_name:
+                tag_name = t
+            elif t_version.major == FRAMEWORK_VERSION and t_version.minor == SYSTEM_VERSION and \
+                    t_version > parse(tag_name.replace(update_channel, "")):
+                tag_name = t
 
         logger.info(f"{prefix}Latest {service_name} tag on {update_channel.upper()} channel is: {tag_name}")
 
