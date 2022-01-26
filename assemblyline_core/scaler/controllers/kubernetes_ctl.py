@@ -29,6 +29,7 @@ WATCH_TIMEOUT = 10 * 60
 WATCH_API_TIMEOUT = WATCH_TIMEOUT + 10
 CHANGE_KEY_NAME = 'al_change_key'
 DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() == 'true'
+CONTAINER_RESTART_THRESHOLD = int(os.environ.get('CONTAINER_RESTART_THRESHOLD', 1))
 
 _exponents = {
     'ki': 2**10,
@@ -313,7 +314,7 @@ class KubernetesController(ControllerInterface):
                         if namespace == self.namespace:
                             namespaced_containers[f"{uid}-{container['name']}"] = get_resources(container)
                     for status in event['raw_object']['status']['containerStatuses']:
-                        if status['restartCount'] > 1:
+                        if status['restartCount'] > CONTAINER_RESTART_THRESHOLD:
                             self.logger.warning(f"Container Status :: {pod_name} - "
                                                 f"Current State: {list(status['state'].keys())[0]}, "
                                                 f"Last State: {list(status['lastState'].keys())[0]} "
