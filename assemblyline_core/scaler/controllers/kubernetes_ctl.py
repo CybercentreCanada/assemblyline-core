@@ -312,6 +312,12 @@ class KubernetesController(ControllerInterface):
                         containers[f"{uid}-{container['name']}"] = get_resources(container)
                         if namespace == self.namespace:
                             namespaced_containers[f"{uid}-{container['name']}"] = get_resources(container)
+                    for status in event['raw_object']['status']['containerStatuses']:
+                        if status['restartCount'] > 1:
+                            self.logger.warning(f"Container Status :: {pod_name} - "
+                                                f"Current State: {list(status['state'].keys())[0]}, "
+                                                f"Last State: {list(status['lastState'].keys())[0]} "
+                                                f"with reason {list(status['lastState'].values())[0]['reason']}")
                 elif event['type'] == 'DELETED':
                     for container in event['raw_object']['spec']['containers']:
                         containers.pop(f"{uid}-{container['name']}", None)
