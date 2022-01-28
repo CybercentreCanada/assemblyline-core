@@ -303,11 +303,12 @@ class KubernetesController(ControllerInterface):
             if not self.running:
                 break
 
-            pod_name = event['raw_object']['metadata']['name']
-            uid = event['raw_object']['metadata']['uid']
-            namespace = event['raw_object']['metadata']['namespace']
-
+            pod_name = "Unknown Pod"
             try:
+                pod_name = event['raw_object']['metadata']['name']
+                uid = event['raw_object']['metadata']['uid']
+                namespace = event['raw_object']['metadata']['namespace']
+
                 if event['type'] in ['ADDED', 'MODIFIED']:
                     for container in event['raw_object']['spec']['containers']:
                         containers[f"{uid}-{container['name']}"] = get_resources(container)
@@ -325,8 +326,14 @@ class KubernetesController(ControllerInterface):
                         namespaced_containers.pop(f"{uid}-{container['name']}", None)
                 else:
                     continue
+            except KeyError as e:
+                # Sometimes some of the information is missing, and we expect it, so drop
+                # log sevarity to info.
+                self.logger.info(f"Couldn't parse container information for {pod_name}: {e}")
+                continue
             except Exception as e:
                 self.logger.exception(f"Couldn't parse container information for {pod_name}: {e}")
+                continue
 
             memory_unrestricted = sum(1 for cpu, mem in containers.values() if mem is None)
             cpu_unrestricted = sum(1 for cpu, mem in containers.values() if cpu is None)
