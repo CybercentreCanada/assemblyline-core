@@ -1,3 +1,7 @@
+import functools
+import requests
+import re
+
 from assemblyline.common import forge
 from assemblyline.common.caching import TimeExpiredCache
 from assemblyline.common.dict_utils import recursive_update
@@ -5,6 +9,7 @@ from assemblyline.common.str_utils import safe_str
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.exceptions import VersionConflictException
 from assemblyline.odm.messages.alert import AlertMessage
+from assemblyline.odm.models.config import AlertEnrichment, AlertFilter
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
 CACHE_LEN = 60 * 60 * 24
@@ -362,4 +367,79 @@ def process_alert_message(counter, datastore, logger, alert_data):
     # Update alert with computed values
     alert = recursive_update(alert, alert_update_p2)
 
+    for enrichment_endpoint in config.core.alerter.enrichment_endpoint:
+        apply_enrichment_step(logger, alert, enrichment_endpoint)
+
     return save_alert(datastore, counter, logger, alert, alert_data['submission']['params']['psid'])
+
+
+def apply_enrichment_step(logger, alert: dict, enrichment: AlertEnrichment):
+    # Make sure this alert has the fields that this enrichment endpoint requires
+    try:
+        for alert_filter in enrichment.filters:
+            if not apply_filter(alert, alert_filter):
+                return
+    except Exception:
+        logger.exeception("Error filtering alerts for enrichment")
+        return
+
+    # Send the alert to the enrichment server
+    attempts = 3
+    while attempts > 0:
+        attempts -= 1
+        try:
+            resp = requests.post(enrichment.url, json=alert)
+            resp.raise_for_status()
+            body = resp.json()
+
+            for change in body:
+                alert = recursive_update(alert, change)
+
+        except requests.exceptions.ConnectionError:
+            logger.warn(f"Connection error reaching enrichment server: {enrichment.url}")
+            attempts += 1
+
+        except requests.HTTPError:
+            logger.exception(f"Error on enrichment server: {enrichment.url}")
+            return
+
+
+@functools.cache
+def compile_regex(regex_string: str):
+    return re.compile(regex_string)
+
+
+def apply_filter(alert, alert_filter: AlertFilter) -> bool:
+    parts = alert_filter.key.split('.')
+
+    data = alert
+    for key in parts:
+        if isinstance(dict, data):
+            if key in data:
+                data = data[key]
+            else:
+                return False
+        elif isinstance(list, data):
+            try:
+                key = int(key)
+            except (ValueError, TypeError):
+                return False
+            if key < len(data):
+                data = data[key]
+            else:
+                return False
+        else:
+            return False
+
+    if alert_filter.value_pattern is None:
+        return True
+
+    filter_obj = compile_regex(alert_filter.value_pattern)
+    if isinstance(str, data):
+        return filter_obj.search(data) is not None
+    elif isinstance(list, data):
+        for datum in data:
+            if isinstance(str, datum):
+                if filter_obj.search(datum) is not None:
+                    return True
+    return False
