@@ -719,7 +719,7 @@ class KubernetesController(ControllerInterface):
         deployment_name = self._dependency_name(service_name, container_name)
         mounts, volumes = [], []
         for volume_name, volume_spec in spec.volumes.items():
-            mount_name = deployment_name + volume_name
+            mount_name = f'{deployment_name}-{volume_name}'
 
             # Check if the PVC exists, create if not
             self._ensure_pvc(mount_name, volume_spec.storage_class, volume_spec.capacity)
@@ -779,7 +779,8 @@ class KubernetesController(ControllerInterface):
 
     def _ensure_pvc(self, name, storage_class, size):
         request = V1ResourceRequirements(requests={'storage': size})
-        claim_spec = V1PersistentVolumeClaimSpec(storage_class_name=storage_class, resources=request)
+        claim_spec = V1PersistentVolumeClaimSpec(storage_class_name=storage_class, resources=request,
+                                                 volume_mode='Filesystem', access_modes=['ReadWriteOnce'])
         metadata = V1ObjectMeta(namespace=self.namespace, name=name)
         claim = V1PersistentVolumeClaim(metadata=metadata, spec=claim_spec)
         self.api.create_namespaced_persistent_volume_claim(namespace=self.namespace, body=claim,
