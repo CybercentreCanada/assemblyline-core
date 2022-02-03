@@ -781,7 +781,7 @@ class KubernetesController(ControllerInterface):
             self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
 
     def _ensure_pvc(self, name, storage_class, size, deployment_name):
-        request = V1ResourceRequirements(requests={'storage': size})
+        request = V1ResourceRequirements(requests={'storage': f'{max(round(int(size)/1024), 1024)}Mi'})
         claim_spec = V1PersistentVolumeClaimSpec(storage_class_name=storage_class, resources=request,
                                                  volume_mode='Filesystem', access_modes=['ReadWriteOnce'])
         metadata = V1ObjectMeta(namespace=self.namespace, name=name)
