@@ -848,21 +848,7 @@ class Dispatcher(ThreadedCoreBase):
             elif kind == Action.service_timeout:
                 task = self.tasks.get(message.sid)
                 if task:
-                    if self.timeout_service(task, message.sha, message.service_name, message.worker_id):
-                        self._dispatching_error(task, Error({
-                            'archive_ts': task.submission.archive_ts,
-                            'expiry_ts': task.submission.expiry_ts,
-                            'response': {
-                                'message': f"{message.service_name} has timed out on "
-                                           f"{message.sha}",
-                                'service_name': message.service_name,
-                                'service_tool_version': "0",
-                                'service_version': "0",
-                                'status': 'FAIL_RECOVERABLE'
-                            },
-                            'sha256': message.sha,
-                            'type': 'UNKNOWN'
-                        }))
+                    self.timeout_service(task, message.sha, message.service_name, message.worker_id)
 
             elif kind == Action.dispatch_file:
                 task = self.tasks.get(message.sid)
