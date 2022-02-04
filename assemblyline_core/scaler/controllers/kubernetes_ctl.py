@@ -781,7 +781,9 @@ class KubernetesController(ControllerInterface):
             self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
 
     def _ensure_pvc(self, name, storage_class, size, deployment_name):
-        request = V1ResourceRequirements(requests={'storage': f'{max(round(int(size)/1024), 1024)}Mi'})
+        size_Mi = f'{max(round(int(size)/1024), 1024)}Mi'
+        size_Gi = f'{max(round(int(size)/1048576), 1)}Gi'
+        request = V1ResourceRequirements(requests={'storage': size_Mi})
         claim_spec = V1PersistentVolumeClaimSpec(storage_class_name=storage_class, resources=request,
                                                  volume_mode='Filesystem', access_modes=['ReadWriteOnce'])
         metadata = V1ObjectMeta(namespace=self.namespace, name=name)
@@ -807,8 +809,10 @@ class KubernetesController(ControllerInterface):
         # Check to see if a PVC with the same name exists
         for pvc in self.api.list_namespaced_persistent_volume_claim(namespace=self.namespace).items:
             if pvc.metadata.name == metadata.name:
+                pvc_requests = pvc.spec.resources.requests
                 # Check for significant changes, if so replace
-                if pvc.spec.resources.requests != claim.spec.resources.requests or \
+                if (pvc_requests['storage'].endswith('Mi') and pvc_requests['storage'] != size_Mi) or \
+                    (pvc_requests['storage'].endswith('Gi') and pvc_requests['storage'] != size_Gi) or \
                         pvc.spec.storage_class_name != claim.spec.storage_class_name:
                     # If PVC is currently in use, terminate associated deployments to proceed with replacement
                     remove_pvc(deployment_name, name)
