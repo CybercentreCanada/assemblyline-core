@@ -1,22 +1,24 @@
 from __future__ import annotations
 import base64
-from collections import defaultdict
 import functools
 import json
 import uuid
 import os
 import threading
 import weakref
-from typing import Optional, Tuple
-
 import urllib3
+
+from collections import defaultdict
+from typing import Optional, Tuple
+from time import sleep
+
 
 from kubernetes import client, config, watch
 from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec, \
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
-    V1NetworkPolicyIngressRule, V1Secret, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort
+    V1NetworkPolicyIngressRule, V1Secret, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext
 from kubernetes.client.rest import ApiException
 from assemblyline.odm.models.service import DockerConfig
 
@@ -313,7 +315,7 @@ class KubernetesController(ControllerInterface):
                         containers[f"{uid}-{container['name']}"] = get_resources(container)
                         if namespace == self.namespace:
                             namespaced_containers[f"{uid}-{container['name']}"] = get_resources(container)
-                    for status in event['raw_object']['status']['containerStatuses']:
+                    for status in event['raw_object']['status'].get('containerStatuses', []):
                         if status['restartCount'] > CONTAINER_RESTART_THRESHOLD:
                             self.logger.warning(f"Container Status :: {pod_name} - "
                                                 f"Current State: {list(status['state'].keys())[0]}, "
@@ -581,6 +583,7 @@ class KubernetesController(ControllerInterface):
                                                all_mounts, core_container=core_mounts),
             priority_class_name=self.priority,
             termination_grace_period_seconds=shutdown_seconds,
+            security_context=V1PodSecurityContext(fs_group=1000)
         )
 
         if use_pull_secret:
@@ -719,10 +722,10 @@ class KubernetesController(ControllerInterface):
         deployment_name = self._dependency_name(service_name, container_name)
         mounts, volumes = [], []
         for volume_name, volume_spec in spec.volumes.items():
-            mount_name = deployment_name + volume_name
+            mount_name = f'{deployment_name}-{volume_name}'
 
             # Check if the PVC exists, create if not
-            self._ensure_pvc(mount_name, volume_spec.storage_class, volume_spec.capacity)
+            self._ensure_pvc(mount_name, volume_spec.storage_class, volume_spec.capacity, deployment_name)
 
             # Create the volume info
             volumes.append(V1Volume(
@@ -777,21 +780,62 @@ class KubernetesController(ControllerInterface):
         if spec.container.ports:
             self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
 
-    def _ensure_pvc(self, name, storage_class, size):
-        request = V1ResourceRequirements(requests={'storage': size})
-        claim_spec = V1PersistentVolumeClaimSpec(storage_class_name=storage_class, resources=request)
+    def _ensure_pvc(self, name, storage_class, size, deployment_name):
+        size_Mi = f'{max(round(int(size)/1024), 1024)}Mi'
+        size_Gi = f'{max(round(int(size)/1048576), 1)}Gi'
+        request = V1ResourceRequirements(requests={'storage': size_Mi})
+        claim_spec = V1PersistentVolumeClaimSpec(storage_class_name=storage_class, resources=request,
+                                                 volume_mode='Filesystem', access_modes=['ReadWriteOnce'])
         metadata = V1ObjectMeta(namespace=self.namespace, name=name)
         claim = V1PersistentVolumeClaim(metadata=metadata, spec=claim_spec)
+
+        def remove_pvc(deployment_name, pvc_name):
+            self.logger.info(f'Deleting old {deployment_name} deployment to release {name} PVC to be recreated..')
+            # Remove deployment
+            self.apps_api.delete_namespaced_deployment(name=deployment_name, namespace=self.namespace,
+                                                       _request_timeout=API_TIMEOUT)
+            # Remove PVC
+            self.api.delete_namespaced_persistent_volume_claim(name=pvc_name, namespace=self.namespace,
+                                                               _request_timeout=API_TIMEOUT)
+            # Poll to see if PVC has been removed
+            try:
+                while self.api.read_namespaced_persistent_volume_claim_status(name=pvc_name, namespace=self.namespace):
+                    sleep(15)
+            except ApiException as e:
+                if e.status == 404:
+                    return
+                self.logger.error(e.reason)
+
+        # Check to see if a PVC with the same name exists
+        for pvc in self.api.list_namespaced_persistent_volume_claim(namespace=self.namespace).items:
+            if pvc.metadata.name == metadata.name:
+                pvc_requests = pvc.spec.resources.requests
+                # Check for significant changes, if so replace
+                if (pvc_requests['storage'].endswith('Mi') and pvc_requests['storage'] != size_Mi) or \
+                    (pvc_requests['storage'].endswith('Gi') and pvc_requests['storage'] != size_Gi) or \
+                        pvc.spec.storage_class_name != claim.spec.storage_class_name:
+                    # If PVC is currently in use, terminate associated deployments to proceed with replacement
+                    remove_pvc(deployment_name, name)
+                    break
+                # Otherwise no need to create a PVC that already exists unchanged
+                return
         self.api.create_namespaced_persistent_volume_claim(namespace=self.namespace, body=claim,
                                                            _request_timeout=API_TIMEOUT)
 
-    def stop_containers(self, labels):
+    def stop_containers(self, labels, fields={}):
         label_selector = ','.join(f'{_n}={_v}' for _n, _v in labels.items())
         deployments = self.apps_api.list_namespaced_deployment(namespace=self.namespace, label_selector=label_selector,
                                                                _request_timeout=API_TIMEOUT)
         for dep in deployments.items:
+            # Remove deployments with matching labels
             self.apps_api.delete_namespaced_deployment(name=dep.metadata.name, namespace=self.namespace,
                                                        _request_timeout=API_TIMEOUT)
+            # Remove PV/C related to the deployment
+            for vol in dep.spec.template.spec.volumes:
+                if vol._persistent_volume_claim:
+                    self.api.delete_namespaced_persistent_volume_claim(name=vol._persistent_volume_claim.claim_name,
+                                                                       namespace=self.namespace,
+                                                                       _request_timeout=API_TIMEOUT)
 
     def prepare_network(self, service_name, internet, dependency_internet):
         safe_name = service_name.lower().replace('_', '-')
