@@ -43,7 +43,7 @@ INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'h
 CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', None)
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 
-SERVICE_API_HOST = os.environ.get('SERVICE_API_HOST', "http://al_service_server:5003")
+SERVICE_API_HOST = os.environ.get('SERVICE_API_HOST', "http://service_server:5003")
 SERVICE_API_KEY = os.environ.get('SERVICE_API_KEY', 'ThisIsARandomAuthKey...ChangeMe!')
 
 AL_REGISTRATION_NETWORK = os.environ.get("AL_REGISTRATION_NETWORK", 'al_registration')
