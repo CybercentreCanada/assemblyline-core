@@ -5,7 +5,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-from typing import Dict, List, Tuple, Set, Optional, Any
+from typing import Optional, Any, TYPE_CHECKING
 import json
 import enum
 from queue import PriorityQueue, Empty
@@ -35,6 +35,11 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
 from assemblyline_core.server_base import ThreadedCoreBase
+
+
+if TYPE_CHECKING:
+    from assemblyline.odm.models.file import File
+
 
 from .schedules import Scheduler
 from .timeout import TimeoutTable
@@ -84,7 +89,7 @@ class ResultSummary:
         self.key: str = key
         self.drop: bool = drop
         self.score: int = score
-        self.children: List[str] = children
+        self.children: list[str] = children
 
 
 class SubmissionTask:
@@ -94,21 +99,21 @@ class SubmissionTask:
         self.submission: Submission = Submission(submission)
         self.completed_queue = str(completed_queue)
 
-        self.file_info: Dict[str, Optional[FileInfo]] = {}
-        self.file_names: Dict[str, str] = {}
-        self.file_schedules: Dict[str, List[Dict[str, Service]]] = {}
+        self.file_info: dict[str, Optional[FileInfo]] = {}
+        self.file_names: dict[str, str] = {}
+        self.file_schedules: dict[str, list[dict[str, Service]]] = {}
         self.file_tags = defaultdict(list)
-        self.file_depth: Dict[str, int] = {}
+        self.file_depth: dict[str, int] = {}
         self.file_temporary_data = defaultdict(dict)
         self.extra_errors = []
-        self.active_files: Set[str] = set()
+        self.active_files: set[str] = set()
         self.dropped_files = set()
 
-        self.service_results: Dict[Tuple[str, str], ResultSummary] = {}
-        self.service_errors: Dict[Tuple[str, str], str] = {}
-        self.service_attempts: Dict[Tuple[str, str], int] = defaultdict(int)
-        self.queue_keys: Dict[Tuple[str, str], bytes] = {}
-        self.running_services: Set[Tuple[str, str]] = set()
+        self.service_results: dict[tuple[str, str], ResultSummary] = {}
+        self.service_errors: dict[tuple[str, str], str] = {}
+        self.service_attempts: dict[tuple[str, str], int] = defaultdict(int)
+        self.queue_keys: dict[tuple[str, str], str] = {}
+        self.running_services: set[tuple[str, str]] = set()
 
     @property
     def sid(self):
@@ -161,7 +166,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Load the datastore collections that we are going to be using
         self.instance_id = uuid.uuid4().hex
-        self.tasks: Dict[str, SubmissionTask] = {}
+        self.tasks: dict[str, SubmissionTask] = {}
         self.finalizing = threading.Event()
         self.finalizing_start = 0.0
 
@@ -202,12 +207,12 @@ class Dispatcher(ThreadedCoreBase):
             self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
                                                 service_name="dispatcher")
 
-        self._service_timeouts: TimeoutTable[Tuple[str, str, str], str] = TimeoutTable()
+        self._service_timeouts: TimeoutTable[tuple[str, str, str], str] = TimeoutTable()
         self._submission_timeouts: TimeoutTable[str, None] = TimeoutTable()
 
         # Setup queues for work to be divided into
-        self.process_queues: List[PriorityQueue[DispatchAction]] = [PriorityQueue() for _ in range(RESULT_THREADS)]
-        self.queue_ready_signals: List[threading.Semaphore] = [threading.Semaphore(MAX_RESULT_BUFFER)
+        self.process_queues: list[PriorityQueue[DispatchAction]] = [PriorityQueue() for _ in range(RESULT_THREADS)]
+        self.queue_ready_signals: list[threading.Semaphore] = [threading.Semaphore(MAX_RESULT_BUFFER)
                                                                for _ in range(RESULT_THREADS)]
 
     def interrupt_handler(self, signum, stack_frame):
@@ -386,7 +391,8 @@ class Dispatcher(ThreadedCoreBase):
         if sha256 not in task.file_schedules:
             with elasticapm.capture_span('build_schedule'):
                 # We are processing this file, load the file info, and build the schedule
-                filestore_info = self.datastore.file.get(sha256)
+                filestore_info: Optional[File] = self.datastore.file.get(sha256)
+
                 if filestore_info is None:
                     task.dropped_files.add(sha256)
                     self._dispatching_error(task, Error({
@@ -554,15 +560,15 @@ class Dispatcher(ThreadedCoreBase):
         :return: true if submission has been finished.
         """
         # Track which files we have looked at already
-        checked: Set[str] = set()
-        unchecked: List[str] = list(task.file_depth.keys())
+        checked: set[str] = set()
+        unchecked: list[str] = list(task.file_depth.keys())
 
         # Categorize files as pending/processing (can be both) all others are finished
         pending_files = []  # Files where we are missing a service and it is not being processed
         processing_files = []  # Files where at least one service is in progress/queued
 
         # Track information about the results as we hit them
-        file_scores: Dict[str, int] = {}
+        file_scores: dict[str, int] = {}
 
         # Make sure we have either a result or
         while unchecked:
@@ -644,7 +650,7 @@ class Dispatcher(ThreadedCoreBase):
         return False
 
     @classmethod
-    def build_service_config(cls, service: Service, submission: Submission) -> Dict[str, str]:
+    def build_service_config(cls, service: Service, submission: Submission) -> dict[str, str]:
         """Prepare the service config that will be used downstream.
 
         v3 names: get_service_params get_config_data
@@ -802,7 +808,11 @@ class Dispatcher(ThreadedCoreBase):
                         self.log.warning(f'[{message.sid}] Service started for finished task.')
                         continue
 
-                    key = message.sha, message.service_name
+                    if not message.sha or not message.service_name:
+                        self.log.warning(f'[{message.sid}] Service started missing data.')
+                        continue
+
+                    key = (message.sha, message.service_name)
                     if task.queue_keys.pop(key, None) is not None:
                         # If this task is already finished (result message processed before start
                         # message) we can skip setting a timeout
@@ -838,21 +848,7 @@ class Dispatcher(ThreadedCoreBase):
             elif kind == Action.service_timeout:
                 task = self.tasks.get(message.sid)
                 if task:
-                    if self.timeout_service(task, message.sha, message.service_name, message.worker_id):
-                        self._dispatching_error(task, Error({
-                            'archive_ts': task.submission.archive_ts,
-                            'expiry_ts': task.submission.expiry_ts,
-                            'response': {
-                                'message': f"{message.service_name} has timed out on "
-                                           f"{message.sha}",
-                                'service_name': message.service_name,
-                                'service_tool_version': "0",
-                                'service_version': "0",
-                                'status': 'FAIL_RECOVERABLE'
-                            },
-                            'sha256': message.sha,
-                            'type': 'UNKNOWN'
-                        }))
+                    self.timeout_service(task, message.sha, message.service_name, message.worker_id)
 
             elif kind == Action.dispatch_file:
                 task = self.tasks.get(message.sid)
