@@ -168,6 +168,7 @@ class DockerController(ControllerInterface):
         env += [f'{_n}={_v}' for _n, _v in self._service_limited_env[service_name].items()]
         if prof.privileged:
             env.append('PRIVILEGED=true')
+            volumes.update({row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.core_mounts})
 
         container = self.client.containers.run(
             image=cfg.image,
@@ -459,7 +460,6 @@ class DockerController(ControllerInterface):
         self._service_limited_env[service_name][f'{container_name}_key'] = instance_key
         if spec.container.ports:
             self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
-
         self._start_container(service_name=service_name, name=deployment_name, labels=all_labels,
                               volumes=volumes, hostname=container_name, cfg=spec.container,
                               core_container=spec.run_as_core, network=self._get_network(service_name).name)
