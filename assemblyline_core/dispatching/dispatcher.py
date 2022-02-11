@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from typing import Optional, Any, TYPE_CHECKING
 import json
 import enum
-from queue import PriorityQueue, Empty
+from queue import PriorityQueue, Empty, Queue
 import dataclasses
 
 import elasticapm
@@ -214,6 +214,7 @@ class Dispatcher(ThreadedCoreBase):
         self.process_queues: list[PriorityQueue[DispatchAction]] = [PriorityQueue() for _ in range(RESULT_THREADS)]
         self.queue_ready_signals: list[threading.Semaphore] = [threading.Semaphore(MAX_RESULT_BUFFER)
                                                                for _ in range(RESULT_THREADS)]
+        self.finalize_queue = Queue()
 
     def interrupt_handler(self, signum, stack_frame):
         self.log.info("Instance caught signal. Beginning to drain work.")
@@ -237,6 +238,8 @@ class Dispatcher(ThreadedCoreBase):
         threads = {
             # Pull in new submissions
             'Pull Submissions': self.pull_submissions,
+            # Finilize submissions that are done
+            'Save Submissions': self.save_submission,
             # pull start messages
             'Pull Service Start': self.pull_service_starts,
             # pull result messages
@@ -645,7 +648,7 @@ class Dispatcher(ThreadedCoreBase):
         else:
             self.log.debug(f"[{task.submission.sid}] Finalizing submission.")
             max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
-            self.finalize_submission(task, max_score, checked)
+            self.finalize_queue.put((task, max_score, checked))
             return True
         return False
 
@@ -662,6 +665,14 @@ class Dispatcher(ThreadedCoreBase):
         if service.name in submission.params.service_spec:
             params.update(submission.params.service_spec[service.name])
         return params
+
+    def save_submission(self):
+        while self.running:
+            try:
+                task, max_score, checked = self.finalize_queue.get(block=True, timeout=3)
+                self.finalize_submission(task, max_score, checked)
+            except Empty:
+                pass
 
     @elasticapm.capture_span(span_type='dispatcher')
     def finalize_submission(self, task: SubmissionTask, max_score, file_list):
