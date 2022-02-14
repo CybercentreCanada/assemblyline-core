@@ -134,6 +134,7 @@ TIMEOUT_EXTRA_TIME = 5
 TIMEOUT_TEST_INTERVAL = 5
 MAX_RESULT_BUFFER = 64
 RESULT_THREADS = max(1, int(os.getenv('DISPATCHER_RESULT_THREADS', '2')))
+FINALIZE_THREADS = max(1, int(os.getenv('DISPATCHER_FINALIZE_THREADS', '2')))
 
 # After 20 minutes, check if a submission is still making progress.
 # In the case of a crash somewhere else in the system, we may not have
@@ -238,8 +239,6 @@ class Dispatcher(ThreadedCoreBase):
         threads = {
             # Pull in new submissions
             'Pull Submissions': self.pull_submissions,
-            # Finilize submissions that are done
-            'Save Submissions': self.save_submission,
             # pull start messages
             'Pull Service Start': self.pull_service_starts,
             # pull result messages
@@ -254,6 +253,11 @@ class Dispatcher(ThreadedCoreBase):
             # Process to protect against old dead tasks timing out
             'Global Timeout Backstop': self.timeout_backstop,
         }
+
+        for ii in range(FINALIZE_THREADS):
+            # Finilize submissions that are done
+            threads[f'Save Submissions #{ii}'] = self.save_submission
+
         for ii in range(RESULT_THREADS):
             # Process results
             threads[f'Service Update Worker #{ii}'] = self.service_worker_factory(ii)
