@@ -21,7 +21,7 @@ from packaging import version
 
 METRICS_QUEUE = "assemblyline_metrics"
 NON_AGGREGATED = ['scaler', 'scaler_status']
-NON_AGGREGATED_COUNTERS = {'dispatcher': set('submission_queue')}
+NON_AGGREGATED_COUNTERS = {'dispatcher': {'save_queue'}}
 
 
 def cleanup_metrics(input_dict):
@@ -184,11 +184,15 @@ class MetricsServer(ServerBase):
 
                 with self.counters_lock:
                     c_key = (m_name, m_type)
-                    if c_key not in self.counters or m_type in NON_AGGREGATED or \
-                            c_key in NON_AGGREGATED_COUNTERS.get(m_type, {}):
+                    if c_key not in self.counters or m_type in NON_AGGREGATED:
                         self.counters[c_key] = Counter(msg)
                     else:
+                        non_agg_values = {}
+                        if m_type in NON_AGGREGATED_COUNTERS:
+                            non_agg_values = {k: v for k, v in msg.items() if k in NON_AGGREGATED_COUNTERS[m_type]}
                         self.counters[c_key].update(Counter(msg))
+                        for k, v in non_agg_values.items():
+                            self.counters[c_key][k] = v
 
                 # APM Transaction end
                 if self.apm_client:
@@ -299,12 +303,15 @@ class HeartbeatManager(ServerBase):
 
                 with self.counters_lock:
                     c_key = (m_name, m_type, m_host)
-                    if c_key not in self.counters or \
-                            m_type in NON_AGGREGATED or \
-                            c_key in NON_AGGREGATED_COUNTERS.get(m_type, {}):
+                    if c_key not in self.counters or m_type in NON_AGGREGATED:
                         self.counters[c_key] = Counter(msg)
                     else:
+                        non_agg_values = {}
+                        if m_type in NON_AGGREGATED_COUNTERS:
+                            non_agg_values = {k: v for k, v in msg.items() if k in NON_AGGREGATED_COUNTERS[m_type]}
                         self.counters[c_key].update(Counter(msg))
+                        for k, v in non_agg_values.items():
+                            self.counters[c_key][k] = v
 
                 # APM Transaction end
                 if self.apm_client:
@@ -332,8 +339,7 @@ class HeartbeatManager(ServerBase):
 
             for w_key, counter in counter_copy.items():
                 _, m_type, _ = w_key
-                if w_key not in self.rolling_window or m_type in NON_AGGREGATED or \
-                        w_key in NON_AGGREGATED_COUNTERS.get(m_type, {}):
+                if w_key not in self.rolling_window or m_type in NON_AGGREGATED:
                     self.rolling_window[w_key] = [counter]
                 else:
                     self.rolling_window[w_key].append(counter)
