@@ -21,6 +21,7 @@ from packaging import version
 
 METRICS_QUEUE = "assemblyline_metrics"
 NON_AGGREGATED = ['scaler', 'scaler_status']
+NON_AGGREGATED_COUNTERS = {'dispatcher': set('submission_queue')}
 
 
 def cleanup_metrics(input_dict):
@@ -55,6 +56,7 @@ class StatisticsAggregator(ServerBase):
     There's no need to be more then one of these since it's job is
     only to cache statistics about signatures and heuristics once per day
     """
+
     def __init__(self, config=None):
         super().__init__('assemblyline.statistics_aggregator')
         self.config = config or forge.get_config()
@@ -118,6 +120,7 @@ class MetricsServer(ServerBase):
     """
     There can only be one of these type of metrics server running because it runs of a pubsub queue.
     """
+
     def __init__(self, config=None):
         super().__init__('assemblyline.metrics_aggregator', shutdown_timeout=65)
         self.config = config or forge.get_config()
@@ -181,7 +184,8 @@ class MetricsServer(ServerBase):
 
                 with self.counters_lock:
                     c_key = (m_name, m_type)
-                    if c_key not in self.counters or m_type in NON_AGGREGATED:
+                    if c_key not in self.counters or m_type in NON_AGGREGATED or \
+                            c_key in NON_AGGREGATED_COUNTERS.get(m_type, {}):
                         self.counters[c_key] = Counter(msg)
                     else:
                         self.counters[c_key].update(Counter(msg))
@@ -295,7 +299,9 @@ class HeartbeatManager(ServerBase):
 
                 with self.counters_lock:
                     c_key = (m_name, m_type, m_host)
-                    if c_key not in self.counters or m_type in NON_AGGREGATED:
+                    if c_key not in self.counters or \
+                            m_type in NON_AGGREGATED or \
+                            c_key in NON_AGGREGATED_COUNTERS.get(m_type, {}):
                         self.counters[c_key] = Counter(msg)
                     else:
                         self.counters[c_key].update(Counter(msg))
@@ -326,7 +332,8 @@ class HeartbeatManager(ServerBase):
 
             for w_key, counter in counter_copy.items():
                 _, m_type, _ = w_key
-                if w_key not in self.rolling_window or m_type in NON_AGGREGATED:
+                if w_key not in self.rolling_window or m_type in NON_AGGREGATED or \
+                        w_key in NON_AGGREGATED_COUNTERS.get(m_type, {}):
                     self.rolling_window[w_key] = [counter]
                 else:
                     self.rolling_window[w_key].append(counter)
