@@ -21,6 +21,7 @@ from packaging import version
 
 METRICS_QUEUE = "assemblyline_metrics"
 NON_AGGREGATED = ['scaler', 'scaler_status']
+NON_AGGREGATED_COUNTERS = {'dispatcher': {'save_queue'}}
 
 
 def cleanup_metrics(input_dict):
@@ -55,6 +56,7 @@ class StatisticsAggregator(ServerBase):
     There's no need to be more then one of these since it's job is
     only to cache statistics about signatures and heuristics once per day
     """
+
     def __init__(self, config=None):
         super().__init__('assemblyline.statistics_aggregator')
         self.config = config or forge.get_config()
@@ -118,6 +120,7 @@ class MetricsServer(ServerBase):
     """
     There can only be one of these type of metrics server running because it runs of a pubsub queue.
     """
+
     def __init__(self, config=None):
         super().__init__('assemblyline.metrics_aggregator', shutdown_timeout=65)
         self.config = config or forge.get_config()
@@ -184,7 +187,12 @@ class MetricsServer(ServerBase):
                     if c_key not in self.counters or m_type in NON_AGGREGATED:
                         self.counters[c_key] = Counter(msg)
                     else:
+                        non_agg_values = {}
+                        if m_type in NON_AGGREGATED_COUNTERS:
+                            non_agg_values = {k: v for k, v in msg.items() if k in NON_AGGREGATED_COUNTERS[m_type]}
                         self.counters[c_key].update(Counter(msg))
+                        for k, v in non_agg_values.items():
+                            self.counters[c_key][k] = v
 
                 # APM Transaction end
                 if self.apm_client:
@@ -298,7 +306,12 @@ class HeartbeatManager(ServerBase):
                     if c_key not in self.counters or m_type in NON_AGGREGATED:
                         self.counters[c_key] = Counter(msg)
                     else:
+                        non_agg_values = {}
+                        if m_type in NON_AGGREGATED_COUNTERS:
+                            non_agg_values = {k: v for k, v in msg.items() if k in NON_AGGREGATED_COUNTERS[m_type]}
                         self.counters[c_key].update(Counter(msg))
+                        for k, v in non_agg_values.items():
+                            self.counters[c_key][k] = v
 
                 # APM Transaction end
                 if self.apm_client:
