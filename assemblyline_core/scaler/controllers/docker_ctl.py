@@ -185,6 +185,9 @@ class DockerController(ControllerInterface):
             detach=True,
         )
 
+        if prof.privileged:
+            self.core_network.connect(container, aliases=[container_name])
+
         if cfg.allow_internet_access:
             self.external_network.connect(container)
 
