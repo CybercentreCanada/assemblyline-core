@@ -672,6 +672,7 @@ class Dispatcher(ThreadedCoreBase):
 
     def save_submission(self):
         while self.running:
+            self.counter.set('save_queue', self.finalize_queue.qsize())
             try:
                 task, max_score, checked = self.finalize_queue.get(block=True, timeout=3)
                 self.finalize_submission(task, max_score, checked)
