@@ -985,6 +985,7 @@ class Dispatcher(ThreadedCoreBase):
                                                                     sha=extracted_sha256))
             else:
                 for extracted_sha256 in summary.children:
+                    task.dropped_files.add(sha256)
                     self._dispatching_error(task, Error({
                         'archive_ts': archive_ts,
                         'expiry_ts': expiry_ts,
