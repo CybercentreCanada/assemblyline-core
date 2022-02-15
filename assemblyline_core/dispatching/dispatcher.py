@@ -366,8 +366,13 @@ class Dispatcher(ThreadedCoreBase):
         # Apply initial data parameter
         if submission.params.initial_data:
             try:
-                task.file_temporary_data[submission.files[0].sha256] = json.loads(submission.params.initial_data)
-            except ValueError as err:
+                task.file_temporary_data[submission.files[0].sha256] = {
+                    key: value
+                    for key, value in dict(json.loads(submission.params.initial_data)).items()
+                    if len(str(value)) <= self.config.submission.max_temp_data_length
+                }
+
+            except (ValueError, TypeError) as err:
                 self.log.warning(f"[{sid}] could not process initialization data: {err}")
 
         self.tasks[sid] = task
@@ -926,7 +931,8 @@ class Dispatcher(ThreadedCoreBase):
 
         # Update the temporary data table for this file
         for key, value in (temporary_data or {}).items():
-            task.file_temporary_data[sha256][key] = value
+            if len(str(value)) <= self.config.submission.max_temp_data_length:
+                task.file_temporary_data[sha256][key] = value
 
         # Record the result as a summary
         task.service_results[(sha256, service_name)] = summary
@@ -979,6 +985,7 @@ class Dispatcher(ThreadedCoreBase):
                                                                     sha=extracted_sha256))
             else:
                 for extracted_sha256 in summary.children:
+                    task.dropped_files.add(sha256)
                     self._dispatching_error(task, Error({
                         'archive_ts': archive_ts,
                         'expiry_ts': expiry_ts,
