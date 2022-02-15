@@ -340,8 +340,11 @@ class TaskingClient:
         # Pop the temporary submission data
         temp_submission_data = result.pop('temp_submission_data', None)
         if temp_submission_data:
+            old_submission_data = {row.name: row.value for row in task.temporary_submission_data}
+            temp_submission_data = {k: v for k, v in temp_submission_data.items()
+                                    if k not in old_submission_data or v != old_submission_data[k]}
             big_temp_data = [k for k, v in temp_submission_data.items()
-                             if len(v) > self.config.submission.max_temp_data_length]
+                             if len(str(v)) > self.config.submission.max_temp_data_length]
             if big_temp_data:
                 self.log.warning("The following temporary submission keys where ignored because they are bigger then "
                                  f"the maximum data size allowed [{self.config.submission.max_temp_data_length}]: "
