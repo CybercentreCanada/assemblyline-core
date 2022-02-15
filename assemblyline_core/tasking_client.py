@@ -339,6 +339,14 @@ class TaskingClient:
 
         # Pop the temporary submission data
         temp_submission_data = result.pop('temp_submission_data', None)
+        if temp_submission_data:
+            big_temp_data = [k for k, v in temp_submission_data.items()
+                             if len(v) > self.config.submission.max_temp_data_length]
+            if big_temp_data:
+                self.log.warning("The following temporary submission keys where ignored because they are bigger then "
+                                 f"the maximum data size allowed [{self.config.submission.max_temp_data_length}]: "
+                                 f"{' | '.join(big_temp_data)}")
+                temp_submission_data = {k: v for k, v in temp_submission_data.items() if k not in big_temp_data}
 
         # Process the tag values
         with elasticapm.capture_span(name="handle_task_result.process_tags",
