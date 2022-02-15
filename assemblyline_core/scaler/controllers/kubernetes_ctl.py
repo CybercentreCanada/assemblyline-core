@@ -8,7 +8,7 @@ import threading
 import weakref
 import urllib3
 
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from typing import Optional, Tuple
 from time import sleep
 
@@ -45,6 +45,30 @@ _exponents = {
     'pi': 2**50,
     'p': 2 ** 50,
 }
+
+
+class CacheDict(OrderedDict):
+    """Dict with a limited length, ejecting LRUs as needed."""
+
+    def __init__(self, *args, cache_len: int = 1000, **kwargs):
+        assert cache_len > 0
+        self.cache_len = cache_len
+
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        super().move_to_end(key)
+
+        while len(self) > self.cache_len:
+            oldkey = next(iter(self))
+            super().__delitem__(oldkey)
+
+    def __getitem__(self, key):
+        val = super().__getitem__(key)
+        super().move_to_end(key)
+
+        return val
 
 
 class TypelessWatch(watch.Watch):
@@ -294,6 +318,7 @@ class KubernetesController(ControllerInterface):
     def _monitor_pods(self):
         watch = TypelessWatch()
         containers = {}
+        log_cache = CacheDict(cache_len=8000)
         namespaced_containers = {}
         self._pod_used_cpu = 0
         self._pod_used_ram = 0
@@ -317,11 +342,14 @@ class KubernetesController(ControllerInterface):
                         if namespace == self.namespace:
                             namespaced_containers[f"{uid}-{container['name']}"] = get_resources(container)
                     for status in event['raw_object']['status'].get('containerStatuses', []):
-                        if status['restartCount'] > CONTAINER_RESTART_THRESHOLD:
+                        restarts = status['restartCount']
+                        if restarts > CONTAINER_RESTART_THRESHOLD and log_cache.get(pod_name, 0) <= restarts:
+                            log_cache[pod_name] = restarts
+                            lastState, detail = next(iter(status['lastState'].items()), ('UNKNOWN', {}))
                             self.logger.warning(f"Container Status :: {pod_name} - "
-                                                f"Current State: {list(status['state'].keys())[0]}, "
-                                                f"Last State: {list(status['lastState'].keys())[0]} "
-                                                f"with reason {list(status['lastState'].values())[0]['reason']}")
+                                                f"Current State: {next(iter(status['state'].keys()), 'UNKNOWN')}, "
+                                                f"Last State: {lastState} "
+                                                f"with reason {detail.get('reason', 'UNKNOWN')}")
                 elif event['type'] == 'DELETED':
                     for container in event['raw_object']['spec']['containers']:
                         containers.pop(f"{uid}-{container['name']}", None)
