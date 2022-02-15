@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from typing import Optional, Any, TYPE_CHECKING
 import json
 import enum
-from queue import PriorityQueue, Empty
+from queue import PriorityQueue, Empty, Queue
 import dataclasses
 
 import elasticapm
@@ -134,6 +134,7 @@ TIMEOUT_EXTRA_TIME = 5
 TIMEOUT_TEST_INTERVAL = 5
 MAX_RESULT_BUFFER = 64
 RESULT_THREADS = max(1, int(os.getenv('DISPATCHER_RESULT_THREADS', '2')))
+FINALIZE_THREADS = max(1, int(os.getenv('DISPATCHER_FINALIZE_THREADS', '2')))
 
 # After 20 minutes, check if a submission is still making progress.
 # In the case of a crash somewhere else in the system, we may not have
@@ -214,6 +215,7 @@ class Dispatcher(ThreadedCoreBase):
         self.process_queues: list[PriorityQueue[DispatchAction]] = [PriorityQueue() for _ in range(RESULT_THREADS)]
         self.queue_ready_signals: list[threading.Semaphore] = [threading.Semaphore(MAX_RESULT_BUFFER)
                                                                for _ in range(RESULT_THREADS)]
+        self.finalize_queue = Queue()
 
     def interrupt_handler(self, signum, stack_frame):
         self.log.info("Instance caught signal. Beginning to drain work.")
@@ -251,6 +253,11 @@ class Dispatcher(ThreadedCoreBase):
             # Process to protect against old dead tasks timing out
             'Global Timeout Backstop': self.timeout_backstop,
         }
+
+        for ii in range(FINALIZE_THREADS):
+            # Finilize submissions that are done
+            threads[f'Save Submissions #{ii}'] = self.save_submission
+
         for ii in range(RESULT_THREADS):
             # Process results
             threads[f'Service Update Worker #{ii}'] = self.service_worker_factory(ii)
@@ -645,7 +652,7 @@ class Dispatcher(ThreadedCoreBase):
         else:
             self.log.debug(f"[{task.submission.sid}] Finalizing submission.")
             max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
-            self.finalize_submission(task, max_score, checked)
+            self.finalize_queue.put((task, max_score, checked))
             return True
         return False
 
@@ -662,6 +669,15 @@ class Dispatcher(ThreadedCoreBase):
         if service.name in submission.params.service_spec:
             params.update(submission.params.service_spec[service.name])
         return params
+
+    def save_submission(self):
+        while self.running:
+            self.counter.set('save_queue', self.finalize_queue.qsize())
+            try:
+                task, max_score, checked = self.finalize_queue.get(block=True, timeout=3)
+                self.finalize_submission(task, max_score, checked)
+            except Empty:
+                pass
 
     @elasticapm.capture_span(span_type='dispatcher')
     def finalize_submission(self, task: SubmissionTask, max_score, file_list):

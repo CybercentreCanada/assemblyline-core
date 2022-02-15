@@ -194,6 +194,7 @@ def test_simple(clean_redis, clean_datastore):
     client.service_finished(sid, 'xerox-result-key', make_result(file_hash, 'xerox'))
     disp.pull_service_results()
     disp.service_worker(disp.process_queue_index(sid))
+    disp.save_submission()
 
     assert wait_result(task, file_hash, 'xerox')
     assert disp.tasks.get(sid) is None
