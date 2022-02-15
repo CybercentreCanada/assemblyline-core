@@ -369,7 +369,7 @@ class Dispatcher(ThreadedCoreBase):
                 task.file_temporary_data[submission.files[0].sha256] = {
                     key: value
                     for key, value in dict(json.loads(submission.params.initial_data)).items()
-                    if len(value) <= self.config.submission.max_temp_data_length
+                    if len(str(value)) <= self.config.submission.max_temp_data_length
                 }
 
             except (ValueError, TypeError) as err:
@@ -931,7 +931,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Update the temporary data table for this file
         for key, value in (temporary_data or {}).items():
-            if len(value) <= self.config.submission.max_temp_data_length:
+            if len(str(value)) <= self.config.submission.max_temp_data_length:
                 task.file_temporary_data[sha256][key] = value
 
         # Record the result as a summary
