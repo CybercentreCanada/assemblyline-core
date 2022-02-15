@@ -346,7 +346,7 @@ class TaskingClient:
             big_temp_data = {k: len(str(v)) for k, v in temp_submission_data.items()
                              if len(str(v)) > self.config.submission.max_temp_data_length}
             if big_temp_data:
-                big_data_sizes = [f"{k}: {v}" for k, v in big_temp_data.items()]
+                big_data_sizes = [f"{k}={v}" for k, v in big_temp_data.items()]
                 self.log.warning(f"[{task.sid}] The following temporary submission keys where ignored because they are "
                                  "bigger then the maximum data size allowed "
                                  f"[{self.config.submission.max_temp_data_length}]: {' | '.join(big_data_sizes)}")
