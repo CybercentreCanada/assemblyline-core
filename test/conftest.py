@@ -7,8 +7,8 @@ import pytest
 from redis.exceptions import ConnectionError
 
 from assemblyline.common import forge
-from assemblyline.datastore.stores.es_store import ESStore
 from assemblyline.datastore.helper import AssemblylineDatastore
+from assemblyline.datastore.store import ESStore
 
 original_classification = forge.get_classification
 
