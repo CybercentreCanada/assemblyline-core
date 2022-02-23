@@ -16,9 +16,11 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
+from assemblyline.common.dict_utils import flatten
 from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
+from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch, DispatcherCommandMessage, \
@@ -95,9 +97,12 @@ class ResultSummary:
 class SubmissionTask:
     """Dispatcher internal model for submissions"""
 
-    def __init__(self, submission, completed_queue):
+    def __init__(self, submission, completed_queue, results=None, file_infos=None, file_tree=None, errors=None):
         self.submission: Submission = Submission(submission)
-        self.completed_queue = str(completed_queue)
+        if completed_queue:
+            self.completed_queue = str(completed_queue)
+        else:
+            self.completed_queue = None
 
         self.file_info: dict[str, Optional[FileInfo]] = {}
         self.file_names: dict[str, str] = {}
@@ -115,7 +120,36 @@ class SubmissionTask:
         self.queue_keys: dict[tuple[str, str], str] = {}
         self.running_services: set[tuple[str, str]] = set()
 
-    @property
+        if file_infos is not None:
+            self.file_info.update({k: FileInfo(v) for k, v in file_infos.items()})
+
+        if file_tree is not None:
+            def recurse_tree(tree, depth):
+                for sha256, file_data in tree.items():
+                    self.file_depth[sha256] = depth
+                    self.file_names[sha256] = file_data['name'][0]
+                    recurse_tree(file_data['children'], depth + 1)
+
+            recurse_tree(file_tree, 0)
+
+        if results is not None:
+            for k, result in results.items():
+                sha256, service, _ = k.split('.', 2)
+                self.service_results[(sha256, service)] = ResultSummary(
+                    key=k, drop=result['drop_file'], score=result['result']['score'],
+                    children=[r['sha256'] for r in result['response']['extracted']])
+
+                tags = []
+                for section in result['result']['sections']:
+                    tags.extend(tag_dict_to_list(flatten(section['tags'])))
+                self.file_tags[sha256] = tags
+
+        if errors is not None:
+            for e in errors:
+                sha256, service, _ = e.split('.', 2)
+                self.service_results[(sha256, service)] = e
+
+    @ property
     def sid(self):
         return self.submission.sid
 

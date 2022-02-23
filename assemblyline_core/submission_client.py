@@ -22,7 +22,7 @@ from assemblyline.common.classification import InvalidClassification
 import elasticapm
 import logging
 import os
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 from assemblyline.common import forge, identify
 from assemblyline.common.codec import decode_file
@@ -32,6 +32,8 @@ from assemblyline.common.str_utils import safe_str
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.submission import Submission as SubmissionObject
+from assemblyline.odm.models.file import File as FileInfo
+from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import File, Submission
 from assemblyline_core.dispatching.client import DispatchClient
 
@@ -66,7 +68,8 @@ class SubmissionClient:
         self.dispatcher = DispatchClient(datastore, redis)
 
     @elasticapm.capture_span(span_type='submission_client')
-    def rescan(self, submission: Submission, rescan_services: List, completed_queue=None):
+    def rescan(self, submission: Submission, results: Dict[str, Result], file_infos: Dict[str, FileInfo],
+               file_tree, errors: List[str],  rescan_services: List[str], completed_queue=None):
         """
         Rescan a submission started on another system.
         """
@@ -99,7 +102,8 @@ class SubmissionClient:
 
         # Dispatch the submission
         self.log.debug("Submission complete. Dispatching: %s", submission_obj.sid)
-        self.dispatcher.dispatch_submission(submission_obj, completed_queue=completed_queue)
+        self.dispatcher.dispatch_bundle(submission_obj, results, file_infos, file_tree,
+                                        errors, completed_queue=completed_queue)
 
         return submission
 

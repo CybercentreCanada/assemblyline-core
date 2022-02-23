@@ -10,28 +10,28 @@ import time
 import weakref
 
 from typing import Dict, Optional, Any, cast
-from assemblyline.common.dict_utils import flatten
 
+from assemblyline.common import forge
+from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SUBMISSION_QUEUE, \
+    make_watcher_list_name, DISPATCH_TASK_HASH
+from assemblyline.common.dict_utils import flatten
 from assemblyline.common.forge import CachedObject, get_service_queue
 from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.datastore.exceptions import VersionConflictException
 from assemblyline.odm.base import DATEFORMAT
 from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, \
     CreateWatch, LIST_OUTSTANDING, ListOutstanding
-from assemblyline.odm.models.service import Service
-from assemblyline.common import forge
-from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SUBMISSION_QUEUE, \
-    make_watcher_list_name, DISPATCH_TASK_HASH
-from assemblyline.odm.models.result import Result
-from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.error import Error
+from assemblyline.odm.models.file import File
+from assemblyline.odm.models.result import Result
+from assemblyline.odm.models.service import Service
+from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes import get_client, reply_queue_name
 from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline_core.dispatching.dispatcher import DISPATCH_START_EVENTS, DISPATCH_RESULT_QUEUE, \
-    DISPATCH_COMMAND_QUEUE, QUEUE_EXPIRY
-from assemblyline_core.dispatching.dispatcher import ServiceTask, Dispatcher
+    DISPATCH_COMMAND_QUEUE, QUEUE_EXPIRY, ServiceTask, Dispatcher
 
 
 def weak_lru(maxsize=128, typed=False):
@@ -103,6 +103,23 @@ class DispatchClient:
         else:
             self.dead_dispatchers.append(dispatcher_id)
             return False
+
+    def dispatch_bundle(self, submission: Submission, results: Dict[str, Result],
+                        file_infos: Dict[str, File], file_tree, errors: Dict[str, Error], completed_queue: str = None):
+        """Insert a bundle into the dispatching system and continue scanning of its files
+
+        Prerequisites:
+            - Submission, results, file_infos and errors should already be saved in the datastore
+            - Files should already be in the filestore
+        """
+        self.submission_queue.push(dict(
+            submission=submission.as_primitives(),
+            results=results,
+            file_infos=file_infos,
+            file_tree=file_tree,
+            errors=errors,
+            completed_queue=completed_queue,
+        ))
 
     def dispatch_submission(self, submission: Submission, completed_queue: str = None):
         """Insert a submission into the dispatching system.
