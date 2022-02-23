@@ -97,7 +97,8 @@ class ResultSummary:
 class SubmissionTask:
     """Dispatcher internal model for submissions"""
 
-    def __init__(self, submission, completed_queue, results=None, file_infos=None, file_tree=None, errors=None):
+    def __init__(self, submission, completed_queue, scheduler, results=None,
+                 file_infos=None, file_tree=None, errors=None):
         self.submission: Submission = Submission(submission)
         if completed_queue:
             self.completed_queue = str(completed_queue)
@@ -133,11 +134,13 @@ class SubmissionTask:
             recurse_tree(file_tree, 0)
 
         if results is not None:
+            rescan = scheduler.expand_categories(self.submission.params.services.rescan)
             for k, result in results.items():
                 sha256, service, _ = k.split('.', 2)
-                self.service_results[(sha256, service)] = ResultSummary(
-                    key=k, drop=result['drop_file'], score=result['result']['score'],
-                    children=[r['sha256'] for r in result['response']['extracted']])
+                if service not in rescan:
+                    self.service_results[(sha256, service)] = ResultSummary(
+                        key=k, drop=result['drop_file'], score=result['result']['score'],
+                        children=[r['sha256'] for r in result['response']['extracted']])
 
                 tags = []
                 for section in result['result']['sections']:
@@ -351,7 +354,7 @@ class Dispatcher(ThreadedCoreBase):
                 # Start of process dispatcher transaction
                 with apm_span(self.apm_client, 'submission_message'):
                     # This is probably a complete task
-                    task = SubmissionTask(**message)
+                    task = SubmissionTask(scheduler=self.scheduler, **message)
                     if self.apm_client:
                         elasticapm.label(sid=task.submission.sid)
                     self.dispatch_submission(task)
