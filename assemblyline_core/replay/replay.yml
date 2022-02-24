@@ -1,0 +1,68 @@
+# Bundle loader configuration
+loader:
+  # File directory configuration
+  directory:
+    # Input directory
+    input: /tmp/replay/input
+  # Assemblyline instance to load the submissions in
+  target:
+    # Use the AL client for loading the data?
+    client:
+      # AL client connection configuration
+      host: https://localhost:443
+      user: admin
+      apikey: "devkey:devpass"
+      verify: true
+    # Use direct datastore connection to load the data?
+    #   NOTE: this only work if the container is running inside the
+    #         Assemblyline cluster
+    direct: false
+  # List of services/categories to rescan after import
+  rescan: [ResultSample]
+
+# Bundle creator configuration
+creator:
+  # File directory configuration
+  directory:
+    # Working directory
+    work: /tmp/replay/work
+    # Directory where the final bundles will be saved
+    output: /tmp/replay/input
+  # Assemblyline instance to load the data from
+  source:
+    # Use the AL client for loading the data?
+    client:
+      host: https://localhost:443
+      user: admin
+      apikey: "devkey:devpass"
+      verify: true
+    # Use direct datastore/redis connection to load the data?
+    #   NOTE: this only work if the container is running inside the
+    #         Assemblyline cluster
+    direct: false
+  # Input configuration block
+  input:
+    # Alert index configuration
+    alert:
+      # Should we import from alerts?
+      enabled: true
+      # List of data that should be in the fields for alerts to be considered
+      match:
+        # Field name
+        - field: extended_scan
+          # Regex to test
+          regex: ^skipped|incomplete|completed$
+          # Or exact value to match
+          exact: null
+    # Submission index configuration
+    submission:
+      # Should we import from submission
+      enabled: true
+      # List of data that should be in the fields for submissions to be considered
+      match:
+        # Field name
+        - field: metadata.replay
+          # Regex to test
+          regex: null
+          # Or exact value to match
+          direct: "true"
