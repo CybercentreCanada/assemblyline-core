@@ -4,7 +4,7 @@ import time
 from queue import Empty, Queue
 
 from assemblyline.common import forge
-from assemblyline.common.bundling import create_bundle
+from assemblyline.common.bundling import create_bundle, import_bundle
 from assemblyline.common.isotime import now_as_iso
 from assemblyline_client import get_client
 
@@ -46,6 +46,9 @@ class ClientBase(object):
         raise NotImplementedError()
 
     def create_submission_bundle(self, *_):
+        raise NotImplementedError()
+
+    def load_bundle(self, *_):
         raise NotImplementedError()
 
     def stop(self):
@@ -125,6 +128,11 @@ class APIClient(ClientBase):
     def create_submission_bundle(self, sid, bundle_path):
         self.al_client.bundle.create(sid, output=bundle_path)
 
+    def load_bundle(self, bundle_path, min_classification, rescan_services):
+        self.al_client.bundle.import_bundle(bundle_path,
+                                            min_classification=min_classification,
+                                            rescan_services=rescan_services)
+
 
 class DirectClient(ClientBase):
     def __init__(self, log,
@@ -154,3 +162,8 @@ class DirectClient(ClientBase):
     def create_submission_bundle(self, sid, bundle_path):
         temp_bundle_file = create_bundle(sid, working_dir=os.path.dirname(bundle_path))
         os.rename(temp_bundle_file, bundle_path)
+
+    def load_bundle(self, bundle_path, min_classification, rescan_services):
+        import_bundle(bundle_path,
+                      min_classification=min_classification,
+                      rescan_services=rescan_services)
