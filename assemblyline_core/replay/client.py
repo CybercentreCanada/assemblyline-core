@@ -11,7 +11,10 @@ EMPTY_WAIT_TIME = int(os.environ.get('EMPTY_WAIT_TIME', '30'))
 
 
 class ClientBase(object):
-    def __init__(self, log, alert_fqs=None, submission_fqs=None):
+    def __init__(self, log,
+                 last_alert_time=None, last_submission_time=None,
+                 last_alert_id=None, last_submission_id=None,
+                 alert_fqs=None, submission_fqs=None):
         # Set logger
         self.log = log
 
@@ -20,10 +23,10 @@ class ClientBase(object):
         self.submission_input_queue = Queue()
 
         # Setup timming
-        self.last_alert_time = now_as_iso(-1 * 60 * 60 * 24)  # Last 24h
-        self.last_alert_id = None
-        self.last_submission_time = now_as_iso(-1 * 60 * 60 * 24)  # Last 24h
-        self.last_submission_id = None
+        self.last_alert_time = last_alert_time or now_as_iso(-1 * 60 * 60 * 24)  # Last 24h
+        self.last_alert_id = last_alert_id or None
+        self.last_submission_time = last_submission_time or now_as_iso(-1 * 60 * 60 * 24)  # Last 24h
+        self.last_submission_id = last_submission_id or None
 
         # Setup filter queries
         self.alert_fqs = alert_fqs
@@ -89,11 +92,17 @@ class ClientBase(object):
 
 
 class APIClient(ClientBase):
-    def __init__(self, log, host, user, apikey, verify, alert_fqs=None, submission_fqs=None):
+    def __init__(self, log, host, user, apikey, verify,
+                 last_alert_time=None, last_submission_time=None,
+                 last_alert_id=None, last_submission_id=None,
+                 alert_fqs=None, submission_fqs=None):
         # Setup AL client
         self.al_client = get_client(host, apikey=(user, apikey), verify=verify)
 
-        super().__init__(log, alert_fqs=alert_fqs, submission_fqs=submission_fqs)
+        super().__init__(log,
+                         last_alert_time=last_alert_time,  last_submission_time=last_submission_time,
+                         last_alert_id=last_alert_id, last_submission_id=last_submission_id,
+                         alert_fqs=alert_fqs, submission_fqs=submission_fqs)
 
     def _get_next_alert_ids(self, query, filter_queries):
         return self.al_client.search.alert(query, fl="id,*", sort="reporting_ts asc", rows=100, filters=filter_queries)
@@ -104,11 +113,17 @@ class APIClient(ClientBase):
 
 
 class DirectClient(ClientBase):
-    def __init__(self, log, alert_fqs=None, submission_fqs=None):
+    def __init__(self, log,
+                 last_alert_time=None, last_submission_time=None,
+                 last_alert_id=None, last_submission_id=None,
+                 alert_fqs=None, submission_fqs=None):
         # Setup datastore
         self.datastore = forge.get_datastore()
 
-        super().__init__(log, alert_fqs=alert_fqs, submission_fqs=submission_fqs)
+        super().__init__(log,
+                         last_alert_time=last_alert_time, last_submission_time=last_submission_time,
+                         last_alert_id=last_alert_id, last_submission_id=last_submission_id,
+                         alert_fqs=alert_fqs, submission_fqs=submission_fqs)
 
     def _get_next_alert_ids(self, query, filter_queries):
         return self.datastore.alert.search(

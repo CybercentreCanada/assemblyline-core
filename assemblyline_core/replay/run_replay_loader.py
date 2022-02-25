@@ -1,6 +1,4 @@
-import os
 
-from pprint import pformat
 from queue import Empty, Queue
 
 from assemblyline_core.replay.replay import ReplayBase
@@ -9,9 +7,7 @@ from assemblyline_core.replay.replay import ReplayBase
 class ReplayLoader(ReplayBase):
     def __init__(self):
         super().__init__("assemblyline.replay_loader")
-        self.log.debug(pformat(self.replay_config))
         self.file_queue = Queue()
-        self.file_processor_count = int(os.environ.get('FILE_THREADS', '6'))
 
     def process_file(self):
         while self.running:
@@ -33,8 +29,7 @@ class ReplayLoader(ReplayBase):
             'File loader': self.load_files
         }
 
-        for ii in range(self.file_processor_count):
-            # Finilize submissions that are done
+        for ii in range(self.replay_config.loader.input_threads):
             threads[f'File processor #{ii}'] = self.process_file
 
         self.maintain_threads(threads)
