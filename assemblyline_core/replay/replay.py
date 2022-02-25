@@ -9,8 +9,7 @@ from assemblyline.common.dict_utils import recursive_update
 from assemblyline.odm.models.replay import DEFAULT_REPLAY, ReplayConfig
 from assemblyline_core.server_base import ServerBase
 
-CONFIG_PATH = '/etc/assemblyline/replay.yml'
-EMPTY_WAIT_TIME = 30
+CONFIG_PATH = os.environ.get('REPLAY_CONFIG_PATH', '/etc/assemblyline/replay.yml')
 
 
 class ReplayBase(ServerBase):

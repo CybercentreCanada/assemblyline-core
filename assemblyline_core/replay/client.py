@@ -1,3 +1,4 @@
+import os
 import time
 
 from queue import Empty, Queue
@@ -6,8 +7,7 @@ from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 from assemblyline_client import get_client
 
-CONFIG_PATH = '/etc/assemblyline/replay.yml'
-EMPTY_WAIT_TIME = 30
+EMPTY_WAIT_TIME = int(os.environ.get('EMPTY_WAIT_TIME', '30'))
 
 
 class ClientBase(object):
