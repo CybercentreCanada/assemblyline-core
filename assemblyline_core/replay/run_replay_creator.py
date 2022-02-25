@@ -13,7 +13,7 @@ class ReplayCreator(ReplayBase):
         # Load/create cache
         self.cache_lock = threading.Lock()
         self.cache = {}
-        self.cache_file = os.path.join(self.replay_config.creator.working_directory, 'cache.json')
+        self.cache_file = os.path.join(self.replay_config.creator.working_directory, 'creator_cache.json')
         if os.path.exists(self.cache_file):
             with open(self.cache_file) as c_fp:
                 try:
