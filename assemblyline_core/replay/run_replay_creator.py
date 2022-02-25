@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 
 from assemblyline_core.replay.client import APIClient, DirectClient
 from assemblyline_core.replay.replay import ReplayBase
@@ -10,6 +11,7 @@ class ReplayCreator(ReplayBase):
         super().__init__("assemblyline.replay_creator")
 
         # Load/create cache
+        self.cache_lock = threading.Lock()
         self.cache = {}
         self.cache_file = os.path.join(self.replay_config.creator.working_directory, 'cache.json')
         if os.path.exists(self.cache_file):
@@ -47,8 +49,9 @@ class ReplayCreator(ReplayBase):
                 # TODO: Bundle using alert_id
 
                 # Save ID to cache
-                self.cache['last_alert_id'] = alert['alert_id']
-                self.cache['last_alert_time'] = alert['reporting_ts']
+                with self.cache_lock:
+                    self.cache['last_alert_id'] = alert['alert_id']
+                    self.cache['last_alert_time'] = alert['reporting_ts']
 
     def process_submissions(self):
         while self.running:
@@ -59,13 +62,16 @@ class ReplayCreator(ReplayBase):
                 # TODO: Bundle using sid
 
                 # Save ID to cache
-                self.cache['last_submission_id'] = submission['sid']
-                self.cache['last_submission_time'] = submission['times']['completed']
+                with self.cache_lock:
+                    self.cache['last_submission_id'] = submission['sid']
+                    self.cache['last_submission_time'] = submission['times']['completed']
 
     def _save_cache(self):
         os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
-        with open(self.cache_file, 'w') as c_fp:
-            json.dump(self.cache, c_fp)
+
+        with self.cache_lock:
+            with open(self.cache_file, 'w') as c_fp:
+                json.dump(self.cache, c_fp)
 
     def save_cache(self):
         while self.running:
