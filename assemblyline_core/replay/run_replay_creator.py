@@ -46,12 +46,26 @@ class ReplayCreator(ReplayBase):
             alert = self.client.get_next_alert()
             if alert:
                 self.log.info(f"Processing alert: {alert['alert_id']}")
-                # TODO: Bundle using alert_id
+
+                # Make sure directories exists
+                os.makedirs(self.replay_config.creator.working_directory, exist_ok=True)
+                os.makedirs(self.replay_config.creator.output_directory, exist_ok=True)
+
+                # Create the bundle
+                bundle_path = os.path.join(self.replay_config.creator.working_directory,
+                                           f"alert_{alert['alert_id']}.al_bundle")
+                self.client.create_alert_bundle(alert['alert_id'], bundle_path)
+
+                # Move the bundle
+                final_path = os.path.join(self.replay_config.creator.output_directory,
+                                          f"alert_{alert['alert_id']}.al_bundle")
+                os.rename(bundle_path, final_path)
 
                 # Save ID to cache
                 with self.cache_lock:
-                    self.cache['last_alert_id'] = alert['alert_id']
-                    self.cache['last_alert_time'] = alert['reporting_ts']
+                    if alert['reporting_ts'] > self.cache['last_alert_time']:
+                        self.cache['last_alert_id'] = alert['alert_id']
+                        self.cache['last_alert_time'] = alert['reporting_ts']
 
     def process_submissions(self):
         while self.running:
@@ -59,12 +73,26 @@ class ReplayCreator(ReplayBase):
             submission = self.client.get_next_submission()
             if submission:
                 self.log.info(f"Processing submission: {submission['sid']}")
-                # TODO: Bundle using sid
+
+                # Make sure directories exists
+                os.makedirs(self.replay_config.creator.working_directory, exist_ok=True)
+                os.makedirs(self.replay_config.creator.output_directory, exist_ok=True)
+
+                # Create the bundle
+                bundle_path = os.path.join(self.replay_config.creator.working_directory,
+                                           f"submission_{submission['sid']}.al_bundle")
+                self.client.create_submission_bundle(submission['sid'], bundle_path)
+
+                # Move the bundle
+                final_path = os.path.join(self.replay_config.creator.output_directory,
+                                          f"submission_{submission['sid']}.al_bundle")
+                os.rename(bundle_path, final_path)
 
                 # Save ID to cache
                 with self.cache_lock:
-                    self.cache['last_submission_id'] = submission['sid']
-                    self.cache['last_submission_time'] = submission['times']['completed']
+                    if submission['times']['completed'] > self.cache['last_submission_time']:
+                        self.cache['last_submission_id'] = submission['sid']
+                        self.cache['last_submission_time'] = submission['times']['completed']
 
     def _save_cache(self):
         os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
