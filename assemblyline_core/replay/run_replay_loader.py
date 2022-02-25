@@ -9,7 +9,6 @@ from assemblyline_core.replay.replay import ReplayBase
 class ReplayLoader(ReplayBase):
     def __init__(self):
         super().__init__("assemblyline.replay_loader")
-        self.replay_config = self.replay_config['creator']
         self.log.debug(pformat(self.replay_config))
         self.file_queue = Queue()
         self.file_processor_count = int(os.environ.get('FILE_THREADS', '6'))
