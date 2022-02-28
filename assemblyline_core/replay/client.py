@@ -128,10 +128,11 @@ class APIClient(ClientBase):
     def create_submission_bundle(self, sid, bundle_path):
         self.al_client.bundle.create(sid, output=bundle_path)
 
-    def load_bundle(self, bundle_path, min_classification, rescan_services):
+    def load_bundle(self, bundle_path, min_classification, rescan_services, exist_ok=True):
         self.al_client.bundle.import_bundle(bundle_path,
                                             min_classification=min_classification,
-                                            rescan_services=rescan_services)
+                                            rescan_services=rescan_services,
+                                            exist_ok=exist_ok)
 
 
 class DirectClient(ClientBase):
@@ -163,7 +164,8 @@ class DirectClient(ClientBase):
         temp_bundle_file = create_bundle(sid, working_dir=os.path.dirname(bundle_path))
         os.rename(temp_bundle_file, bundle_path)
 
-    def load_bundle(self, bundle_path, min_classification, rescan_services):
+    def load_bundle(self, bundle_path, min_classification, rescan_services, exist_ok=True):
         import_bundle(bundle_path,
                       min_classification=min_classification,
-                      rescan_services=rescan_services)
+                      rescan_services=rescan_services,
+                      exist_ok=exist_ok)
