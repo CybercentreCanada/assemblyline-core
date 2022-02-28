@@ -1,4 +1,5 @@
 import json
+import shutil
 import os
 import threading
 
@@ -59,7 +60,7 @@ class ReplayCreator(ReplayBase):
                 # Move the bundle
                 final_path = os.path.join(self.replay_config.creator.output_directory,
                                           f"alert_{alert['alert_id']}.al_bundle")
-                os.rename(bundle_path, final_path)
+                shutil.move(bundle_path, final_path)
 
                 # Save ID to cache
                 with self.cache_lock:
@@ -86,7 +87,7 @@ class ReplayCreator(ReplayBase):
                 # Move the bundle
                 final_path = os.path.join(self.replay_config.creator.output_directory,
                                           f"submission_{submission['sid']}.al_bundle")
-                os.rename(bundle_path, final_path)
+                shutil.move(bundle_path, final_path)
 
                 # Save ID to cache
                 with self.cache_lock:
