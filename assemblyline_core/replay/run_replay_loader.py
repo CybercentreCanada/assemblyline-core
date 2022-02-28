@@ -1,4 +1,5 @@
 import shelve
+import shutil
 import os
 
 from queue import Empty, Queue
@@ -12,8 +13,10 @@ class ReplayLoader(ReplayBase):
         super().__init__("assemblyline.replay_loader")
         self.file_queue = Queue()
 
-        # Create the cache
+        # Create cache directory
         os.makedirs(self.replay_config.loader.working_directory, exist_ok=True)
+
+        # Create/Load the cache
         self.cache = shelve.open(os.path.join(self.replay_config.loader.working_directory, 'loader_cache.db'))
         if 'files' not in self.cache:
             self.cache['files'] = set()
@@ -34,10 +37,18 @@ class ReplayLoader(ReplayBase):
             try:
                 file_path = self.file_queue.get(block=True, timeout=3)
                 self.log.info(f"Processing file: {file_path}")
-                self.client.load_bundle(file_path,
-                                        min_classification=self.replay_config.loader.min_classification,
-                                        rescan_services=self.replay_config.loader.rescan)
-                os.unlink(file_path)
+                try:
+                    self.client.load_bundle(file_path,
+                                            min_classification=self.replay_config.loader.min_classification,
+                                            rescan_services=self.replay_config.loader.rescan)
+                    os.unlink(file_path)
+                except Exception:
+                    # Make sure failed directory exists
+                    os.makedirs(self.replay_config.loader.failed_directory, exist_ok=True)
+
+                    self.log.error(f"Failed to load the bundle file {file_path}, moving it to the failed directory.")
+                    failed_path = os.path.join(self.replay_config.loader.failed_directory, os.path.basename(file_path))
+                    shutil.move(file_path, failed_path)
             except Empty:
                 pass
 
