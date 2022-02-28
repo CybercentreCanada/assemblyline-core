@@ -1,7 +1,8 @@
-import json
 import shutil
 import os
+import shelve
 import threading
+from assemblyline.common.isotime import epoch_to_iso
 
 from assemblyline_core.replay.client import APIClient, DirectClient
 from assemblyline_core.replay.replay import ReplayBase
@@ -11,16 +12,12 @@ class ReplayCreator(ReplayBase):
     def __init__(self):
         super().__init__("assemblyline.replay_creator")
 
+        # Create cache directory
+        os.makedirs(self.replay_config.creator.working_directory, exist_ok=True)
+
         # Load/create cache
         self.cache_lock = threading.Lock()
-        self.cache = {}
-        self.cache_file = os.path.join(self.replay_config.creator.working_directory, 'creator_cache.json')
-        if os.path.exists(self.cache_file):
-            with open(self.cache_file) as c_fp:
-                try:
-                    self.cache.update(json.load(c_fp))
-                except json.JSONDecodeError:
-                    os.unlink(self.cache_file)
+        self.cache = shelve.open(os.path.join(self.replay_config.creator.working_directory, 'creator_cache.db'))
 
         # Load client
         client_config = dict(last_alert_time=self.cache.get('last_alert_time', None),
@@ -64,7 +61,7 @@ class ReplayCreator(ReplayBase):
 
                 # Save ID to cache
                 with self.cache_lock:
-                    if alert['reporting_ts'] > self.cache['last_alert_time']:
+                    if alert['reporting_ts'] > self.cache.get('last_alert_time', epoch_to_iso(0)):
                         self.cache['last_alert_id'] = alert['alert_id']
                         self.cache['last_alert_time'] = alert['reporting_ts']
 
@@ -91,27 +88,9 @@ class ReplayCreator(ReplayBase):
 
                 # Save ID to cache
                 with self.cache_lock:
-                    if submission['times']['completed'] > self.cache['last_submission_time']:
+                    if submission['times']['completed'] > self.cache.get('last_submission_time', epoch_to_iso(0)):
                         self.cache['last_submission_id'] = submission['sid']
                         self.cache['last_submission_time'] = submission['times']['completed']
-
-    def _save_cache(self):
-        os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
-
-        with self.cache_lock:
-            with open(self.cache_file, 'w') as c_fp:
-                json.dump(self.cache, c_fp)
-
-    def save_cache(self):
-        while self.running:
-            self._save_cache()
-            for _ in range(self.replay_config.creator.cache_save_interval):
-                if not self.running:
-                    break
-                self.sleep(1)
-
-        # Save on exit
-        self._save_cache()
 
     def try_run(self):
         threads = {}
@@ -126,10 +105,13 @@ class ReplayCreator(ReplayBase):
                 threads[f'Submission process thread #{ii}'] = self.process_submissions
 
         if threads:
-            threads['Save cache'] = self.save_cache
             self.maintain_threads(threads)
         else:
             self.log.warning("There are no configured input, terminating")
+
+    def stop(self):
+        self.cache.close()
+        return super().stop()
 
 
 if __name__ == '__main__':
