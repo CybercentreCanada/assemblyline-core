@@ -1,4 +1,5 @@
 from __future__ import annotations
+import docker
 import os
 import threading
 import time
@@ -25,6 +26,8 @@ COPY_LABELS = [
     "com.docker.compose.project.version",
 ]
 
+SERVICE_LIVENESS_PERIOD = int(os.environ.get('SERVICE_LIVENESS_PERIOD', 300)) * 1000000000
+SERVICE_LIVENESS_TIMEOUT = int(os.environ.get('SERVICE_LIVENESS_TIMEOUT', 60)) * 1000000000
 
 class DockerController(ControllerInterface):
     """A controller for *non* swarm mode docker."""
@@ -35,7 +38,6 @@ class DockerController(ControllerInterface):
         :param prefix: A prefix used to distinguish containers launched by this controller.
         """
         # Connect to the host docker port
-        import docker
         self.client = docker.from_env()
         self.log = logger
         self.log_level = log_level
@@ -144,6 +146,16 @@ class DockerController(ControllerInterface):
         self._profiles[profile.name] = profile
         self._pull_image(profile)
 
+    def _connect_to_network(self, container, network, aliases=[]):
+        if not aliases:
+            aliases = [container.name]
+        try:
+            network.connect(container, aliases=aliases)
+        except docker.errors.APIError as e:
+            if 'already exists' in str(e):
+                return
+            raise e
+
     def _start(self, service_name):
         """Launch a docker container in a manner suitable for Assemblyline."""
         container_name, container_index = self._name_container(service_name)
@@ -183,13 +195,18 @@ class DockerController(ControllerInterface):
             network=self._get_network(service_name).name,
             environment=env,
             detach=True,
+            healthcheck={
+                'test': ["CMD", "python3", "-m", "assemblyline_v4_service.healthz"],
+                'interval': SERVICE_LIVENESS_PERIOD,
+                'timeout': SERVICE_LIVENESS_TIMEOUT
+            }
         )
 
         if prof.privileged:
-            self.core_network.connect(container, aliases=[container_name])
+            self._connect_to_network(self.core_network, container)
 
         if cfg.allow_internet_access:
-            self.external_network.connect(container)
+            self._connect_to_network(self.external_network, container)
 
     def _start_container(
             self, service_name, name, labels, volumes, cfg: DockerConfig, network, hostname, core_container=False):
@@ -237,13 +254,17 @@ class DockerController(ControllerInterface):
             environment=env,
             detach=True,
             # ports=ports,
+            healthcheck={
+                'test': ["CMD", "python3", "-m", "assemblyline_v4_service.healthz"],
+                'interval': SERVICE_LIVENESS_PERIOD,
+                'timeout': SERVICE_LIVENESS_TIMEOUT
+            }
         )
-
         if core_container:
-            self.core_network.connect(container, aliases=[hostname])
+            self._connect_to_network(container, self.core_network, aliases=[hostname])
 
         if cfg.allow_internet_access:
-            self.external_network.connect(container, aliases=[hostname])
+            self._connect_to_network(container, self.external_network, aliases=[hostname])
 
     def _name_container(self, service_name):
         """Find an unused name for a container.

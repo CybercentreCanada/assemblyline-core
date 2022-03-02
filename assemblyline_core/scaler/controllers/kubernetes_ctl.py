@@ -18,7 +18,8 @@ from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec,
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
-    V1NetworkPolicyIngressRule, V1Secret, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext
+    V1NetworkPolicyIngressRule, V1Secret, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext, \
+    V1Probe, V1ExecAction
 from kubernetes.client.rest import ApiException
 from assemblyline.odm.models.service import DockerConfig
 
@@ -32,6 +33,8 @@ WATCH_API_TIMEOUT = WATCH_TIMEOUT + 10
 CHANGE_KEY_NAME = 'al_change_key'
 DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() == 'true'
 CONTAINER_RESTART_THRESHOLD = int(os.environ.get('CONTAINER_RESTART_THRESHOLD', 1))
+SERVICE_LIVENESS_PERIOD = int(os.environ.get('SERVICE_LIVENESS_PERIOD', 300))
+SERVICE_LIVENESS_TIMEOUT = int(os.environ.get('SERVICE_LIVENESS_TIMEOUT', 60))
 
 _exponents = {
     'ki': 2**10,
@@ -500,6 +503,13 @@ class KubernetesController(ControllerInterface):
         memory = container_config.ram_mb
         min_memory = min(container_config.ram_mb_min, container_config.ram_mb)
         environment_variables: list[V1EnvVar] = []
+
+        # Use custom health check located in service base
+        health_probe = V1Probe(
+            _exec=V1ExecAction(command=["python3", "-m", "assemblyline_v4_service.healthz"]),
+            timeout_seconds=SERVICE_LIVENESS_TIMEOUT,
+            period_seconds=SERVICE_LIVENESS_PERIOD)
+
         # If we are launching a core container, include environment variables related to authentication for DBs
         if core_container:
             environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in self.core_env.items()]
@@ -525,7 +535,9 @@ class KubernetesController(ControllerInterface):
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
                 requests={'cpu': cores*self.cpu_reservation, 'memory': f'{min_memory}Mi'},
-            )
+            ),
+            liveness_probe=health_probe,
+            readiness_probe=health_probe
         )]
 
     def _create_deployment(self, service_name: str, deployment_name: str, docker_config: DockerConfig,
@@ -866,11 +878,11 @@ class KubernetesController(ControllerInterface):
             self.apps_api.delete_namespaced_deployment(name=dep.metadata.name, namespace=self.namespace,
                                                        _request_timeout=API_TIMEOUT)
             # Remove PV/C related to the deployment
-            for vol in dep.spec.template.spec.volumes:
+            for vol in dep.spec.template.spec.volumes or []:
                 if vol._persistent_volume_claim:
                     self.api.delete_namespaced_persistent_volume_claim(name=vol._persistent_volume_claim.claim_name,
-                                                                       namespace=self.namespace,
-                                                                       _request_timeout=API_TIMEOUT)
+                                                                    namespace=self.namespace,
+                                                                    _request_timeout=API_TIMEOUT)
 
     def prepare_network(self, service_name, internet, dependency_internet):
         safe_name = service_name.lower().replace('_', '-')
