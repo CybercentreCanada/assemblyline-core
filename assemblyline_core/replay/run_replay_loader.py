@@ -41,7 +41,8 @@ class ReplayLoader(ReplayBase):
                     self.client.load_bundle(file_path,
                                             min_classification=self.replay_config.loader.min_classification,
                                             rescan_services=self.replay_config.loader.rescan)
-                    os.unlink(file_path)
+                    if os.path.exists(file_path):
+                        os.unlink(file_path)
                 except Exception:
                     # Make sure failed directory exists
                     os.makedirs(self.replay_config.loader.failed_directory, exist_ok=True)
