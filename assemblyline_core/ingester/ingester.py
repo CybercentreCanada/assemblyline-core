@@ -24,7 +24,7 @@ from assemblyline.common.exceptions import get_stacktrace_info
 from assemblyline.common.isotime import now, now_as_iso
 from assemblyline.common.importing import load_module_by_path
 from assemblyline.common import forge, exceptions, isotime
-from assemblyline.datastore import DataStoreException
+from assemblyline.datastore.exceptions import DataStoreException
 from assemblyline.filestore import CorruptedFileStoreException, FileStoreException
 from assemblyline.odm.models.filescore import FileScore
 from assemblyline.odm.messages.ingest_heartbeat import Metrics
