@@ -22,16 +22,18 @@ from assemblyline.common.classification import InvalidClassification
 import elasticapm
 import logging
 import os
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 from assemblyline.common import forge, identify
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
-from assemblyline.common.isotime import now_as_iso, epoch_to_iso
+from assemblyline.common.isotime import epoch_to_iso, now, now_as_iso
 from assemblyline.common.str_utils import safe_str
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.submission import Submission as SubmissionObject
+from assemblyline.odm.models.file import File as FileInfo
+from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import File, Submission
 from assemblyline_core.dispatching.client import DispatchClient
 
@@ -64,6 +66,46 @@ class SubmissionClient:
 
         # A client for interacting with the dispatcher
         self.dispatcher = DispatchClient(datastore, redis)
+
+    @elasticapm.capture_span(span_type='submission_client')
+    def rescan(self, submission: Submission, results: Dict[str, Result], file_infos: Dict[str, FileInfo],
+               file_tree, errors: List[str],  rescan_services: List[str], completed_queue=None):
+        """
+        Rescan a submission started on another system.
+        """
+        # Reset submission processing data
+        submission['times'].pop('completed')
+        submission['state'] = 'submitted'
+
+        # Set the list of service to rescan
+        submission['params']['services']['rescan'] = rescan_services
+
+        # Create the submission object
+        submission_obj = Submission(submission)
+
+        if len(submission_obj.files) == 0:
+            raise SubmissionException("No files found to submit.")
+
+        for f in submission_obj.files:
+            if not self.datastore.file.exists(f.sha256):
+                raise SubmissionException(f"File {f.sha256} does not exist, cannot continue submission.")
+
+        # Set the new expiry
+        if submission_obj.params.ttl:
+            submission_obj.expiry_ts = epoch_to_iso(now() + submission_obj.params.ttl * 24 * 60 * 60)
+
+        # Clearing runtime_excluded on initial submit or resubmit
+        submission_obj.params.services.runtime_excluded = []
+
+        # Save the submission
+        self.datastore.submission.save(submission_obj.sid, submission_obj)
+
+        # Dispatch the submission
+        self.log.debug("Submission complete. Dispatching: %s", submission_obj.sid)
+        self.dispatcher.dispatch_bundle(submission_obj, results, file_infos, file_tree,
+                                        errors, completed_queue=completed_queue)
+
+        return submission
 
     @elasticapm.capture_span(span_type='submission_client')
     def submit(self, submission_obj: SubmissionObject, local_files: List = None, completed_queue=None):
