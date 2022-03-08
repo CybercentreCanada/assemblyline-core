@@ -11,7 +11,7 @@ from assemblyline_core.ingester import INGEST_QUEUE_NAME, drop_chance
 from assemblyline.common import forge, metrics
 from assemblyline.common.constants import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, \
     SERVICE_STATE_HASH, ServiceStatus
-from assemblyline.datastore import SearchException
+from assemblyline.datastore.exceptions import SearchException
 from assemblyline.odm.messages.alerter_heartbeat import AlerterMessage
 from assemblyline.odm.messages.archive_heartbeat import ArchiveMessage
 from assemblyline.odm.messages.dispatcher_heartbeat import DispatcherMessage
