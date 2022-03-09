@@ -217,6 +217,7 @@ def perform_alert_update(datastore, logger, alert):
 
         old_alert = recursive_update(old_alert, alert)
         old_alert['al'] = recursive_update(old_alert['al'], merged)
+        old_alert['workflows_completed'] = False
 
         try:
             datastore.alert.save(alert_id, old_alert, version=version)
