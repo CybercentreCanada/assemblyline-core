@@ -170,6 +170,33 @@ class WorkflowManager(ServerBase):
                     if self.apm_client:
                         self.apm_client.end_transaction(workflow.name, 'success')
 
+                # Marking all alerts for the time period as their workflow completed
+                # Start of transaction
+                if self.apm_client:
+                    self.apm_client.begin_transaction("Mark alerts complete")
+
+                self.log.info(f'Marking all alerts between {self.start_ts} and {end_ts} as workflow completed...')
+                wc_query = "reporting_ts:[{start_ts} TO {end_ts}]".format(start_ts=self.start_ts, end_ts=end_ts)
+                wc_operations = [(self.datastore.alert.UPDATE_SET, 'workflows_completed', True)]
+                try:
+                    wc_count = self.datastore.alert.update_by_query(wc_query, wc_operations)
+                    if self.apm_client:
+                        elasticapm.label(affected_alerts=wc_count)
+
+                    if wc_count:
+                        self.log.info("{count} Alert(s) workflows marked as completed.".format(count=count))
+
+                    # End of transaction
+                    if self.apm_client:
+                        self.apm_client.end_transaction("workflows_completed", 'success')
+
+                except SearchException as e:
+                    self.log.warning(f"Failed to update alerts workflows_completed field. [{str(e)}]")
+
+                    # End of transaction
+                    if self.apm_client:
+                        self.apm_client.end_transaction("workflows_completed", 'search_exception')
+
             else:
                 self.log.info("Skipping all workflows since there where no new alerts in the specified time period.")
 
