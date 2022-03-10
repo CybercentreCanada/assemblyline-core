@@ -39,6 +39,9 @@ class Scheduler:
         else:
             selected = self.expand_categories(submission.params.services.selected)
 
+        if submission.params.services.rescan:
+            selected.extend(self.expand_categories(submission.params.services.rescan))
+
         # Add all selected, accepted, and not rejected services to the schedule
         schedule: list[dict[str, Service]] = [{} for _ in self.config.services.stages]
         services = list(set(selected) - set(excluded) - set(runtime_excluded))
