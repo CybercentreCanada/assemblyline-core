@@ -1,8 +1,8 @@
-import shutil
 import os
 import shelve
 import threading
 from assemblyline.common.isotime import epoch_to_iso
+from assemblyline.filestore import FileStore
 
 from assemblyline_core.replay.client import APIClient, DirectClient
 from assemblyline_core.replay.replay import ReplayBase
@@ -40,6 +40,7 @@ class ReplayCreator(ReplayBase):
 
     def process_alerts(self):
         while self.running:
+            filestore = FileStore(self.replay_config.creator.output_filestore)
             # Process alerts found
             alert = self.client.get_next_alert()
             if alert:
@@ -47,7 +48,6 @@ class ReplayCreator(ReplayBase):
 
                 # Make sure directories exists
                 os.makedirs(self.replay_config.creator.working_directory, exist_ok=True)
-                os.makedirs(self.replay_config.creator.output_directory, exist_ok=True)
 
                 # Create the bundle
                 bundle_path = os.path.join(self.replay_config.creator.working_directory,
@@ -55,9 +55,7 @@ class ReplayCreator(ReplayBase):
                 self.client.create_alert_bundle(alert['alert_id'], bundle_path)
 
                 # Move the bundle
-                final_path = os.path.join(self.replay_config.creator.output_directory,
-                                          f"alert_{alert['alert_id']}.al_bundle")
-                shutil.move(bundle_path, final_path)
+                filestore.upload(bundle_path, f"alert_{alert['alert_id']}.al_bundle")
 
                 # Save ID to cache
                 with self.cache_lock:
@@ -67,6 +65,7 @@ class ReplayCreator(ReplayBase):
 
     def process_submissions(self):
         while self.running:
+            filestore = FileStore(self.replay_config.creator.output_filestore)
             # Process submissions found
             submission = self.client.get_next_submission()
             if submission:
@@ -74,7 +73,6 @@ class ReplayCreator(ReplayBase):
 
                 # Make sure directories exists
                 os.makedirs(self.replay_config.creator.working_directory, exist_ok=True)
-                os.makedirs(self.replay_config.creator.output_directory, exist_ok=True)
 
                 # Create the bundle
                 bundle_path = os.path.join(self.replay_config.creator.working_directory,
@@ -82,9 +80,7 @@ class ReplayCreator(ReplayBase):
                 self.client.create_submission_bundle(submission['sid'], bundle_path)
 
                 # Move the bundle
-                final_path = os.path.join(self.replay_config.creator.output_directory,
-                                          f"submission_{submission['sid']}.al_bundle")
-                shutil.move(bundle_path, final_path)
+                filestore.upload(bundle_path, f"submission_{submission['sid']}.al_bundle")
 
                 # Save ID to cache
                 with self.cache_lock:
