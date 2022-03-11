@@ -51,6 +51,10 @@ class ReplayCreator(ReplayBase):
                 # Move the bundle
                 filestore.upload(bundle_path, f"alert_{alert['alert_id']}.al_bundle")
 
+                # Remove temp file
+                if os.path.exists(bundle_path):
+                    os.unlink(bundle_path)
+
                 # Set alert state done
                 self.client.set_single_alert_complete(alert['alert_id'])
 
@@ -72,6 +76,10 @@ class ReplayCreator(ReplayBase):
 
                 # Move the bundle
                 filestore.upload(bundle_path, f"submission_{submission['sid']}.al_bundle")
+
+                # Remove temp file
+                if os.path.exists(bundle_path):
+                    os.unlink(bundle_path)
 
                 # Set submission state done
                 self.client.set_single_submission_complete(submission['sid'])
