@@ -5,7 +5,6 @@ from queue import Empty, Queue
 
 from assemblyline.common import forge
 from assemblyline.common.bundling import create_bundle, import_bundle
-from assemblyline_client import get_client
 
 
 EMPTY_WAIT_TIME = int(os.environ.get('EMPTY_WAIT_TIME', '30'))
@@ -150,6 +149,9 @@ class ClientBase(object):
 
 class APIClient(ClientBase):
     def __init__(self, log, host, user, apikey, verify, alert_fqs=None, submission_fqs=None, lookback_time='*'):
+        # Import assemblyline client
+        from assemblyline_client import get_client
+
         # Setup AL client
         self.al_client = get_client(host, apikey=(user, apikey), verify=verify)
 
