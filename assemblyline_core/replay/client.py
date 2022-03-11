@@ -164,10 +164,16 @@ class APIClient(ClientBase):
             query, fl="sid,times.completed", sort="times.completed asc", rows=100, filters=filter_queries)
 
     def _set_bulk_alert_pending(self, query, filter_queries, max_docs):
-        raise NotImplementedError()
+        self.al_client.replay.set_bulk_pending('alert', query, filter_queries, max_docs)
 
     def _set_bulk_submission_pending(self, query, filter_queries, max_docs):
-        raise NotImplementedError()
+        self.al_client.replay.set_bulk_pending('submission', query, filter_queries, max_docs)
+
+    def _stream_alert_ids(self, query):
+        return self.al_client.search.stream.alert(query, fl="alert_id,reporting_ts")
+
+    def _stream_submission_ids(self, query):
+        return self.al_client.search.stream.submission(query, fl="sid,times.completed")
 
     def create_alert_bundle(self, alert_id, bundle_path):
         self.al_client.bundle.create(alert_id, output=bundle_path, use_alert=True)
@@ -182,10 +188,10 @@ class APIClient(ClientBase):
                                             exist_ok=exist_ok)
 
     def set_single_alert_complete(self, alert_id):
-        raise NotImplementedError()
+        self.al_client.replay.set_complete('alert', alert_id)
 
     def set_single_submission_complete(self, sid):
-        raise NotImplementedError()
+        self.al_client.replay.set_complete('submission', sid)
 
 
 class DirectClient(ClientBase):
