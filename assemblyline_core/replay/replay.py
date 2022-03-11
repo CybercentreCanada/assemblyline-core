@@ -7,7 +7,7 @@ from typing import Callable
 
 from assemblyline.common.dict_utils import recursive_update
 from assemblyline.common.forge import env_substitute
-from assemblyline.odm.models.replay import DEFAULT_REPLAY, ReplayConfig
+from assemblyline.odm.models.replay import ReplayConfig
 from assemblyline_core.server_base import ServerBase
 
 CONFIG_PATH = os.environ.get('REPLAY_CONFIG_PATH', '/etc/assemblyline/replay.yml')
@@ -20,7 +20,7 @@ class ReplayBase(ServerBase):
         # Load updated values
         if os.path.exists(CONFIG_PATH):
             with open(CONFIG_PATH) as yml_fh:
-                self.replay_config = ReplayConfig(recursive_update(DEFAULT_REPLAY,
+                self.replay_config = ReplayConfig(recursive_update(ReplayConfig().as_primitives(),
                                                                    yaml.safe_load(env_substitute(yml_fh.read()))))
 
         # Thread events related to exiting
