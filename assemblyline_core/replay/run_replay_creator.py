@@ -1,9 +1,6 @@
 import os
-import shelve
-import threading
-from assemblyline.common.isotime import epoch_to_iso
-from assemblyline.filestore import FileStore
 
+from assemblyline.filestore import FileStore
 from assemblyline_core.replay.client import APIClient, DirectClient
 from assemblyline_core.replay.replay import ReplayBase
 
@@ -12,18 +9,15 @@ class ReplayCreator(ReplayBase):
     def __init__(self):
         super().__init__("assemblyline.replay_creator")
 
+        if not self.replay_config.creator.alert_input.enabled and \
+                not self.replay_config.creator.submission_input.enabled:
+            return
+
         # Create cache directory
         os.makedirs(self.replay_config.creator.working_directory, exist_ok=True)
 
-        # Load/create cache
-        self.cache_lock = threading.Lock()
-        self.cache = shelve.open(os.path.join(self.replay_config.creator.working_directory, 'creator_cache.db'))
-
         # Load client
-        client_config = dict(last_alert_time=self.cache.get('last_alert_time', None),
-                             last_submission_time=self.cache.get('last_submission_time', None),
-                             last_alert_id=self.cache.get('last_alert_id', None),
-                             last_submission_id=self.cache.get('last_submission_id', None),
+        client_config = dict(lookback_time=self.replay_config.creator.lookback_time,
                              alert_fqs=self.replay_config.creator.alert_input.filter_queries,
                              submission_fqs=self.replay_config.creator.submission_input.filter_queries)
 
@@ -57,11 +51,8 @@ class ReplayCreator(ReplayBase):
                 # Move the bundle
                 filestore.upload(bundle_path, f"alert_{alert['alert_id']}.al_bundle")
 
-                # Save ID to cache
-                with self.cache_lock:
-                    if alert['reporting_ts'] > self.cache.get('last_alert_time', epoch_to_iso(0)):
-                        self.cache['last_alert_id'] = alert['alert_id']
-                        self.cache['last_alert_time'] = alert['reporting_ts']
+                # Set alert state done
+                self.client.set_single_alert_complete(alert['alert_id'])
 
     def process_submissions(self):
         while self.running:
@@ -82,11 +73,8 @@ class ReplayCreator(ReplayBase):
                 # Move the bundle
                 filestore.upload(bundle_path, f"submission_{submission['sid']}.al_bundle")
 
-                # Save ID to cache
-                with self.cache_lock:
-                    if submission['times']['completed'] > self.cache.get('last_submission_time', epoch_to_iso(0)):
-                        self.cache['last_submission_id'] = submission['sid']
-                        self.cache['last_submission_time'] = submission['times']['completed']
+                # Set submission state done
+                self.client.set_single_submission_complete(submission['sid'])
 
     def try_run(self):
         threads = {}
@@ -104,10 +92,8 @@ class ReplayCreator(ReplayBase):
             self.maintain_threads(threads)
         else:
             self.log.warning("There are no configured input, terminating")
-
-    def stop(self):
-        self.cache.close()
-        return super().stop()
+            self.main_loop_exit.set()
+            self.stop()
 
 
 if __name__ == '__main__':
