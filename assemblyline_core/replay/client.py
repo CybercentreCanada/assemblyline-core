@@ -23,7 +23,7 @@ class ClientBase(object):
         self.submission_input_queue = Queue()
 
         # Setup timming
-        self.lookback_time = lookback_time
+        self.last_alert_time = self.last_submission_time = self.lookback_time = lookback_time
 
         # Setup filter queries
         self.pending_fq = f'NOT metadata.replay:{REPLAY_PENDING}'
@@ -81,15 +81,16 @@ class ClientBase(object):
         # Run
         while self.running:
             # Find alerts
-            alert_input_query = f"reporting_ts:[{self.lookback_time} TO now]"
+            alert_input_query = f"reporting_ts:{{{self.last_alert_time} TO now]"
             alerts = self._get_next_alert_ids(alert_input_query, processing_fqs)
 
             # Set their pending state
             if alerts['items']:
                 last_time = alerts['items'][-1]['reporting_ts']
-                bulk_query = f"reporting_ts:[{self.lookback_time} TO {last_time}]"
+                bulk_query = f"reporting_ts:{{{self.last_alert_time} TO {last_time}]"
                 count = len(alerts['items'])
                 self._set_bulk_alert_pending(bulk_query, processing_fqs, count)
+                self.last_alert_time = last_time
 
             # Queue them
             for a in alerts['items']:
@@ -97,6 +98,7 @@ class ClientBase(object):
 
             # Wait if nothing found
             if alerts['total'] == 0:
+                self.last_alert_time = self.lookback_time
                 for _ in range(EMPTY_WAIT_TIME):
                     if not self.running:
                         break
@@ -113,15 +115,16 @@ class ClientBase(object):
         # Run
         while self.running:
             # Find submissions
-            sub_query = f"times.completed:[{self.lookback_time} TO now]"
+            sub_query = f"times.completed:{{{self.last_submission_time} TO now]"
             submissions = self._get_next_submission_ids(sub_query, processing_fqs)
 
             # Set their pending state
             if submissions['items']:
                 last_time = submissions['items'][-1]['times']['completed']
-                bulk_query = f"times.completed:[{self.lookback_time} TO {last_time}]"
+                bulk_query = f"times.completed:{{{self.last_submission_time} TO {last_time}]"
                 count = len(submissions['items'])
                 self._set_bulk_submission_pending(bulk_query, processing_fqs, count)
+                self.last_submission_time = last_time
 
             # Queue them
             for sub in submissions['items']:
@@ -129,6 +132,7 @@ class ClientBase(object):
 
             # Wait if nothing found
             if submissions['total'] == 0:
+                self.last_submission_time = self.lookback_time
                 for _ in range(EMPTY_WAIT_TIME):
                     if not self.running:
                         break
