@@ -29,6 +29,7 @@ COPY_LABELS = [
 SERVICE_LIVENESS_PERIOD = int(os.environ.get('SERVICE_LIVENESS_PERIOD', 300)) * 1000000000
 SERVICE_LIVENESS_TIMEOUT = int(os.environ.get('SERVICE_LIVENESS_TIMEOUT', 60)) * 1000000000
 
+
 class DockerController(ControllerInterface):
     """A controller for *non* swarm mode docker."""
 
@@ -115,7 +116,8 @@ class DockerController(ControllerInterface):
                 for service_name in self.networks:
                     network = self._get_network(service_name)
                     if self.service_server.name not in {c.name for c in network.containers}:
-                        self.networks[service_name].connect(self.service_server, aliases=['service-server'])
+                        self._connect_to_network(self.service_server, self.networks[service_name],
+                                                 aliases=['service-server'])
 
                 # As long as the current service server is still running, just block its exit code in this thread
                 self.service_server.wait()
@@ -203,10 +205,10 @@ class DockerController(ControllerInterface):
         )
 
         if prof.privileged:
-            self._connect_to_network(self.core_network, container)
+            self._connect_to_network(container, self.core_network)
 
         if cfg.allow_internet_access:
-            self._connect_to_network(self.external_network, container)
+            self._connect_to_network(container, self.external_network)
 
     def _start_container(
             self, service_name, name, labels, volumes, cfg: DockerConfig, network, hostname, core_container=False):
@@ -509,7 +511,7 @@ class DockerController(ControllerInterface):
             network = self.networks[service_name] = self.client.networks.create(name=network_name, internal=True)
 
         if self.service_server.name not in {c.name for c in network.containers}:
-            self.networks[service_name].connect(self.service_server, aliases=['service-server'])
+            self._connect_to_network(self.service_server, self.networks[service_name], aliases=['service-server'])
 
         return network
 
