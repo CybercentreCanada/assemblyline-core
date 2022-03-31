@@ -421,11 +421,7 @@ class ScalerServer(ThreadedCoreBase):
 
         # noinspection PyBroadException
         try:
-            # Is this service considered compatible to run on this version of Assemblyline?
-            system_spec = f'{FRAMEWORK_VERSION}.{SYSTEM_VERSION}'
-            if not service.version.startswith(system_spec):
-                self.log.warning("Disabling service with incompatible version. "
-                                 f"[{service.version} != '{system_spec}.X.{service.update_channel}Y'].")
+            def disable_incompatible_service():
                 service.enabled = False
                 if self.datastore.service_delta.update(service.name,
                                                        [(self.datastore.service_delta.UPDATE_SET, 'enabled', False)]):
@@ -434,6 +430,21 @@ class ScalerServer(ThreadedCoreBase):
                         'operation': Operation.Incompatible,
                         'name': service.name
                     })
+
+            # Check if service considered compatible to run on Assemblyline?
+            system_spec = f'{FRAMEWORK_VERSION}.{SYSTEM_VERSION}'
+            if not service.version.startswith(system_spec):
+                # If FW and SYS version don't prefix in the service version, we can't guarantee the service is compatible
+                # Disable and treat it as incompatible due to service version.
+                self.log.warning("Disabling service with incompatible version. "
+                                 f"[{service.version} != '{system_spec}.X.{service.update_channel}Y'].")
+                disable_incompatible_service()
+            elif service.update_config and service.update_config.wait_for_update and not service.update_config.sources:
+                # All signatures sources from a signature-dependent service was removed
+                # Disable and treat it as incompatible due to service configuration relative to source management
+                self.log.warning("Disabling service with incompatible service configuration. "
+                                 "Signature-dependent service has no signature sources.")
+                disable_incompatible_service()
 
             if not service.enabled:
                 self.stop_service(service.name, stage)
