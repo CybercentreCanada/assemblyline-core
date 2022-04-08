@@ -208,20 +208,20 @@ class APIClient(ClientBase):
     def get_next_alert(self):
         return self.al_client.replay.get_message('alert')
 
+    def get_next_file(self):
+        return self.al_client.replay.get_message('file')
+
     def get_next_submission(self):
         return self.al_client.replay.get_message('submission')
 
     def put_alert(self, alert):
-        return self.al_client.replay.put_message('alert', alert)
-
-    def put_submission(self, submission):
-        return self.al_client.replay.put_message('submission', submission)
-
-    def get_next_file(self):
-        return self.al_client.replay.get_message('file')
+        self.al_client.replay.put_message('alert', alert)
 
     def put_file(self, path):
-        return self.al_client.replay.put_message('file', path)
+        self.al_client.replay.put_message('file', path)
+
+    def put_submission(self, submission):
+        self.al_client.replay.put_message('submission', submission)
 
 
 class DirectClient(ClientBase):
@@ -282,19 +282,19 @@ class DirectClient(ClientBase):
         self.datastore.submission.update(sid, operations)
 
     def get_next_alert(self):
-        self.alert_queue.pop(blocking=True, timeout=30)
+        return self.alert_queue.pop(blocking=True, timeout=30)
+
+    def get_next_file(self):
+        return self.file_queue.pop(blocking=True, timeout=30)
 
     def get_next_submission(self):
-        self.submission_queue.pop(blocking=True, timeout=30)
+        return self.submission_queue.pop(blocking=True, timeout=30)
 
     def put_alert(self, alert):
         self.alert_queue.push(alert)
 
-    def put_submission(self, submission):
-        self.submission_queue.push(submission)
-
-    def get_next_file(self):
-        self.file_queue.pop(blocking=True, timeout=30)
-
     def put_file(self, path):
         self.file_queue.push(path)
+
+    def put_submission(self, submission):
+        self.submission_queue.push(submission)
