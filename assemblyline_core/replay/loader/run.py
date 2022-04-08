@@ -40,6 +40,7 @@ class ReplayLoader(ReplayBase):
                     new_cache.add(file_path)
 
                     if file_path not in self.cache['files']:
+                        self.log.info(f'Queueing file: {file_path}')
                         self.client.put_file(file_path)
                         new_files = True
 

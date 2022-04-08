@@ -1,4 +1,3 @@
-import shelve
 import shutil
 import os
 
@@ -12,11 +11,6 @@ class ReplayLoaderWorker(ReplayBase):
 
         # Create cache directory
         os.makedirs(self.replay_config.loader.working_directory, exist_ok=True)
-
-        # Create/Load the cache
-        self.cache = shelve.open(os.path.join(self.replay_config.loader.working_directory, 'loader_cache.db'))
-        if 'files' not in self.cache:
-            self.cache['files'] = set()
 
         # Load client
         if self.replay_config.loader.client.type == 'direct':
@@ -58,7 +52,6 @@ class ReplayLoaderWorker(ReplayBase):
         self.maintain_threads(threads)
 
     def stop(self):
-        self.cache.close()
         return super().stop()
 
 
