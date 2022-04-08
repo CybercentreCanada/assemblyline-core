@@ -212,9 +212,9 @@ class SubmissionClient:
             if extracted_path:
                 local_path = extracted_path
 
-            self.filestore.upload(local_path, fileinfo['sha256'])
             self.datastore.save_or_freshen_file(fileinfo['sha256'], fileinfo, expiry,
                                                 al_meta['classification'], redis=self.redis)
+            self.filestore.upload(local_path, fileinfo['sha256'])
             return fileinfo['sha256'], fileinfo['size'], al_meta
 
         finally:
