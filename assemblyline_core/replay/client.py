@@ -69,7 +69,8 @@ class ClientBase(object):
     def setup_alert_input_queue(self):
         # Bootstrap recovery of pending replayed alerts
         for a in self._stream_alert_ids(f"metadata.replay:{REPLAY_PENDING}"):
-            self.alert_input_queue.put(a)
+            self.log.info(f"Replaying alert: {a['alert_id']}")
+            self.put_alert(a)
 
         # Create the list of filter queries
         processing_fqs = self.alert_fqs + [self.pending_fq, self.done_fq]
@@ -90,7 +91,8 @@ class ClientBase(object):
 
             # Queue them
             for a in alerts['items']:
-                self.alert_input_queue.put(a)
+                self.log.info(f"Replaying alert: {a['alert_id']}")
+                self.put_alert(a)
 
             # Wait if nothing found
             if alerts['total'] == 0:
@@ -103,7 +105,8 @@ class ClientBase(object):
     def setup_submission_input_queue(self):
         # Bootstrap recovery of pending replayed submission
         for sub in self._stream_submission_ids(f"metadata.replay:{REPLAY_PENDING}"):
-            self.submission_input_queue.put(sub)
+            self.log.info(f"Replaying submission: {sub['sid']}")
+            self.put_submission(sub)
 
         # Create the list of filter queries
         processing_fqs = self.submission_fqs + [self.pending_fq, self.done_fq]
@@ -124,7 +127,8 @@ class ClientBase(object):
 
             # Queue them
             for sub in submissions['items']:
-                self.submission_input_queue.put(sub)
+                self.log.info(f"Replaying submission: {sub['sid']}")
+                self.put_submission(sub)
 
             # Wait if nothing found
             if submissions['total'] == 0:
