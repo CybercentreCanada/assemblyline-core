@@ -5,13 +5,16 @@ from assemblyline_core.replay.client import APIClient, DirectClient
 from assemblyline_core.replay.replay import ReplayBase
 
 
-class ReplayCreator(ReplayBase):
+class ReplayCreatorWorker(ReplayBase):
     def __init__(self):
-        super().__init__("assemblyline.replay_creator")
+        super().__init__("assemblyline.replay_creator.worker")
 
         if not self.replay_config.creator.alert_input.enabled and \
                 not self.replay_config.creator.submission_input.enabled:
             return
+
+        # Initialize filestore object
+        self.filestore = FileStore(self.replay_config.creator.output_filestore)
 
         # Create cache directory
         os.makedirs(self.replay_config.creator.working_directory, exist_ok=True)
@@ -34,7 +37,6 @@ class ReplayCreator(ReplayBase):
 
     def process_alerts(self):
         while self.running:
-            filestore = FileStore(self.replay_config.creator.output_filestore)
             # Process alerts found
             alert = self.client.get_next_alert()
             if alert:
@@ -49,7 +51,7 @@ class ReplayCreator(ReplayBase):
                 self.client.create_alert_bundle(alert['alert_id'], bundle_path)
 
                 # Move the bundle
-                filestore.upload(bundle_path, f"alert_{alert['alert_id']}.al_bundle")
+                self.filestore.upload(bundle_path, f"alert_{alert['alert_id']}.al_bundle")
 
                 # Remove temp file
                 if os.path.exists(bundle_path):
@@ -60,7 +62,6 @@ class ReplayCreator(ReplayBase):
 
     def process_submissions(self):
         while self.running:
-            filestore = FileStore(self.replay_config.creator.output_filestore)
             # Process submissions found
             submission = self.client.get_next_submission()
             if submission:
@@ -75,7 +76,7 @@ class ReplayCreator(ReplayBase):
                 self.client.create_submission_bundle(submission['sid'], bundle_path)
 
                 # Move the bundle
-                filestore.upload(bundle_path, f"submission_{submission['sid']}.al_bundle")
+                self.filestore.upload(bundle_path, f"submission_{submission['sid']}.al_bundle")
 
                 # Remove temp file
                 if os.path.exists(bundle_path):
@@ -87,12 +88,10 @@ class ReplayCreator(ReplayBase):
     def try_run(self):
         threads = {}
         if self.replay_config.creator.alert_input.enabled:
-            threads['Load Alerts'] = self.client.setup_alert_input_queue
             for ii in range(self.replay_config.creator.alert_input.threads):
                 threads[f'Alert process thread #{ii}'] = self.process_alerts
 
         if self.replay_config.creator.submission_input.enabled:
-            threads['Load Submissions'] = self.client.setup_submission_input_queue
             for ii in range(self.replay_config.creator.submission_input.threads):
                 threads[f'Submission process thread #{ii}'] = self.process_submissions
 
@@ -105,5 +104,5 @@ class ReplayCreator(ReplayBase):
 
 
 if __name__ == '__main__':
-    with ReplayCreator() as replay:
+    with ReplayCreatorWorker() as replay:
         replay.serve_forever()
