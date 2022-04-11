@@ -1,10 +1,10 @@
 import os
 import time
 
-from queue import Empty, Queue
-
 from assemblyline.common import forge
 from assemblyline.common.bundling import create_bundle, import_bundle
+from assemblyline.remote.datatypes import get_client
+from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 
 EMPTY_WAIT_TIME = int(os.environ.get('EMPTY_WAIT_TIME', '30'))
@@ -17,10 +17,6 @@ class ClientBase(object):
     def __init__(self, log, alert_fqs=None, submission_fqs=None, lookback_time='*'):
         # Set logger
         self.log = log
-
-        # Setup input queues
-        self.alert_input_queue = Queue()
-        self.submission_input_queue = Queue()
 
         # Setup timming
         self.last_alert_time = self.last_submission_time = self.lookback_time = lookback_time
@@ -73,7 +69,8 @@ class ClientBase(object):
     def setup_alert_input_queue(self):
         # Bootstrap recovery of pending replayed alerts
         for a in self._stream_alert_ids(f"metadata.replay:{REPLAY_PENDING}"):
-            self.alert_input_queue.put(a)
+            self.log.info(f"Replaying alert: {a['alert_id']}")
+            self.put_alert(a)
 
         # Create the list of filter queries
         processing_fqs = self.alert_fqs + [self.pending_fq, self.done_fq]
@@ -94,7 +91,8 @@ class ClientBase(object):
 
             # Queue them
             for a in alerts['items']:
-                self.alert_input_queue.put(a)
+                self.log.info(f"Replaying alert: {a['alert_id']}")
+                self.put_alert(a)
 
             # Wait if nothing found
             if alerts['total'] == 0:
@@ -107,7 +105,8 @@ class ClientBase(object):
     def setup_submission_input_queue(self):
         # Bootstrap recovery of pending replayed submission
         for sub in self._stream_submission_ids(f"metadata.replay:{REPLAY_PENDING}"):
-            self.submission_input_queue.put(sub)
+            self.log.info(f"Replaying submission: {sub['sid']}")
+            self.put_submission(sub)
 
         # Create the list of filter queries
         processing_fqs = self.submission_fqs + [self.pending_fq, self.done_fq]
@@ -128,7 +127,8 @@ class ClientBase(object):
 
             # Queue them
             for sub in submissions['items']:
-                self.submission_input_queue.put(sub)
+                self.log.info(f"Replaying submission: {sub['sid']}")
+                self.put_submission(sub)
 
             # Wait if nothing found
             if submissions['total'] == 0:
@@ -139,16 +139,22 @@ class ClientBase(object):
                     time.sleep(1)
 
     def get_next_alert(self):
-        try:
-            return self.alert_input_queue.get(block=True, timeout=3)
-        except Empty:
-            return None
+        raise NotImplementedError()
 
     def get_next_submission(self):
-        try:
-            return self.submission_input_queue.get(block=True, timeout=3)
-        except Empty:
-            return None
+        raise NotImplementedError()
+
+    def put_alert(self, *_):
+        raise NotImplementedError()
+
+    def put_submission(self, *_):
+        raise NotImplementedError()
+
+    def get_next_file(self):
+        raise NotImplementedError()
+
+    def put_file(self, *_):
+        raise NotImplementedError()
 
 
 class APIClient(ClientBase):
@@ -199,11 +205,35 @@ class APIClient(ClientBase):
     def set_single_submission_complete(self, sid):
         self.al_client.replay.set_complete('submission', sid)
 
+    def get_next_alert(self):
+        return self.al_client.replay.get_message('alert')
+
+    def get_next_file(self):
+        return self.al_client.replay.get_message('file')
+
+    def get_next_submission(self):
+        return self.al_client.replay.get_message('submission')
+
+    def put_alert(self, alert):
+        self.al_client.replay.put_message('alert', alert)
+
+    def put_file(self, path):
+        self.al_client.replay.put_message('file', path)
+
+    def put_submission(self, submission):
+        self.al_client.replay.put_message('submission', submission)
+
 
 class DirectClient(ClientBase):
     def __init__(self, log, alert_fqs=None, submission_fqs=None, lookback_time='*'):
         # Setup datastore
-        self.datastore = forge.get_datastore()
+        config = forge.get_config()
+        redis = get_client(config.core.redis.nonpersistent.host, config.core.redis.nonpersistent.port, False)
+
+        self.datastore = forge.get_datastore(config=config)
+        self.alert_queue = NamedQueue("replay_alert", host=redis)
+        self.file_queue = NamedQueue("replay_file", host=redis)
+        self.submission_queue = NamedQueue("replay_submission", host=redis)
 
         super().__init__(log, alert_fqs=alert_fqs, submission_fqs=submission_fqs, lookback_time=lookback_time)
 
@@ -250,3 +280,21 @@ class DirectClient(ClientBase):
     def set_single_submission_complete(self, sid):
         operations = [(self.datastore.submission.UPDATE_SET, 'metadata.replay', REPLAY_DONE)]
         self.datastore.submission.update(sid, operations)
+
+    def get_next_alert(self):
+        return self.alert_queue.pop(blocking=True, timeout=30)
+
+    def get_next_file(self):
+        return self.file_queue.pop(blocking=True, timeout=30)
+
+    def get_next_submission(self):
+        return self.submission_queue.pop(blocking=True, timeout=30)
+
+    def put_alert(self, alert):
+        self.alert_queue.push(alert)
+
+    def put_file(self, path):
+        self.file_queue.push(path)
+
+    def put_submission(self, submission):
+        self.submission_queue.push(submission)
