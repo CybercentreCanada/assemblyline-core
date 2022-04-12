@@ -260,7 +260,7 @@ class Dispatcher(ThreadedCoreBase):
         # Queue to hold of service timeouts that need to be processed
         # They will be held in this queue until results in redis are
         # already processed
-        self.timeout_queue = Queue()
+        self.timeout_queue: Queue[DispatchAction] = Queue()
 
     def interrupt_handler(self, signum, stack_frame):
         self.log.info("Instance caught signal. Beginning to drain work.")
@@ -836,14 +836,15 @@ class Dispatcher(ThreadedCoreBase):
         while self.running:
             # Try to get a batch of results to process
             messages = result_queue.pop_batch(RESULT_BATCH_SIZE)
+            timeouts: list[DispatchAction] = []
 
             # If we got an incomplete batch, we have taken everything in redis
             # and its safe to process timeouts, fill up the message list with
             # timeout messages
             if len(messages) < RESULT_BATCH_SIZE:
-                while len(messages) < RESULT_BATCH_SIZE * 2:
+                while len(timeouts) < RESULT_BATCH_SIZE:
                     try:
-                        messages.append(self.timeout_queue.get_nowait())
+                        timeouts.append(self.timeout_queue.get_nowait())
                     except Empty:
                         break
 
@@ -859,6 +860,10 @@ class Dispatcher(ThreadedCoreBase):
                 sid = message['sid']
                 self.queue_ready_signals[self.process_queue_index(sid)].acquire()
                 self.find_process_queue(sid).put(DispatchAction(kind=Action.result, sid=sid, data=message))
+
+            for message in timeouts:
+                self.queue_ready_signals[self.process_queue_index(message.sid)].acquire()
+                self.find_process_queue(message.sid).put(message)
 
     def service_worker(self, index: int):
         self.log.info(f"Start service worker {index}")
