@@ -21,7 +21,7 @@ from packaging import version
 
 METRICS_QUEUE = "assemblyline_metrics"
 NON_AGGREGATED = ['scaler', 'scaler_status']
-NON_AGGREGATED_COUNTERS = {'dispatcher': {'save_queue'}}
+NON_AGGREGATED_COUNTERS = {'dispatcher': {'save_queue', 'error_queue'}}
 
 
 def cleanup_metrics(input_dict):

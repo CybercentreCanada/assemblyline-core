@@ -53,6 +53,7 @@ AL_SHUTDOWN_GRACE = int(os.environ.get('AL_SHUTDOWN_GRACE', '60'))
 AL_SHUTDOWN_QUIT = 60
 FINALIZING_WINDOW = max(AL_SHUTDOWN_GRACE - AL_SHUTDOWN_QUIT, 0)
 RESULT_BATCH_SIZE = int(os.environ.get('DISPATCHER_RESULT_BATCH_SIZE', '50'))
+ERROR_BATCH_SIZE = int(os.environ.get('DISPATCHER_ERROR_BATCH_SIZE', '50'))
 
 
 class Action(enum.IntEnum):
@@ -254,8 +255,9 @@ class Dispatcher(ThreadedCoreBase):
         self.queue_ready_signals: list[threading.Semaphore] = [threading.Semaphore(MAX_RESULT_BUFFER)
                                                                for _ in range(RESULT_THREADS)]
 
-        # Queue of finished submissions waiting to be saved into elastic
+        # Queue of finished submissions/errors waiting to be saved into elastic
         self.finalize_queue = Queue()
+        self.error_queue: Queue[tuple[str, Error]] = Queue()
 
         # Queue to hold of service timeouts that need to be processed
         # They will be held in this queue until results in redis are
@@ -288,6 +290,8 @@ class Dispatcher(ThreadedCoreBase):
             'Pull Service Start': self.pull_service_starts,
             # pull result messages
             'Pull Service Result': self.pull_service_results,
+            # Save errors to DB
+            'Save Errors': self.save_errors,
             # Handle timeouts
             'Process Timeouts': self.handle_timeouts,
             # Work guard/thief
@@ -729,6 +733,26 @@ class Dispatcher(ThreadedCoreBase):
             except Empty:
                 pass
 
+    def save_errors(self):
+        while self.running:
+            self.counter.set('error_queue', self.error_queue.qsize())
+
+            try:
+                errors = [self.error_queue.get(block=True, timeout=3)]
+            except Empty:
+                continue
+
+            try:
+                while len(errors) < ERROR_BATCH_SIZE:
+                    errors.append(self.error_queue.get_nowait())
+            except Empty:
+                pass
+
+            plan = self.datastore.error.get_bulk_plan()
+            for error_key, error in errors:
+                plan.add_upsert_operation(error_key, error)
+            self.datastore.error.bulk(plan)
+
     @elasticapm.capture_span(span_type='dispatcher')
     def finalize_submission(self, task: SubmissionTask, max_score, file_list):
         """All of the services for all of the files in this submission have finished or failed.
@@ -816,7 +840,7 @@ class Dispatcher(ThreadedCoreBase):
         ))
 
         error_key = error.build_key()
-        self.datastore.error.save(error_key, error.as_primitives())
+        self.error_queue.put((error_key, error))
 
         task.queue_keys.pop((sha256, service_name), None)
         task.running_services.discard((sha256, service_name))
@@ -1074,7 +1098,7 @@ class Dispatcher(ThreadedCoreBase):
     def _dispatching_error(self, task: SubmissionTask, error):
         error_key = error.build_key()
         task.extra_errors.append(error_key)
-        self.datastore.error.save(error_key, error)
+        self.error_queue.put((error_key, error))
         msg = {'status': 'FAIL', 'cache_key': error_key}
         for w in self._watcher_list(task.submission.sid).members():
             NamedQueue(w).push(msg)
