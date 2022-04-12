@@ -750,7 +750,7 @@ class Dispatcher(ThreadedCoreBase):
 
             plan = self.datastore.error.get_bulk_plan()
             for error_key, error in errors:
-                plan.add_insert_operation(error_key, error)
+                plan.add_upsert_operation(error_key, error)
             self.datastore.error.bulk(plan)
 
     @elasticapm.capture_span(span_type='dispatcher')
