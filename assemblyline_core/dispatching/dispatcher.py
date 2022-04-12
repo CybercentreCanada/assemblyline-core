@@ -742,16 +742,17 @@ class Dispatcher(ThreadedCoreBase):
             except Empty:
                 continue
 
-            try:
-                while len(errors) < ERROR_BATCH_SIZE:
-                    errors.append(self.error_queue.get_nowait())
-            except Empty:
-                pass
+            with apm_span(self.apm_client, 'save_error'):
+                try:
+                    while len(errors) < ERROR_BATCH_SIZE:
+                        errors.append(self.error_queue.get_nowait())
+                except Empty:
+                    pass
 
-            plan = self.datastore.error.get_bulk_plan()
-            for error_key, error in errors:
-                plan.add_upsert_operation(error_key, error)
-            self.datastore.error.bulk(plan)
+                plan = self.datastore.error.get_bulk_plan()
+                for error_key, error in errors:
+                    plan.add_upsert_operation(error_key, error)
+                self.datastore.error.bulk(plan)
 
     @elasticapm.capture_span(span_type='dispatcher')
     def finalize_submission(self, task: SubmissionTask, max_score, file_list):
