@@ -1135,9 +1135,13 @@ class Dispatcher(ThreadedCoreBase):
         task.queue_keys.pop((sha256, service_name), None)
         task_key = ServiceTask.make_key(sid=sid, service_name=service_name, sha=sha256)
         service_task = self.running_tasks.pop(task_key)
-        if not service_task and (sha256, service_name) not in task.running_services:
-            self.log.debug(f"[{sid}] Service {service_name} "
-                           f"timed out on {sha256} but task isn't running.")
+        if not service_task:
+            if (sha256, service_name) not in task.running_services:
+                self.log.debug(f"[{sid}] Service {service_name} "
+                               f"timed out on {sha256} but task isn't running, may be already processed.")
+            else:
+                self.log.warning(f"[{sid}] Service {service_name} timed out on "
+                                 f"{sha256} but redis doesn't know task, check redis CPU.")
             return False
 
         # We can confirm that the task is ours now, even if the worker finished, the result will be ignored
