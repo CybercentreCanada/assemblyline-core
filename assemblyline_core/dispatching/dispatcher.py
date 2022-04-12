@@ -52,6 +52,7 @@ APM_SPAN_TYPE = 'handle_message'
 AL_SHUTDOWN_GRACE = int(os.environ.get('AL_SHUTDOWN_GRACE', '60'))
 AL_SHUTDOWN_QUIT = 60
 FINALIZING_WINDOW = max(AL_SHUTDOWN_GRACE - AL_SHUTDOWN_QUIT, 0)
+RESULT_BATCH_SIZE = int(os.environ.get('DISPATCHER_RESULT_BATCH_SIZE', '50'))
 
 
 class Action(enum.IntEnum):
@@ -252,7 +253,14 @@ class Dispatcher(ThreadedCoreBase):
         self.process_queues: list[PriorityQueue[DispatchAction]] = [PriorityQueue() for _ in range(RESULT_THREADS)]
         self.queue_ready_signals: list[threading.Semaphore] = [threading.Semaphore(MAX_RESULT_BUFFER)
                                                                for _ in range(RESULT_THREADS)]
+
+        # Queue of finished submissions waiting to be saved into elastic
         self.finalize_queue = Queue()
+
+        # Queue to hold of service timeouts that need to be processed
+        # They will be held in this queue until results in redis are
+        # already processed
+        self.timeout_queue = Queue()
 
     def interrupt_handler(self, signum, stack_frame):
         self.log.info("Instance caught signal. Beginning to drain work.")
@@ -826,12 +834,27 @@ class Dispatcher(ThreadedCoreBase):
         result_queue = self.result_queue
 
         while self.running:
-            messages = result_queue.pop_batch(5)
+            # Try to get a batch of results to process
+            messages = result_queue.pop_batch(RESULT_BATCH_SIZE)
+
+            # If we got an incomplete batch, we have taken everything in redis
+            # and its safe to process timeouts, fill up the message list with
+            # timeout messages
+            if len(messages) < RESULT_BATCH_SIZE:
+                while len(messages) < RESULT_BATCH_SIZE * 2:
+                    try:
+                        messages.append(self.timeout_queue.get_nowait())
+                    except Empty:
+                        break
+
+            # If there are no messages and no timeouts to process block for a second
             if not messages:
                 message = result_queue.pop(timeout=1)
                 if message:
                     messages = [message]
 
+            # If after all of this we have any messages, schedule them to be processed
+            # by the right worker thread
             for message in messages:
                 sid = message['sid']
                 self.queue_ready_signals[self.process_queue_index(sid)].acquire()
@@ -1119,9 +1142,12 @@ class Dispatcher(ThreadedCoreBase):
                 # Check for service timeouts
                 service_timeouts = self._service_timeouts.timeouts()
                 for (sid, sha, service_name), worker_id in service_timeouts.items():
-                    _q = self.find_process_queue(sid)
-                    _q.put(DispatchAction(kind=Action.service_timeout, sid=sid, sha=sha,
-                                          service_name=service_name, worker_id=worker_id))
+                    # Put our timeouts into special timeout queue so they are delayed
+                    # until redis results are processed
+                    self.timeout_queue.put(
+                        DispatchAction(kind=Action.service_timeout, sid=sid, sha=sha,
+                                       service_name=service_name, worker_id=worker_id)
+                    )
 
                 self.counter.increment('service_timeouts', len(service_timeouts))
                 self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
@@ -1135,13 +1161,9 @@ class Dispatcher(ThreadedCoreBase):
         task.queue_keys.pop((sha256, service_name), None)
         task_key = ServiceTask.make_key(sid=sid, service_name=service_name, sha=sha256)
         service_task = self.running_tasks.pop(task_key)
-        if not service_task:
-            if (sha256, service_name) not in task.running_services:
-                self.log.debug(f"[{sid}] Service {service_name} "
-                               f"timed out on {sha256} but task isn't running, may be already processed.")
-            else:
-                self.log.warning(f"[{sid}] Service {service_name} timed out on "
-                                 f"{sha256} but redis doesn't know task, check redis CPU.")
+        if not service_task and (sha256, service_name) not in task.running_services:
+            self.log.debug(f"[{sid}] Service {service_name} "
+                           f"timed out on {sha256} but task isn't running.")
             return False
 
         # We can confirm that the task is ours now, even if the worker finished, the result will be ignored
