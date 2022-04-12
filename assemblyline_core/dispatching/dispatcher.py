@@ -855,7 +855,6 @@ class Dispatcher(ThreadedCoreBase):
                 for _ in range(RESULT_BATCH_SIZE):
                     try:
                         message = self.timeout_queue.get_nowait()
-                        self.queue_ready_signals[self.process_queue_index(message.sid)].acquire()
                         self.find_process_queue(message.sid).put(message)
                     except Empty:
                         break
