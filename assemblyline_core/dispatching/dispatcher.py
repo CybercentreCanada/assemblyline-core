@@ -836,34 +836,29 @@ class Dispatcher(ThreadedCoreBase):
         while self.running:
             # Try to get a batch of results to process
             messages = result_queue.pop_batch(RESULT_BATCH_SIZE)
-            timeouts: list[DispatchAction] = []
-
-            # If we got an incomplete batch, we have taken everything in redis
-            # and its safe to process timeouts, fill up the message list with
-            # timeout messages
-            if len(messages) < RESULT_BATCH_SIZE:
-                while len(timeouts) < RESULT_BATCH_SIZE:
-                    try:
-                        timeouts.append(self.timeout_queue.get_nowait())
-                    except Empty:
-                        break
 
             # If there are no messages and no timeouts to process block for a second
-            if not messages:
+            if not messages and self.timeout_queue.empty():
                 message = result_queue.pop(timeout=1)
                 if message:
                     messages = [message]
 
-            # If after all of this we have any messages, schedule them to be processed
-            # by the right worker thread
+            # If we have any messages, schedule them to be processed by the right worker thread
             for message in messages:
                 sid = message['sid']
                 self.queue_ready_signals[self.process_queue_index(sid)].acquire()
                 self.find_process_queue(sid).put(DispatchAction(kind=Action.result, sid=sid, data=message))
 
-            for message in timeouts:
-                self.queue_ready_signals[self.process_queue_index(message.sid)].acquire()
-                self.find_process_queue(message.sid).put(message)
+            # If we got an incomplete batch, we have taken everything in redis
+            # and its safe to process timeouts, put some into the processing queues
+            if len(messages) < RESULT_BATCH_SIZE:
+                for _ in range(RESULT_BATCH_SIZE):
+                    try:
+                        message = self.timeout_queue.get_nowait()
+                        self.queue_ready_signals[self.process_queue_index(message.sid)].acquire()
+                        self.find_process_queue(message.sid).put(message)
+                    except Empty:
+                        break
 
     def service_worker(self, index: int):
         self.log.info(f"Start service worker {index}")
