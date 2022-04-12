@@ -52,6 +52,7 @@ APM_SPAN_TYPE = 'handle_message'
 AL_SHUTDOWN_GRACE = int(os.environ.get('AL_SHUTDOWN_GRACE', '60'))
 AL_SHUTDOWN_QUIT = 60
 FINALIZING_WINDOW = max(AL_SHUTDOWN_GRACE - AL_SHUTDOWN_QUIT, 0)
+RESULT_BATCH_SIZE = int(os.environ.get('DISPATCHER_RESULT_BATCH_SIZE', '50'))
 
 
 class Action(enum.IntEnum):
@@ -252,7 +253,14 @@ class Dispatcher(ThreadedCoreBase):
         self.process_queues: list[PriorityQueue[DispatchAction]] = [PriorityQueue() for _ in range(RESULT_THREADS)]
         self.queue_ready_signals: list[threading.Semaphore] = [threading.Semaphore(MAX_RESULT_BUFFER)
                                                                for _ in range(RESULT_THREADS)]
+
+        # Queue of finished submissions waiting to be saved into elastic
         self.finalize_queue = Queue()
+
+        # Queue to hold of service timeouts that need to be processed
+        # They will be held in this queue until results in redis are
+        # already processed
+        self.timeout_queue: Queue[DispatchAction] = Queue()
 
     def interrupt_handler(self, signum, stack_frame):
         self.log.info("Instance caught signal. Beginning to drain work.")
@@ -826,16 +834,30 @@ class Dispatcher(ThreadedCoreBase):
         result_queue = self.result_queue
 
         while self.running:
-            messages = result_queue.pop_batch(5)
-            if not messages:
+            # Try to get a batch of results to process
+            messages = result_queue.pop_batch(RESULT_BATCH_SIZE)
+
+            # If there are no messages and no timeouts to process block for a second
+            if not messages and self.timeout_queue.empty():
                 message = result_queue.pop(timeout=1)
                 if message:
                     messages = [message]
 
+            # If we have any messages, schedule them to be processed by the right worker thread
             for message in messages:
                 sid = message['sid']
                 self.queue_ready_signals[self.process_queue_index(sid)].acquire()
                 self.find_process_queue(sid).put(DispatchAction(kind=Action.result, sid=sid, data=message))
+
+            # If we got an incomplete batch, we have taken everything in redis
+            # and its safe to process timeouts, put some into the processing queues
+            if len(messages) < RESULT_BATCH_SIZE:
+                for _ in range(RESULT_BATCH_SIZE):
+                    try:
+                        message = self.timeout_queue.get_nowait()
+                        self.find_process_queue(message.sid).put(message)
+                    except Empty:
+                        break
 
     def service_worker(self, index: int):
         self.log.info(f"Start service worker {index}")
@@ -1119,9 +1141,12 @@ class Dispatcher(ThreadedCoreBase):
                 # Check for service timeouts
                 service_timeouts = self._service_timeouts.timeouts()
                 for (sid, sha, service_name), worker_id in service_timeouts.items():
-                    _q = self.find_process_queue(sid)
-                    _q.put(DispatchAction(kind=Action.service_timeout, sid=sid, sha=sha,
-                                          service_name=service_name, worker_id=worker_id))
+                    # Put our timeouts into special timeout queue so they are delayed
+                    # until redis results are processed
+                    self.timeout_queue.put(
+                        DispatchAction(kind=Action.service_timeout, sid=sid, sha=sha,
+                                       service_name=service_name, worker_id=worker_id)
+                    )
 
                 self.counter.increment('service_timeouts', len(service_timeouts))
                 self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
