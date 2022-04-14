@@ -9,9 +9,6 @@ class ReplayLoaderWorker(ReplayBase):
     def __init__(self):
         super().__init__("assemblyline.replay_loader.worker")
 
-        # Create cache directory
-        os.makedirs(self.replay_config.loader.working_directory, exist_ok=True)
-
         # Load client
         if self.replay_config.loader.client.type == 'direct':
             self.log.info("Using direct database access client")
