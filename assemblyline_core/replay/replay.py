@@ -22,6 +22,8 @@ class ReplayBase(ServerBase):
             with open(CONFIG_PATH) as yml_fh:
                 self.replay_config = ReplayConfig(recursive_update(ReplayConfig().as_primitives(),
                                                                    yaml.safe_load(env_substitute(yml_fh.read()))))
+        else:
+            self.replay_config = ReplayConfig()
 
         # Thread events related to exiting
         self.main_loop_exit = threading.Event()
