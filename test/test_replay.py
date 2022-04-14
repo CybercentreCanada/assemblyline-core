@@ -53,7 +53,8 @@ def datastore(request, datastore_connection, fs):
         datastore_connection.alert.wipe()
 
 
-def test_replay_single_alert(config, datastore):
+@pytest.fixture(scope="module")
+def creator():
     # Initialize Replay Creator
     replay_creator = ReplayCreator()
     replay_creator.running = True
@@ -63,10 +64,20 @@ def test_replay_single_alert(config, datastore):
         for f in os.listdir(output_dir):
             os.unlink(os.path.join(output_dir, f))
 
+    return replay_creator
+
+
+@pytest.fixture(scope="module")
+def creator_worker():
     # Initialize Replay Creator worker
     replay_creator_worker = ReplayCreatorWorker()
     replay_creator_worker.running = True
 
+    return replay_creator_worker
+
+
+@pytest.fixture(scope="module")
+def loader():
     # Initialize Replay Loader
     replay_loader = ReplayLoader()
     replay_loader.running = True
@@ -76,9 +87,21 @@ def test_replay_single_alert(config, datastore):
         for f in os.listdir(input_dir):
             os.unlink(os.path.join(input_dir, f))
 
+    return replay_loader
+
+
+@pytest.fixture(scope="module")
+def loader_worker():
     # Initialize Replay Loader worker
     replay_loader_worker = ReplayLoaderWorker()
     replay_loader_worker.running = True
+
+    return replay_loader_worker
+
+
+def test_replay_single_alert(config, datastore, creator, creator_worker, loader, loader_worker):
+    output_dir = creator.replay_config.creator.output_filestore.replace('file://', '')
+    input_dir = loader.replay_config.loader.input_directory
 
     # Make sure the alert get picked up by the creator
     alert = random.choice(all_alerts)
@@ -86,17 +109,17 @@ def test_replay_single_alert(config, datastore):
     alert.workflows_completed = True
     datastore.alert.save(alert.alert_id, alert)
     datastore.alert.commit()
+    filename = os.path.join(output_dir, f'alert_{alert.alert_id}.al_bundle')
 
     # Test replay creator
-    replay_creator.client.setup_alert_input_queue(once=True)
-    assert replay_creator.client.alert_queue.length() == 1
-    assert replay_creator.client.alert_queue.peek_next()['alert_id'] == alert.alert_id
+    creator.client.setup_alert_input_queue(once=True)
+    assert creator.client.alert_queue.length() == 1
+    assert creator.client.alert_queue.peek_next()['alert_id'] == alert.alert_id
 
     # Test replay creator worker
-    filename = os.path.join(output_dir, f'alert_{alert.alert_id}.al_bundle')
-    replay_creator_worker.process_alerts(once=True)
+    creator_worker.process_alerts(once=True)
     datastore.alert.commit()
-    assert replay_loader.client.alert_queue.length() == 0
+    assert creator_worker.client.alert_queue.length() == 0
     assert datastore.alert.get(alert.alert_id, as_obj=False)['metadata']['replay'] == 'done'
     assert os.path.exists(filename)
 
@@ -111,16 +134,65 @@ def test_replay_single_alert(config, datastore):
         filename = new_filename
 
     # Test replay loader
-    replay_loader.load_files(once=True)
-    assert replay_loader.client.file_queue.length() == 1
-    assert replay_loader.client.file_queue.peek_next() == filename
+    loader.load_files(once=True)
+    assert loader.client.file_queue.length() == 1
+    assert loader.client.file_queue.peek_next() == filename
 
     # Test replay loader worker
-    replay_loader_worker.process_file(once=True)
-    assert replay_loader_worker.client.file_queue.length() == 0
+    loader_worker.process_file(once=True)
+    assert loader_worker.client.file_queue.length() == 0
     assert not os.path.exists(filename)
 
     loaded_alert = datastore.alert.get(alert.alert_id, as_obj=False)
     assert 'bundle.loaded' in loaded_alert['metadata']
     assert alert.alert_id == loaded_alert['alert_id']
     assert alert.workflows_completed != loaded_alert['workflows_completed']
+
+
+def test_replay_single_submission(config, datastore, creator, creator_worker, loader, loader_worker):
+    output_dir = creator.replay_config.creator.output_filestore.replace('file://', '')
+    input_dir = loader.replay_config.loader.input_directory
+
+    # Make sure the submission get picked up by the creator
+    sub = random.choice(all_submissions).as_primitives()
+    sub['metadata']['replay'] = 'requested'
+    datastore.submission.save(sub['sid'], sub)
+    datastore.submission.commit()
+    filename = os.path.join(output_dir, f"submission_{sub['sid']}.al_bundle")
+
+    # Test replay creator
+    creator.client.setup_submission_input_queue(once=True)
+    assert creator.client.submission_queue.length() == 1
+    assert creator.client.submission_queue.peek_next()['sid'] == sub['sid']
+
+    # Test replay creator worker
+    creator_worker.process_submissions(once=True)
+    datastore.submission.commit()
+    assert creator_worker.client.submission_queue.length() == 0
+    assert datastore.submission.get(sub['sid'], as_obj=False)['metadata']['replay'] == 'done'
+    assert os.path.exists(filename)
+
+    # Delete the alert to test the loading process
+    datastore.submission.delete(sub['sid'])
+    datastore.submission.commit()
+
+    # In case the replay.yaml config creator output is not the same as loader input
+    new_filename = filename.replace(output_dir, input_dir)
+    if filename != new_filename:
+        os.rename(filename, new_filename)
+        filename = new_filename
+
+    # Test replay loader
+    loader.load_files(once=True)
+    assert loader.client.file_queue.length() == 1
+    assert loader.client.file_queue.peek_next() == filename
+
+    # Test replay loader worker
+    loader_worker.process_file(once=True)
+    assert loader_worker.client.file_queue.length() == 0
+    assert not os.path.exists(filename)
+
+    loaded_submission = datastore.submission.get(sub['sid'], as_obj=False)
+    assert 'bundle.loaded' in loaded_submission['metadata']
+    assert sub['sid'] == loaded_submission['sid']
+    assert 'replay' not in loaded_submission['metadata']
