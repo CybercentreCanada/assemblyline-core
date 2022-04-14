@@ -9,8 +9,10 @@ class ReplayLoader(ReplayBase):
     def __init__(self):
         super().__init__("assemblyline.replay_loader")
 
-        # Create cache directory
+        # Make sure all directories exist
         os.makedirs(self.replay_config.loader.working_directory, exist_ok=True)
+        os.makedirs(self.replay_config.loader.input_directory, exist_ok=True)
+        os.makedirs(self.replay_config.loader.failed_directory, exist_ok=True)
 
         # Create/Load the cache
         self.cache = shelve.open(os.path.join(self.replay_config.loader.working_directory, 'loader_cache.db'))
