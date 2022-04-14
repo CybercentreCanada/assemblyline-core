@@ -28,7 +28,7 @@ class ReplayLoader(ReplayBase):
             raise ValueError(f'Invalid client type ({self.replay_config.loader.client.type}). '
                              'Must be either \'api\' or \'direct\'.')
 
-    def load_files(self):
+    def load_files(self, once=False):
         while self.running:
             new_files = False
             new_cache = set()
@@ -49,6 +49,9 @@ class ReplayLoader(ReplayBase):
 
             # Cleanup cache
             self.cache['files'] = new_cache
+
+            if once:
+                break
 
             if not new_files:
                 self.sleep(5)

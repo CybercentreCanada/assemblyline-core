@@ -23,7 +23,7 @@ class ReplayLoaderWorker(ReplayBase):
             raise ValueError(f'Invalid client type ({self.replay_config.loader.client.type}). '
                              'Must be either \'api\' or \'direct\'.')
 
-    def process_file(self):
+    def process_file(self, once=False):
         while self.running:
             file_path = self.client.get_next_file()
 
@@ -42,6 +42,9 @@ class ReplayLoaderWorker(ReplayBase):
                     self.log.error(f"Failed to load the bundle file {file_path}, moving it to the failed directory.")
                     failed_path = os.path.join(self.replay_config.loader.failed_directory, os.path.basename(file_path))
                     shutil.move(file_path, failed_path)
+
+            if once:
+                break
 
     def try_run(self):
         threads = {}
