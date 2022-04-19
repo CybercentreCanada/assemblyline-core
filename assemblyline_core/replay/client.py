@@ -66,7 +66,7 @@ class ClientBase(object):
     def set_single_submission_complete(self, *_):
         raise NotImplementedError()
 
-    def setup_alert_input_queue(self):
+    def setup_alert_input_queue(self, once=False):
         # Bootstrap recovery of pending replayed alerts
         for a in self._stream_alert_ids(f"metadata.replay:{REPLAY_PENDING}"):
             self.log.info(f"Replaying alert: {a['alert_id']}")
@@ -102,7 +102,10 @@ class ClientBase(object):
                         break
                     time.sleep(1)
 
-    def setup_submission_input_queue(self):
+            if once:
+                break
+
+    def setup_submission_input_queue(self, once=False):
         # Bootstrap recovery of pending replayed submission
         for sub in self._stream_submission_ids(f"metadata.replay:{REPLAY_PENDING}"):
             self.log.info(f"Replaying submission: {sub['sid']}")
@@ -137,6 +140,9 @@ class ClientBase(object):
                     if not self.running:
                         break
                     time.sleep(1)
+
+            if once:
+                break
 
     def get_next_alert(self):
         raise NotImplementedError()

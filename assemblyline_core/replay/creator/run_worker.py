@@ -35,7 +35,7 @@ class ReplayCreatorWorker(ReplayBase):
             raise ValueError(f'Invalid client type ({self.replay_config.creator.client.type}). '
                              'Must be either \'api\' or \'direct\'.')
 
-    def process_alerts(self):
+    def process_alerts(self, once=False):
         while self.running:
             # Process alerts found
             alert = self.client.get_next_alert()
@@ -60,7 +60,10 @@ class ReplayCreatorWorker(ReplayBase):
                 # Set alert state done
                 self.client.set_single_alert_complete(alert['alert_id'])
 
-    def process_submissions(self):
+            if once:
+                break
+
+    def process_submissions(self, once=False):
         while self.running:
             # Process submissions found
             submission = self.client.get_next_submission()
@@ -84,6 +87,9 @@ class ReplayCreatorWorker(ReplayBase):
 
                 # Set submission state done
                 self.client.set_single_submission_complete(submission['sid'])
+
+            if once:
+                break
 
     def try_run(self):
         threads = {}

@@ -1,5 +1,5 @@
 # Only used in test files
-fakeredis[lua]
 pytest
 pytest-cov
 codecov
+assemblyline_client
