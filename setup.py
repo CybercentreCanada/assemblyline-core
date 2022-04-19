@@ -46,6 +46,7 @@ setup(
             'pytest',
             'pytest-cov',
             'codecov',
+            'assemblyline_client'
         ]
     },
     tests_require=[
