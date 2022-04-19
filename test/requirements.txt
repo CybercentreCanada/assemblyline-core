@@ -3,3 +3,4 @@ fakeredis[lua]
 pytest
 pytest-cov
 codecov
+assemblyline_client
