@@ -69,7 +69,7 @@ class SubmissionClient:
 
     @elasticapm.capture_span(span_type='submission_client')
     def rescan(self, submission: Submission, results: Dict[str, Result], file_infos: Dict[str, FileInfo],
-               file_tree, errors: List[str],  rescan_services: List[str], completed_queue=None):
+               file_tree, errors: List[str],  rescan_services: List[str]):
         """
         Rescan a submission started on another system.
         """
@@ -102,8 +102,7 @@ class SubmissionClient:
 
         # Dispatch the submission
         self.log.debug("Submission complete. Dispatching: %s", submission_obj.sid)
-        self.dispatcher.dispatch_bundle(submission_obj, results, file_infos, file_tree,
-                                        errors, completed_queue=completed_queue)
+        self.dispatcher.dispatch_bundle(submission_obj, results, file_infos, file_tree, errors)
 
         return submission
 
