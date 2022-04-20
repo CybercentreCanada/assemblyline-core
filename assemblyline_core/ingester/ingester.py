@@ -52,6 +52,7 @@ HOUR_IN_SECONDS = 60 * 60
 COMPLETE_THREADS = int(environ.get('INGESTER_COMPLETE_THREADS', 4))
 INGEST_THREADS = int(environ.get('INGESTER_INGEST_THREADS', 1))
 SUBMIT_THREADS = int(environ.get('INGESTER_SUBMIT_THREADS', 4))
+ALERT_THRESHOLD = 500
 
 
 def must_drop(length: int, maximum: int) -> bool:
@@ -893,7 +894,7 @@ class Ingester(ThreadedCoreBase):
         if not task.params.generate_alert:
             return False
 
-        if score < self.threshold_value['critical']:
+        if score < ALERT_THRESHOLD:
             return False
 
         return True
