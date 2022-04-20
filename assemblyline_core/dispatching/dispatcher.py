@@ -810,21 +810,17 @@ class Dispatcher(ThreadedCoreBase):
         for w in watcher_list.members():
             NamedQueue(w).push(WatchQueueMessage({'status': 'STOP'}).as_primitives())
 
-        # Send the submission for alerting if it meets the threshold and we are in rescan mode
-        if submission.params.generate_alert and submission.max_score >= ALERT_THRESHOLD \
-                and len(submission.params.services.rescan) != 0:
+        # Send the submission for alerting if it meets the threshold and ingester will not do it for you
+        if submission.params.generate_alert and submission.max_score >= ALERT_THRESHOLD and not task.completed_queue:
             submission_msg = from_datastore_submission(submission)
 
-            if not submission_msg.params.psid:
-                submission_msg.params.psid = submission.sid
-
-            self.log.info(
-                f"[{submission_msg.sid} :: {submission_msg.files[0].sha256}] Notifying alerter to update an alert")
+            self.log.info(f"[{submission_msg.sid} :: {submission_msg.files[0].sha256}] Notifying alerter to "
+                          "create or update an alert")
 
             self.alert_queue.push(dict(
                 submission=submission_msg.as_primitives(),
                 score=submission.max_score,
-                extended_scan="completed",
+                extended_scan="skipped",
                 ingest_id=submission_msg.metadata.get('ingest_id', None)
             ))
 
