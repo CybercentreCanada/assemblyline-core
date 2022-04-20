@@ -575,6 +575,7 @@ class Dispatcher(ThreadedCoreBase):
                         ttl=submission.params.ttl,
                         ignore_cache=submission.params.ignore_cache,
                         ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
+                        ignore_filtering=submission.params.ignore_filtering,
                         tags=[
                             {'type': x['type'], 'value': x['value'], 'short_type': x['short_type']} for x in tags
                         ],
