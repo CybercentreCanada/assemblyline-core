@@ -47,6 +47,8 @@ jobs:
       - checkout: self
       - checkout: assemblyline-base
       - script: |
+          echo "hello"
+      - script: |
           sudo apt-get update
           sudo apt-get install -y build-essential libffi-dev libfuzzy-dev python3-dev git
           sudo mkdir -p /etc/assemblyline/
