@@ -893,7 +893,7 @@ class Ingester(ThreadedCoreBase):
         if not task.params.generate_alert:
             return False
 
-        if score < self.threshold_value['critical']:
+        if score < self.config.core.alerter.threshold:
             return False
 
         return True

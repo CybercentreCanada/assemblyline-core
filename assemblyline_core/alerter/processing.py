@@ -328,7 +328,7 @@ def process_alert_message(counter, datastore, logger, alert_data):
     if user:
         user_classification = user['classification']
     else:
-        user_classification = Classification.UNRESTRICTED
+        user_classification = None
     a_type = alert_data.get('submission', {}).get('metadata', {}).pop('type', None)
     a_ts = alert_data.get('submission', {}).get('metadata', {}).pop('ts', None)
 
