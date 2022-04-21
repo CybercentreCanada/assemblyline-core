@@ -264,6 +264,9 @@ class Dispatcher(ThreadedCoreBase):
         # already processed
         self.timeout_queue: Queue[DispatchAction] = Queue()
 
+        # Safelist configuration for services
+        self.service_safelist = self.config.services.safelist
+
     def interrupt_handler(self, signum, stack_frame):
         self.log.info("Instance caught signal. Beginning to drain work.")
         self.finalizing_start = time.time()
@@ -484,7 +487,9 @@ class Dispatcher(ThreadedCoreBase):
                     ))
                     task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type)
         file_info = task.file_info[sha256]
-        schedule = list(task.file_schedules[sha256])
+        schedule: list = task.file_schedules[sha256]
+        file_depth: int = task.file_depth[sha256]
+        deep_scan, ignore_filtering = submission.params.deep_scan, submission.params.ignore_filtering
 
         # Go through each round of the schedule removing complete/failed services
         # Break when we find a stage that still needs processing
@@ -496,6 +501,14 @@ class Dispatcher(ThreadedCoreBase):
                 started_stages.append(stage)
 
                 for service_name in stage:
+                    # If we enable service safelisting, the Safelist service shouldn't run on extracted files unless:
+                    #   - We're enforcing use of the Safelist service (we always want to run the Safelist service)
+                    #   - We're running submission with Deep Scanning
+                    #   - We want to Ignore Filtering (perform as much unfiltered analysis as possible)
+                    if service_name == "Safelist" and file_depth and self.service_safelist.enabled and (
+                            not self.service_safelist.enforce_safelist_service and not deep_scan and not ignore_filtering):
+                        continue
+
                     service = self.scheduler.services.get(service_name)
                     if not service:
                         continue
@@ -513,7 +526,7 @@ class Dispatcher(ThreadedCoreBase):
                         continue
 
                     # if the service finished, count the score, and check if the file has been dropped
-                    if not submission.params.ignore_filtering and result.drop:
+                    if not ignore_filtering and result.drop:
                         # Clear out anything in the schedule after this stage
                         task.file_schedules[sha256] = started_stages
                         schedule.clear()
@@ -570,20 +583,21 @@ class Dispatcher(ThreadedCoreBase):
                         service_config=config,
                         fileinfo=file_info,
                         filename=task.file_names.get(sha256, sha256),
-                        depth=task.file_depth[sha256],
+                        depth=file_depth,
                         max_files=task.submission.params.max_extracted,
                         ttl=submission.params.ttl,
                         ignore_cache=submission.params.ignore_cache,
                         ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
-                        ignore_filtering=submission.params.ignore_filtering,
+                        ignore_filtering=ignore_filtering,
                         tags=[
                             {'type': x['type'], 'value': x['value'], 'short_type': x['short_type']} for x in tags
                         ],
                         temporary_submission_data=[
                             {'name': name, 'value': value} for name, value in temp_data.items()
                         ],
-                        deep_scan=submission.params.deep_scan,
+                        deep_scan=deep_scan,
                         priority=submission.params.priority,
+                        safelist_config=self.service_safelist
                     ))
                     service_task.metadata['dispatcher__'] = self.instance_id
 
