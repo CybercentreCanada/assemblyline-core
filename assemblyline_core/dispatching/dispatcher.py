@@ -50,7 +50,6 @@ from ..ingester.constants import COMPLETE_QUEUE_NAME
 
 APM_SPAN_TYPE = 'handle_message'
 
-ALERT_THRESHOLD = 500
 AL_SHUTDOWN_GRACE = int(os.environ.get('AL_SHUTDOWN_GRACE', '60'))
 AL_SHUTDOWN_QUIT = 60
 FINALIZING_WINDOW = max(AL_SHUTDOWN_GRACE - AL_SHUTDOWN_QUIT, 0)
@@ -811,7 +810,8 @@ class Dispatcher(ThreadedCoreBase):
             NamedQueue(w).push(WatchQueueMessage({'status': 'STOP'}).as_primitives())
 
         # Send the submission for alerting if it meets the threshold and ingester will not do it for you
-        if submission.params.generate_alert and submission.max_score >= ALERT_THRESHOLD and not task.completed_queue:
+        if submission.params.generate_alert and submission.max_score >= self.config.core.alerter.threshold \
+                and not task.completed_queue:
             submission_msg = from_datastore_submission(submission)
 
             self.log.info(f"[{submission_msg.sid} :: {submission_msg.files[0].sha256}] Notifying alerter to "
