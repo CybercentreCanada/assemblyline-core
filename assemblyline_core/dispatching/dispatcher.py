@@ -451,6 +451,7 @@ class Dispatcher(ThreadedCoreBase):
         sid = submission.sid
         elasticapm.label(sid=sid, sha256=sha256)
 
+        file_depth: int = task.file_depth[sha256]
         # If its the first time we've seen this file, we won't have a schedule for it
         if sha256 not in task.file_schedules:
             with elasticapm.capture_span('build_schedule'):
@@ -485,10 +486,9 @@ class Dispatcher(ThreadedCoreBase):
                         size=filestore_info.size,
                         type=filestore_info.type,
                     ))
-                    task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type)
+                    task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type, file_depth)
         file_info = task.file_info[sha256]
-        schedule: list = task.file_schedules[sha256]
-        file_depth: int = task.file_depth[sha256]
+        schedule: list = list(task.file_schedules[sha256])
         deep_scan, ignore_filtering = submission.params.deep_scan, submission.params.ignore_filtering
 
         # Go through each round of the schedule removing complete/failed services
@@ -501,14 +501,6 @@ class Dispatcher(ThreadedCoreBase):
                 started_stages.append(stage)
 
                 for service_name in stage:
-                    # If we enable service safelisting, the Safelist service shouldn't run on extracted files unless:
-                    #   - We're enforcing use of the Safelist service (we always want to run the Safelist service)
-                    #   - We're running submission with Deep Scanning
-                    #   - We want to Ignore Filtering (perform as much unfiltered analysis as possible)
-                    if service_name == "Safelist" and file_depth and self.service_safelist.enabled and (
-                            not self.service_safelist.enforce_safelist_service and not deep_scan and not ignore_filtering):
-                        continue
-
                     service = self.scheduler.services.get(service_name)
                     if not service:
                         continue
