@@ -46,11 +46,11 @@ class Scheduler:
         #   - We're enforcing use of the Safelist service (we always want to run the Safelist service)
         #   - We're running submission with Deep Scanning
         #   - We want to Ignore Filtering (perform as much unfiltered analysis as possible)
-        if file_depth and self.config.services.safelist.enabled and \
+        if "Safelist" in selected and file_depth and self.config.services.safelist.enabled and \
                 not self.config.services.safelist.enforce_safelist_service \
                 and not (submission.params.deep_scan or submission.params.ignore_filtering):
             # Alter schedule to remove Safelist, if scheduled to run
-            selected.remove("Safelist") if "Safelist" in selected else None
+            selected.remove("Safelist")
 
         # Add all selected, accepted, and not rejected services to the schedule
         schedule: list[dict[str, Service]] = [{} for _ in self.config.services.stages]
