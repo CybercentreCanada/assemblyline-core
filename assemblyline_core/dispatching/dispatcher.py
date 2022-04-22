@@ -448,6 +448,7 @@ class Dispatcher(ThreadedCoreBase):
         sid = submission.sid
         elasticapm.label(sid=sid, sha256=sha256)
 
+        file_depth: int = task.file_depth[sha256]
         # If its the first time we've seen this file, we won't have a schedule for it
         if sha256 not in task.file_schedules:
             with elasticapm.capture_span('build_schedule'):
@@ -482,9 +483,10 @@ class Dispatcher(ThreadedCoreBase):
                         size=filestore_info.size,
                         type=filestore_info.type,
                     ))
-                    task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type)
+                    task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type, file_depth)
         file_info = task.file_info[sha256]
-        schedule = list(task.file_schedules[sha256])
+        schedule: list = list(task.file_schedules[sha256])
+        deep_scan, ignore_filtering = submission.params.deep_scan, submission.params.ignore_filtering
 
         # Go through each round of the schedule removing complete/failed services
         # Break when we find a stage that still needs processing
@@ -513,7 +515,7 @@ class Dispatcher(ThreadedCoreBase):
                         continue
 
                     # if the service finished, count the score, and check if the file has been dropped
-                    if not submission.params.ignore_filtering and result.drop:
+                    if not ignore_filtering and result.drop:
                         # Clear out anything in the schedule after this stage
                         task.file_schedules[sha256] = started_stages
                         schedule.clear()
@@ -570,19 +572,21 @@ class Dispatcher(ThreadedCoreBase):
                         service_config=config,
                         fileinfo=file_info,
                         filename=task.file_names.get(sha256, sha256),
-                        depth=task.file_depth[sha256],
+                        depth=file_depth,
                         max_files=task.submission.params.max_extracted,
                         ttl=submission.params.ttl,
                         ignore_cache=submission.params.ignore_cache,
                         ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
+                        ignore_filtering=ignore_filtering,
                         tags=[
                             {'type': x['type'], 'value': x['value'], 'short_type': x['short_type']} for x in tags
                         ],
                         temporary_submission_data=[
                             {'name': name, 'value': value} for name, value in temp_data.items()
                         ],
-                        deep_scan=submission.params.deep_scan,
+                        deep_scan=deep_scan,
                         priority=submission.params.priority,
+                        safelist_config=self.config.services.safelist
                     ))
                     service_task.metadata['dispatcher__'] = self.instance_id
 

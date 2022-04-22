@@ -11,8 +11,7 @@ from assemblyline.filestore import FileStore
 class SafelistClient:
     """A helper class to simplify safelisting for privileged services and service-server."""
 
-    def __init__(self, datastore: AssemblylineDatastore = None, filestore: FileStore = None,
-                 config=None, redis=None):
+    def __init__(self, datastore: AssemblylineDatastore = None, config=None):
         self.log = logging.getLogger('assemblyline.safelist_client')
         self.config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
