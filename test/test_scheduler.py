@@ -73,6 +73,12 @@ class FakeDatastore:
                 category='static',
                 accepts='.*',
                 rejects='document/*',
+            ),
+            'Safelist': dummy_service(
+                name='Safelist',
+                stage='pre',
+                category='static',
+                accepts='.*',
             )
         }.values()
 
@@ -97,20 +103,51 @@ def scheduler(redis):
 
 def test_schedule_simple(scheduler):
     schedule = scheduler.build_schedule(submission(['static', 'av'], ['dynamic']), 'document/word')
-    for a, b in zip(schedule, [[], ['AnAV'], ['polish']]):
+    for a, b in zip(schedule, [['Safelist'], ['AnAV'], ['polish']]):
         assert set(a) == set(b)
 
 
 def test_schedule_no_excludes(scheduler):
     schedule = scheduler.build_schedule(submission(['static', 'av', 'dynamic'], []), 'document/word')
-    assert all(set(a) == set(b) for a, b in zip(schedule, [[], ['AnAV', 'cuckoo'], ['polish']]))
+    assert all(set(a) == set(b) for a, b in zip(schedule, [['Safelist'], ['AnAV', 'cuckoo'], ['polish']]))
 
 
 def test_schedule_all_defaults_word(scheduler):
     schedule = scheduler.build_schedule(submission([], []), 'document/word')
-    assert all(set(a) == set(b) for a, b in zip(schedule, [[], ['AnAV', 'cuckoo'], ['polish']]))
+    assert all(set(a) == set(b) for a, b in zip(schedule, [['Safelist'], ['AnAV', 'cuckoo'], ['polish']]))
 
 
 def test_schedule_all_defaults_zip(scheduler):
     schedule = scheduler.build_schedule(submission([], []), 'archive/zip')
-    assert all(set(a) == set(b) for a, b in zip(schedule, [['extract'], ['AnAV'], ['polish', 'not_documents']]))
+    assert all(set(a) == set(b)
+               for a, b in zip(schedule, [['extract', 'Safelist'], ['AnAV'], ['polish', 'not_documents']]))
+
+
+def test_schedule_service_safelist(scheduler):
+    # Safelist service should still be scheduled
+    schedule = scheduler.build_schedule(submission(["Safelist"], []), 'document/word', file_depth=0)
+    for a, b in zip(schedule, [["Safelist"], [], []]):
+        assert set(a) == set(b)
+
+    # Safelist service should NOT still be scheduled because we're not enforcing Safelist service by default
+    # and deep_scan and ignore_filtering is OFF for this submission
+    sub = submission(["Safelist"], [])
+    sub.params.deep_scan = False
+    sub.params.ignore_filtering = False
+    schedule = scheduler.build_schedule(sub, 'document/word', file_depth=1)
+    for a, b in zip(schedule, [[], [], []]):
+        assert set(a) == set(b)
+
+    # Safelist service should be scheduled because we're enabling deep_scan
+    sub.params.deep_scan = True
+    sub.params.ignore_filtering = False
+    schedule = scheduler.build_schedule(sub, 'document/word', file_depth=1)
+    for a, b in zip(schedule, [["Safelist"], [], []]):
+        assert set(a) == set(b)
+
+    # Safelist service should be scheduled because we're enabling ignore_filtering
+    sub.params.deep_scan = False
+    sub.params.ignore_filtering = True
+    schedule = scheduler.build_schedule(sub, 'document/word', file_depth=1)
+    for a, b in zip(schedule, [["Safelist"], [], []]):
+        assert set(a) == set(b)
