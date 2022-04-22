@@ -264,9 +264,6 @@ class Dispatcher(ThreadedCoreBase):
         # already processed
         self.timeout_queue: Queue[DispatchAction] = Queue()
 
-        # Safelist configuration for services
-        self.service_safelist = self.config.services.safelist
-
     def interrupt_handler(self, signum, stack_frame):
         self.log.info("Instance caught signal. Beginning to drain work.")
         self.finalizing_start = time.time()
@@ -589,7 +586,7 @@ class Dispatcher(ThreadedCoreBase):
                         ],
                         deep_scan=deep_scan,
                         priority=submission.params.priority,
-                        safelist_config=self.service_safelist
+                        safelist_config=self.config.services.safelist
                     ))
                     service_task.metadata['dispatcher__'] = self.instance_id
 
