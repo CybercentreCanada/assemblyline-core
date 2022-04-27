@@ -4,10 +4,7 @@ from unittest import mock
 
 import json
 import pytest
-from assemblyline.datastore.helper import AssemblylineDatastore
 
-import assemblyline.odm.models.file
-import assemblyline.odm.models.submission
 from assemblyline.common.forge import get_service_queue, get_classification
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.file import File
@@ -16,10 +13,8 @@ from assemblyline.odm.randomizer import random_model_obj, random_minimal_obj, ge
 from assemblyline.odm import models
 from assemblyline.common.metrics import MetricsFactory
 
-# from assemblyline_core.dispatching.dispatcher import Dispatcher, DispatchHash, FileTask, \
-#     SubmissionTask, depths_from_tree, Scheduler as RealScheduler
 from assemblyline_core.dispatching.client import DispatchClient
-from assemblyline_core.dispatching.dispatcher import Dispatcher, Submission, SubmissionTask
+from assemblyline_core.dispatching.dispatcher import Dispatcher, Submission
 from assemblyline_core.dispatching.schedules import Scheduler as RealScheduler
 
 # noinspection PyUnresolvedReferences
@@ -255,7 +250,6 @@ def test_dispatch_extracted(clean_redis, clean_datastore):
     assert job.filename == 'second-*'
 
 
-from unittest import mock
 mock_time = mock.Mock()
 mock_time.return_value = 0
 
@@ -295,4 +289,3 @@ def test_timeout():
 
     # Expire nothing
     assert len(table.timeouts()) == 0
-
