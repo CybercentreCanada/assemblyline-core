@@ -37,6 +37,7 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
 from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
 from assemblyline_core.server_base import ThreadedCoreBase
+from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
 
 
 if TYPE_CHECKING:
@@ -236,6 +237,9 @@ class Dispatcher(ThreadedCoreBase):
         self.start_queue = NamedQueue(DISPATCH_START_EVENTS+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
         self.result_queue = NamedQueue(DISPATCH_RESULT_QUEUE+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
         self.command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
+
+        # Submissions that should have alerts generated
+        self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.redis_persist)
 
         # Publish counters to the metrics sink.
         self.counter = MetricsFactory(metrics_type='dispatcher', schema=Metrics, name=counter_name,
@@ -808,6 +812,21 @@ class Dispatcher(ThreadedCoreBase):
         watcher_list = self._watcher_list(sid)
         for w in watcher_list.members():
             NamedQueue(w).push(WatchQueueMessage({'status': 'STOP'}).as_primitives())
+
+        # Send the submission for alerting if it meets the threshold and ingester will not do it for you
+        if submission.params.generate_alert and submission.max_score >= self.config.core.alerter.threshold \
+                and not task.completed_queue:
+            submission_msg = from_datastore_submission(submission)
+
+            self.log.info(f"[{submission_msg.sid} :: {submission_msg.files[0].sha256}] Notifying alerter to "
+                          "create or update an alert")
+
+            self.alert_queue.push(dict(
+                submission=submission_msg.as_primitives(),
+                score=submission.max_score,
+                extended_scan="skipped",
+                ingest_id=submission_msg.metadata.get('ingest_id', None)
+            ))
 
         # Clear the timeout watcher
         watcher_list.delete()
