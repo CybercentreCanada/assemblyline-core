@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import concurrent.futures
+from typing import Union
 import elasticapm
 import time
 
@@ -13,8 +14,11 @@ from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.expiry_heartbeat import Metrics
 
-ARCHIVE_SIZE = 10000
+ARCHIVE_SIZE = 5000
 EXPIRY_SIZE = 10000
+DAY_SECONDS = 24 * 60 * 60
+ARCHIVE_WORKERS = 10
+ARCHIVE_MAX_TASKS = 20
 
 
 class ExpiryManager(ServerBase):
@@ -167,50 +171,92 @@ class ExpiryManager(ServerBase):
         if not self.config.datastore.ilm.enabled:
             return reached_max
 
-        now = now_as_iso()
         # Archive data
-        for collection in self.archiveable_collections:
-            # Call heartbeat pre-dated by 5 minutes. If a collection takes more than
-            # 5 minutes to expire, this container could be seen as unhealthy. The down
-            # side is if it is stuck on something it will be more than 5 minutes before
-            # the container is restarted.
-            self.heartbeat(int(time.time() + 5 * 60))
-
+        with concurrent.futures.ThreadPoolExecutor(ARCHIVE_WORKERS) as pool:
             # Start of expiry transaction
             if self.apm_client:
                 self.apm_client.begin_transaction("Archive older documents")
 
-            archive_query = f"archive_ts:[* TO {now}]"
-            sort = ["archive_ts asc", "id asc"]
+            # Collect a set of jobs which archive all the collections in
+            # managable sized queries. Breaking up the query is helpful
+            # where each of our archive calls are actually a reindex
+            # followed by a delete, which we would like to both complete
+            # relatively close togeather.
+            futures = []
+            for collection in self.archiveable_collections:
+                self.heartbeat(int(time.time() + 60))
+                tasks, maxed_out = self._archive_collection(collection, pool)
+                futures.extend(tasks)
+                reached_max |= maxed_out
 
-            number_to_archive = collection.search(archive_query, rows=0, as_obj=False,
-                                                  use_archive=False, sort=sort,
-                                                  track_total_hits=ARCHIVE_SIZE)['total']
-
-            if number_to_archive == ARCHIVE_SIZE:
-                reached_max = True
-
-            if self.apm_client:
-                elasticapm.label(query=archive_query)
-                elasticapm.label(number_to_archive=number_to_archive)
-
-            self.log.info(f"Processing collection: {collection.name}")
-            if number_to_archive != 0:
-                # Proceed with archiving
-                if collection.archive(archive_query, max_docs=number_to_archive, sort=sort):
-                    self.counter_archive.increment(f'{collection.name}', increment_by=number_to_archive)
-                    self.log.info(f"    Archived {number_to_archive} documents...")
-                else:
-                    self.log.warning(f"    Failed to properly archive {number_to_archive} documents...")
-
-            else:
-                self.log.debug("    Nothing to archive in this collection.")
+            # Wait untill all of the chunks have been archived
+            for _ in concurrent.futures.as_completed(futures):
+                self.heartbeat()
 
             # End of expiry transaction
             if self.apm_client:
-                self.apm_client.end_transaction(collection.name, 'archived')
+                self.apm_client.end_transaction(result='archived')
 
         return reached_max
+
+    def _find_archive_start(self, container):
+        """
+        Moving backwards one day at a time get a rough idea where archiveable material
+        in the datastore starts.
+        """
+        now = time.time()
+        offset = 1
+        while True:
+            count = self._count_archivable(container, "*", now - offset * DAY_SECONDS)
+            if count == 0:
+                return now - offset * DAY_SECONDS
+            offset += 1
+
+    def _count_archivable(self, container, start: Union[float, str], end: float) -> int:
+        """
+        Count how many items need to be archived in the given window.
+        """
+        if isinstance(start, (float, int)):
+            start = epoch_to_iso(start)
+        query = f'archive_ts:[{start} TO {epoch_to_iso(end)}}}'
+        return container.search(query, rows=0, as_obj=False, use_archive=False, track_total_hits="true")['total']
+
+    def _archive_collection(self, collection, pool):
+        # Start with archiving everything up until now
+        chunks: list[tuple[float, float]] = [(self._find_archive_start(collection), time.time())]
+        futures = []
+
+        while len(chunks) > 0 and len(futures) < ARCHIVE_MAX_TASKS:
+            # Take the next chunk, and figure out how many records it covers
+            start, end = chunks.pop(0)
+            count = self._count_archivable(collection, start, end)
+
+            # Chunks that are fully archived are fine to skip
+            if count == 0:
+                continue
+
+            # If the chunk is bigger than the number we intend to archive
+            # in a single call break it into parts
+            if count > ARCHIVE_SIZE:
+                middle = (start + end)/2
+                chunks.append((start, middle))
+                chunks.append((middle, end))
+                continue
+
+            # Schedule the chunk of data to be archived
+            def archive_chunk(query, expected):
+                try:
+                    if collection.archive(query):
+                        self.counter_archive.increment(f'{collection.name}', increment_by=expected)
+                    else:
+                        self.log.error("Failed to archive range {query}")
+                except Exception:
+                    self.log.exception("Error archiving range {query}")
+
+            query = f'archive_ts:[{epoch_to_iso(start)} TO {epoch_to_iso(end)}}}'
+            futures.append(pool.submit(archive_chunk, query, count))
+
+        return futures, len(futures) == ARCHIVE_MAX_TASKS
 
     def try_run(self):
         while self.running:
