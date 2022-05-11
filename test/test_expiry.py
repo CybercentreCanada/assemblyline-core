@@ -1,6 +1,7 @@
 
 import pytest
 import random
+import concurrent.futures
 
 from assemblyline_core.expiry.run_expiry import ExpiryManager
 from assemblyline.common.isotime import now_as_iso
@@ -79,7 +80,8 @@ def test_expire_all(ds_expiry):
     expiry = ExpiryManager()
     expiry.counter = FakeCounter()
     expiry.counter_archive = FakeCounter()
-    expiry.run_expiry_once()
+    with concurrent.futures.ThreadPoolExecutor(5) as pool:
+        expiry.run_expiry_once(pool)
 
     for k, v in expiry_collections_len.items():
         assert v == expiry.counter.get(k)
@@ -92,7 +94,8 @@ def test_archive_all(ds_archive):
     expiry = ExpiryManager(force_ilm=True)
     expiry.counter = FakeCounter()
     expiry.counter_archive = FakeCounter()
-    expiry.run_archive_once()
+    with concurrent.futures.ThreadPoolExecutor(5) as pool:
+        expiry.run_archive_once(pool)
 
     for k, v in archive_collections_len.items():
         assert v == expiry.counter_archive.get(k)
