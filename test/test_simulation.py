@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from assemblyline.common import forge, identify
+from assemblyline.common import forge
 from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.uid import get_random_id
@@ -23,7 +23,6 @@ from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.result import Result
-from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.service_delta import ServiceDelta
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.messages.submission import Submission as SubmissionInput
@@ -43,6 +42,7 @@ if TYPE_CHECKING:
     from redis import Redis
 
 RESPONSE_TIMEOUT = 60
+identify = forge.get_identify(use_cache=False)
 
 
 @pytest.fixture(scope='module')

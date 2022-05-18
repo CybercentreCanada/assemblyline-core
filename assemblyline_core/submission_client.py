@@ -24,7 +24,7 @@ import logging
 import os
 from typing import List, Tuple, Dict
 
-from assemblyline.common import forge, identify
+from assemblyline.common import forge
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
 from assemblyline.common.isotime import epoch_to_iso, now, now_as_iso
@@ -38,6 +38,7 @@ from assemblyline.odm.models.submission import File, Submission
 from assemblyline_core.dispatching.client import DispatchClient
 
 Classification = forge.get_classification()
+identify = forge.get_identify(use_cache=True)
 
 
 def assert_valid_sha256(sha256):
