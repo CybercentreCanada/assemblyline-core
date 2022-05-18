@@ -30,6 +30,7 @@ from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
+from assemblyline.odm.models.result import Result
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
@@ -145,9 +146,8 @@ class SubmissionTask:
                         key=k, drop=result['drop_file'], score=result['result']['score'],
                         children=[r['sha256'] for r in result['response']['extracted']])
 
-                tags = []
-                for section in result['result']['sections']:
-                    tags.extend(tag_dict_to_list(flatten(section['tags'])))
+                tags = Result(result).scored_tag_list()
+
                 self.file_tags[sha256] = tags
 
         if errors is not None:
@@ -553,7 +553,7 @@ class Dispatcher(ThreadedCoreBase):
 
                     # Load the list of tags we will pass
                     tags = []
-                    if service.uses_tags:
+                    if service.uses_tags or service.uses_tag_scores:
                         tags = task.file_tags.get(sha256, [])
 
                     # Load the temp submission data we will pass
@@ -565,6 +565,10 @@ class Dispatcher(ThreadedCoreBase):
                     metadata = {}
                     if service.uses_metadata:
                         metadata = submission.metadata
+
+                    tag_fields = ['type', 'value', 'short_type']
+                    if service.uses_tag_scores:
+                        tag_fields.append('score')
 
                     # Build the actual service dispatch message
                     config = self.build_service_config(service, submission)
@@ -582,9 +586,7 @@ class Dispatcher(ThreadedCoreBase):
                         ignore_cache=submission.params.ignore_cache,
                         ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
                         ignore_filtering=ignore_filtering,
-                        tags=[
-                            {'type': x['type'], 'value': x['value'], 'short_type': x['short_type']} for x in tags
-                        ],
+                        tags=[{field: x[field] for field in tag_fields} for x in tags],
                         temporary_submission_data=[
                             {'name': name, 'value': value} for name, value in temp_data.items()
                         ],
