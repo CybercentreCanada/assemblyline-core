@@ -24,8 +24,6 @@ from assemblyline.remote.datatypes.events import EventSender
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline_core.dispatching.client import DispatchClient
 
-identify = forge.get_identify(use_cache=True)
-
 
 class TaskingClientException(Exception):
     pass
@@ -44,7 +42,7 @@ class TaskingClient:
     """
 
     def __init__(self, datastore: AssemblylineDatastore = None, filestore: FileStore = None,
-                 config=None, redis=None, redis_persist=None):
+                 config=None, redis=None, redis_persist=None, identify=None):
         self.log = logging.getLogger('assemblyline.tasking_client')
         self.config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
@@ -56,11 +54,12 @@ class TaskingClient:
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, ttl=60*30, host=redis)
         self.tag_safelister = forge.CachedObject(forge.get_tag_safelister, kwargs=dict(
             log=self.log, config=config, datastore=self.datastore), refresh=300)
+        self.identify = identify or forge.get_identify(config=self.config, datastore=self.datastore, use_cache=True)
 
     @elasticapm.capture_span(span_type='tasking_client')
     def upload_file(self, file_path, classification, ttl, is_section_image, expected_sha256=None):
         # Identify the file info of the uploaded file
-        file_info = identify.fileinfo(file_path)
+        file_info = self.identify.fileinfo(file_path)
 
         # Validate SHA256 of the uploaded file
         if expected_sha256 is None or expected_sha256 == file_info['sha256']:
