@@ -63,10 +63,24 @@ class SubmissionClient:
         self.datastore = datastore or forge.get_datastore(self.config)
         self.filestore = filestore or forge.get_filestore(self.config)
         self.redis = redis
+        if identify:
+            self.cleanup = False
+        else:
+            self.cleanup = True
         self.identify = identify or forge.get_identify(config=self.config, datastore=self.datastore, use_cache=True)
 
         # A client for interacting with the dispatcher
         self.dispatcher = DispatchClient(datastore, redis)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.stop()
+
+    def stop(self):
+        if self.cleanup:
+            self.identify.stop()
 
     @elasticapm.capture_span(span_type='submission_client')
     def rescan(self, submission: Submission, results: Dict[str, Result], file_infos: Dict[str, FileInfo],

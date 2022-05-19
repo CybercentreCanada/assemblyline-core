@@ -657,6 +657,7 @@ class Ingester(ThreadedCoreBase):
         super().stop()
         if self.apm_client:
             elasticapm.uninstrument()
+        self.submit_client.stop()
 
     def stale(self, delta: float, errors: int):
         if errors:

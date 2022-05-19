@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     from redis import Redis
 
 RESPONSE_TIMEOUT = 60
-identify = forge.get_identify(use_cache=False)
 
 
 @pytest.fixture(scope='module')
@@ -290,7 +289,8 @@ def ready_body(core, body=None):
     with NamedTemporaryFile() as file:
         file.write(out)
         file.flush()
-        fileinfo = identify.fileinfo(file.name)
+        with forge.get_identify(use_cache=False) as identify:
+            fileinfo = identify.fileinfo(file.name)
         core.ds.save_or_freshen_file(sha256.hexdigest(), fileinfo, now_as_iso(500), 'U', redis=core.redis)
 
     return sha256.hexdigest(), len(out)
