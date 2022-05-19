@@ -54,7 +54,21 @@ class TaskingClient:
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, ttl=60*30, host=redis)
         self.tag_safelister = forge.CachedObject(forge.get_tag_safelister, kwargs=dict(
             log=self.log, config=config, datastore=self.datastore), refresh=300)
+        if identify:
+            self.cleanup = False
+        else:
+            self.cleanup = True
         self.identify = identify or forge.get_identify(config=self.config, datastore=self.datastore, use_cache=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.stop()
+
+    def stop(self):
+        if self.cleanup:
+            self.identify.stop()
 
     @elasticapm.capture_span(span_type='tasking_client')
     def upload_file(self, file_path, classification, ttl, is_section_image, expected_sha256=None):
