@@ -38,7 +38,6 @@ from assemblyline.odm.models.submission import File, Submission
 from assemblyline_core.dispatching.client import DispatchClient
 
 Classification = forge.get_classification()
-identify = forge.get_identify(use_cache=True)
 
 
 def assert_valid_sha256(sha256):
@@ -58,12 +57,13 @@ class SubmissionClient:
     """
 
     def __init__(self, datastore: AssemblylineDatastore = None, filestore: FileStore = None,
-                 config=None, redis=None):
+                 config=None, redis=None, identify=None):
         self.log = logging.getLogger('assemblyline.submission_client')
         self.config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
         self.filestore = filestore or forge.get_filestore(self.config)
         self.redis = redis
+        self.identify = identify or forge.get_identify(config=self.config, datastore=self.datastore, use_cache=True)
 
         # A client for interacting with the dispatcher
         self.dispatcher = DispatchClient(datastore, redis)
@@ -195,7 +195,7 @@ class SubmissionClient:
         extracted_path = None
         try:
             # Analyze the file and make sure the file table is up to date
-            fileinfo = identify.fileinfo(local_path)
+            fileinfo = self.identify.fileinfo(local_path)
 
             if fileinfo['size'] == 0:
                 raise SubmissionException("File empty. Submission failed")
@@ -203,7 +203,7 @@ class SubmissionClient:
             # Check if there is an integrated decode process for this file
             # eg. files that are packaged, and the contained file (not the package
             # that local_path points to) should be passed into the system.
-            extracted_path, fileinfo, al_meta = decode_file(local_path, fileinfo)
+            extracted_path, fileinfo, al_meta = decode_file(local_path, fileinfo, self.identify)
             al_meta['classification'] = al_meta.get('classification', classification)
             if not Classification.is_valid(al_meta['classification']):
                 raise SubmissionException(f"{al_meta['classification']} is not a valid classification for this system"
