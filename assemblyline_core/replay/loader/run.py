@@ -36,6 +36,10 @@ class ReplayLoader(ReplayBase):
             new_cache = set()
             for root, _, files in os.walk(self.replay_config.loader.input_directory, topdown=False):
                 for name in files:
+                    # Unexpected files that could be the result of external transfer mechanisms
+                    if name.startswith('.') or not name.endswith('.al_bundle'):
+                        continue
+
                     file_path = os.path.join(root, name)
 
                     # Cache file
