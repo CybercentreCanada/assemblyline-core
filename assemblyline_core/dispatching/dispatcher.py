@@ -630,7 +630,7 @@ class Dispatcher(ThreadedCoreBase):
         """
         # Track which files we have looked at already
         checked: set[str] = set()
-        unchecked: list[str] = list(task.file_depth.keys())
+        unchecked: set[str] = set(list(task.file_depth.keys()))
 
         # Categorize files as pending/processing (can be both) all others are finished
         pending_files = []  # Files where we are missing a service and it is not being processed
@@ -641,7 +641,8 @@ class Dispatcher(ThreadedCoreBase):
 
         # Make sure we have either a result or
         while unchecked:
-            sha256 = unchecked.pop()
+            sha256 = next(iter(unchecked))
+            unchecked.remove(sha256)
             checked.add(sha256)
 
             if sha256 in task.dropped_files:
@@ -675,7 +676,7 @@ class Dispatcher(ThreadedCoreBase):
 
                         # Collect information about the result
                         file_scores[sha256] = file_scores.get(sha256, 0) + result.score
-                        unchecked += set(result.children) - checked
+                        unchecked.update(set(result.children) - checked)
                         continue
 
                     # If the file is in process, we may not need to dispatch it, but we aren't finished
