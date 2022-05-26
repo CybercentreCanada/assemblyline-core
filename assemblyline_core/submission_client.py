@@ -24,7 +24,7 @@ import logging
 import os
 from typing import List, Tuple, Dict
 
-from assemblyline.common import forge, identify
+from assemblyline.common import forge
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
 from assemblyline.common.isotime import epoch_to_iso, now, now_as_iso
@@ -57,15 +57,30 @@ class SubmissionClient:
     """
 
     def __init__(self, datastore: AssemblylineDatastore = None, filestore: FileStore = None,
-                 config=None, redis=None):
+                 config=None, redis=None, identify=None):
         self.log = logging.getLogger('assemblyline.submission_client')
         self.config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
         self.filestore = filestore or forge.get_filestore(self.config)
         self.redis = redis
+        if identify:
+            self.cleanup = False
+        else:
+            self.cleanup = True
+        self.identify = identify or forge.get_identify(config=self.config, datastore=self.datastore, use_cache=True)
 
         # A client for interacting with the dispatcher
         self.dispatcher = DispatchClient(datastore, redis)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.stop()
+
+    def stop(self):
+        if self.cleanup:
+            self.identify.stop()
 
     @elasticapm.capture_span(span_type='submission_client')
     def rescan(self, submission: Submission, results: Dict[str, Result], file_infos: Dict[str, FileInfo],
@@ -194,7 +209,7 @@ class SubmissionClient:
         extracted_path = None
         try:
             # Analyze the file and make sure the file table is up to date
-            fileinfo = identify.fileinfo(local_path)
+            fileinfo = self.identify.fileinfo(local_path)
 
             if fileinfo['size'] == 0:
                 raise SubmissionException("File empty. Submission failed")
@@ -202,7 +217,7 @@ class SubmissionClient:
             # Check if there is an integrated decode process for this file
             # eg. files that are packaged, and the contained file (not the package
             # that local_path points to) should be passed into the system.
-            extracted_path, fileinfo, al_meta = decode_file(local_path, fileinfo)
+            extracted_path, fileinfo, al_meta = decode_file(local_path, fileinfo, self.identify)
             al_meta['classification'] = al_meta.get('classification', classification)
             if not Classification.is_valid(al_meta['classification']):
                 raise SubmissionException(f"{al_meta['classification']} is not a valid classification for this system"

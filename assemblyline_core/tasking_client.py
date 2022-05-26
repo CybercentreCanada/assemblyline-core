@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 import elasticapm
 
-from assemblyline.common import forge, identify
+from assemblyline.common import forge
 from assemblyline.common.constants import SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.dict_utils import flatten, unflatten
 from assemblyline.common.heuristics import HeuristicHandler, InvalidHeuristicException
@@ -42,7 +42,7 @@ class TaskingClient:
     """
 
     def __init__(self, datastore: AssemblylineDatastore = None, filestore: FileStore = None,
-                 config=None, redis=None, redis_persist=None):
+                 config=None, redis=None, redis_persist=None, identify=None):
         self.log = logging.getLogger('assemblyline.tasking_client')
         self.config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
@@ -54,11 +54,26 @@ class TaskingClient:
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, ttl=60*30, host=redis)
         self.tag_safelister = forge.CachedObject(forge.get_tag_safelister, kwargs=dict(
             log=self.log, config=config, datastore=self.datastore), refresh=300)
+        if identify:
+            self.cleanup = False
+        else:
+            self.cleanup = True
+        self.identify = identify or forge.get_identify(config=self.config, datastore=self.datastore, use_cache=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.stop()
+
+    def stop(self):
+        if self.cleanup:
+            self.identify.stop()
 
     @elasticapm.capture_span(span_type='tasking_client')
     def upload_file(self, file_path, classification, ttl, is_section_image, expected_sha256=None):
         # Identify the file info of the uploaded file
-        file_info = identify.fileinfo(file_path)
+        file_info = self.identify.fileinfo(file_path)
 
         # Validate SHA256 of the uploaded file
         if expected_sha256 is None or expected_sha256 == file_info['sha256']:
