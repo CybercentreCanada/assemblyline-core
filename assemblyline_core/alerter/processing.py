@@ -15,12 +15,37 @@ cache = TimeExpiredCache(CACHE_LEN, CACHE_EXPIRY_RATE)
 Classification = forge.get_classification()
 config = forge.get_config()
 
-summary_tags = (
-    "av.virus_name", "attribution.exploit",
-    "file.config", "technique.obfuscation", "file.behavior",
-    "attribution.family", "attribution.implant", "network.static.domain", "network.static.ip",
-    "network.dynamic.domain", "network.dynamic.ip", "technique.obfuscation", "attribution.actor",
-)
+
+SUMMARY_TYPE_MAP = {
+    'av.virus_name': 'av',
+    'attribution.exploit': 'attrib',
+    'attribution': 'attrib',
+    'file.config': 'attrib',
+    'technique.obfuscation': 'attrib',
+    'file.behavior': 'behavior',
+    'file.rule.yara': 'yara',
+    'attribution.family': 'attrib',
+    'attribution.implant': 'attrib',
+    'network.static.domain': 'domain_static',
+    'network.dynamic.domain': 'domain_dynamic',
+    'network.static.ip': 'ip_static',
+    'network.dynamic.ip': 'ip_dynamic',
+    'technique.config': 'attrib',
+    'attribution.actor': 'attrib',
+    'heuristic.name': 'heuristic',
+    'attack.pattern': 'attack_pattern',
+    'attack.category': 'attack_category'
+}
+
+AL_RESULT_KEYS = ['attrib', 'av', 'behavior', 'domain', 'domain_dynamic',
+                  'domain_static', 'ip', 'ip_dynamic', 'ip_static', 'yara']
+
+VERDICT_RANK_MAP = {
+    "safe": 0,
+    "info": 1,
+    "suspicious": 2,
+    "malicious": 3
+}
 
 TAG_MAP = {
     'attribution.exploit': 'EXP',
@@ -69,26 +94,7 @@ def get_submission_record(counter, datastore, sid):
 def get_summary(datastore, srecord, user_classification):
     max_classification = srecord['classification']
 
-    summary = {
-        'av.virus_name': set(),
-        'attribution.exploit': set(),
-        'attribution': set(),
-        'file.config': set(),
-        'technique.obfuscation': set(),
-        'file.behavior': set(),
-        'file.rule.yara': set(),
-        'attribution.family': set(),
-        'attribution.implant': set(),
-        'network.static.domain': set(),
-        'network.dynamic.domain': set(),
-        'network.static.ip': set(),
-        'network.dynamic.ip': set(),
-        'technique.config': set(),
-        'attribution.actor': set(),
-        'heuristic.name': set(),
-        'attack.pattern': set(),
-        'attack.category': set()
-    }
+    detailed = {v: {} for v in SUMMARY_TYPE_MAP.values()}
 
     submission_summary = datastore.get_summary_from_keys(srecord.get('results', []), cl_engine=Classification,
                                                          user_classification=user_classification)
@@ -96,14 +102,48 @@ def get_summary(datastore, srecord, user_classification):
 
     # Process Att&cks
     for attack in submission_summary['attack_matrix']:
-        summary['attack.pattern'].add(attack['name'])
+        tag_type = 'attack_pattern'
+        item_key = attack['name']
+        if item_key not in detailed[tag_type]:
+            detailed[tag_type][item_key] = {
+                "type": tag_type,
+                "subtype": None,
+                "verdict": attack['h_type'],
+                "value": item_key
+            }
+        else:
+            if VERDICT_RANK_MAP[detailed[tag_type][item_key]['verdict']] < VERDICT_RANK_MAP[attack['h_type']]:
+                detailed[tag_type][item_key]['verdict'] = attack['h_type']
+
+        # Process Att&cks categories
         for cat in attack['categories']:
-            summary['attack.category'].add(cat)
+            tag_type = 'attack_category'
+            if cat not in detailed[tag_type]:
+                detailed[tag_type][cat] = {
+                    "type": tag_type,
+                    "subtype": None,
+                    "verdict": attack['h_type'],
+                    "value": cat
+                }
+            else:
+                if VERDICT_RANK_MAP[detailed[tag_type][cat]['verdict']] < VERDICT_RANK_MAP[attack['h_type']]:
+                    detailed[tag_type][cat]['verdict'] = attack['h_type']
 
     # Process Heuristics
-    for heur_list in submission_summary['heuristics'].values():
+    for h_type, heur_list in submission_summary['heuristics'].items():
         for heur in heur_list:
-            summary['heuristic.name'].add(heur['name'])
+            tag_type = 'heuristic'
+            item_key = heur['name']
+            if item_key not in detailed[tag_type]:
+                detailed[tag_type][item_key] = {
+                    "type": tag_type,
+                    "subtype": None,
+                    "verdict": h_type,
+                    "value": item_key
+                }
+            else:
+                if VERDICT_RANK_MAP[detailed[tag_type][item_key]['verdict']] < VERDICT_RANK_MAP[h_type]:
+                    detailed[tag_type][item_key]['verdict'] = h_type
 
     # Process Tags
     for t in submission_summary['tags']:
@@ -111,25 +151,47 @@ def get_summary(datastore, srecord, user_classification):
             continue
 
         tag_value = t['value']
-        tag_type = t['type']
+        tag_type = SUMMARY_TYPE_MAP.get(t['type'], None)
 
-        if tag_value == '' or tag_type not in summary:
+        if tag_value == '' or tag_type is None:
             continue
 
-        sub_tag = TAG_MAP.get(tag_type, None)
-        if sub_tag:
-            tag_type = 'attribution'
-            tag_value = "%s [%s]" % (tag_value, sub_tag)
+        sub_type = TAG_MAP.get(t['type'], None)
 
-        if tag_type == 'av.virus_name':
+        if tag_type == 'av':
             if tag_value in AV_TO_BEAVIOR:
-                tag_type = 'file.behavior'
+                tag_type = 'behavior'
 
-        summary_values = summary.get(tag_type, None)
-        if summary_values is not None:
-            summary_values.add(tag_value)
+        item_key = f"{t['type']}__{t['value']}"
+        if item_key not in detailed[tag_type]:
+            detailed[tag_type][item_key] = {
+                "type": t['type'],
+                "subtype": sub_type,
+                "verdict": t['h_type'],
+                "value": t['value']
+            }
+        else:
+            if VERDICT_RANK_MAP[detailed[tag_type][item_key]['verdict']] < VERDICT_RANK_MAP[t['h_type']]:
+                detailed[tag_type][item_key]['verdict'] = t['h_type']
 
-    return max_classification, summary, submission_summary['filtered']
+    # Simplify the detailed items
+    detailed = {k: list(v.values()) for k, v in detailed.items()}
+
+    # Generate the Summary
+    summary = {k: set([f"{item['value']} [{item['subtype']}]" if item.get('subtype', None) else item['value']
+                       for item in v]) for k, v in detailed.items()}
+    summary['domain'] = summary['domain_dynamic'].union(summary['domain_static'])
+    summary['ip'] = summary['ip_dynamic'].union(summary['ip_static'])
+
+    # Merge IPs and domains in details
+    domains = list(detailed.pop('domain_dynamic', {}))
+    domains.extend(detailed.pop('domain_static', {}))
+    ips = list(detailed.pop('ip_dynamic', {}))
+    ips.extend(detailed.pop('ip_static', {}))
+    detailed['ip'] = ips
+    detailed['domain'] = domains
+
+    return max_classification, summary, submission_summary['filtered'], detailed
 
 
 def generate_alert_id(logger, alert_data):
@@ -146,8 +208,7 @@ def parse_submission_record(counter, datastore, alert_data, logger, user_classif
     psid = alert_data['submission']['params']['psid']
     srecord = get_submission_record(counter, datastore, sid)
 
-    max_classification, summary, filtered = get_summary(datastore, srecord, user_classification)
-    behaviors = list(summary['file.behavior'])
+    max_classification, summary, filtered, detailed = get_summary(datastore, srecord, user_classification)
 
     extended_scan = alert_data['extended_scan']
     if psid:
@@ -163,18 +224,13 @@ def parse_submission_record(counter, datastore, alert_data, logger, user_classif
         except Exception:  # pylint: disable=W0702
             logger.exception('Problem determining extended scan state:')
 
-    domains = summary['network.dynamic.domain'].union(summary['network.static.domain'])
-    ips = summary['network.dynamic.ip'].union(summary['network.static.ip'])
-
     return {
-        'behaviors': behaviors,
         'extended_scan': extended_scan,
-        'domains': domains,
-        'ips': ips,
         'summary': summary,
         'srecord': srecord,
         'max_classification': max_classification,
-        'filtered': filtered
+        'filtered': filtered,
+        'detailed': detailed
     }
 
 
@@ -266,29 +322,20 @@ def get_alert_update_parts(counter, datastore, alert_data, logger, user_classifi
     if alert_update_p1 is None or alert_update_p2 is None:
         parsed_record = parse_submission_record(counter, datastore, alert_data, logger, user_classification)
         file_record = datastore.file.get(alert_file['sha256'], as_obj=False)
+        al = {k: list(v) for k, v in parsed_record['summary'].items() if k in AL_RESULT_KEYS}
+        al['detailed'] = parsed_record['detailed']
+        al['request_end_time'] = parsed_record['srecord']['times']['completed']
         alert_update_p1 = {
             'extended_scan': parsed_record['extended_scan'],
             'filtered': parsed_record['filtered'],
-            'al': {
-                'attrib': list(parsed_record['summary']['attribution']),
-                'av': list(parsed_record['summary']['av.virus_name']),
-                'behavior': parsed_record['behaviors'],
-                'domain': list(parsed_record['domains']),
-                'domain_dynamic': list(parsed_record['summary']['network.dynamic.domain']),
-                'domain_static': list(parsed_record['summary']['network.static.domain']),
-                'ip': list(parsed_record['ips']),
-                'ip_dynamic': list(parsed_record['summary']['network.dynamic.ip']),
-                'ip_static': list(parsed_record['summary']['network.static.ip']),
-                'request_end_time': parsed_record['srecord']['times']['completed'],
-                'yara': list(parsed_record['summary']['file.rule.yara']),
-            },
+            'al': al,
             'attack': {
-                'pattern': list(parsed_record['summary']['attack.pattern']),
-                'category': list(parsed_record['summary']['attack.category'])
+                'pattern': list(parsed_record['summary']['attack_pattern']),
+                'category': list(parsed_record['summary']['attack_category'])
 
             },
             'heuristic': {
-                'name': list(parsed_record['summary']['heuristic.name'])
+                'name': list(parsed_record['summary']['heuristic'])
             }
         }
         alert_update_p2 = {
