@@ -21,6 +21,7 @@ from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.tagging import tag_dict_to_list
+from assemblyline.common.postprocess import ActionWorker
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch, DispatcherCommandMessage, \
@@ -155,7 +156,7 @@ class SubmissionTask:
                 sha256, service, _ = e.split('.', 2)
                 self.service_results[(sha256, service)] = e
 
-    @ property
+    @property
     def sid(self):
         return self.submission.sid
 
@@ -267,6 +268,14 @@ class Dispatcher(ThreadedCoreBase):
         # They will be held in this queue until results in redis are
         # already processed
         self.timeout_queue: Queue[DispatchAction] = Queue()
+
+        # Utility object to handle post-processing actions
+        self.postprocess_worker = ActionWorker(cache=False, config=self.config, datastore=self.datastore,
+                                               redis_persist=self.redis_persist)
+
+    def stop(self):
+        super().stop()
+        self.postprocess_worker.stop()
 
     def interrupt_handler(self, signum, stack_frame):
         self.log.info("Instance caught signal. Beginning to drain work.")
@@ -814,20 +823,13 @@ class Dispatcher(ThreadedCoreBase):
         for w in watcher_list.members():
             NamedQueue(w).push(WatchQueueMessage({'status': 'STOP'}).as_primitives())
 
-        # Send the submission for alerting if it meets the threshold and ingester will not do it for you
-        if submission.params.generate_alert and submission.max_score >= self.config.core.alerter.threshold \
-                and not task.completed_queue:
-            submission_msg = from_datastore_submission(submission)
-
-            self.log.info(f"[{submission_msg.sid} :: {submission_msg.files[0].sha256}] Notifying alerter to "
-                          "create or update an alert")
-
-            self.alert_queue.push(dict(
-                submission=submission_msg.as_primitives(),
-                score=submission.max_score,
-                extended_scan="skipped",
-                ingest_id=submission_msg.metadata.get('ingest_id', None)
-            ))
+        # Send the submission for alerting or resubmission
+        tags = [
+            _t
+            for file_tags in task.file_tags.values()
+            for _t in file_tags
+        ]
+        self.postprocess_worker.process_submission(submission, tags)
 
         # Clear the timeout watcher
         watcher_list.delete()
