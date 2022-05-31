@@ -30,6 +30,8 @@ SUMMARY_TYPE_MAP = {
     'network.dynamic.domain': 'domain_dynamic',
     'network.static.ip': 'ip_static',
     'network.dynamic.ip': 'ip_dynamic',
+    'network.static.uri': 'uri_static',
+    'network.dynamic.uri': 'uri_dynamic',
     'technique.config': 'attrib',
     'attribution.actor': 'attrib',
     'heuristic.name': 'heuristic',
@@ -37,8 +39,20 @@ SUMMARY_TYPE_MAP = {
     'attack.category': 'attack_category'
 }
 
-AL_RESULT_KEYS = ['attrib', 'av', 'behavior', 'domain', 'domain_dynamic',
-                  'domain_static', 'ip', 'ip_dynamic', 'ip_static', 'yara']
+AL_RESULT_KEYS = [
+    'attrib',
+    'av',
+    'behavior',
+    'domain',
+    'domain_dynamic',
+    'domain_static',
+    'ip',
+    'ip_dynamic',
+    'ip_static',
+    'uri',
+    'uri_dynamic',
+    'uri_static',
+    'yara']
 
 VERDICT_RANK_MAP = {
     "safe": 0,
@@ -182,14 +196,18 @@ def get_summary(datastore, srecord, user_classification):
                        for item in v]) for k, v in detailed.items()}
     summary['domain'] = summary['domain_dynamic'].union(summary['domain_static'])
     summary['ip'] = summary['ip_dynamic'].union(summary['ip_static'])
+    summary['uri'] = summary['uri_dynamic'].union(summary['uri_static'])
 
     # Merge IPs and domains in details
     domains = list(detailed.pop('domain_dynamic', {}))
     domains.extend(detailed.pop('domain_static', {}))
     ips = list(detailed.pop('ip_dynamic', {}))
     ips.extend(detailed.pop('ip_static', {}))
+    uris = list(detailed.pop('uri_dynamic', {}))
+    uris.extend(detailed.pop('uri_static', {}))
     detailed['ip'] = ips
     detailed['domain'] = domains
+    detailed['uri'] = uris
 
     return max_classification, summary, submission_summary['filtered'], detailed
 
