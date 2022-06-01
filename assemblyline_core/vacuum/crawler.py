@@ -4,20 +4,18 @@ import sys
 import logging
 import os
 import signal
-from argparse import ArgumentParser
 from time import sleep, time
 
-import yaml
-
+from assemblyline.common.log import init_logging
+from assemblyline.common.forge import get_config
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes import get_client as get_redis_client
 
 from multiprocessing import Event
 
-from .worker import main as worker_main
-
 DEL_TIME: int = 60 * 60  # An hour
 MAX_QUEUE_LENGTH = 1000000
+VACUUM_BUFFER_NAME = 'vacuum-file-buffer'
 
 stop_event = Event()
 
@@ -28,54 +26,26 @@ def sigterm_handler(_signum=0, _frame=None):
 
 
 def main():
-    parser = ArgumentParser(description="Bulk import tool for assemblyline.")
-    parser.add_argument('-d', '--dry_run', dest='dry_run',  action='store_true',
-                        help="Process files but does not send to processing", default=False)
-    # parser.add_argument("-p", "--path", dest="path", help="Path to source directory.", default=None)
-    parser.add_argument("-v", "--verbose", action='store_true', dest="verbose",
-                        help="Turn on verbose mode", default=False)
-    parser.add_argument("-c", "--config", dest="config_path",
-                        help="Path to configuration file.", required=True)
-    parser.add_argument("-w", "--workers", dest="workers", type=int,
-                        help="Launch workers rather than collecting files.", default=0)
-    parser.add_argument("-r", "--reconnect", dest="reconnect", type=int,
-                        help="Reset the connection to the api servers.", default=0)
-    options = parser.parse_args()
-
-    try:
-        with open(options.config_path, 'r') as _cf:
-            config = Config(**yaml.safe_load(_cf))
-    except (OSError, ValueError):
-        parser.print_help()
-        exit(1)
-
-    config.dry_run = options.dry_run
-    config.reconnect = options.reconnect
+    config = get_config()
+    vacuum_config = config.core.vacuum
     signal.signal(signal.SIGTERM, sigterm_handler)
 
     # Initialize logging
-    # init_logging('assemblyline.vacuum')
+    init_logging('assemblyline.vacuum')
     logger = logging.getLogger('assemblyline.vacuum')
     logger.addHandler(logging.StreamHandler(sys.stdout))
-    if options.verbose:
-        logger.setLevel(logging.DEBUG)
-    else:
-        logger.setLevel(logging.INFO)
     logger.info('Vacuum starting up...')
-
-    if options.workers > 0:
-        return worker_main(options, config, stop_event)
 
     # Initialize cache
     logger.info("Connect to redis...")
-    redis = get_redis_client('vacuum-redis', 6379, False)
+    redis = get_redis_client(config.core.redis.nonpersistent.host, config.core.redis.nonpersistent.port, False)
 
     # connect to workers
     logger.info("Connect to work queue...")
-    queue = NamedQueue('work', redis)
+    queue = NamedQueue(VACUUM_BUFFER_NAME, redis)
 
     logger.info("Load cache...")
-    files_list_cache = os.path.join(config.list_cache_directory, 'visited.json')
+    files_list_cache = os.path.join(vacuum_config.list_cache_directory, 'visited.json')
     try:
         with open(files_list_cache, 'r') as handle:
             previous_iteration_files = set(json.load(handle))
@@ -94,7 +64,7 @@ def main():
         remove_dir_list = []
         futures = []
         with concurrent.futures.ThreadPoolExecutor(20) as pool:
-            for data_directory in config.data_directories:
+            for data_directory in vacuum_config.data_directories:
                 for root, dirs, files in os.walk(data_directory):
                     while len(futures) > 50:
                         futures = [f for f in futures if not f.done()]
@@ -162,3 +132,6 @@ def main():
 
     logger.info('Good bye!')
 
+
+if __name__ == '__main__':
+    main()

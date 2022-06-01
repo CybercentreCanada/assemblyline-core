@@ -6,6 +6,7 @@ import tempfile
 import logging
 import os
 import time
+import signal
 import shutil
 from copy import deepcopy
 from typing import Dict, Tuple, Optional
@@ -16,13 +17,16 @@ import threading
 
 import elasticapm
 
+from assemblyline.common.forge import get_classification, get_config, get_datastore, get_filestore
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
+from assemblyline.common.log import init_logging
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.datastore.store import ESStore
 from assemblyline.common import identify, forge
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.uid import get_random_id
+from assemblyline.odm.models.config import Config
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
 from assemblyline.filestore import FileStore
@@ -34,18 +38,22 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from assemblyline_ui.helper.service import ui_to_submission_params, get_default_service_spec, get_default_service_list
 
+from assemblyline_core.vacuum.crawler import VACUUM_BUFFER_NAME
+
 from .safelist import VacuumSafelist
 from .department_map import DepartmentMap
 from .stream_map import StreamMap, Stream
 
+
 # init_logging('assemblyline.vacuum.worker')
 logger = logging.getLogger('assemblyline.vacuum.worker')
-engine = forge.get_classification()
+stop_event = Event()
 
-if not engine.enforce:
-    print("Classification must be enabled")
-    time.sleep(100)
-    exit(1)
+
+# noinspection PyUnusedLocal
+def sigterm_handler(_signum=0, _frame=None):
+    stop_event.set()
+
 
 APM_SPAN_TYPE = 'vacuum'
 
@@ -124,41 +132,42 @@ class FileProcessor(threading.Thread):
     settings_check = time.time()
     total_rounds = threading.Semaphore(value=1000)
 
-    user_profile = None
-    user_settings = None
+    user_profile: Optional[dict] = None
+    user_settings: Optional[dict] = None
 
-    def __init__(self, worker_id, stop, feedback, apm_client, config, safelist, department_map, stream_map):
+    def __init__(self, worker_id, feedback, apm_client, config, safelist, department_map, stream_map):
         # Start these worker processes in daemon mode so the OS makes sure they exit when the vacuum process exits.
         super().__init__(daemon=True)
         # Things initialized here will be copied into the new process when it starts.
         # Anything that can't be copied easily should be initialized in 'run'.
         self.config: Config = config
-        self._stop_event: Event = stop
+        self.minimum_classification = self.config.core.vacuum.minimum_classification
         self._feedback: Queue = feedback
         logger.info("Connect to work queue")
-        redis = get_redis_client('vacuum-redis', 6379, False)
-        self.queue = NamedQueue('work', redis)
+        redis = get_redis_client(host=self.config.core.redis.nonpersistent.host,
+                                 port=self.config.core.redis.nonpersistent.port, private=False)
+        self.queue = NamedQueue(VACUUM_BUFFER_NAME, redis)
         self.worker_id = worker_id
-        self.filestore: FileStore = None
+        self.filestore: FileStore = get_filestore()
         self.times = {}
+        self.engine = get_classification()
         self.apm_client = apm_client
         self.safelist: VacuumSafelist = safelist
-        self.department_codes = department_map
-        self.stream_map = stream_map
+        self.department_codes: Optional[DepartmentMap] = department_map
+        self.stream_map: Optional[StreamMap] = stream_map
+        self.identify = identify.Identify(use_cache=True)
 
-        self.traffic_queue = CommsQueue('submissions',
-                                        host=config.redis_volatile_host,
-                                        port=config.redis_volatile_port)
+        self.traffic_queue = CommsQueue('submissions', redis)
 
         self.ingest_queue = NamedQueue(
             "m-ingest",
-            host=config.redis_persist_host,
-            port=config.redis_persist_port
+            host=self.config.core.redis.persistent.host,
+            port=self.config.core.redis.persistent.port
         )
 
         with self.profile_lock:
             if self.datastore is None:
-                self.datastore = AssemblylineDatastore(ESStore([self.config.datastore_url], archive_access=False))
+                self.datastore = get_datastore()
         self.get_user()
         self.get_user_settings()
 
@@ -170,7 +179,7 @@ class FileProcessor(threading.Thread):
             if self.user_profile and time.time() - self.profile_check < PROFILE_CACHE_TIME:
                 return self.user_profile
 
-            self.user_profile = self.datastore.user.get(self.config.assemblyline_user, as_obj=False)
+            self.user_profile = self.datastore.user.get(self.config.core.vacuum.assemblyline_user, as_obj=False)
             self.profile_check = time.time()
             return self.user_profile
 
@@ -191,7 +200,8 @@ class FileProcessor(threading.Thread):
 
     def get_stream(self, stream_id) -> Optional[Stream]:
         try:
-            return self.stream_map[int(stream_id)]
+            if self.stream_map:
+                return self.stream_map[int(stream_id)]
         except (KeyError, TypeError):
             logger.warning("Invalid stream: %s" % stream_id)
         return None
@@ -204,13 +214,13 @@ class FileProcessor(threading.Thread):
         if not stream:
             # log and return bogus data
             logger.error('Could not find info on stream %s' % stream_id)
-            return 'UNK', 10, 'UNK_STREAM', "Unknown stream ID", 'PB//CND'
+            return 'UNK', 10, 'UNK_STREAM', "Unknown stream ID", self.minimum_classification
 
         description = stream.description or "Unknown stream ID"
         name = stream.name or "UNK_STREAM"
         dept = name.split("_", 1)[0]
         zone = stream.zone_id
-        classification = stream.classification or 'PB//CND'
+        classification = stream.classification or self.minimum_classification
 
         return dept, zone, name, description, classification
 
@@ -231,7 +241,7 @@ class FileProcessor(threading.Thread):
         return reason, hit
 
     def source_file_path(self, sha256) -> Optional[str]:
-        for file_directory in self.config.file_directories:
+        for file_directory in self.config.core.vacuum.file_directories:
             path = os.path.join(file_directory, sha256[0], sha256[1], sha256[2], sha256[3], sha256)
             if os.path.exists(path):
                 return path
@@ -313,11 +323,11 @@ class FileProcessor(threading.Thread):
                 })
 
                 # Apply provided params
-                active_classification = msg.get('overrides', {}).get('classification', 'PB//CND')
-                active_classification = engine.max_classification(active_classification, 'PB//CND')
-                active_classification = engine.max_classification(active_classification, stream_classification)
+                active_cc = msg.get('overrides', {}).get('classification', self.minimum_classification)
+                active_cc = self.engine.max_classification(active_cc, self.minimum_classification)
+                active_cc = self.engine.max_classification(active_cc, stream_classification)
                 s_params.update({
-                    'classification': active_classification,
+                    'classification': active_cc,
                     'ttl': 60,
                 })
                 s_params['services']['resubmit'] = ['Dynamic Analysis']
@@ -354,12 +364,7 @@ class FileProcessor(threading.Thread):
 
                 # Calculate file digest
                 with self.tt('identify'):
-                    fileinfo = identify.fileinfo(working_file)
-
-                    # If identified as a higher priority item (ie. documents), elevate submission priority
-                    # meta_copy: dict = deepcopy(msg.get('metadata', {}))
-                    # if not is_low_priority(meta_copy, self.department_codes):
-                    #     s_params.update({'priority': meta_copy.get('priority', 200)})
+                    fileinfo = self.identify.fileinfo(working_file)
 
                     if msg.get('metadata', {}).get('truncated'):
                         # File is malformed therefore don't send to certain services
@@ -371,27 +376,8 @@ class FileProcessor(threading.Thread):
                             }
                         })
 
-                    # If still considered low priority, submit to a subset of services and
-                    # resubmit to all if necessary
-                    # elif s_params['priority'] == 100:
-                    #     resubmit_services = list(DEFAULT_SRV_SEL) + ["Dynamic Analysis"]
-                    #     s_params.update({
-                    #         'services': {
-                    #             'selected': ['Extract', 'MetaDefender', 'AntiVirus', 'VirusTotalCache',
-                    #                          'Safelist', 'YARA'],
-                    #             'resubmit': resubmit_services
-                    #         },
-                    #     })
-
-                    # Validate file size
-                    # if fileinfo['size'] > MAX_SIZE and not s_params.get('ignore_size', False):
-                    #     msg = f"File too large ({fileinfo['size']} > {MAX_SIZE}). Ingestion failed"
-                    #     return make_api_response({}, err=msg, status_code=413)
-                    # elif fileinfo['size'] == 0:
-                    #     return make_api_response({}, err="File empty. Ingestion failed", status_code=400)
-
                     # Decode cart if needed
-                    extracted_path, fileinfo, al_meta = decode_file(working_file, fileinfo)
+                    extracted_path, fileinfo, al_meta = decode_file(working_file, fileinfo, self.identify)
                     if extracted_path:
                         active_file = extracted_path
 
@@ -473,9 +459,6 @@ class FileProcessor(threading.Thread):
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
     def process_file(self, meta_path: str):
         flush_file = False
-        if self.config.dry_run:
-            logger.info("Processing: %s" % meta_path)
-
         try:
             with self.tt('load_json'):
                 if not os.path.exists(meta_path):
@@ -505,26 +488,24 @@ class FileProcessor(threading.Thread):
                     msg['metadata']['stream_name'] = stream_name
                 if description and 'description' not in msg['metadata']:
                     msg['metadata']['stream_description'] = description
-                if 'ip_src' in msg['metadata']:
-                    dep = self.department_codes[msg['metadata']['ip_src']]
-                    if dep:
-                        msg['metadata']['dep_src'] = dep
-                if 'ip_dst' in msg['metadata']:
-                    dep = self.department_codes[msg['metadata']['ip_dst']]
-                    if dep:
-                        msg['metadata']['dep_dst'] = dep
+                if self.department_codes:
+                    if 'ip_src' in msg['metadata']:
+                        dep = self.department_codes[msg['metadata']['ip_src']]
+                        if dep:
+                            msg['metadata']['dep_src'] = dep
+                    if 'ip_dst' in msg['metadata']:
+                        dep = self.department_codes[msg['metadata']['ip_dst']]
+                        if dep:
+                            msg['metadata']['dep_dst'] = dep
                 msg['metadata']['transport'] = 'tcp'
 
             with self.tt('ingest_outer'):
-                if not self.config.dry_run:
-                    with tempfile.NamedTemporaryFile(dir=self.config.worker_cache_directory) as temp_file:
-                        with self.tt('ingest'):
-                            self.ingest(msg, meta_path, temp_file, stream_classification)
-                            flush_file = True
-                        _s = time.time()
-                    self.times['dir_cleanup'] = time.time() - _s
-                else:
-                    pprint(msg)
+                with tempfile.NamedTemporaryFile(dir=self.config.core.vacuum.worker_cache_directory) as temp_file:
+                    with self.tt('ingest'):
+                        self.ingest(msg, meta_path, temp_file, stream_classification)
+                        flush_file = True
+                    _s = time.time()
+                self.times['dir_cleanup'] = time.time() - _s
         except EmptyMetaException as eme:
             logger.warning(str(eme))
             flush_file = True
@@ -567,25 +548,8 @@ class FileProcessor(threading.Thread):
     #     self.client._connection.session = session
 
     def run(self):
-        self.filestore = FileStore(self.config.filestore_destination)
-        if not self.config.dry_run:
-            # self.reconnect()
-            # counts = counter.AutoExportingCounters(
-            #     name='vacuum',
-            #     host=get_hostip(),
-            #     auto_flush=True,
-            #     auto_log=False,
-            #     export_interval_secs=al_config.system.update_interval,
-            #     channel=forge.get_metrics_sink(),
-            #     counter_type='vacuum')
-            # counts.start()
-            ...
-
-        else:
-            logger.info('DRY_MODE: Messages will not be queued, they will be displayed on screen.')
-
         logger.info('Waiting for files...')
-        while not self._stop_event.is_set():
+        while not stop_event.is_set():
             if self.ingest_queue.length() > 1000000:
                 time.sleep(10)
                 continue
@@ -624,26 +588,31 @@ class FileProcessor(threading.Thread):
                 time.sleep(1000000)
 
 
-def main(options, config: Config, stop):
-    logger.handlers.clear()
-    logger.addHandler(logging.StreamHandler(sys.stdout))
-    if options.verbose:
-        logger.setLevel(logging.DEBUG)
-    else:
-        logger.setLevel(logging.INFO)
+def main():
+    config = get_config()
+    vacuum_config = config.core.vacuum
+    signal.signal(signal.SIGTERM, sigterm_handler)
+
+    # Initialize logging
+    init_logging('assemblyline.vacuum')
+    logger = logging.getLogger('assemblyline.vacuum')
+    logger.info('Vacuum worker starting up...')
 
     apm_client = None
-    if config.apm_url:
+    if config.core.metrics.apm_server.server_url:
         elasticapm.instrument()
-        apm_client = elasticapm.Client(server_url=config.apm_url, service_name='vacuum')
+        apm_client = elasticapm.Client(server_url=config.core.metrics.apm_server.server_url,
+                                       service_name="vacuum_worker")
 
     container_id = os.environ.get("HOSTNAME", 'vacuum-worker') + '-'
     feedback = Queue()
-    FileProcessor.total_rounds = threading.Semaphore(value=1000*options.workers)
+    FileProcessor.total_rounds = threading.Semaphore(value=1000*vacuum_config.worker_threads)
 
     department_map, stream_map = None, None
-    department_map = DepartmentMap.load(config.department_map_url)
-    stream_map = StreamMap.load(config.stream_map_url)
+    if vacuum_config.department_map_url:
+        department_map = DepartmentMap.load(vacuum_config.department_map_url)
+    if vacuum_config.stream_map_url:
+        stream_map = StreamMap.load(vacuum_config.stream_map_url)
 
     args = dict(
         config=config,
@@ -651,10 +620,10 @@ def main(options, config: Config, stop):
         stream_map=stream_map
     )
 
-    workers = [FileProcessor(container_id + str(0), stop, feedback, apm_client, **args)]
+    workers = [FileProcessor(container_id + str(0), feedback, apm_client, **args)]
     workers.extend([
-        FileProcessor(container_id + str(ii), stop, feedback, None, **args)
-        for ii in range(1, options.workers)
+        FileProcessor(container_id + str(ii), feedback, None, **args)
+        for ii in range(1, vacuum_config.worker_threads)
     ])
     [w.start() for w in workers]
 
@@ -669,11 +638,11 @@ def main(options, config: Config, stop):
             except KeyError:
                 times[key] = value
 
-    while not stop.is_set() and workers:
+    while not stop_event.is_set() and workers:
         workers = [w for w in workers if w.is_alive()]
         time.sleep(1)
 
-        while not stop.is_set():
+        while not stop_event.is_set():
             try:
                 line = feedback.get_nowait()
                 process_update(line)
@@ -691,3 +660,7 @@ def main(options, config: Config, stop):
         workers = [w for w in workers if w.is_alive()]
         print(len(workers))
         time.sleep(1)
+
+
+if __name__ == '__main__':
+    main()
