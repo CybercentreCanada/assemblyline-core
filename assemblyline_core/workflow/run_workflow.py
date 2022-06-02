@@ -130,7 +130,8 @@ class WorkflowManager(ServerBase):
                     operations = []
                     fq_items = []
                     if labels:
-                        operations.extend([(self.datastore.alert.UPDATE_APPEND, 'label', lbl) for lbl in labels])
+                        operations.extend([(self.datastore.alert.UPDATE_APPEND_IF_MISSING, 'label', lbl)
+                                           for lbl in labels])
                         for label in labels:
                             fq_items.append("label:\"{label}\"".format(label=label))
                     if priority:
