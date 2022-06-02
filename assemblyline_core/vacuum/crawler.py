@@ -25,20 +25,25 @@ def sigterm_handler(_signum=0, _frame=None):
     stop_event.set()
 
 
+logger = logging.getLogger('assemblyline.vacuum')
+
+
 def main():
     config = get_config()
-    vacuum_config = config.core.vacuum
     signal.signal(signal.SIGTERM, sigterm_handler)
 
     # Initialize logging
     init_logging('assemblyline.vacuum')
-    logger = logging.getLogger('assemblyline.vacuum')
-    logger.addHandler(logging.StreamHandler(sys.stdout))
     logger.info('Vacuum starting up...')
 
     # Initialize cache
     logger.info("Connect to redis...")
     redis = get_redis_client(config.core.redis.nonpersistent.host, config.core.redis.nonpersistent.port, False)
+    run(config, redis)
+
+
+def run(config, redis):
+    vacuum_config = config.core.vacuum
 
     # connect to workers
     logger.info("Connect to work queue...")
