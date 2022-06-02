@@ -14,7 +14,7 @@ from assemblyline.remote.datatypes import get_client as get_redis_client
 from multiprocessing import Event
 
 DEL_TIME: int = 60 * 60  # An hour
-MAX_QUEUE_LENGTH = 1000000
+MAX_QUEUE_LENGTH = 100000
 VACUUM_BUFFER_NAME = 'vacuum-file-buffer'
 
 stop_event = Event()

@@ -1,7 +1,6 @@
 import contextlib
 import datetime
 import json
-import sys
 import tempfile
 import logging
 import os
@@ -9,10 +8,8 @@ import time
 import signal
 import shutil
 from copy import deepcopy
-from typing import Dict, Tuple, Optional
-from multiprocessing import Lock, Event, Queue
-from queue import Empty
-from pprint import pprint
+from typing import Dict, Tuple, Optional, Any
+from multiprocessing import Lock, Event
 import threading
 
 import elasticapm
@@ -21,19 +18,19 @@ from assemblyline.common.forge import get_classification, get_config, get_datast
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
 from assemblyline.common.log import init_logging
+from assemblyline.common.metrics import MetricsFactory
 from assemblyline.datastore.helper import AssemblylineDatastore
-from assemblyline.datastore.store import ESStore
-from assemblyline.common import identify, forge
+from assemblyline.common import identify
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.uid import get_random_id
 from assemblyline.odm.models.config import Config
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
+from assemblyline.odm.messages.vacuum_heartbeat import Metrics
 
 from assemblyline.filestore import FileStore
 from assemblyline.common.str_utils import safe_str
 from assemblyline.remote.datatypes import get_client as get_redis_client
 from assemblyline.odm.messages.submission import Submission
-from assemblyline.odm.models.submission import DEFAULT_SRV_SEL
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from assemblyline_ui.helper.service import ui_to_submission_params, get_default_service_spec, get_default_service_list
@@ -59,7 +56,7 @@ APM_SPAN_TYPE = 'vacuum'
 
 
 def load_user_settings(datastore, user) -> dict:
-    default_settings = {}
+    default_settings: dict[str, Any] = {}
 
     SERVICE_LIST = datastore.list_all_services(as_obj=False, full=True)
 
@@ -103,26 +100,16 @@ PROFILE_CACHE_TIME = 60 * 10
 
 
 @contextlib.contextmanager
-def timed(data_dict, name, client):
-    start = time.time()
-
+def timed(name, client):
     if client:
         with elasticapm.capture_span(name):
-            try:
-                yield
-            finally:
-                data_dict[name] = time.time() - start
-    else:
-        try:
             yield
-        finally:
-            data_dict[name] = time.time() - start
 
 
 class FileProcessor(threading.Thread):
     last_stream_id_update = datetime.datetime.now()
     stream_id_lock = Lock()
-    safe_files = {}
+    safe_files: dict[str, str] = {}
 
     datastore: AssemblylineDatastore = None
 
@@ -135,21 +122,18 @@ class FileProcessor(threading.Thread):
     user_profile: Optional[dict] = None
     user_settings: Optional[dict] = None
 
-    def __init__(self, worker_id, feedback, apm_client, config, safelist, department_map, stream_map):
+    def __init__(self, worker_id, counter, apm_client, redis, config, safelist, department_map, stream_map):
         # Start these worker processes in daemon mode so the OS makes sure they exit when the vacuum process exits.
         super().__init__(daemon=True)
         # Things initialized here will be copied into the new process when it starts.
         # Anything that can't be copied easily should be initialized in 'run'.
         self.config: Config = config
+        self.counter = counter
         self.minimum_classification = self.config.core.vacuum.minimum_classification
-        self._feedback: Queue = feedback
         logger.info("Connect to work queue")
-        redis = get_redis_client(host=self.config.core.redis.nonpersistent.host,
-                                 port=self.config.core.redis.nonpersistent.port, private=False)
         self.queue = NamedQueue(VACUUM_BUFFER_NAME, redis)
         self.worker_id = worker_id
         self.filestore: FileStore = get_filestore()
-        self.times = {}
         self.engine = get_classification()
         self.apm_client = apm_client
         self.safelist: VacuumSafelist = safelist
@@ -195,8 +179,8 @@ class FileProcessor(threading.Thread):
             self.settings_check = time.time()
             return deepcopy(self.user_settings)
 
-    def tt(self, name):
-        return timed(self.times, name, self.apm_client)
+    def timed(self, name):
+        return timed(name, self.apm_client)
 
     def get_stream(self, stream_id) -> Optional[Stream]:
         try:
@@ -253,18 +237,18 @@ class FileProcessor(threading.Thread):
             raise InvalidMessageException('SHA256 is missing form the message or is invalid.')
         sha256 = msg['sha256']
 
-        # counts.increment('vacuum.ingested')
+        # export metrics
+        self.counter.increment('ingested')
+        # protocol = msg.get('metadata', msg).get('protocol', None)
+        # if protocol:
+        #     self.counter.increment(f'protocol.{protocol}')
 
-        # if msg.get('metadata', msg).get('protocol', None):
-        #     counts.increment('vacuum.%s' % msg.get('metadata', msg)['protocol'])
-        # notice = Notice(msg)
-        # noinspection PyBroadException
-        with self.tt('safelist'):
+        with self.timed('safelist'):
             try:
                 reason, hit = self.is_safelisted(msg)
                 if reason:
                     # return to skip this safelisted notice
-                    # counts.increment('vacuum.safelist')
+                    self.counter.increment('safelist')
                     logger.info("Trusting %s due to reason: %s (%s)" % (sha256, reason, hit))
                     return True
             except Exception:
@@ -274,7 +258,7 @@ class FileProcessor(threading.Thread):
             if sha256 == 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855':
                 return True
 
-        with self.tt('copy'):
+        with self.timed('copy'):
             # Temporarily create a local copy
             source_file = self.source_file_path(sha256)
             working_file = ''
@@ -306,7 +290,7 @@ class FileProcessor(threading.Thread):
         al_meta = {}
 
         try:
-            with self.tt('user_info'):
+            with self.timed('user_info'):
                 user = self.get_user()
 
                 # Load default user params
@@ -350,7 +334,7 @@ class FileProcessor(threading.Thread):
             #     int(s_params['ttl']),
             #     config.submission.max_dtl) if int(s_params['ttl']) else config.submission.max_dtl
 
-            with self.tt('get_info'):
+            with self.timed('get_info'):
                 fileinfo = self.datastore.file.get_if_exists(sha256, as_obj=False,
                                                              archive_access=False)
             # config.datastore.ilm.update_archive)
@@ -363,7 +347,7 @@ class FileProcessor(threading.Thread):
                     return False
 
                 # Calculate file digest
-                with self.tt('identify'):
+                with self.timed('identify'):
                     fileinfo = self.identify.fileinfo(working_file)
 
                     if msg.get('metadata', {}).get('truncated'):
@@ -384,15 +368,15 @@ class FileProcessor(threading.Thread):
             # Save the file to the filestore if needs be
             # also no need to test if exist before upload because it already does that
             if os.path.exists(active_file):
-                with self.tt('upload'):
+                with self.timed('upload'):
                     self.filestore.upload(active_file, fileinfo['sha256'])
 
             # Freshen file object
-            with self.tt('freshen'):
+            with self.timed('freshen'):
                 expiry = now_as_iso(s_params['ttl'] * 24 * 60 * 60) if s_params.get('ttl', None) else None
                 self.datastore.save_or_freshen_file(fileinfo['sha256'], fileinfo, expiry, s_params['classification'])
 
-            with self.tt('create'):
+            with self.timed('create'):
                 # Load metadata, setup some default values if they are missing and append the cart metadata
                 ingest_id = get_random_id()
                 metadata = flatten({
@@ -427,7 +411,7 @@ class FileProcessor(threading.Thread):
                     return True
 
             # Send submission object for processing
-            with self.tt('post'):
+            with self.timed('post'):
                 self.ingest_queue.push(submission_obj.as_primitives())
                 # self.traffic_queue.publish(SubmissionMessage({
                 #     'msg': submission_obj,
@@ -439,7 +423,7 @@ class FileProcessor(threading.Thread):
             logger.exception("Error in ingest")
             return False
         finally:
-            with self.tt('cleanup'):
+            with self.timed('cleanup'):
                 # Cleanup files on disk
                 try:
                     if source_file and os.path.exists(source_file):
@@ -460,10 +444,10 @@ class FileProcessor(threading.Thread):
     def process_file(self, meta_path: str):
         flush_file = False
         try:
-            with self.tt('load_json'):
+            with self.timed('load_json'):
                 if not os.path.exists(meta_path):
                     logger.warning("File %s was not found..." % meta_path)
-                    #     counts.increment('vacuum.skipped')
+                    self.counter.increment('skipped')
                     return
 
                 if not os.path.getsize(meta_path):
@@ -475,10 +459,11 @@ class FileProcessor(threading.Thread):
                     except Exception as error:
                         logger.info('File %s failed to parsed as JSON. Will try other parsing methods...' % meta_path)
                         fh.seek(0)
+                        sample = str(fh.read(2000))
                         raise NotJSONException(f"File '{meta_path}' is not a JSON Metadata "
-                                               f"file because {error}: {fh.read(2000)}")
+                                               f"file because {error}: {sample}")
 
-            with self.tt('client_info'):
+            with self.timed('client_info'):
                 dept, zone, stream_name, description, stream_classification = self.client_info(msg['metadata']['stream'])
                 if 'department' not in msg['metadata']:
                     msg['metadata']['department'] = dept
@@ -499,29 +484,25 @@ class FileProcessor(threading.Thread):
                             msg['metadata']['dep_dst'] = dep
                 msg['metadata']['transport'] = 'tcp'
 
-            with self.tt('ingest_outer'):
+            with self.timed('ingest_outer'):
                 with tempfile.NamedTemporaryFile(dir=self.config.core.vacuum.worker_cache_directory) as temp_file:
-                    with self.tt('ingest'):
+                    with self.timed('ingest'):
                         self.ingest(msg, meta_path, temp_file, stream_classification)
                         flush_file = True
-                    _s = time.time()
-                self.times['dir_cleanup'] = time.time() - _s
+
         except EmptyMetaException as eme:
             logger.warning(str(eme))
             flush_file = True
-            # if not dry_run:
-            #     counts.increment('vacuum.skipped')
+            self.counter.increment('skipped')
         except NotJSONException as nje:
             logger.warning(str(nje))
-            # if not dry_run:
-            #     counts.increment('vacuum.skipped')
+            self.counter.increment('skipped')
         except Exception as e:
-            # if not dry_run:
-            #     counts.increment('vacuum.error')
+            self.counter.increment('errors')
             logger.exception("%s: %s" % (e.__class__.__name__, str(e)))
         finally:
             if flush_file:
-                with self.tt('cleanup_meta'):
+                with self.timed('cleanup_meta'):
                     try:
                         os.unlink(meta_path)
                     except Exception as error:
@@ -530,27 +511,10 @@ class FileProcessor(threading.Thread):
                         if os.path.exists(meta_path):
                             logger.warning("File '%s' could not be deleted by vacuum worker" % meta_path)
 
-    # def reconnect(self):
-    #     logger.info(f'Connecting to assemblyline {self.config.assemblyline_url} as {self.config.assemblyline_user}')
-    #     self.client = get_client(
-    #         self.config.assemblyline_url,
-    #         apikey=(self.config.assemblyline_user, self.config.assemblyline_key),
-    #         verify=False
-    #     )
-    #
-    # def soft_reconnect(self):
-    #     session = requests.Session()
-    #     session.verify = False
-    #     session.cookies = self.client._connection.session.cookies
-    #     session.headers.update(self.client._connection.session.headers)
-    #     session.headers['Connection'] = 'close'
-    #     session.timeout = self.client._connection.session.timeout
-    #     self.client._connection.session = session
-
     def run(self):
         logger.info('Waiting for files...')
         while not stop_event.is_set():
-            if self.ingest_queue.length() > 1000000:
+            if self.ingest_queue.length() > 100000:
                 time.sleep(10)
                 continue
 
@@ -558,33 +522,26 @@ class FileProcessor(threading.Thread):
                 return
 
             try:
-                _s = time.time()
                 file = self.queue.pop(blocking=True, timeout=2)
                 if file:
                     if self.apm_client:
                         self.apm_client.begin_transaction(APM_SPAN_TYPE)
 
-                    self.times['popping'] = time.time() - _s
                     self.process_file(file)
-                    self.times['total'] = time.time() - _s
 
                     if self.apm_client:
                         self.apm_client.end_transaction(APM_SPAN_TYPE, 'error')
 
             except EmptyMetaException as eme:
-                # if not dry_run:
-                #     counts.increment('vacuum.skipped')
+                self.counter.increment('skipped')
                 logger.error(str(eme))
             except Exception as e:
-                # if not dry_run:
-                #     counts.increment('vacuum.error')
+                self.counter.increment('errors')
                 logger.exception("Unhandled Exception: %s" % str(e))
                 if self.apm_client:
                     self.apm_client.end_transaction(APM_SPAN_TYPE, 'error')
 
             finally:
-                self._feedback.put(self.times)
-                self.times = {}
                 time.sleep(1000000)
 
 
@@ -605,7 +562,6 @@ def main():
                                        service_name="vacuum_worker")
 
     container_id = os.environ.get("HOSTNAME", 'vacuum-worker') + '-'
-    feedback = Queue()
     FileProcessor.total_rounds = threading.Semaphore(value=1000*vacuum_config.worker_threads)
 
     department_map, stream_map = None, None
@@ -614,51 +570,34 @@ def main():
     if vacuum_config.stream_map_url:
         stream_map = StreamMap.load(vacuum_config.stream_map_url)
 
+    redis = get_redis_client(host=config.core.redis.nonpersistent.host,
+                             port=config.core.redis.nonpersistent.port, private=False)
+
+    counter = MetricsFactory(metrics_type='vacuum', schema=Metrics, name='vacuum',
+                             redis=redis, config=config)
+
     args = dict(
         config=config,
         department_map=department_map,
-        stream_map=stream_map
+        stream_map=stream_map,
+        counter=counter,
+        redis=redis,
     )
 
-    workers = [FileProcessor(container_id + str(0), feedback, apm_client, **args)]
+    workers = [FileProcessor(container_id + str(0), apm_client=apm_client, **args)]
     workers.extend([
-        FileProcessor(container_id + str(ii), feedback, None, **args)
+        FileProcessor(container_id + str(ii), **args)
         for ii in range(1, vacuum_config.worker_threads)
     ])
     [w.start() for w in workers]
-
-    processed = [0]
-    times = {}
-
-    def process_update(message):
-        processed[0] += 1
-        for key, value in message.items():
-            try:
-                times[key] += value
-            except KeyError:
-                times[key] = value
 
     while not stop_event.is_set() and workers:
         workers = [w for w in workers if w.is_alive()]
         time.sleep(1)
 
-        while not stop_event.is_set():
-            try:
-                line = feedback.get_nowait()
-                process_update(line)
-            except Empty:
-                break
-
-        if processed[0] == 0:
-            continue
-
-        _t = {name: int(value/processed[0] * 1000) for name, value in times.items()}
-        values = ' '.join(sorted([f'{name}: {value}' for name, value in _t.items() if value > 1]))
-        print(f'{processed[0]} [{len(workers)}] ', values, flush=True)
-
     while workers:
         workers = [w for w in workers if w.is_alive()]
-        print(len(workers))
+        logger.info(f'stopping; {len(workers)} remaining workers')
         time.sleep(1)
 
 
