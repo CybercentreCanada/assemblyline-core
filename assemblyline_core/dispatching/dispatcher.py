@@ -1035,6 +1035,13 @@ class Dispatcher(ThreadedCoreBase):
             if service_info and service_info.category == "Dynamic Analysis":
                 submission.params.services.runtime_excluded.append(service_name)
 
+        # Update score of tag as it moves through different services
+        lookup_map = {f"{t['type']}:{t['value']}": i for i, t in enumerate(task.file_tags[sha256])}
+        for t in tags:
+            existing_tag_index = lookup_map.get(f"{t['type']}:{t['value']}")
+            if existing_tag_index:
+                t['score'] += task.file_tags[sha256].pop(existing_tag_index)['score']
+
         # Save the tags
         task.file_tags[sha256].extend(tags)
 
