@@ -1,6 +1,5 @@
 import concurrent.futures
 import json
-import sys
 import logging
 import os
 import signal

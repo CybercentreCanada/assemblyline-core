@@ -23,7 +23,9 @@ from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.common import identify
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.uid import get_random_id
+from assemblyline.odm.models import user
 from assemblyline.odm.models.config import Config
+from assemblyline.odm.models.user_settings import UserSettings
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.odm.messages.vacuum_heartbeat import Metrics
 
@@ -104,6 +106,8 @@ def timed(name, client):
     if client:
         with elasticapm.capture_span(name):
             yield
+    else:
+        yield
 
 
 class FileProcessor(threading.Thread):
@@ -122,7 +126,7 @@ class FileProcessor(threading.Thread):
     user_profile: Optional[dict] = None
     user_settings: Optional[dict] = None
 
-    def __init__(self, worker_id, counter, apm_client, redis, config, safelist, department_map, stream_map):
+    def __init__(self, worker_id, counter, apm_client, redis, persistent_redis, config, safelist, department_map, stream_map):
         # Start these worker processes in daemon mode so the OS makes sure they exit when the vacuum process exits.
         super().__init__(daemon=True)
         # Things initialized here will be copied into the new process when it starts.
@@ -142,16 +146,25 @@ class FileProcessor(threading.Thread):
         self.identify = identify.Identify(use_cache=True)
 
         self.traffic_queue = CommsQueue('submissions', redis)
-
-        self.ingest_queue = NamedQueue(
-            "m-ingest",
-            host=self.config.core.redis.persistent.host,
-            port=self.config.core.redis.persistent.port
-        )
+        self.ingest_queue = NamedQueue("m-ingest", persistent_redis)
 
         with self.profile_lock:
             if self.datastore is None:
                 self.datastore = get_datastore()
+
+            username = self.config.core.vacuum.assemblyline_user
+            if not self.datastore.user.get_if_exists(username):
+                logger.warning("Creating Vacuum user account")
+                user_data = user.User({
+                    "agrees_with_tos": "NOW",
+                    "classification": "RESTRICTED",
+                    "name": "Vacuum Account",
+                    "password": '000',  # Invalid
+                    "uname": username,
+                    "type": []})
+                self.datastore.user.save(username, user_data)
+                self.datastore.user_settings.save(username, UserSettings())
+
         self.get_user()
         self.get_user_settings()
 
@@ -463,26 +476,29 @@ class FileProcessor(threading.Thread):
                         raise NotJSONException(f"File '{meta_path}' is not a JSON Metadata "
                                                f"file because {error}: {sample}")
 
-            with self.timed('client_info'):
-                dept, zone, stream_name, description, stream_classification = self.client_info(msg['metadata']['stream'])
-                if 'department' not in msg['metadata']:
-                    msg['metadata']['department'] = dept
-                if 'zone' not in msg['metadata']:
-                    msg['metadata']['zone'] = zone
-                if 'stream_name' not in msg['metadata']:
-                    msg['metadata']['stream_name'] = stream_name
-                if description and 'description' not in msg['metadata']:
-                    msg['metadata']['stream_description'] = description
-                if self.department_codes:
-                    if 'ip_src' in msg['metadata']:
-                        dep = self.department_codes[msg['metadata']['ip_src']]
-                        if dep:
-                            msg['metadata']['dep_src'] = dep
-                    if 'ip_dst' in msg['metadata']:
-                        dep = self.department_codes[msg['metadata']['ip_dst']]
-                        if dep:
-                            msg['metadata']['dep_dst'] = dep
-                msg['metadata']['transport'] = 'tcp'
+            if self.stream_map:
+                with self.timed('client_info'):
+                    dept, zone, stream_name, description, stream_classification = self.client_info(msg['metadata']['stream'])
+                    if 'department' not in msg['metadata']:
+                        msg['metadata']['department'] = dept
+                    if 'zone' not in msg['metadata']:
+                        msg['metadata']['zone'] = zone
+                    if 'stream_name' not in msg['metadata']:
+                        msg['metadata']['stream_name'] = stream_name
+                    if description and 'description' not in msg['metadata']:
+                        msg['metadata']['stream_description'] = description
+                    if self.department_codes:
+                        if 'ip_src' in msg['metadata']:
+                            dep = self.department_codes[msg['metadata']['ip_src']]
+                            if dep:
+                                msg['metadata']['dep_src'] = dep
+                        if 'ip_dst' in msg['metadata']:
+                            dep = self.department_codes[msg['metadata']['ip_dst']]
+                            if dep:
+                                msg['metadata']['dep_dst'] = dep
+                    msg['metadata']['transport'] = 'tcp'
+            else:
+                stream_classification = self.minimum_classification
 
             with self.timed('ingest_outer'):
                 with tempfile.NamedTemporaryFile(dir=self.config.core.vacuum.worker_cache_directory) as temp_file:
@@ -541,14 +557,15 @@ class FileProcessor(threading.Thread):
                 if self.apm_client:
                     self.apm_client.end_transaction(APM_SPAN_TYPE, 'error')
 
-            finally:
-                time.sleep(1000000)
-
 
 def main():
-    config = get_config()
-    vacuum_config = config.core.vacuum
     signal.signal(signal.SIGTERM, sigterm_handler)
+    run()
+
+
+def run(config=None, redis=None, persistent_redis=None):
+    config = config or get_config()
+    vacuum_config = config.core.vacuum
 
     # Initialize logging
     init_logging('assemblyline.vacuum')
@@ -562,7 +579,7 @@ def main():
                                        service_name="vacuum_worker")
 
     container_id = os.environ.get("HOSTNAME", 'vacuum-worker') + '-'
-    FileProcessor.total_rounds = threading.Semaphore(value=1000*vacuum_config.worker_threads)
+    FileProcessor.total_rounds = threading.Semaphore(value=vacuum_config.worker_rollover*vacuum_config.worker_threads)
 
     department_map, stream_map = None, None
     if vacuum_config.department_map_url:
@@ -570,11 +587,15 @@ def main():
     if vacuum_config.stream_map_url:
         stream_map = StreamMap.load(vacuum_config.stream_map_url)
 
-    redis = get_redis_client(host=config.core.redis.nonpersistent.host,
-                             port=config.core.redis.nonpersistent.port, private=False)
+    redis = redis or get_redis_client(host=config.core.redis.nonpersistent.host,
+                                      port=config.core.redis.nonpersistent.port, private=False)
+
+    persistent_redis = persistent_redis or get_redis_client(host=config.core.redis.persistent.host,
+                                                            port=config.core.redis.persistent.port, private=False)
 
     counter = MetricsFactory(metrics_type='vacuum', schema=Metrics, name='vacuum',
                              redis=redis, config=config)
+    safelist = VacuumSafelist(vacuum_config.safelist)
 
     args = dict(
         config=config,
@@ -582,6 +603,8 @@ def main():
         stream_map=stream_map,
         counter=counter,
         redis=redis,
+        persistent_redis=persistent_redis,
+        safelist=safelist
     )
 
     workers = [FileProcessor(container_id + str(0), apm_client=apm_client, **args)]
