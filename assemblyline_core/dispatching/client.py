@@ -14,9 +14,7 @@ from typing import Dict, Optional, Any, cast
 from assemblyline.common import forge
 from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SUBMISSION_QUEUE, \
     make_watcher_list_name, DISPATCH_TASK_HASH
-from assemblyline.common.dict_utils import flatten
 from assemblyline.common.forge import CachedObject, get_service_queue
-from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.datastore.exceptions import VersionConflictException
 from assemblyline.odm.base import DATEFORMAT
 from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, \
@@ -258,10 +256,8 @@ class DispatchClient:
         for w in self._get_watcher_list(task.sid).members():
             NamedQueue(w, host=self.redis).push(msg)
 
-        # Save the tags
-        tags = []
-        for section in result.result.sections:
-            tags.extend(tag_dict_to_list(flatten(section.tags.as_primitives())))
+        # Save the tags and their score
+        tags = result.scored_tag_list()
 
         # Pull out file names if we have them
         file_names = {}
