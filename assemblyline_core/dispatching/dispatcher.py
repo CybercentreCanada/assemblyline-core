@@ -1037,10 +1037,15 @@ class Dispatcher(ThreadedCoreBase):
 
         # Update score of tag as it moves through different services
         lookup_map = {f"{t['type']}:{t['value']}": i for i, t in enumerate(task.file_tags[sha256])}
+        pop_list = []
         for t in tags:
             existing_tag_index = lookup_map.get(f"{t['type']}:{t['value']}")
             if existing_tag_index:
-                t['score'] = t.get('score', 0) + task.file_tags[sha256].pop(existing_tag_index).get('score', 0)
+                t['score'] = t.get('score', 0) + task.file_tags[sha256][existing_tag_index].get('score', 0)
+                pop_list.append(existing_tag_index)
+
+        # Remove tags that we know will be replaced
+        [task.file_tags[sha256].pop(i) for i in pop_list]
 
         # Save the tags
         task.file_tags[sha256].extend(tags)
