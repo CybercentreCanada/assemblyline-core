@@ -8,7 +8,7 @@ import time
 import signal
 import shutil
 from copy import deepcopy
-from typing import Dict, Tuple, Optional, Any
+from typing import Optional, Any
 from multiprocessing import Lock, Event
 import threading
 
@@ -115,8 +115,6 @@ class FileProcessor(threading.Thread):
     stream_id_lock = Lock()
     safe_files: dict[str, str] = {}
 
-    datastore: AssemblylineDatastore = None
-
     profile_lock = threading.RLock()
 
     profile_check = time.time()
@@ -126,12 +124,15 @@ class FileProcessor(threading.Thread):
     user_profile: Optional[dict] = None
     user_settings: Optional[dict] = None
 
-    def __init__(self, worker_id, counter, apm_client, redis, persistent_redis, config, safelist, department_map, stream_map):
+    def __init__(self, worker_id: str, counter, apm_client, redis, persistent_redis,
+                 config: Config, safelist: VacuumSafelist, department_map: DepartmentMap,
+                 stream_map: StreamMap, datastore: AssemblylineDatastore):
         # Start these worker processes in daemon mode so the OS makes sure they exit when the vacuum process exits.
         super().__init__(daemon=True)
         # Things initialized here will be copied into the new process when it starts.
         # Anything that can't be copied easily should be initialized in 'run'.
         self.config: Config = config
+        self.datastore = datastore
         self.counter = counter
         self.minimum_classification = self.config.core.vacuum.minimum_classification
         logger.info("Connect to work queue")
@@ -149,9 +150,6 @@ class FileProcessor(threading.Thread):
         self.ingest_queue = NamedQueue("m-ingest", persistent_redis)
 
         with self.profile_lock:
-            if self.datastore is None:
-                self.datastore = get_datastore()
-
             username = self.config.core.vacuum.assemblyline_user
             if not self.datastore.user.get_if_exists(username):
                 logger.warning("Creating Vacuum user account")
@@ -204,7 +202,7 @@ class FileProcessor(threading.Thread):
         return None
 
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
-    def client_info(self, stream_id: str) -> Tuple[str, int, str, str, str]:
+    def client_info(self, stream_id: str) -> tuple[str, int, str, str, str]:
         stream = self.get_stream(stream_id)
 
         # stream not in cache, update cache and try again
@@ -221,7 +219,7 @@ class FileProcessor(threading.Thread):
 
         return dept, zone, name, description, classification
 
-    def is_safelisted(self, msg: Dict) -> Tuple[str, str]:
+    def is_safelisted(self, msg: dict) -> tuple[str, str]:
         sha256 = msg['sha256']
         if sha256 in self.safe_files:
             return self.safe_files[sha256], 'cached'
@@ -245,7 +243,7 @@ class FileProcessor(threading.Thread):
         return None
 
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
-    def ingest(self, msg: Dict, meta_path: str, temp_file, stream_classification) -> bool:
+    def ingest(self, msg: dict, meta_path: str, temp_file, stream_classification) -> bool:
         if 'sha256' not in msg or not msg['sha256'] or len(msg['sha256']) != 64:
             raise InvalidMessageException('SHA256 is missing form the message or is invalid.')
         sha256 = msg['sha256']
@@ -348,9 +346,7 @@ class FileProcessor(threading.Thread):
             #     config.submission.max_dtl) if int(s_params['ttl']) else config.submission.max_dtl
 
             with self.timed('get_info'):
-                fileinfo = self.datastore.file.get_if_exists(sha256, as_obj=False,
-                                                             archive_access=False)
-            # config.datastore.ilm.update_archive)
+                fileinfo: dict = self.datastore.file.get_if_exists(sha256, as_obj=False, archive_access=False)
 
             # No need to re-calculate fileinfo if we have it already
             active_file = working_file
@@ -378,16 +374,19 @@ class FileProcessor(threading.Thread):
                     if extracted_path:
                         active_file = extracted_path
 
+            # Get the new sha after unpacking
+            file_sha256 = fileinfo['sha256']
+
             # Save the file to the filestore if needs be
             # also no need to test if exist before upload because it already does that
             if os.path.exists(active_file):
                 with self.timed('upload'):
-                    self.filestore.upload(active_file, fileinfo['sha256'])
+                    self.filestore.upload(active_file, file_sha256)
 
             # Freshen file object
             with self.timed('freshen'):
                 expiry = now_as_iso(s_params['ttl'] * 24 * 60 * 60) if s_params.get('ttl', None) else None
-                self.datastore.save_or_freshen_file(fileinfo['sha256'], fileinfo, expiry, s_params['classification'])
+                self.datastore.save_or_freshen_file(file_sha256, fileinfo, expiry, s_params['classification'])
 
             with self.timed('create'):
                 # Load metadata, setup some default values if they are missing and append the cart metadata
@@ -404,15 +403,15 @@ class FileProcessor(threading.Thread):
                     metadata['ts'] = now_as_iso()
 
                 # Set description if it does not exists
-                s_params['description'] = f"[{s_params['type']}] Inspection of file: {fileinfo['sha256']}"
+                s_params['description'] = f"[{s_params['type']}] Inspection of file: {file_sha256}"
 
                 # Create submission object
                 try:
                     submission_obj = Submission({
                         "sid": ingest_id,
                         "files": [{
-                            'name': metadata.get('filename', fileinfo['sha256']),
-                            'sha256': fileinfo['sha256'],
+                            'name': metadata.get('filename', file_sha256),
+                            'sha256': file_sha256,
                             'size': fileinfo['size']
                         }],
                         "notification": {},
@@ -478,7 +477,8 @@ class FileProcessor(threading.Thread):
 
             if self.stream_map:
                 with self.timed('client_info'):
-                    dept, zone, stream_name, description, stream_classification = self.client_info(msg['metadata']['stream'])
+                    dept, zone, stream_name, description, stream_classification = \
+                        self.client_info(msg['metadata']['stream'])
                     if 'department' not in msg['metadata']:
                         msg['metadata']['department'] = dept
                     if 'zone' not in msg['metadata']:
@@ -597,14 +597,15 @@ def run(config=None, redis=None, persistent_redis=None):
                              redis=redis, config=config)
     safelist = VacuumSafelist(vacuum_config.safelist)
 
-    args = dict(
+    args: dict[str, Any] = dict(
         config=config,
         department_map=department_map,
         stream_map=stream_map,
         counter=counter,
         redis=redis,
         persistent_redis=persistent_redis,
-        safelist=safelist
+        safelist=safelist,
+        datastore=get_datastore(),
     )
 
     workers = [FileProcessor(container_id + str(0), apm_client=apm_client, **args)]
