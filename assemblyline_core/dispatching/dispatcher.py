@@ -1041,7 +1041,7 @@ class Dispatcher(ThreadedCoreBase):
         for t in tags:
             existing_tag_index = lookup_map.get(f"{t['type']}:{t['value']}")
             if existing_tag_index:
-                t['score'] += task.file_tags[sha256].pop(existing_tag_index).get('score', 0)
+                t['score'] = t.get('score', 0) + task.file_tags[sha256].pop(existing_tag_index).get('score', 0)
 
         # Save the tags
         task.file_tags[sha256].extend(tags)
