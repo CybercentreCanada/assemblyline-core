@@ -1045,8 +1045,8 @@ class Dispatcher(ThreadedCoreBase):
                 t['score'] = t.get('score', 0) + task.file_tags[sha256][existing_tag_index].get('score', 0)
                 pop_list.append(existing_tag_index)
 
-        # Remove tags that we know will be replaced
-        [task.file_tags[sha256].pop(i) for i in pop_list]
+        # Remove tags that we know will be replaced (last to first)
+        [task.file_tags[sha256].pop(i) for i in sorted(pop_list, reverse=True)]
 
         # Save the tags
         task.file_tags[sha256].extend(tags)
