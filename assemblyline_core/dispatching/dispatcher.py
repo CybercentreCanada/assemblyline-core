@@ -112,7 +112,7 @@ class SubmissionTask:
         self.file_info: dict[str, Optional[FileInfo]] = {}
         self.file_names: dict[str, str] = {}
         self.file_schedules: dict[str, list[dict[str, Service]]] = {}
-        self.file_tags = defaultdict(lambda: defaultdict(int))
+        self.file_tags = defaultdict(dict)
         self.file_depth: dict[str, int] = {}
         self.file_temporary_data = defaultdict(dict)
         self.extra_errors = []
@@ -1041,9 +1041,11 @@ class Dispatcher(ThreadedCoreBase):
                 submission.params.services.runtime_excluded.append(service_name)
 
         # Update score of tag as it moves through different services
-        for t in tags:
-            key = f"{t['type']}:{t['value']}"
-            task.file_tags[sha256][key] = t
+        for key, value in tags.items():
+            if key in task.file_tags[sha256].keys():
+                task.file_tags[sha256][key] += value['score']
+            else:
+                task.file_tags[sha256][key] = value
 
         # Update the temporary data table for this file
         for key, value in (temporary_data or {}).items():

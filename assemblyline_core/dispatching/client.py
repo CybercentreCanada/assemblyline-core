@@ -265,7 +265,6 @@ class DispatchClient:
             if extracted_data.name:
                 file_names[extracted_data.sha256] = extracted_data.name
 
-        #
         dispatcher = task.metadata['dispatcher__']
         result_queue = self._get_queue_from_cache(DISPATCH_RESULT_QUEUE + dispatcher)
         ex_ts = result.expiry_ts.strftime(DATEFORMAT) if result.expiry_ts else result.archive_ts.strftime(DATEFORMAT)
