@@ -112,7 +112,7 @@ class SubmissionTask:
         self.file_info: dict[str, Optional[FileInfo]] = {}
         self.file_names: dict[str, str] = {}
         self.file_schedules: dict[str, list[dict[str, Service]]] = {}
-        self.file_tags = defaultdict(list)
+        self.file_tags = defaultdict(lambda: defaultdict(int))
         self.file_depth: dict[str, int] = {}
         self.file_temporary_data = defaultdict(dict)
         self.extra_errors = []
@@ -146,9 +146,13 @@ class SubmissionTask:
                         key=k, drop=result['drop_file'], score=result['result']['score'],
                         children=[r['sha256'] for r in result['response']['extracted']])
 
-                tags = Result(result).scored_tag_list()
-
-                self.file_tags[sha256] = tags
+                tags = Result(result).scored_tag_dict()
+                for key in tags.keys():
+                    if key in self.file_tags[sha256].keys():
+                        # Sum score of already known tags
+                        self.file[sha256][key]['score'] += tags[key]['score']
+                    else:
+                        self.file[sha256][key] = tags[key]
 
         if errors is not None:
             for e in errors:
@@ -554,7 +558,7 @@ class Dispatcher(ThreadedCoreBase):
                     # Load the list of tags we will pass
                     tags = []
                     if service.uses_tags or service.uses_tag_scores:
-                        tags = task.file_tags.get(sha256, [])
+                        tags = task.file_tags.get(sha256, {}).values()
 
                     # Load the temp submission data we will pass
                     temp_data = {}
@@ -1037,19 +1041,9 @@ class Dispatcher(ThreadedCoreBase):
                 submission.params.services.runtime_excluded.append(service_name)
 
         # Update score of tag as it moves through different services
-        lookup_map = {f"{t['type']}:{t['value']}": i for i, t in enumerate(task.file_tags[sha256])}
-        pop_list = []
         for t in tags:
-            existing_tag_index = lookup_map.get(f"{t['type']}:{t['value']}")
-            if existing_tag_index:
-                t['score'] = t.get('score', 0) + task.file_tags[sha256][existing_tag_index].get('score', 0)
-                pop_list.append(existing_tag_index)
-
-        # Remove tags that we know will be replaced (last to first)
-        [task.file_tags[sha256].pop(i) for i in sorted(pop_list, reverse=True)]
-
-        # Save the tags
-        task.file_tags[sha256].extend(tags)
+            key = f"{t['type']}:{t['value']}"
+            task.file_tags[sha256][key] = t
 
         # Update the temporary data table for this file
         for key, value in (temporary_data or {}).items():

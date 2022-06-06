@@ -257,7 +257,7 @@ class DispatchClient:
             NamedQueue(w, host=self.redis).push(msg)
 
         # Save the tags and their score
-        tags = result.scored_tag_list()
+        tags = result.scored_tag_dict()
 
         # Pull out file names if we have them
         file_names = {}
