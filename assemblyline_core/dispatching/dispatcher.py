@@ -1042,7 +1042,7 @@ class Dispatcher(ThreadedCoreBase):
         # Update score of tag as it moves through different services
         for key, value in tags.items():
             if key in task.file_tags[sha256].keys():
-                task.file_tags[sha256][key] += value['score']
+                task.file_tags[sha256][key]['score'] += value['score']
             else:
                 task.file_tags[sha256][key] = value
 
