@@ -153,7 +153,6 @@ class SubmissionTask:
                         self.file[sha256][key]['score'] += tags[key]['score']
                     else:
                         self.file[sha256][key] = tags[key]
-                        self.log.error('added full dict')
 
         if errors is not None:
             for e in errors:
