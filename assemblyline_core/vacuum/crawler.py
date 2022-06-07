@@ -121,7 +121,8 @@ def run(config, redis):
                         continue
 
                     if files:
-                        new_files = [os.path.join(root, f) for f in files if not f.startswith(".")]
+                        new_files = [os.path.join(root, f) for f in files
+                                     if not f.startswith(".") and not f.endswith('.bad')]
                         new_files = set(new_files) - previous_iteration_files
 
                         if new_files:

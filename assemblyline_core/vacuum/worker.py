@@ -125,9 +125,10 @@ class FileProcessor(threading.Thread):
     user_profile: Optional[dict] = None
     user_settings: Optional[dict] = None
 
-    def __init__(self, worker_id: str, counter, apm_client, redis, persistent_redis,
+    def __init__(self, worker_id: str, counter, redis, persistent_redis,
                  config: Config, safelist: VacuumSafelist, department_map: DepartmentMap,
-                 stream_map: StreamMap, datastore: AssemblylineDatastore):
+                 stream_map: StreamMap, datastore: AssemblylineDatastore,
+                 identifier, apm_client=None):
         # Start these worker processes in daemon mode so the OS makes sure they exit when the vacuum process exits.
         super().__init__(daemon=True)
         # Things initialized here will be copied into the new process when it starts.
@@ -145,7 +146,7 @@ class FileProcessor(threading.Thread):
         self.safelist: VacuumSafelist = safelist
         self.department_codes: Optional[DepartmentMap] = department_map
         self.stream_map: Optional[StreamMap] = stream_map
-        self.identify = identify.Identify(use_cache=True)
+        self.identify = identifier
 
         self.traffic_queue = CommsQueue('submissions', redis)
         self.ingest_queue = NamedQueue("m-ingest", persistent_redis)
@@ -194,16 +195,16 @@ class FileProcessor(threading.Thread):
     def timed(self, name):
         return timed(name, self.apm_client)
 
-    def get_stream(self, stream_id) -> Optional[Stream]:
+    def get_stream(self, stream_id: Optional[str]) -> Optional[Stream]:
         try:
-            if self.stream_map:
+            if self.stream_map and stream_id is not None:
                 return self.stream_map[int(stream_id)]
         except (KeyError, TypeError):
             logger.warning("Invalid stream: %s" % stream_id)
         return None
 
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
-    def client_info(self, stream_id: str) -> tuple[str, int, str, str, str]:
+    def client_info(self, stream_id: Optional[str]) -> tuple[str, int, str, str, str]:
         stream = self.get_stream(stream_id)
 
         # stream not in cache, update cache and try again
@@ -229,12 +230,12 @@ class FileProcessor(threading.Thread):
             return ''.join(['.' if ord(x) < 32 or ord(x) > 125 else x for x in s])
 
         reason, hit = self.safelist.drop(msg['metadata'])
-        hit = str({x: dotdump(safe_str(y)) for x, y in hit.items()})
+        hit_summary = str({x: dotdump(safe_str(y)) for x, y in hit.items()})
 
         if reason:
             self.safe_files[sha256] = reason
 
-        return reason, hit
+        return reason, hit_summary
 
     def source_file_path(self, sha256) -> Optional[str]:
         for file_directory in self.config.core.vacuum.file_directories:
@@ -360,7 +361,7 @@ class FileProcessor(threading.Thread):
                 with self.timed('identify'):
                     fileinfo = self.identify.fileinfo(working_file)
 
-                    if msg.get('metadata', {}).get('truncated'):
+                    if msg['metadata'].get('truncated'):
                         # File is malformed therefore don't send to certain services
                         s_params.update({
                             "services": {
@@ -476,10 +477,13 @@ class FileProcessor(threading.Thread):
                         raise NotJSONException(f"File '{meta_path}' is not a JSON Metadata "
                                                f"file because {error}: {sample}")
 
+            # Ensure metadata field is defined
+            msg.setdefault('metadata', {})
+
             if self.stream_map:
                 with self.timed('client_info'):
                     dept, zone, stream_name, description, stream_classification = \
-                        self.client_info(msg['metadata']['stream'])
+                        self.client_info(msg['metadata'].get('stream'))
                     if 'department' not in msg['metadata']:
                         msg['metadata']['department'] = dept
                     if 'zone' not in msg['metadata']:
@@ -504,29 +508,30 @@ class FileProcessor(threading.Thread):
             with self.timed('ingest_outer'):
                 with tempfile.NamedTemporaryFile(dir=self.config.core.vacuum.worker_cache_directory) as temp_file:
                     with self.timed('ingest'):
-                        self.ingest(msg, meta_path, temp_file, stream_classification)
-                        flush_file = True
+                        flush_file = self.ingest(msg, meta_path, temp_file, stream_classification)
 
         except EmptyMetaException as eme:
             logger.warning(str(eme))
             flush_file = True
             self.counter.increment('skipped')
-        except NotJSONException as nje:
-            logger.warning(str(nje))
+        except (NotJSONException, InvalidMessageException) as nje:
+            logger.warning(str(nje) + " " + meta_path)
             self.counter.increment('skipped')
         except Exception as e:
             self.counter.increment('errors')
             logger.exception("%s: %s" % (e.__class__.__name__, str(e)))
         finally:
-            if flush_file:
-                with self.timed('cleanup_meta'):
-                    try:
+            with self.timed('cleanup_meta'):
+                try:
+                    if flush_file:
                         os.unlink(meta_path)
-                    except Exception as error:
-                        logger.exception(f"Exception caught deleting file: {meta_path} {error}")
-                    finally:
-                        if os.path.exists(meta_path):
-                            logger.warning("File '%s' could not be deleted by vacuum worker" % meta_path)
+                    else:
+                        os.rename(meta_path, meta_path + '.bad')
+                except Exception as error:
+                    logger.exception(f"Exception caught deleting file: {meta_path} {error}")
+                finally:
+                    if os.path.exists(meta_path):
+                        logger.warning("File '%s' could not be deleted by vacuum worker" % meta_path)
 
     def run(self):
         logger.info('Waiting for files...')
@@ -540,25 +545,20 @@ class FileProcessor(threading.Thread):
             if not FileProcessor.total_rounds.acquire(blocking=False):
                 return
 
+            finished_message = None
             try:
                 file = self.queue.pop(blocking=True, timeout=2)
                 if file:
                     if self.apm_client:
                         self.apm_client.begin_transaction(APM_SPAN_TYPE)
+                        finished_message = 'error'
 
                     self.process_file(file)
+                    finished_message = 'ingested'
 
-                    if self.apm_client:
-                        self.apm_client.end_transaction(APM_SPAN_TYPE, 'error')
-
-            except EmptyMetaException as eme:
-                self.counter.increment('skipped')
-                logger.error(str(eme))
-            except Exception as e:
-                self.counter.increment('errors')
-                logger.exception("Unhandled Exception: %s" % str(e))
-                if self.apm_client:
-                    self.apm_client.end_transaction(APM_SPAN_TYPE, 'error')
+            finally:
+                if self.apm_client and finished_message is not None:
+                    self.apm_client.end_transaction(APM_SPAN_TYPE, finished_message)
 
 
 def main():
@@ -609,6 +609,7 @@ def run(config=None, redis=None, persistent_redis=None):
         persistent_redis=persistent_redis,
         safelist=safelist,
         datastore=get_datastore(),
+        identifier=identify.Identify(use_cache=True),
     )
 
     workers = [FileProcessor(container_id + str(0), apm_client=apm_client, **args)]
