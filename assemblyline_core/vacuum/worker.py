@@ -14,7 +14,7 @@ import threading
 
 import elasticapm
 
-from assemblyline.common.forge import get_classification, get_config, get_datastore, get_filestore
+from assemblyline.common.forge import CachedObject, get_classification, get_config, get_datastore, get_filestore
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
 from assemblyline.common.log import init_logging
@@ -25,6 +25,7 @@ from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.uid import get_random_id
 from assemblyline.odm.models import user
 from assemblyline.odm.models.config import Config
+from assemblyline.odm.models.submission import DEFAULT_SRV_SEL
 from assemblyline.odm.models.user_settings import UserSettings
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.odm.messages.vacuum_heartbeat import Metrics
@@ -34,8 +35,6 @@ from assemblyline.common.str_utils import safe_str
 from assemblyline.remote.datatypes import get_client as get_redis_client
 from assemblyline.odm.messages.submission import Submission
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-
-from assemblyline_ui.helper.service import ui_to_submission_params, get_default_service_spec, get_default_service_list
 
 from assemblyline_core.vacuum.crawler import VACUUM_BUFFER_NAME
 
@@ -58,33 +57,61 @@ def sigterm_handler(_signum=0, _frame=None):
 APM_SPAN_TYPE = 'vacuum'
 
 
-def load_user_settings(datastore, user) -> dict:
-    default_settings: dict[str, Any] = {}
+def get_default_service_list(srv_list: list, default_selection: list):
+    services: dict[str, list] = {}
+    for item in srv_list:
+        grp = item['category']
 
-    SERVICE_LIST = datastore.list_all_services(as_obj=False, full=True)
+        if grp not in services:
+            services[grp] = []
 
-    settings = datastore.user_settings.get_if_exists(user['uname'], as_obj=False)
-    srv_list: list[dict] = [x for x in SERVICE_LIST if x['enabled']]
-    if not settings:
-        def_srv_list = None
-        settings = default_settings
-    else:
-        # Make sure all defaults are there
-        for key, item in default_settings.items():
-            if key not in settings:
-                settings[key] = item
+        services[grp].append({"name": item["name"],
+                              "category": grp,
+                              "selected": (grp in default_selection or item['name'] in default_selection),
+                              "is_external": item["is_external"]})
 
-        # Remove all obsolete keys
-        for key in list(settings.keys()):
-            if key not in default_settings:
-                del settings[key]
+    return [{"name": k, "selected": k in default_selection, "services": v} for k, v in services.items()]
 
-        def_srv_list = settings.get('services', {}).get('selected', None)
 
-    settings['service_spec'] = get_default_service_spec(srv_list, settings.get('service_spec', {}))
-    settings['services'] = get_default_service_list(srv_list, def_srv_list)
+def simplify_services(services):
+    out = []
+    for item in services:
+        if item["selected"]:
+            out.append(item["name"])
+        else:
+            for srv in item["services"]:
+                if srv["selected"]:
+                    out.append(srv["name"])
 
-    return settings
+    return out
+
+
+def simplify_service_spec(service_spec):
+    params = {}
+    for spec in service_spec:
+        service = spec['name']
+        for param in spec['params']:
+            if param['value'] != param['default']:
+                params[service] = params.get(service, {})
+                params[service][param['name']] = param['value']
+
+    return params
+
+
+def get_default_service_spec(srv_list, user_default_values={}):
+
+    out = []
+    for x in srv_list:
+        if x["submission_params"]:
+            param_object = {'name': x['name'], "params": []}
+            for param in x.get('submission_params'):
+                new_param = deepcopy(param)
+                new_param['value'] = user_default_values.get(x['name'], {}).get(param['name'], param['value'])
+                param_object["params"].append(new_param)
+
+            out.append(param_object)
+
+    return out
 
 
 class EmptyMetaException(Exception):
@@ -150,6 +177,7 @@ class FileProcessor(threading.Thread):
 
         self.traffic_queue = CommsQueue('submissions', redis)
         self.ingest_queue = NamedQueue("m-ingest", persistent_redis)
+        self.service_list = CachedObject(self.datastore.list_all_services, kwargs={'as_obj': False, 'full': True})
 
         with self.profile_lock:
             username = self.config.core.vacuum.assemblyline_user
@@ -188,9 +216,58 @@ class FileProcessor(threading.Thread):
             if self.user_settings and time.time() - self.settings_check < PROFILE_CACHE_TIME:
                 return deepcopy(self.user_settings)
 
-            self.user_settings = load_user_settings(self.datastore, self.get_user())
+            self.user_settings = self.prepare_settings()
             self.settings_check = time.time()
             return deepcopy(self.user_settings)
+
+    def prepare_settings(self) -> dict:
+        default_settings: dict[str, Any] = UserSettings().as_primitives()
+
+        settings: dict = self.datastore.user_settings.get_if_exists(self.config.core.vacuum.assemblyline_user, as_obj=False)
+        def_srv_list = None
+
+        srv_list: list[dict] = [x for x in self.service_list if x['enabled']]
+        if not settings:
+            settings = default_settings
+        else:
+            # Make sure all defaults are there
+            for key, item in default_settings.items():
+                if key not in settings:
+                    settings[key] = item
+
+            # Remove all obsolete keys
+            for key in list(settings.keys()):
+                if key not in default_settings:
+                    del settings[key]
+
+            def_srv_list = settings.get('services', {}).get('selected', None)
+
+        if not def_srv_list:
+            def_srv_list = DEFAULT_SRV_SEL
+
+        settings['service_spec'] = get_default_service_spec(srv_list, settings.get('service_spec', {}))
+        settings['services'] = get_default_service_list(srv_list, def_srv_list)
+
+        # Simplify services params
+        if "service_spec" in settings:
+            settings["service_spec"] = simplify_service_spec(settings["service_spec"])
+        else:
+            settings['service_spec'] = {}
+
+        # Simplify service selection
+        if "services" in settings and isinstance(settings['services'], list):
+            settings['services'] = {'selected': simplify_services(settings["services"])}
+
+        settings['ttl'] = int(settings.get('ttl', self.config.submission.dtl))
+
+        # Remove UI specific params
+        settings.pop('default_zip_password', None)
+        settings.pop('download_encoding', None)
+        settings.pop('expand_min_score', None)
+        settings.pop('submission_view', None)
+        settings.pop('ui4', None)
+        settings.pop('ui4_ask', None)
+        return settings
 
     def timed(self, name):
         return timed(name, self.apm_client)
@@ -307,7 +384,7 @@ class FileProcessor(threading.Thread):
                 user = self.get_user()
 
                 # Load default user params
-                s_params: dict = ui_to_submission_params(self.get_user_settings())
+                s_params: dict = self.get_user_settings()
 
                 # Reset dangerous user settings to safe values
                 s_params.update({
