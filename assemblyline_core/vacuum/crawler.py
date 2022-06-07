@@ -2,6 +2,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import io
 import signal
 from time import sleep, time
 
@@ -22,6 +23,17 @@ stop_event = Event()
 # noinspection PyUnusedLocal
 def sigterm_handler(_signum=0, _frame=None):
     stop_event.set()
+
+
+_last_heartbeat = 0
+
+
+def heartbeat(config):
+    global _last_heartbeat
+    if _last_heartbeat + 3 < time():
+        with io.open(config.logging.heartbeat_file, 'ab'):
+            os.utime(config.logging.heartbeat_file)
+        _last_heartbeat = time()
 
 
 logger = logging.getLogger('assemblyline.vacuum')
@@ -70,6 +82,7 @@ def run(config, redis):
         with concurrent.futures.ThreadPoolExecutor(20) as pool:
             for data_directory in vacuum_config.data_directories:
                 for root, dirs, files in os.walk(data_directory):
+                    heartbeat(config)
                     while len(futures) > 50:
                         futures = [f for f in futures if not f.done()]
                         sleep(0.1)

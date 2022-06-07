@@ -42,6 +42,7 @@ from assemblyline_core.vacuum.crawler import VACUUM_BUFFER_NAME
 from .safelist import VacuumSafelist
 from .department_map import DepartmentMap
 from .stream_map import StreamMap, Stream
+from .crawler import heartbeat
 
 
 # init_logging('assemblyline.vacuum.worker')
@@ -530,6 +531,8 @@ class FileProcessor(threading.Thread):
     def run(self):
         logger.info('Waiting for files...')
         while not stop_event.is_set():
+            heartbeat(self.config)
+
             if self.ingest_queue.length() > 100000:
                 time.sleep(10)
                 continue
