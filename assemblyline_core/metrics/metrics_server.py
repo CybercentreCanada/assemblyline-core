@@ -61,7 +61,9 @@ class StatisticsAggregator(ServerBase):
         super().__init__('assemblyline.statistics_aggregator')
         self.config = config or forge.get_config()
         self.datastore = forge.get_datastore(archive_access=True)
-        self.scheduler = BackgroundScheduler(daemon=True)
+        self.sleep_time = 60 * 5  # Default sleep time (5 minutes)
+        self.heuristic_lookback = "now-1d"  # Default lookback time for heuristics
+        self.signature_lookback = "now-1d"  # Default lookback time for signatures
 
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
@@ -72,16 +74,14 @@ class StatisticsAggregator(ServerBase):
             self.apm_client = None
 
     def try_run(self):
-        # Run once
-        self._aggregated_statistics()
-
-        # Start a scheduled job
-        self.scheduler.add_job(self._aggregated_statistics, 'interval', seconds=60*60*24)
-        self.scheduler.start()
-
         while self.running:
-            # Wait forever...
-            time.sleep(1)
+            self._aggregated_statistics()
+
+            # Non-block wait for sleep time duration
+            for _ in range(self.sleep_time):
+                if not self.running:
+                    break
+                time.sleep(1)
 
     def _heuristics_stats(self):
         self.log.info("Computing heuristics statistics")
@@ -90,11 +90,8 @@ class StatisticsAggregator(ServerBase):
         if self.apm_client:
             self.apm_client.begin_transaction('statistics')
 
-        heur_list = sorted([(x['heur_id'])
-                            for x in self.ds.heuristic.stream_search("heur_id:*", fl="heur_id",
-                                                                     as_obj=False)])
-
-        self.datastore.calculate_heuristic_stats(heur_list)
+        # Do heuristics update
+        self.heuristic_lookback = self.datastore.calculate_heuristic_stats(self.heuristic_lookback)
 
         # APM Transaction end
         if self.apm_client:
@@ -107,12 +104,8 @@ class StatisticsAggregator(ServerBase):
         if self.apm_client:
             self.apm_client.begin_transaction('statistics')
 
-        sig_list = sorted([(x['id'], x['source'], x['name'], x['type'])
-                           for x in self.ds.signature.stream_search("id:*",
-                                                                    fl="id,name,type,source",
-                                                                    as_obj=False)])
-
-        self.datastore.calculate_signature_stats(sig_list)
+        # Do signature update
+        self.signature_lookback = self.datastore.calculate_signature_stats(self.signature_lookback)
 
         # APM Transaction end
         if self.apm_client:
