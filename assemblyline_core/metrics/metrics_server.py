@@ -90,7 +90,11 @@ class StatisticsAggregator(ServerBase):
         if self.apm_client:
             self.apm_client.begin_transaction('statistics')
 
-        self.datastore.calculate_heuristic_stats()
+        heur_list = sorted([(x['heur_id'])
+                            for x in self.ds.heuristic.stream_search("heur_id:*", fl="heur_id",
+                                                                     as_obj=False)])
+
+        self.datastore.calculate_heuristic_stats(heur_list)
 
         # APM Transaction end
         if self.apm_client:
@@ -103,7 +107,12 @@ class StatisticsAggregator(ServerBase):
         if self.apm_client:
             self.apm_client.begin_transaction('statistics')
 
-        self.datastore.calculate_signature_stats()
+        sig_list = sorted([(x['id'], x['source'], x['name'], x['type'])
+                           for x in self.ds.signature.stream_search("id:*",
+                                                                    fl="id,name,type,source",
+                                                                    as_obj=False)])
+
+        self.datastore.calculate_signature_stats(sig_list)
 
         # APM Transaction end
         if self.apm_client:
