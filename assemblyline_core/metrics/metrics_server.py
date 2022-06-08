@@ -78,10 +78,7 @@ class StatisticsAggregator(ServerBase):
             self._aggregated_statistics()
 
             # Non-block wait for sleep time duration
-            for _ in range(self.sleep_time):
-                if not self.running:
-                    break
-                time.sleep(1)
+            self.sleep(self.sleep_time)
 
     def _heuristics_stats(self):
         self.log.info("Computing heuristics statistics")
