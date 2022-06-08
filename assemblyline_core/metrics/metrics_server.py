@@ -62,7 +62,6 @@ class StatisticsAggregator(ServerBase):
         self.config = config or forge.get_config()
         self.datastore = forge.get_datastore(archive_access=True)
         self.sleep_time = 60 * 5  # Default sleep time (5 minutes)
-        self.heuristic_lookback = "now-1d"  # Default lookback time for heuristics
         self.signature_lookback = "now-1d"  # Default lookback time for signatures
 
         if self.config.core.metrics.apm_server.server_url is not None:
@@ -88,7 +87,7 @@ class StatisticsAggregator(ServerBase):
             self.apm_client.begin_transaction('statistics')
 
         # Do heuristics update
-        self.heuristic_lookback = self.datastore.calculate_heuristic_stats(self.heuristic_lookback)
+        self.datastore.calculate_heuristic_stats()
 
         # APM Transaction end
         if self.apm_client:
