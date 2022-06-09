@@ -166,6 +166,7 @@ class TaskingClient:
                                       f"heuristic {item['update']['_id']}: {item['update']['result'].upper()}")
 
                 self.datastore.heuristic.commit()
+                self.heuristics = {h.heur_id: h for h in self.datastore.list_all_heuristics()}
 
             service_config = self.datastore.get_service_with_delta(service.name, as_obj=False)
 
