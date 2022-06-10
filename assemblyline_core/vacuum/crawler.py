@@ -85,11 +85,13 @@ def run(config, redis):
                     heartbeat(config)
                     while len(futures) > 50:
                         futures = [f for f in futures if not f.done()]
+                        heartbeat(config)
                         sleep(0.1)
 
                     if length > MAX_QUEUE_LENGTH:
                         while len(futures) > 0:
                             futures = [f for f in futures if not f.done()]
+                            heartbeat(config)
                             sleep(0.1)
                         length = queue.length()
 
@@ -97,6 +99,7 @@ def run(config, redis):
                         logger.warning("Backlog full")
                         length = queue.length()
                         for _ in range(120):
+                            heartbeat(config)
                             sleep(1)
                             if stop_event.is_set():
                                 break
