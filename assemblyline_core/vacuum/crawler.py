@@ -82,6 +82,7 @@ def run(config, redis):
 
     logger.info("Starting main loop...")
     while not stop_event.is_set():
+        heartbeat(config)
         remove_dir_list = []
         futures = []
         with concurrent.futures.ThreadPoolExecutor(20) as pool:

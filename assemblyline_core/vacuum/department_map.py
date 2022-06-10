@@ -34,7 +34,7 @@ class DepartmentMap:
                 return
 
             table = RangeTable()
-            res = requests.get(self.url)
+            res = requests.get(self.url, verify=False)
             res.raise_for_status()
 
             for row in res.json():

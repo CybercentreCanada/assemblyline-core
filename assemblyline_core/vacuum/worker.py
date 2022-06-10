@@ -663,8 +663,10 @@ def run(config=None, redis=None, persistent_redis=None):
 
     department_map, stream_map = None, None
     if vacuum_config.department_map_url:
+        logger.info(f"Getting department map from {vacuum_config.department_map_url}")
         department_map = DepartmentMap.load(vacuum_config.department_map_url)
     if vacuum_config.stream_map_url:
+        logger.info(f"Getting stream map from {vacuum_config.stream_map_url}")
         stream_map = StreamMap.load(vacuum_config.stream_map_url)
 
     redis = redis or get_redis_client(host=config.core.redis.nonpersistent.host,
