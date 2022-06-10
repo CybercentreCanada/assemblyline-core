@@ -40,7 +40,7 @@ class StreamMap:
             if time.time() - self.update_time < 5:
                 return
 
-            res = requests.get(self.url)
+            res = requests.get(self.url, verify=False)
             res.raise_for_status()
 
             table = {}
