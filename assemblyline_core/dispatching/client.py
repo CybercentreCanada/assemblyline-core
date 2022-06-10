@@ -9,7 +9,7 @@ import logging
 import time
 import weakref
 
-from typing import Dict, Optional, Any, cast
+from typing import Optional, Any, cast
 
 from assemblyline.common import forge
 from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SUBMISSION_QUEUE, \
@@ -79,7 +79,7 @@ class DispatchClient:
         self.files = self.ds.file
         self.submission_assignments = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
         self.running_tasks = Hash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
-        self.service_data = cast(Dict[str, Service], CachedObject(self._get_services))
+        self.service_data = cast(dict[str, Service], CachedObject(self._get_services))
         self.dispatcher_data = []
         self.dispatcher_data_age = 0.0
         self.dead_dispatchers = []
@@ -104,8 +104,8 @@ class DispatchClient:
             self.dead_dispatchers.append(dispatcher_id)
             return False
 
-    def dispatch_bundle(self, submission: Submission, results: Dict[str, Result],
-                        file_infos: Dict[str, File], file_tree, errors: Dict[str, Error], completed_queue: str = None):
+    def dispatch_bundle(self, submission: Submission, results: dict[str, Result],
+                        file_infos: dict[str, File], file_tree, errors: dict[str, Error], completed_queue: str = None):
         """Insert a bundle into the dispatching system and continue scanning of its files
 
         Prerequisites:
@@ -136,7 +136,7 @@ class DispatchClient:
             completed_queue=completed_queue,
         ))
 
-    def outstanding_services(self, sid) -> Dict[str, int]:
+    def outstanding_services(self, sid) -> Optional[dict[str, int]]:
         """
         List outstanding services for a given submission and the number of file each
         of them still have to process.
@@ -148,7 +148,7 @@ class DispatchClient:
         dispatcher_id = self.submission_assignments.get(sid)
         if dispatcher_id:
             queue_name = reply_queue_name(prefix="D", suffix="ResponseQueue")
-            queue = NamedQueue(queue_name, host=self.redis, ttl=30)
+            queue: NamedQueue[dict[str, int]] = NamedQueue(queue_name, host=self.redis, ttl=30)
             command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+dispatcher_id, ttl=QUEUE_EXPIRY, host=self.redis)
             command_queue.push(DispatcherCommandMessage({
                 'kind': LIST_OUTSTANDING,
@@ -222,7 +222,7 @@ class DispatchClient:
 
     @elasticapm.capture_span(span_type='dispatch_client')
     def service_finished(self, sid: str, result_key: str, result: Result,
-                         temporary_data: Optional[Dict[str, Any]] = None):
+                         temporary_data: Optional[dict[str, Any]] = None):
         """Notifies the dispatcher of service completion, and possible new files to dispatch."""
         # Make sure the dispatcher knows we were working on this task
         task_key = ServiceTask.make_key(sid=sid, service_name=result.response.service_name, sha=result.sha256)
@@ -346,6 +346,7 @@ class DispatchClient:
                 })
             }).as_primitives())
             return queue_name
+        return None
 
     def _get_watcher_list(self, sid):
         return ExpiringSet(make_watcher_list_name(sid), host=self.redis)

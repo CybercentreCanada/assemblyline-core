@@ -1,82 +1,117 @@
 import contextlib
 import datetime
 import json
-import sys
 import tempfile
 import logging
 import os
 import time
+import signal
 import shutil
 from copy import deepcopy
-from typing import Dict, Tuple, Optional
-from multiprocessing import Lock, Event, Queue
-from queue import Empty
-from pprint import pprint
+from typing import Optional, Any
+from multiprocessing import Lock, Event
 import threading
 
 import elasticapm
 
+from assemblyline.common.forge import CachedObject, get_classification, get_config, get_datastore, get_filestore
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
+from assemblyline.common.log import init_logging
+from assemblyline.common.metrics import MetricsFactory
 from assemblyline.datastore.helper import AssemblylineDatastore
-from assemblyline.datastore.store import ESStore
-from assemblyline.common import identify, forge
+from assemblyline.common import identify
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.uid import get_random_id
+from assemblyline.odm.models import user
+from assemblyline.odm.models.config import Config
+from assemblyline.odm.models.submission import DEFAULT_SRV_SEL
+from assemblyline.odm.models.user_settings import UserSettings
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
+from assemblyline.odm.messages.vacuum_heartbeat import Metrics
 
 from assemblyline.filestore import FileStore
 from assemblyline.common.str_utils import safe_str
 from assemblyline.remote.datatypes import get_client as get_redis_client
 from assemblyline.odm.messages.submission import Submission
-from assemblyline.odm.models.submission import DEFAULT_SRV_SEL
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
-from assemblyline_ui.helper.service import ui_to_submission_params, get_default_service_spec, get_default_service_list
+from assemblyline_core.vacuum.crawler import VACUUM_BUFFER_NAME
 
 from .safelist import VacuumSafelist
 from .department_map import DepartmentMap
 from .stream_map import StreamMap, Stream
+from .crawler import heartbeat
+
 
 # init_logging('assemblyline.vacuum.worker')
 logger = logging.getLogger('assemblyline.vacuum.worker')
-engine = forge.get_classification()
+stop_event = Event()
 
-if not engine.enforce:
-    print("Classification must be enabled")
-    time.sleep(100)
-    exit(1)
+
+# noinspection PyUnusedLocal
+def sigterm_handler(_signum=0, _frame=None):
+    stop_event.set()
+
 
 APM_SPAN_TYPE = 'vacuum'
 
 
-def load_user_settings(datastore, user) -> dict:
-    default_settings = {}
+def get_default_service_list(srv_list: list, default_selection: list):
+    services: dict[str, list] = {}
+    for item in srv_list:
+        grp = item['category']
 
-    SERVICE_LIST = datastore.list_all_services(as_obj=False, full=True)
+        if grp not in services:
+            services[grp] = []
 
-    settings = datastore.user_settings.get_if_exists(user['uname'], as_obj=False)
-    srv_list: list[dict] = [x for x in SERVICE_LIST if x['enabled']]
-    if not settings:
-        def_srv_list = None
-        settings = default_settings
-    else:
-        # Make sure all defaults are there
-        for key, item in default_settings.items():
-            if key not in settings:
-                settings[key] = item
+        services[grp].append({"name": item["name"],
+                              "category": grp,
+                              "selected": (grp in default_selection or item['name'] in default_selection),
+                              "is_external": item["is_external"]})
 
-        # Remove all obsolete keys
-        for key in list(settings.keys()):
-            if key not in default_settings:
-                del settings[key]
+    return [{"name": k, "selected": k in default_selection, "services": v} for k, v in services.items()]
 
-        def_srv_list = settings.get('services', {}).get('selected', None)
 
-    settings['service_spec'] = get_default_service_spec(srv_list, settings.get('service_spec', {}))
-    settings['services'] = get_default_service_list(srv_list, def_srv_list)
+def simplify_services(services):
+    out = []
+    for item in services:
+        if item["selected"]:
+            out.append(item["name"])
+        else:
+            for srv in item["services"]:
+                if srv["selected"]:
+                    out.append(srv["name"])
 
-    return settings
+    return out
+
+
+def simplify_service_spec(service_spec):
+    params = {}
+    for spec in service_spec:
+        service = spec['name']
+        for param in spec['params']:
+            if param['value'] != param['default']:
+                params[service] = params.get(service, {})
+                params[service][param['name']] = param['value']
+
+    return params
+
+
+def get_default_service_spec(srv_list, user_default_values={}):
+
+    out = []
+    for x in srv_list:
+        if x["submission_params"]:
+            param_object = {'name': x['name'], "params": []}
+            for param in x.get('submission_params'):
+                new_param = deepcopy(param)
+                new_param['value'] = user_default_values.get(x['name'], {}).get(param['name'], param['value'])
+                param_object["params"].append(new_param)
+
+            out.append(param_object)
+
+    return out
 
 
 class EmptyMetaException(Exception):
@@ -95,28 +130,18 @@ PROFILE_CACHE_TIME = 60 * 10
 
 
 @contextlib.contextmanager
-def timed(data_dict, name, client):
-    start = time.time()
-
+def timed(name, client):
     if client:
         with elasticapm.capture_span(name):
-            try:
-                yield
-            finally:
-                data_dict[name] = time.time() - start
-    else:
-        try:
             yield
-        finally:
-            data_dict[name] = time.time() - start
+    else:
+        yield
 
 
 class FileProcessor(threading.Thread):
     last_stream_id_update = datetime.datetime.now()
     stream_id_lock = Lock()
-    safe_files = {}
-
-    datastore: AssemblylineDatastore = None
+    safe_files: dict[str, str] = {}
 
     profile_lock = threading.RLock()
 
@@ -124,41 +149,50 @@ class FileProcessor(threading.Thread):
     settings_check = time.time()
     total_rounds = threading.Semaphore(value=1000)
 
-    user_profile = None
-    user_settings = None
+    user_profile: Optional[dict] = None
+    user_settings: Optional[dict] = None
 
-    def __init__(self, worker_id, stop, feedback, apm_client, config, safelist, department_map, stream_map):
+    def __init__(self, worker_id: str, counter, redis, persistent_redis,
+                 config: Config, safelist: VacuumSafelist, department_map: DepartmentMap,
+                 stream_map: StreamMap, datastore: AssemblylineDatastore,
+                 identifier, apm_client=None):
         # Start these worker processes in daemon mode so the OS makes sure they exit when the vacuum process exits.
         super().__init__(daemon=True)
         # Things initialized here will be copied into the new process when it starts.
         # Anything that can't be copied easily should be initialized in 'run'.
         self.config: Config = config
-        self._stop_event: Event = stop
-        self._feedback: Queue = feedback
+        self.datastore = datastore
+        self.counter = counter
+        self.minimum_classification = self.config.core.vacuum.minimum_classification
         logger.info("Connect to work queue")
-        redis = get_redis_client('vacuum-redis', 6379, False)
-        self.queue = NamedQueue('work', redis)
+        self.queue = NamedQueue(VACUUM_BUFFER_NAME, redis)
         self.worker_id = worker_id
-        self.filestore: FileStore = None
-        self.times = {}
+        self.filestore: FileStore = get_filestore()
+        self.engine = get_classification()
         self.apm_client = apm_client
         self.safelist: VacuumSafelist = safelist
-        self.department_codes = department_map
-        self.stream_map = stream_map
+        self.department_codes: Optional[DepartmentMap] = department_map
+        self.stream_map: Optional[StreamMap] = stream_map
+        self.identify = identifier
 
-        self.traffic_queue = CommsQueue('submissions',
-                                        host=config.redis_volatile_host,
-                                        port=config.redis_volatile_port)
-
-        self.ingest_queue = NamedQueue(
-            "m-ingest",
-            host=config.redis_persist_host,
-            port=config.redis_persist_port
-        )
+        self.traffic_queue = CommsQueue('submissions', redis)
+        self.ingest_queue = NamedQueue("m-ingest", persistent_redis)
+        self.service_list = CachedObject(self.datastore.list_all_services, kwargs={'as_obj': False, 'full': True})
 
         with self.profile_lock:
-            if self.datastore is None:
-                self.datastore = AssemblylineDatastore(ESStore([self.config.datastore_url], archive_access=False))
+            username = self.config.core.vacuum.assemblyline_user
+            if not self.datastore.user.get_if_exists(username):
+                logger.warning("Creating Vacuum user account")
+                user_data = user.User({
+                    "agrees_with_tos": "NOW",
+                    "classification": "RESTRICTED",
+                    "name": "Vacuum Account",
+                    "password": '000',  # Invalid
+                    "uname": username,
+                    "type": []})
+                self.datastore.user.save(username, user_data)
+                self.datastore.user_settings.save(username, UserSettings())
+
         self.get_user()
         self.get_user_settings()
 
@@ -170,7 +204,7 @@ class FileProcessor(threading.Thread):
             if self.user_profile and time.time() - self.profile_check < PROFILE_CACHE_TIME:
                 return self.user_profile
 
-            self.user_profile = self.datastore.user.get(self.config.assemblyline_user, as_obj=False)
+            self.user_profile = self.datastore.user.get(self.config.core.vacuum.assemblyline_user, as_obj=False)
             self.profile_check = time.time()
             return self.user_profile
 
@@ -182,39 +216,89 @@ class FileProcessor(threading.Thread):
             if self.user_settings and time.time() - self.settings_check < PROFILE_CACHE_TIME:
                 return deepcopy(self.user_settings)
 
-            self.user_settings = load_user_settings(self.datastore, self.get_user())
+            self.user_settings = self.prepare_settings()
             self.settings_check = time.time()
             return deepcopy(self.user_settings)
 
-    def tt(self, name):
-        return timed(self.times, name, self.apm_client)
+    def prepare_settings(self) -> dict:
+        default_settings: dict[str, Any] = UserSettings().as_primitives()
 
-    def get_stream(self, stream_id) -> Optional[Stream]:
+        settings: dict = self.datastore.user_settings.get_if_exists(self.config.core.vacuum.assemblyline_user, as_obj=False)
+        def_srv_list = None
+
+        srv_list: list[dict] = [x for x in self.service_list if x['enabled']]
+        if not settings:
+            settings = default_settings
+        else:
+            # Make sure all defaults are there
+            for key, item in default_settings.items():
+                if key not in settings:
+                    settings[key] = item
+
+            # Remove all obsolete keys
+            for key in list(settings.keys()):
+                if key not in default_settings:
+                    del settings[key]
+
+            def_srv_list = settings.get('services', {}).get('selected', None)
+
+        if not def_srv_list:
+            def_srv_list = DEFAULT_SRV_SEL
+
+        settings['service_spec'] = get_default_service_spec(srv_list, settings.get('service_spec', {}))
+        settings['services'] = get_default_service_list(srv_list, def_srv_list)
+
+        # Simplify services params
+        if "service_spec" in settings:
+            settings["service_spec"] = simplify_service_spec(settings["service_spec"])
+        else:
+            settings['service_spec'] = {}
+
+        # Simplify service selection
+        if "services" in settings and isinstance(settings['services'], list):
+            settings['services'] = {'selected': simplify_services(settings["services"])}
+
+        settings['ttl'] = int(settings.get('ttl', self.config.submission.dtl))
+
+        # Remove UI specific params
+        settings.pop('default_zip_password', None)
+        settings.pop('download_encoding', None)
+        settings.pop('expand_min_score', None)
+        settings.pop('submission_view', None)
+        settings.pop('ui4', None)
+        settings.pop('ui4_ask', None)
+        return settings
+
+    def timed(self, name):
+        return timed(name, self.apm_client)
+
+    def get_stream(self, stream_id: Optional[str]) -> Optional[Stream]:
         try:
-            return self.stream_map[int(stream_id)]
+            if self.stream_map and stream_id is not None:
+                return self.stream_map[int(stream_id)]
         except (KeyError, TypeError):
             logger.warning("Invalid stream: %s" % stream_id)
         return None
 
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
-    def client_info(self, stream_id: str) -> Tuple[str, int, str, str, str]:
+    def client_info(self, stream_id: Optional[str]) -> tuple[str, int, str, str, str]:
         stream = self.get_stream(stream_id)
 
         # stream not in cache, update cache and try again
         if not stream:
             # log and return bogus data
             logger.error('Could not find info on stream %s' % stream_id)
-            return 'UNK', 10, 'UNK_STREAM', "Unknown stream ID", 'PB//CND'
+            return 'UNK', 10, 'UNK_STREAM', "Unknown stream ID", self.minimum_classification
 
         description = stream.description or "Unknown stream ID"
         name = stream.name or "UNK_STREAM"
         dept = name.split("_", 1)[0]
         zone = stream.zone_id
-        classification = stream.classification or 'PB//CND'
+        classification = stream.classification or self.minimum_classification
 
         return dept, zone, name, description, classification
 
-    def is_safelisted(self, msg: Dict) -> Tuple[str, str]:
+    def is_safelisted(self, msg: dict) -> tuple[str, str]:
         sha256 = msg['sha256']
         if sha256 in self.safe_files:
             return self.safe_files[sha256], 'cached'
@@ -223,38 +307,38 @@ class FileProcessor(threading.Thread):
             return ''.join(['.' if ord(x) < 32 or ord(x) > 125 else x for x in s])
 
         reason, hit = self.safelist.drop(msg['metadata'])
-        hit = str({x: dotdump(safe_str(y)) for x, y in hit.items()})
+        hit_summary = str({x: dotdump(safe_str(y)) for x, y in hit.items()})
 
         if reason:
             self.safe_files[sha256] = reason
 
-        return reason, hit
+        return reason, hit_summary
 
     def source_file_path(self, sha256) -> Optional[str]:
-        for file_directory in self.config.file_directories:
+        for file_directory in self.config.core.vacuum.file_directories:
             path = os.path.join(file_directory, sha256[0], sha256[1], sha256[2], sha256[3], sha256)
             if os.path.exists(path):
                 return path
         return None
 
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
-    def ingest(self, msg: Dict, meta_path: str, temp_file, stream_classification) -> bool:
+    def ingest(self, msg: dict, meta_path: str, temp_file, stream_classification) -> bool:
         if 'sha256' not in msg or not msg['sha256'] or len(msg['sha256']) != 64:
             raise InvalidMessageException('SHA256 is missing form the message or is invalid.')
         sha256 = msg['sha256']
 
-        # counts.increment('vacuum.ingested')
+        # export metrics
+        self.counter.increment('ingested')
+        # protocol = msg.get('metadata', msg).get('protocol', None)
+        # if protocol:
+        #     self.counter.increment(f'protocol.{protocol}')
 
-        # if msg.get('metadata', msg).get('protocol', None):
-        #     counts.increment('vacuum.%s' % msg.get('metadata', msg)['protocol'])
-        # notice = Notice(msg)
-        # noinspection PyBroadException
-        with self.tt('safelist'):
+        with self.timed('safelist'):
             try:
                 reason, hit = self.is_safelisted(msg)
                 if reason:
                     # return to skip this safelisted notice
-                    # counts.increment('vacuum.safelist')
+                    self.counter.increment('safelist')
                     logger.info("Trusting %s due to reason: %s (%s)" % (sha256, reason, hit))
                     return True
             except Exception:
@@ -264,7 +348,7 @@ class FileProcessor(threading.Thread):
             if sha256 == 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855':
                 return True
 
-        with self.tt('copy'):
+        with self.timed('copy'):
             # Temporarily create a local copy
             source_file = self.source_file_path(sha256)
             working_file = ''
@@ -296,11 +380,11 @@ class FileProcessor(threading.Thread):
         al_meta = {}
 
         try:
-            with self.tt('user_info'):
+            with self.timed('user_info'):
                 user = self.get_user()
 
                 # Load default user params
-                s_params: dict = ui_to_submission_params(self.get_user_settings())
+                s_params: dict = self.get_user_settings()
 
                 # Reset dangerous user settings to safe values
                 s_params.update({
@@ -313,11 +397,11 @@ class FileProcessor(threading.Thread):
                 })
 
                 # Apply provided params
-                active_classification = msg.get('overrides', {}).get('classification', 'PB//CND')
-                active_classification = engine.max_classification(active_classification, 'PB//CND')
-                active_classification = engine.max_classification(active_classification, stream_classification)
+                active_cc = msg.get('overrides', {}).get('classification', self.minimum_classification)
+                active_cc = self.engine.max_classification(active_cc, self.minimum_classification)
+                active_cc = self.engine.max_classification(active_cc, stream_classification)
                 s_params.update({
-                    'classification': active_classification,
+                    'classification': active_cc,
                     'ttl': 60,
                 })
                 s_params['services']['resubmit'] = ['Dynamic Analysis']
@@ -340,10 +424,8 @@ class FileProcessor(threading.Thread):
             #     int(s_params['ttl']),
             #     config.submission.max_dtl) if int(s_params['ttl']) else config.submission.max_dtl
 
-            with self.tt('get_info'):
-                fileinfo = self.datastore.file.get_if_exists(sha256, as_obj=False,
-                                                             archive_access=False)
-            # config.datastore.ilm.update_archive)
+            with self.timed('get_info'):
+                fileinfo: dict = self.datastore.file.get_if_exists(sha256, as_obj=False, archive_access=False)
 
             # No need to re-calculate fileinfo if we have it already
             active_file = working_file
@@ -353,15 +435,10 @@ class FileProcessor(threading.Thread):
                     return False
 
                 # Calculate file digest
-                with self.tt('identify'):
-                    fileinfo = identify.fileinfo(working_file)
+                with self.timed('identify'):
+                    fileinfo = self.identify.fileinfo(working_file)
 
-                    # If identified as a higher priority item (ie. documents), elevate submission priority
-                    # meta_copy: dict = deepcopy(msg.get('metadata', {}))
-                    # if not is_low_priority(meta_copy, self.department_codes):
-                    #     s_params.update({'priority': meta_copy.get('priority', 200)})
-
-                    if msg.get('metadata', {}).get('truncated'):
+                    if msg['metadata'].get('truncated'):
                         # File is malformed therefore don't send to certain services
                         s_params.update({
                             "services": {
@@ -371,42 +448,26 @@ class FileProcessor(threading.Thread):
                             }
                         })
 
-                    # If still considered low priority, submit to a subset of services and
-                    # resubmit to all if necessary
-                    # elif s_params['priority'] == 100:
-                    #     resubmit_services = list(DEFAULT_SRV_SEL) + ["Dynamic Analysis"]
-                    #     s_params.update({
-                    #         'services': {
-                    #             'selected': ['Extract', 'MetaDefender', 'AntiVirus', 'VirusTotalCache',
-                    #                          'Safelist', 'YARA'],
-                    #             'resubmit': resubmit_services
-                    #         },
-                    #     })
-
-                    # Validate file size
-                    # if fileinfo['size'] > MAX_SIZE and not s_params.get('ignore_size', False):
-                    #     msg = f"File too large ({fileinfo['size']} > {MAX_SIZE}). Ingestion failed"
-                    #     return make_api_response({}, err=msg, status_code=413)
-                    # elif fileinfo['size'] == 0:
-                    #     return make_api_response({}, err="File empty. Ingestion failed", status_code=400)
-
                     # Decode cart if needed
-                    extracted_path, fileinfo, al_meta = decode_file(working_file, fileinfo)
+                    extracted_path, fileinfo, al_meta = decode_file(working_file, fileinfo, self.identify)
                     if extracted_path:
                         active_file = extracted_path
+
+            # Get the new sha after unpacking
+            file_sha256 = fileinfo['sha256']
 
             # Save the file to the filestore if needs be
             # also no need to test if exist before upload because it already does that
             if os.path.exists(active_file):
-                with self.tt('upload'):
-                    self.filestore.upload(active_file, fileinfo['sha256'])
+                with self.timed('upload'):
+                    self.filestore.upload(active_file, file_sha256)
 
             # Freshen file object
-            with self.tt('freshen'):
+            with self.timed('freshen'):
                 expiry = now_as_iso(s_params['ttl'] * 24 * 60 * 60) if s_params.get('ttl', None) else None
-                self.datastore.save_or_freshen_file(fileinfo['sha256'], fileinfo, expiry, s_params['classification'])
+                self.datastore.save_or_freshen_file(file_sha256, fileinfo, expiry, s_params['classification'])
 
-            with self.tt('create'):
+            with self.timed('create'):
                 # Load metadata, setup some default values if they are missing and append the cart metadata
                 ingest_id = get_random_id()
                 metadata = flatten({
@@ -421,15 +482,15 @@ class FileProcessor(threading.Thread):
                     metadata['ts'] = now_as_iso()
 
                 # Set description if it does not exists
-                s_params['description'] = f"[{s_params['type']}] Inspection of file: {fileinfo['sha256']}"
+                s_params['description'] = f"[{s_params['type']}] Inspection of file: {file_sha256}"
 
                 # Create submission object
                 try:
                     submission_obj = Submission({
                         "sid": ingest_id,
                         "files": [{
-                            'name': metadata.get('filename', fileinfo['sha256']),
-                            'sha256': fileinfo['sha256'],
+                            'name': metadata.get('filename', file_sha256),
+                            'sha256': file_sha256,
                             'size': fileinfo['size']
                         }],
                         "notification": {},
@@ -441,7 +502,7 @@ class FileProcessor(threading.Thread):
                     return True
 
             # Send submission object for processing
-            with self.tt('post'):
+            with self.timed('post'):
                 self.ingest_queue.push(submission_obj.as_primitives())
                 # self.traffic_queue.publish(SubmissionMessage({
                 #     'msg': submission_obj,
@@ -453,7 +514,7 @@ class FileProcessor(threading.Thread):
             logger.exception("Error in ingest")
             return False
         finally:
-            with self.tt('cleanup'):
+            with self.timed('cleanup'):
                 # Cleanup files on disk
                 try:
                     if source_file and os.path.exists(source_file):
@@ -473,14 +534,11 @@ class FileProcessor(threading.Thread):
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
     def process_file(self, meta_path: str):
         flush_file = False
-        if self.config.dry_run:
-            logger.info("Processing: %s" % meta_path)
-
         try:
-            with self.tt('load_json'):
+            with self.timed('load_json'):
                 if not os.path.exists(meta_path):
                     logger.warning("File %s was not found..." % meta_path)
-                    #     counts.increment('vacuum.skipped')
+                    self.counter.increment('skipped')
                     return
 
                 if not os.path.getsize(meta_path):
@@ -492,202 +550,161 @@ class FileProcessor(threading.Thread):
                     except Exception as error:
                         logger.info('File %s failed to parsed as JSON. Will try other parsing methods...' % meta_path)
                         fh.seek(0)
+                        sample = str(fh.read(2000))
                         raise NotJSONException(f"File '{meta_path}' is not a JSON Metadata "
-                                               f"file because {error}: {fh.read(2000)}")
+                                               f"file because {error}: {sample}")
 
-            with self.tt('client_info'):
-                dept, zone, stream_name, description, stream_classification = self.client_info(msg['metadata']['stream'])
-                if 'department' not in msg['metadata']:
-                    msg['metadata']['department'] = dept
-                if 'zone' not in msg['metadata']:
-                    msg['metadata']['zone'] = zone
-                if 'stream_name' not in msg['metadata']:
-                    msg['metadata']['stream_name'] = stream_name
-                if description and 'description' not in msg['metadata']:
-                    msg['metadata']['stream_description'] = description
-                if 'ip_src' in msg['metadata']:
-                    dep = self.department_codes[msg['metadata']['ip_src']]
-                    if dep:
-                        msg['metadata']['dep_src'] = dep
-                if 'ip_dst' in msg['metadata']:
-                    dep = self.department_codes[msg['metadata']['ip_dst']]
-                    if dep:
-                        msg['metadata']['dep_dst'] = dep
-                msg['metadata']['transport'] = 'tcp'
+            # Ensure metadata field is defined
+            msg.setdefault('metadata', {})
 
-            with self.tt('ingest_outer'):
-                if not self.config.dry_run:
-                    with tempfile.NamedTemporaryFile(dir=self.config.worker_cache_directory) as temp_file:
-                        with self.tt('ingest'):
-                            self.ingest(msg, meta_path, temp_file, stream_classification)
-                            flush_file = True
-                        _s = time.time()
-                    self.times['dir_cleanup'] = time.time() - _s
-                else:
-                    pprint(msg)
+            if self.stream_map:
+                with self.timed('client_info'):
+                    dept, zone, stream_name, description, stream_classification = \
+                        self.client_info(msg['metadata'].get('stream'))
+                    if 'department' not in msg['metadata']:
+                        msg['metadata']['department'] = dept
+                    if 'zone' not in msg['metadata']:
+                        msg['metadata']['zone'] = zone
+                    if 'stream_name' not in msg['metadata']:
+                        msg['metadata']['stream_name'] = stream_name
+                    if description and 'description' not in msg['metadata']:
+                        msg['metadata']['stream_description'] = description
+                    if self.department_codes:
+                        if 'ip_src' in msg['metadata']:
+                            dep = self.department_codes[msg['metadata']['ip_src']]
+                            if dep:
+                                msg['metadata']['dep_src'] = dep
+                        if 'ip_dst' in msg['metadata']:
+                            dep = self.department_codes[msg['metadata']['ip_dst']]
+                            if dep:
+                                msg['metadata']['dep_dst'] = dep
+                    msg['metadata']['transport'] = 'tcp'
+            else:
+                stream_classification = self.minimum_classification
+
+            with self.timed('ingest_outer'):
+                with tempfile.NamedTemporaryFile(dir=self.config.core.vacuum.worker_cache_directory) as temp_file:
+                    with self.timed('ingest'):
+                        flush_file = self.ingest(msg, meta_path, temp_file, stream_classification)
+
         except EmptyMetaException as eme:
             logger.warning(str(eme))
             flush_file = True
-            # if not dry_run:
-            #     counts.increment('vacuum.skipped')
-        except NotJSONException as nje:
-            logger.warning(str(nje))
-            # if not dry_run:
-            #     counts.increment('vacuum.skipped')
+            self.counter.increment('skipped')
+        except (NotJSONException, InvalidMessageException) as nje:
+            logger.warning(str(nje) + " " + meta_path)
+            self.counter.increment('skipped')
         except Exception as e:
-            # if not dry_run:
-            #     counts.increment('vacuum.error')
+            self.counter.increment('errors')
             logger.exception("%s: %s" % (e.__class__.__name__, str(e)))
         finally:
-            if flush_file:
-                with self.tt('cleanup_meta'):
-                    try:
+            with self.timed('cleanup_meta'):
+                try:
+                    if flush_file:
                         os.unlink(meta_path)
-                    except Exception as error:
-                        logger.exception(f"Exception caught deleting file: {meta_path} {error}")
-                    finally:
-                        if os.path.exists(meta_path):
-                            logger.warning("File '%s' could not be deleted by vacuum worker" % meta_path)
-
-    # def reconnect(self):
-    #     logger.info(f'Connecting to assemblyline {self.config.assemblyline_url} as {self.config.assemblyline_user}')
-    #     self.client = get_client(
-    #         self.config.assemblyline_url,
-    #         apikey=(self.config.assemblyline_user, self.config.assemblyline_key),
-    #         verify=False
-    #     )
-    #
-    # def soft_reconnect(self):
-    #     session = requests.Session()
-    #     session.verify = False
-    #     session.cookies = self.client._connection.session.cookies
-    #     session.headers.update(self.client._connection.session.headers)
-    #     session.headers['Connection'] = 'close'
-    #     session.timeout = self.client._connection.session.timeout
-    #     self.client._connection.session = session
+                    else:
+                        os.rename(meta_path, meta_path + '.bad')
+                except Exception as error:
+                    logger.exception(f"Exception caught deleting file: {meta_path} {error}")
+                finally:
+                    if os.path.exists(meta_path):
+                        logger.warning("File '%s' could not be deleted by vacuum worker" % meta_path)
 
     def run(self):
-        self.filestore = FileStore(self.config.filestore_destination)
-        if not self.config.dry_run:
-            # self.reconnect()
-            # counts = counter.AutoExportingCounters(
-            #     name='vacuum',
-            #     host=get_hostip(),
-            #     auto_flush=True,
-            #     auto_log=False,
-            #     export_interval_secs=al_config.system.update_interval,
-            #     channel=forge.get_metrics_sink(),
-            #     counter_type='vacuum')
-            # counts.start()
-            ...
-
-        else:
-            logger.info('DRY_MODE: Messages will not be queued, they will be displayed on screen.')
-
         logger.info('Waiting for files...')
-        while not self._stop_event.is_set():
-            if self.ingest_queue.length() > 1000000:
+        while not stop_event.is_set():
+            heartbeat(self.config)
+
+            if self.ingest_queue.length() > 100000:
                 time.sleep(10)
                 continue
 
             if not FileProcessor.total_rounds.acquire(blocking=False):
                 return
 
+            finished_message = None
             try:
-                _s = time.time()
                 file = self.queue.pop(blocking=True, timeout=2)
                 if file:
                     if self.apm_client:
                         self.apm_client.begin_transaction(APM_SPAN_TYPE)
+                        finished_message = 'error'
 
-                    self.times['popping'] = time.time() - _s
                     self.process_file(file)
-                    self.times['total'] = time.time() - _s
-
-                    if self.apm_client:
-                        self.apm_client.end_transaction(APM_SPAN_TYPE, 'error')
-
-            except EmptyMetaException as eme:
-                # if not dry_run:
-                #     counts.increment('vacuum.skipped')
-                logger.error(str(eme))
-            except Exception as e:
-                # if not dry_run:
-                #     counts.increment('vacuum.error')
-                logger.exception("Unhandled Exception: %s" % str(e))
-                if self.apm_client:
-                    self.apm_client.end_transaction(APM_SPAN_TYPE, 'error')
+                    finished_message = 'ingested'
 
             finally:
-                self._feedback.put(self.times)
-                self.times = {}
-                time.sleep(1000000)
+                if self.apm_client and finished_message is not None:
+                    self.apm_client.end_transaction(APM_SPAN_TYPE, finished_message)
 
 
-def main(options, config: Config, stop):
-    logger.handlers.clear()
-    logger.addHandler(logging.StreamHandler(sys.stdout))
-    if options.verbose:
-        logger.setLevel(logging.DEBUG)
-    else:
-        logger.setLevel(logging.INFO)
+def main():
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    run()
+
+
+def run(config=None, redis=None, persistent_redis=None):
+    config = config or get_config()
+    vacuum_config = config.core.vacuum
+
+    # Initialize logging
+    init_logging('assemblyline.vacuum')
+    logger = logging.getLogger('assemblyline.vacuum')
+    logger.info('Vacuum worker starting up...')
 
     apm_client = None
-    if config.apm_url:
+    if config.core.metrics.apm_server.server_url:
         elasticapm.instrument()
-        apm_client = elasticapm.Client(server_url=config.apm_url, service_name='vacuum')
+        apm_client = elasticapm.Client(server_url=config.core.metrics.apm_server.server_url,
+                                       service_name="vacuum_worker")
 
     container_id = os.environ.get("HOSTNAME", 'vacuum-worker') + '-'
-    feedback = Queue()
-    FileProcessor.total_rounds = threading.Semaphore(value=1000*options.workers)
+    FileProcessor.total_rounds = threading.Semaphore(value=vacuum_config.worker_rollover*vacuum_config.worker_threads)
 
     department_map, stream_map = None, None
-    department_map = DepartmentMap.load(config.department_map_url)
-    stream_map = StreamMap.load(config.stream_map_url)
+    if vacuum_config.department_map_url:
+        department_map = DepartmentMap.load(vacuum_config.department_map_url)
+    if vacuum_config.stream_map_url:
+        stream_map = StreamMap.load(vacuum_config.stream_map_url)
 
-    args = dict(
+    redis = redis or get_redis_client(host=config.core.redis.nonpersistent.host,
+                                      port=config.core.redis.nonpersistent.port, private=False)
+
+    persistent_redis = persistent_redis or get_redis_client(host=config.core.redis.persistent.host,
+                                                            port=config.core.redis.persistent.port, private=False)
+
+    counter = MetricsFactory(metrics_type='vacuum', schema=Metrics, name='vacuum',
+                             redis=redis, config=config)
+    safelist = VacuumSafelist(vacuum_config.safelist)
+
+    args: dict[str, Any] = dict(
         config=config,
         department_map=department_map,
-        stream_map=stream_map
+        stream_map=stream_map,
+        counter=counter,
+        redis=redis,
+        persistent_redis=persistent_redis,
+        safelist=safelist,
+        datastore=get_datastore(),
+        identifier=identify.Identify(use_cache=True),
     )
 
-    workers = [FileProcessor(container_id + str(0), stop, feedback, apm_client, **args)]
+    workers = [FileProcessor(container_id + str(0), apm_client=apm_client, **args)]
     workers.extend([
-        FileProcessor(container_id + str(ii), stop, feedback, None, **args)
-        for ii in range(1, options.workers)
+        FileProcessor(container_id + str(ii), **args)
+        for ii in range(1, vacuum_config.worker_threads)
     ])
     [w.start() for w in workers]
 
-    processed = [0]
-    times = {}
-
-    def process_update(message):
-        processed[0] += 1
-        for key, value in message.items():
-            try:
-                times[key] += value
-            except KeyError:
-                times[key] = value
-
-    while not stop.is_set() and workers:
+    while not stop_event.is_set() and workers:
         workers = [w for w in workers if w.is_alive()]
         time.sleep(1)
-
-        while not stop.is_set():
-            try:
-                line = feedback.get_nowait()
-                process_update(line)
-            except Empty:
-                break
-
-        if processed[0] == 0:
-            continue
-
-        _t = {name: int(value/processed[0] * 1000) for name, value in times.items()}
-        values = ' '.join(sorted([f'{name}: {value}' for name, value in _t.items() if value > 1]))
-        print(f'{processed[0]} [{len(workers)}] ', values, flush=True)
 
     while workers:
         workers = [w for w in workers if w.is_alive()]
-        print(len(workers))
+        logger.info(f'stopping; {len(workers)} remaining workers')
         time.sleep(1)
+
+
+if __name__ == '__main__':
+    main()

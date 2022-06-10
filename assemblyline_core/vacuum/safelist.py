@@ -1,6 +1,8 @@
 import re
 from typing import Tuple, Dict
 
+from assemblyline.odm.models.config import VacuumSafelistItem
+
 _safelist = [
     {
         'name': 'ibiblio.org',
@@ -100,9 +102,12 @@ def _call(cache, data, func, key):
 
 
 class VacuumSafelist:
-    def __init__(self, data):
+    def __init__(self, data: list[VacuumSafelistItem]):
         self._safelist = _safelist
-        self._safelist.extend(data)
+        self._safelist.extend([
+            row.as_primitives() if isinstance(row, VacuumSafelistItem) else row
+            for row in data
+        ])
         VacuumSafelist.optimize(self._safelist)
 
     def drop(self, data: Dict) -> Tuple[str, Dict]:
