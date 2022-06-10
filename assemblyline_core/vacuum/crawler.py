@@ -75,6 +75,11 @@ def run(config, redis):
     this_iteration_files = []
     length = queue.length()
 
+    # Make sure some input is configured
+    if not vacuum_config.data_directories:
+        logger.error("No input directory configured.")
+        return
+
     logger.info("Starting main loop...")
     while not stop_event.is_set():
         remove_dir_list = []
