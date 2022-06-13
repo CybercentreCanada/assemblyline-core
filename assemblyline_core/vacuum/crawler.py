@@ -5,13 +5,19 @@ import os
 import io
 import signal
 from time import sleep, time
+from typing import TYPE_CHECKING
 
 from assemblyline.common.log import init_logging
 from assemblyline.common.forge import get_config
+from assemblyline.odm.models.config import Config
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes import get_client as get_redis_client
 
 from multiprocessing import Event
+
+if TYPE_CHECKING:
+    from redis import Redis
+
 
 DEL_TIME: int = 60 * 60  # An hour
 MAX_QUEUE_LENGTH = 100000
@@ -25,10 +31,10 @@ def sigterm_handler(_signum=0, _frame=None):
     stop_event.set()
 
 
-_last_heartbeat = 0
+_last_heartbeat: float = 0
 
 
-def heartbeat(config):
+def heartbeat(config: Config):
     global _last_heartbeat
     if _last_heartbeat + 3 < time():
         with io.open(config.logging.heartbeat_file, 'ab'):
@@ -53,7 +59,7 @@ def main():
     run(config, redis)
 
 
-def run(config, redis):
+def run(config: Config, redis: Redis):
     vacuum_config = config.core.vacuum
 
     # connect to workers
@@ -64,7 +70,7 @@ def run(config, redis):
     files_list_cache = os.path.join(vacuum_config.list_cache_directory, 'visited.json')
     try:
         with open(files_list_cache, 'r') as handle:
-            previous_iteration_files = set(json.load(handle))
+            previous_iteration_files: set[str] = set(json.load(handle))
     except (OSError, json.JSONDecodeError):
         previous_iteration_files = set()
 
@@ -72,7 +78,7 @@ def run(config, redis):
     with open(files_list_cache, 'w'):
         pass
 
-    this_iteration_files = []
+    this_iteration_files: list[str] = []
     length = queue.length()
 
     # Make sure some input is configured
@@ -84,7 +90,7 @@ def run(config, redis):
     while not stop_event.is_set():
         heartbeat(config)
         remove_dir_list = []
-        futures = []
+        futures: list[concurrent.futures.Future] = []
         with concurrent.futures.ThreadPoolExecutor(20) as pool:
             for data_directory in vacuum_config.data_directories:
                 for root, dirs, files in os.walk(data_directory):
@@ -130,9 +136,9 @@ def run(config, redis):
                         continue
 
                     if files:
-                        new_files = [os.path.join(root, f) for f in files
-                                     if not f.startswith(".") and not f.endswith('.bad')]
-                        new_files = set(new_files) - previous_iteration_files
+                        new_file_list = [os.path.join(root, f) for f in files
+                                         if not f.startswith(".") and not f.endswith('.bad')]
+                        new_files = set(new_file_list) - previous_iteration_files
 
                         if new_files:
                             futures.append(pool.submit(queue.push, *new_files))

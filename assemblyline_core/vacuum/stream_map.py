@@ -86,7 +86,7 @@ class StreamMap:
         if time.time() - self.update_time > self.UPDATE_INTERVAL:
             self._load_stream_map()
 
-    def __getitem__(self, stream_id):
+    def __getitem__(self, stream_id: int) -> Optional[Stream]:
         self._refresh_stream_map()
         try:
             return self.table[stream_id]
