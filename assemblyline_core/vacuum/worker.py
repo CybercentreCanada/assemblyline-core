@@ -662,12 +662,12 @@ def run(config=None, redis=None, persistent_redis=None):
     FileProcessor.total_rounds = threading.Semaphore(value=vacuum_config.worker_rollover*vacuum_config.worker_threads)
 
     department_map, stream_map = None, None
-    if vacuum_config.department_map_url:
+    if vacuum_config.department_map_url or vacuum_config.department_map_init:
         logger.info(f"Getting department map from {vacuum_config.department_map_url}")
-        department_map = DepartmentMap.load(vacuum_config.department_map_url)
-    if vacuum_config.stream_map_url:
+        department_map = DepartmentMap.load(vacuum_config.department_map_url, vacuum_config.department_map_init)
+    if vacuum_config.stream_map_url or vacuum_config.stream_map_init:
         logger.info(f"Getting stream map from {vacuum_config.stream_map_url}")
-        stream_map = StreamMap.load(vacuum_config.stream_map_url)
+        stream_map = StreamMap.load(vacuum_config.stream_map_url, vacuum_config.stream_map_init)
 
     redis = redis or get_redis_client(host=config.core.redis.nonpersistent.host,
                                       port=config.core.redis.nonpersistent.port, private=False)

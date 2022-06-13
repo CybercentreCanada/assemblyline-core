@@ -1,5 +1,7 @@
 import functools
+import json
 import time
+import logging
 import threading
 from typing import Optional
 
@@ -8,16 +10,20 @@ from assemblyline.common.iprange import RangeTable
 import requests
 
 
+logger = logging.getLogger("assemblyline.vacuum.department_map")
+
+
 class DepartmentMap:
     UPDATE_INTERVAL = 60 * 60
 
     @staticmethod
     @functools.cache
-    def load(url):
-        return DepartmentMap(url)
+    def load(url: Optional[str], init: Optional[str]):
+        return DepartmentMap(url, init)
 
-    def __init__(self, url):
+    def __init__(self, url: Optional[str], init: Optional[str]):
         self.url = url
+        self.init_data = init
         self.lock = threading.Lock()
         self.table = RangeTable()
         self.update_time = 0
@@ -34,13 +40,27 @@ class DepartmentMap:
                 return
 
             table = RangeTable()
-            res = requests.get(self.url, verify=False)
-            res.raise_for_status()
 
-            for row in res.json():
-                if ':' not in row['LOWER'] and ':' not in row['UPPER']:
-                    # print(row["LOWER"], row['UPPER'], row['LABEL'])
-                    table.add_range(row['LOWER'], row['UPPER'], row['LABEL'])
+            try:
+                if self.init_data:
+                    for row in json.loads(self.init_data):
+                        if ':' not in row['LOWER'] and ':' not in row['UPPER']:
+                            # print(row["LOWER"], row['UPPER'], row['LABEL'])
+                            table.add_range(row['LOWER'], row['UPPER'], row['LABEL'])
+            except Exception:
+                logger.exception("Error parsing department_map_init")
+
+            try:
+                if self.url:
+                    res = requests.get(self.url, verify=False)
+                    res.raise_for_status()
+
+                    for row in res.json():
+                        if ':' not in row['LOWER'] and ':' not in row['UPPER']:
+                            # print(row["LOWER"], row['UPPER'], row['LABEL'])
+                            table.add_range(row['LOWER'], row['UPPER'], row['LABEL'])
+            except Exception:
+                logger.exception("Error parsing department_map_url")
 
             self.table = table
             self.update_time = time.time()
@@ -62,5 +82,5 @@ class DepartmentMap:
 
 
 if __name__ == '__main__':
-    departments = DepartmentMap('')
+    departments = DepartmentMap('', None)
     print(departments['48.49.39.100'])
