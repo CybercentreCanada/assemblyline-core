@@ -37,7 +37,7 @@ class ReplayLoaderWorker(ReplayBase):
                     if 'Stale file handle' in str(e):
                         # Terminate on stale file handle from NFS mount
                         self.log.warning("Stale file handle detected. Terminating..")
-                        os._exit(-1)
+                        self.stop()
                 except Exception:
                     # Make sure failed directory exists
                     os.makedirs(self.replay_config.loader.failed_directory, exist_ok=True)
