@@ -1,8 +1,11 @@
 #!/usr/bin/env python
-
-import concurrent.futures
+from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor, Future
+import functools
+from typing import Union, TYPE_CHECKING
 import elasticapm
 import time
+import os
 
 from datemath import dm
 
@@ -13,8 +16,15 @@ from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.expiry_heartbeat import Metrics
 
-ARCHIVE_SIZE = 10000
+if TYPE_CHECKING:
+    from assemblyline.datastore.collection import ESCollection
+
+
+ARCHIVE_SIZE = 5000
 EXPIRY_SIZE = 10000
+DAY_SECONDS = 24 * 60 * 60
+WORKERS = int(os.environ.get('EXPIRY_WORKERS', '10'))
+MAX_TASKS = 20
 
 
 class ExpiryManager(ServerBase):
@@ -28,8 +38,8 @@ class ExpiryManager(ServerBase):
         self.hot_datastore = forge.get_datastore(config=self.config, archive_access=False)
         self.filestore = forge.get_filestore(config=self.config)
         self.cachestore = FileStore(*self.config.filestore.cache)
-        self.expirable_collections = []
-        self.archiveable_collections = []
+        self.expirable_collections: list[ESCollection] = []
+        self.archiveable_collections: list[ESCollection] = []
         self.counter = MetricsFactory('expiry', Metrics)
         self.counter_archive = MetricsFactory('archive', Metrics)
 
@@ -66,6 +76,15 @@ class ExpiryManager(ServerBase):
             elasticapm.uninstrument()
         super().stop()
 
+    def log_errors(self, function):
+        @functools.wraps(function)
+        def _func(*args, **kwargs):
+            try:
+                function(*args, **kwargs)
+            except Exception:
+                self.log.exception("Error in expiry worker")
+        return _func
+
     def filestore_delete(self, sha256, _):
         self.filestore.delete(sha256)
 
@@ -76,7 +95,7 @@ class ExpiryManager(ServerBase):
             return
         self.filestore.delete(sha256)
 
-    def cachestore_delete(self, sha256, _):
+    def cachestore_delete(self, sha256, _expiry_time):
         self.filestore.delete(sha256)
 
     def archive_cachestore_delete(self, sha256, expiry_time):
@@ -85,7 +104,20 @@ class ExpiryManager(ServerBase):
             return
         self.cachestore.delete(sha256)
 
-    def run_expiry_once(self):
+    def _finish_delete(self, collection, delete_query, number_to_delete, tasks: list[Future]):
+        for future in tasks:
+            future.result()
+        self.log.info(f'    Deleted associated files from the '
+                      f'{"cachestore" if "cache" in collection.name else "filestore"}...')
+        self._simple_delete(collection, delete_query, number_to_delete)
+
+    def _simple_delete(self, collection, delete_query, number_to_delete):
+        self.heartbeat()
+        collection.delete_by_query(delete_query, workers=self.config.core.expiry.workers)
+        self.counter.increment(f'{collection.name}', increment_by=number_to_delete)
+        self.log.info(f"    Deleted {number_to_delete} items from the datastore...")
+
+    def run_expiry_once(self, pool: ThreadPoolExecutor):
         now = now_as_iso()
         reached_max = False
 
@@ -102,59 +134,66 @@ class ExpiryManager(ServerBase):
                 self.apm_client.begin_transaction("Delete expired documents")
 
             if self.config.core.expiry.batch_delete:
-                computed_date = epoch_to_iso(dm(f"{now}||-{self.config.core.expiry.delay}h/d").float_timestamp)
+                final_date = dm(f"{now}||-{self.config.core.expiry.delay}h/d").float_timestamp
             else:
-                computed_date = epoch_to_iso(dm(f"{now}||-{self.config.core.expiry.delay}h").float_timestamp)
+                final_date = dm(f"{now}||-{self.config.core.expiry.delay}h").float_timestamp
+            final_date_string = epoch_to_iso(final_date)
 
-            delete_query = f"expiry_ts:[* TO {computed_date}]"
+            # Break down the expiry window into smaller chunks of data
+            unchecked_chunks: list[tuple[float, float]] = [(0, final_date)]
+            ready_chunks: dict[tuple[float, float], int] = {}
+            while unchecked_chunks and len(ready_chunks) < MAX_TASKS:
+                start, end = unchecked_chunks.pop(0)
+                chunk_size = self._count_expired(collection, start, end)
 
-            if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
-                file_delete = True
-                sort = ["expiry_ts asc", "id asc"]
-            else:
-                file_delete = False
-                sort = None
+                # Empty chunks are fine
+                if chunk_size == 0:
+                    continue
 
-            number_to_delete = collection.search(delete_query, rows=0, as_obj=False, use_archive=True,
-                                                 sort=sort, track_total_hits=EXPIRY_SIZE)['total']
+                # We found a small enough chunk to run on
+                if chunk_size < EXPIRY_SIZE:
+                    ready_chunks[(start, end)] = chunk_size
+                    continue
 
-            if self.apm_client:
-                elasticapm.label(query=delete_query)
-                elasticapm.label(number_to_delete=number_to_delete)
+                # Break this chunk into parts
+                if start == 0:
+                    middle = end - DAY_SECONDS
+                else:
+                    middle = (end + start)/2
+                unchecked_chunks.append((middle, end))
+                unchecked_chunks.append((start, middle))
 
-            self.log.info(f"Processing collection: {collection.name}")
-            if number_to_delete != 0:
-                if file_delete:
-                    with elasticapm.capture_span(name='FILESTORE [ThreadPoolExecutor] :: delete()',
-                                                 labels={"num_files": number_to_delete,
-                                                         "query": delete_query}):
-                        # Delete associated files
-                        with concurrent.futures.ThreadPoolExecutor(self.config.core.expiry.workers,
-                                                                   thread_name_prefix="file_delete") as executor:
-                            for item in collection.search(delete_query, fl='id', rows=number_to_delete,
-                                                          sort=sort, use_archive=True, as_obj=False)['items']:
-                                executor.submit(self.fs_hashmap[collection.name], item['id'], computed_date)
+            # If there are still chunks we haven't checked, then we know there is more data
+            if unchecked_chunks:
+                reached_max = True
 
-                        self.log.info(f'    Deleted associated files from the '
-                                      f'{"cachestore" if "cache" in collection.name else "filestore"}...')
+            for (start, end), number_to_delete in ready_chunks.items():
+                # We assume that no records are ever inserted such that their expiry_ts is in the past.
+                # We also assume that the `end` dates are also in the past.
+                # As long as these two things are true, the set returned by this query should be consistent.
+                # The one race condition is that a record might be refreshed while the file
+                # blob would be deleted anyway, leaving a file record with no filestore object
+                self.log.info(f"Processing collection: {collection.name}")
+                delete_query = f"expiry_ts:[{epoch_to_iso(start) if start > 0 else '*'} TO {epoch_to_iso(end)}}}"
 
-                    # Proceed with deletion
-                    collection.delete_by_query(delete_query, workers=self.config.core.expiry.workers,
-                                               sort=sort, max_docs=number_to_delete)
+                # check if we are dealing with an index that needs file cleanup
+                if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
+                    # Delete associated files
+                    delete_tasks: list[Future] = []
+                    for item in collection.search(delete_query, fl='id', use_archive=True, as_obj=False)['items']:
+                        delete_tasks.append(pool.submit(self.fs_hashmap[collection.name],
+                                                        item['id'], final_date_string))
+
+                    # Proceed with deletion, but only after all the scheduled deletes for this
+                    self.log.info(f"Scheduled {len(delete_tasks)}/{number_to_delete} "
+                                  f"files to be removed for: {collection.name}")
+                    pool.submit(self.log_errors(self._finish_delete), collection,
+                                delete_query, number_to_delete, delete_tasks)
 
                 else:
                     # Proceed with deletion
-                    collection.delete_by_query(delete_query, workers=self.config.core.expiry.workers)
-
-                if number_to_delete == EXPIRY_SIZE:
-                    reached_max = True
-
-                self.counter.increment(f'{collection.name}', increment_by=number_to_delete)
-
-                self.log.info(f"    Deleted {number_to_delete} items from the datastore...")
-
-            else:
-                self.log.debug("    Nothing to delete in this collection.")
+                    pool.submit(self.log_errors(self._simple_delete),
+                                collection, delete_query, number_to_delete)
 
             # End of expiry transaction
             if self.apm_client:
@@ -162,69 +201,110 @@ class ExpiryManager(ServerBase):
 
         return reached_max
 
-    def run_archive_once(self):
+    def run_archive_once(self, pool: ThreadPoolExecutor):
         reached_max = False
         if not self.config.datastore.ilm.enabled:
             return reached_max
 
-        now = now_as_iso()
-        # Archive data
+        # Start of expiry transaction
+        if self.apm_client:
+            self.apm_client.begin_transaction("Archive older documents")
+
+        # Collect a set of jobs which archive all the collections in
+        # managable sized queries. Breaking up the query is helpful
+        # where each of our archive calls are actually a reindex
+        # followed by a delete, which we would like to both complete
+        # relatively close togeather.
         for collection in self.archiveable_collections:
-            # Call heartbeat pre-dated by 5 minutes. If a collection takes more than
-            # 5 minutes to expire, this container could be seen as unhealthy. The down
-            # side is if it is stuck on something it will be more than 5 minutes before
-            # the container is restarted.
-            self.heartbeat(int(time.time() + 5 * 60))
+            self.heartbeat(int(time.time() + 60))
+            reached_max |= self._archive_collection(collection, pool)
 
-            # Start of expiry transaction
-            if self.apm_client:
-                self.apm_client.begin_transaction("Archive older documents")
-
-            archive_query = f"archive_ts:[* TO {now}]"
-            sort = ["archive_ts asc", "id asc"]
-
-            number_to_archive = collection.search(archive_query, rows=0, as_obj=False,
-                                                  use_archive=False, sort=sort,
-                                                  track_total_hits=ARCHIVE_SIZE)['total']
-
-            if number_to_archive == ARCHIVE_SIZE:
-                reached_max = True
-
-            if self.apm_client:
-                elasticapm.label(query=archive_query)
-                elasticapm.label(number_to_archive=number_to_archive)
-
-            self.log.info(f"Processing collection: {collection.name}")
-            if number_to_archive != 0:
-                # Proceed with archiving
-                if collection.archive(archive_query, max_docs=number_to_archive, sort=sort):
-                    self.counter_archive.increment(f'{collection.name}', increment_by=number_to_archive)
-                    self.log.info(f"    Archived {number_to_archive} documents...")
-                else:
-                    self.log.warning(f"    Failed to properly archive {number_to_archive} documents...")
-
-            else:
-                self.log.debug("    Nothing to archive in this collection.")
-
-            # End of expiry transaction
-            if self.apm_client:
-                self.apm_client.end_transaction(collection.name, 'archived')
+        # End of expiry transaction
+        if self.apm_client:
+            self.apm_client.end_transaction(result='archived')
 
         return reached_max
+
+    def _find_archive_start(self, container: ESCollection):
+        """
+        Moving backwards one day at a time get a rough idea where archiveable material
+        in the datastore starts.
+        """
+        now = time.time()
+        offset = 1
+        while True:
+            count = self._count_archivable(container, "*", now - offset * DAY_SECONDS)
+            if count == 0:
+                return now - offset * DAY_SECONDS
+            offset += 1
+
+    def _count_expired(self, container: ESCollection, start: Union[float, str], end: float) -> int:
+        """Count how many items need to be erased in the given window."""
+        if start == 0:
+            start = '*'
+        if isinstance(start, (float, int)):
+            start = epoch_to_iso(start)
+        query = f'expiry_ts:[{start} TO {epoch_to_iso(end)}}}'
+        return container.search(query, rows=0, as_obj=False, use_archive=True, track_total_hits=EXPIRY_SIZE)['total']
+
+    def _count_archivable(self, container: ESCollection, start: Union[float, str], end: float) -> int:
+        """Count how many items need to be archived in the given window."""
+        if isinstance(start, (float, int)):
+            start = epoch_to_iso(start)
+        query = f'archive_ts:[{start} TO {epoch_to_iso(end)}}}'
+        return container.search(query, rows=0, as_obj=False, use_archive=False, track_total_hits=ARCHIVE_SIZE)['total']
+
+    def _archive_collection(self, collection: ESCollection, pool: ThreadPoolExecutor) -> bool:
+        # Start with archiving everything up until now
+        chunks: list[tuple[float, float]] = [(self._find_archive_start(collection), time.time())]
+        futures: list[Future] = []
+
+        while len(chunks) > 0 and len(futures) < MAX_TASKS:
+            # Take the next chunk, and figure out how many records it covers
+            start, end = chunks.pop(0)
+            count = self._count_archivable(collection, start, end)
+
+            # Chunks that are fully archived are fine to skip
+            if count == 0:
+                continue
+
+            # If the chunk is bigger than the number we intend to archive
+            # in a single call break it into parts
+            if count >= ARCHIVE_SIZE:
+                middle = (start + end)/2
+                chunks.append((start, middle))
+                chunks.append((middle, end))
+                continue
+
+            # Schedule the chunk of data to be archived
+            @self.log_errors
+            def archive_chunk(query, expected):
+                self.heartbeat()
+                if collection.archive(query):
+                    self.counter_archive.increment(f'{collection.name}', increment_by=expected)
+                else:
+                    self.log.error("Failed to archive range {query}")
+
+            query = f'archive_ts:[{epoch_to_iso(start)} TO {epoch_to_iso(end)}}}'
+            futures.append(pool.submit(archive_chunk, query, count))
+
+        return len(futures) == MAX_TASKS
 
     def try_run(self):
         while self.running:
             expiry_maxed_out = False
             archive_maxed_out = False
-            try:
-                expiry_maxed_out = self.run_expiry_once()
-            except Exception as e:
-                self.log.exception(str(e))
 
-            try:
-                archive_maxed_out = self.run_archive_once()
-            except Exception as e:
-                self.log.exception(str(e))
+            with ThreadPoolExecutor(self.config.core.expiry.workers) as pool:
+                try:
+                    expiry_maxed_out = self.run_expiry_once(pool)
+                except Exception as e:
+                    self.log.exception(str(e))
+
+                try:
+                    archive_maxed_out = self.run_archive_once(pool)
+                except Exception as e:
+                    self.log.exception(str(e))
 
             if not expiry_maxed_out and not archive_maxed_out:
                 self.sleep_with_heartbeat(self.config.core.expiry.sleep_time)
