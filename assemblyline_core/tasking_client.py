@@ -13,14 +13,14 @@ from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.filestore import FileStore
 from assemblyline.odm import construct_safe
-from assemblyline.odm.messages.changes import Operation
+from assemblyline.odm.messages.changes import ServiceChange, Operation
 from assemblyline.odm.messages.task import Task as ServiceTask
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.heuristic import Heuristic
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.tagging import Tagging
-from assemblyline.remote.datatypes.events import EventSender
+from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline_core.dispatching.client import DispatchClient
 
@@ -59,6 +59,13 @@ class TaskingClient:
         else:
             self.cleanup = True
         self.identify = identify or forge.get_identify(config=self.config, datastore=self.datastore, use_cache=True)
+
+        try:
+            self.service_change_watcher = EventWatcher(redis, deserializer = ServiceChange.deserialize)
+            self.service_change_watcher.register('change.services.*', self._handle_service_change_event)
+            self.service_change_watcher.start()
+        except Exception as e:
+            self.log.exception(f"SSEW: {str(e)}")
 
     def __enter__(self):
         return self
@@ -166,7 +173,6 @@ class TaskingClient:
                                       f"heuristic {item['update']['_id']}: {item['update']['result'].upper()}")
 
                 self.datastore.heuristic.commit()
-                self.heuristics = {h.heur_id: h for h in self.datastore.list_all_heuristics()}
 
             service_config = self.datastore.get_service_with_delta(service.name, as_obj=False)
 
@@ -430,3 +436,7 @@ class TaskingClient:
             metric_factory.increment('fail_nonrecoverable')
 
         self.status_table.set(client_id, (service_name, ServiceStatus.Idle, time.time() + 5))
+
+    def _handle_service_change_event(self, data: ServiceChange):
+        if data.operation == Operation.Added:
+            self.heuristics = {h.heur_id: h for h in self.datastore.list_all_heuristics()}
