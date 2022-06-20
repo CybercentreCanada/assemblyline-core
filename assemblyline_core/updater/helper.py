@@ -112,6 +112,18 @@ def get_latest_tag_for_service(service_config, system_config, logger, prefix="")
     # Get authentication
     auth = None
     auth_config = None
+    server, image_name = process_image(searchable_image)
+
+    if not (service_config.docker_config.registry_username and service_config.docker_config.registry_password):
+        # If the passed in service configuration is missing registry credentials, check against system configuration
+        for registry in system_config.services.registries:
+            if server.startswith(registry['name']):
+                # Apply the credentials that the system is configured to use with the registry
+                service_config.docker_config.registry_username = registry['username']
+                service_config.docker_config.registry_password = registry['password']
+                service_config.docker_config.registry_type = registry['type']
+                break
+
     if service_config.docker_config.registry_username and service_config.docker_config.registry_password:
         auth_config = {
             'username': service_config.docker_config.registry_username,
@@ -120,7 +132,6 @@ def get_latest_tag_for_service(service_config, system_config, logger, prefix="")
         upass = f"{service_config.docker_config.registry_username}:{service_config.docker_config.registry_password}"
         auth = f"Basic {b64encode(upass.encode()).decode()}"
 
-    server, image_name = process_image(searchable_image)
     registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
 
     if server == DEFAULT_DOCKER_REGISTRY:
