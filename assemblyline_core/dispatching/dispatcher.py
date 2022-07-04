@@ -724,7 +724,8 @@ class Dispatcher(ThreadedCoreBase):
         else:
             self.log.debug(f"[{task.submission.sid}] Finalizing submission.")
             max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
-            self.finalize_queue.put((task, max_score, checked))
+            if self.tasks.pop(task.sid, None):
+                self.finalize_queue.put((task, max_score, checked))
             return True
         return False
 
