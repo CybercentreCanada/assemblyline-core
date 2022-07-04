@@ -207,7 +207,7 @@ class DockerController(ControllerInterface):
         if prof.privileged:
             self._connect_to_network(container, self.core_network)
 
-        if cfg.allow_internet_access or prof.is_external:
+        if cfg.allow_internet_access:
             self._connect_to_network(container, self.external_network)
 
     def _start_container(
