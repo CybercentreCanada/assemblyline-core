@@ -5,7 +5,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-from typing import Optional, Any, TYPE_CHECKING
+from typing import Optional, Any, TYPE_CHECKING, Iterable
 import json
 import enum
 from queue import PriorityQueue, Empty, Queue
@@ -101,7 +101,7 @@ class SubmissionTask:
     """Dispatcher internal model for submissions"""
 
     def __init__(self, submission, completed_queue, scheduler, results=None,
-                 file_infos=None, file_tree=None, errors=None):
+                 file_infos=None, file_tree=None, errors: Optional[Iterable[str]]=None):
         self.submission: Submission = Submission(submission)
         if completed_queue:
             self.completed_queue = str(completed_queue)
@@ -153,7 +153,7 @@ class SubmissionTask:
         if errors is not None:
             for e in errors:
                 sha256, service, _ = e.split('.', 2)
-                self.service_results[(sha256, service)] = e
+                self.service_errors[(sha256, service)] = e
 
     @ property
     def sid(self):
