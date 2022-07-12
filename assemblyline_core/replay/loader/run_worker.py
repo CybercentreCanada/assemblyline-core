@@ -38,6 +38,10 @@ class ReplayLoaderWorker(ReplayBase):
                         # Terminate on stale file handle from NFS mount
                         self.log.warning("Stale file handle detected. Terminating..")
                         self.stop()
+                    elif 'Invalid cross-device link' in str(e):
+                        # Terminate on NFS-related error
+                        self.log.warning("'Invalid cross-device link' exception detected. Terminating..")
+                        self.stop()
                 except Exception:
                     # Make sure failed directory exists
                     os.makedirs(self.replay_config.loader.failed_directory, exist_ok=True)
