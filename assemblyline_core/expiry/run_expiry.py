@@ -122,11 +122,14 @@ class ExpiryManager(ServerBase):
                 bulk.add_delete_operation(sha256)
                 removing += 1
 
-        self.log.info(f'    Deleted associated files from the '
-                      f'{"cachestore" if "cache" in collection.name else "filestore"}...')
-        collection.bulk(bulk)
-        self.counter.increment(f'{collection.name}', increment_by=removing)
-        self.log.info(f"    Deleted {removing} items from the datastore...")
+        if removing > 0:
+            self.log.info(f'    Deleted associated files from the '
+                          f'{"cachestore" if "cache" in collection.name else "filestore"}...')
+            collection.bulk(bulk)
+            self.counter.increment(f'{collection.name}', increment_by=removing)
+            self.log.info(f"    Deleted {removing} items from the datastore...")
+        elif len(tasks) > 0:
+            self.log.warning('    Expiry unable to clean up any of the files in filestore.')
 
     def _simple_delete(self, collection, delete_query, number_to_delete):
         self.heartbeat()
