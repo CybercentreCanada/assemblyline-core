@@ -34,7 +34,7 @@ def ds_expiry(request, datastore):
             for x in range(expiry_len):
                 obj = random_model_obj(collection.model_class)
                 obj.expiry_ts = now_as_iso(-10000)
-                collection.save(str(x), obj)
+                collection.save('longer_name'+str(x), obj)
 
             expiry_collections_len[name] = expiry_len
             collection.commit()
@@ -53,7 +53,7 @@ def ds_archive(request, datastore):
             for x in range(expiry_len):
                 obj = random_model_obj(collection.model_class)
                 obj.archive_ts = now_as_iso(-10000)
-                collection.save(str(x), obj)
+                collection.save('longer_name'+str(x), obj)
 
             archive_collections_len[name] = expiry_len
             collection.commit()
