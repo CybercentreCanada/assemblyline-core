@@ -87,6 +87,8 @@ class ExpiryManager(ServerBase):
 
     def filestore_delete(self, sha256, _):
         self.filestore.delete(sha256)
+        if not self.filestore.exists(sha256):
+            return sha256
 
     def archive_filestore_delete(self, sha256, expiry_time):
         # If we are working with an archive, their may be a hot entry that expires later.
@@ -94,22 +96,40 @@ class ExpiryManager(ServerBase):
         if doc and doc['expiry_ts'] > expiry_time:
             return
         self.filestore.delete(sha256)
+        if not self.filestore.exists(sha256):
+            return sha256
 
     def cachestore_delete(self, sha256, _expiry_time):
-        self.filestore.delete(sha256)
+        self.cachestore.delete(sha256)
+        if not self.cachestore.exists(sha256):
+            return sha256
 
     def archive_cachestore_delete(self, sha256, expiry_time):
         doc = self.hot_datastore.cached_file.get_if_exists(sha256, as_obj=False)
         if doc and doc['expiry_ts'] > expiry_time:
             return
         self.cachestore.delete(sha256)
+        if not self.cachestore.exists(sha256):
+            return sha256
 
-    def _finish_delete(self, collection, delete_query, number_to_delete, tasks: list[Future]):
+    def _finish_delete(self, collection: ESCollection, tasks: list[Future]):
+        bulk = collection.get_bulk_plan()
+        removing = 0
         for future in tasks:
-            future.result()
-        self.log.info(f'    Deleted associated files from the '
-                      f'{"cachestore" if "cache" in collection.name else "filestore"}...')
-        self._simple_delete(collection, delete_query, number_to_delete)
+            self.heartbeat()
+            sha256 = future.result()
+            if sha256:
+                bulk.add_delete_operation(sha256)
+                removing += 1
+
+        if removing > 0:
+            self.log.info(f'    Deleted associated files from the '
+                          f'{"cachestore" if "cache" in collection.name else "filestore"}...')
+            collection.bulk(bulk)
+            self.counter.increment(f'{collection.name}', increment_by=removing)
+            self.log.info(f"    Deleted {removing} items from the datastore...")
+        elif len(tasks) > 0:
+            self.log.warning('    Expiry unable to clean up any of the files in filestore.')
 
     def _simple_delete(self, collection, delete_query, number_to_delete):
         self.heartbeat()
@@ -180,15 +200,14 @@ class ExpiryManager(ServerBase):
                 if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
                     # Delete associated files
                     delete_tasks: list[Future] = []
-                    for item in collection.search(delete_query, fl='id', use_archive=True, as_obj=False)['items']:
+                    for item in collection.stream_search(delete_query, fl='id', use_archive=True, as_obj=False):
                         delete_tasks.append(pool.submit(self.fs_hashmap[collection.name],
                                                         item['id'], final_date_string))
 
                     # Proceed with deletion, but only after all the scheduled deletes for this
                     self.log.info(f"Scheduled {len(delete_tasks)}/{number_to_delete} "
                                   f"files to be removed for: {collection.name}")
-                    pool.submit(self.log_errors(self._finish_delete), collection,
-                                delete_query, number_to_delete, delete_tasks)
+                    pool.submit(self.log_errors(self._finish_delete), collection, delete_tasks)
 
                 else:
                     # Proceed with deletion
