@@ -10,6 +10,8 @@ import time
 from datemath import dm
 
 from assemblyline.common.isotime import epoch_to_iso, now_as_iso
+from assemblyline.datastore.helper import AssemblylineDatastore
+from assemblyline.datastore.store import ESStore
 from assemblyline_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
@@ -25,8 +27,11 @@ EXPIRY_SIZE = 10000
 DAY_SECONDS = 24 * 60 * 60
 
 
-def file_delete_worker(collection, logger, filestore_urls, file_batch, expiry_time):
-    finished_files = []
+def file_archive_delete_worker(logger, datastore_url, collection_name, filestore_urls, file_batch, expiry_time):
+
+    datastore = AssemblylineDatastore(ESStore(datastore_url, archive_access=True))
+    collection = datastore.get_collection(collection_name)
+
     try:
         filestore = FileStore(*filestore_urls)
 
@@ -39,16 +44,32 @@ def file_delete_worker(collection, logger, filestore_urls, file_batch, expiry_ti
             if not filestore.exists(sha256):
                 return sha256
 
+        return _file_delete_worker(logger, archive_filestore_delete, file_batch)
+
+    except Exception as error:
+        logger.exception("Error in filestore worker: " + str(error))
+    return []
+
+
+def file_delete_worker(logger, filestore_urls, file_batch):
+    try:
+        filestore = FileStore(*filestore_urls)
+
         def filestore_delete(sha256):
             filestore.delete(sha256)
             if not filestore.exists(sha256):
                 return sha256
 
-        if collection and expiry_time is not None:
-            delete_action = archive_filestore_delete
-        else:
-            delete_action = filestore_delete
+        return _file_delete_worker(logger, filestore_delete, file_batch)
 
+    except Exception as error:
+        logger.exception("Error in filestore worker: " + str(error))
+    return []
+
+
+def _file_delete_worker(logger, delete_action, file_batch):
+    finished_files = []
+    try:
         futures = []
 
         with ThreadPoolExecutor(8) as pool:
@@ -126,23 +147,25 @@ class ExpiryManager(ServerBase):
         return _func
 
     def filestore_delete(self, file_batch, _):
-        return self.file_delete_worker.submit(file_delete_worker, collection=None, logger=self.log,
+        return self.file_delete_worker.submit(file_delete_worker, logger=self.log,
                                               filestore_urls=list(self.config.filestore.storage),
-                                              file_batch=file_batch, expiry_time=None)
+                                              file_batch=file_batch)
 
     def archive_filestore_delete(self, file_batch, expiry_time):
-        return self.file_delete_worker.submit(file_delete_worker, collection=self.hot_datastore.file,
-                                              logger=self.log, filestore_urls=list(self.config.filestore.storage),
+        return self.file_delete_worker.submit(file_archive_delete_worker, collection_name='file',
+                                              logger=self.log, datastore_url=list(self.config.datastore.hosts),
+                                              filestore_urls=list(self.config.filestore.storage),
                                               file_batch=file_batch, expiry_time=expiry_time)
 
     def cachestore_delete(self, file_batch, _):
-        return self.file_delete_worker.submit(file_delete_worker, collection=None, logger=self.log,
+        return self.file_delete_worker.submit(file_delete_worker, logger=self.log,
                                               filestore_urls=list(self.config.filestore.cache),
-                                              file_batch=file_batch, expiry_time=None)
+                                              file_batch=file_batch)
 
     def archive_cachestore_delete(self, file_batch, expiry_time):
-        return self.file_delete_worker.submit(file_delete_worker, collection=self.hot_datastore.cached_file,
-                                              logger=self.log, filestore_urls=list(self.config.filestore.cache),
+        return self.file_delete_worker.submit(file_archive_delete_worker, collection_name='cached_file',
+                                              logger=self.log, datastore_url=list(self.config.datastore.hosts),
+                                              filestore_urls=list(self.config.filestore.cache),
                                               file_batch=file_batch, expiry_time=expiry_time)
 
     def _finish_delete(self, collection: ESCollection, task: Future):
