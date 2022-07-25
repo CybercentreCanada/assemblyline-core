@@ -20,7 +20,7 @@ from assemblyline.odm.models.heuristic import Heuristic
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.tagging import Tagging
-from assemblyline.remote.datatypes.events import EventSender
+from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline_core.dispatching.client import DispatchClient
 
@@ -48,9 +48,11 @@ class TaskingClient:
         self.datastore = datastore or forge.get_datastore(self.config)
         self.dispatch_client = DispatchClient(self.datastore, redis=redis, redis_persist=redis_persist)
         self.event_sender = EventSender('changes.services', redis)
+        self.event_listener = EventWatcher(redis)
         self.filestore = filestore or forge.get_filestore(self.config)
         self.heuristic_handler = HeuristicHandler(self.datastore)
-        self.heuristics = {h.heur_id: h for h in self.datastore.list_all_heuristics()}
+        self.heuristics: dict[str, Heuristic] = {}
+        self.reload_heuristics()
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, ttl=60*30, host=redis)
         self.tag_safelister = forge.CachedObject(forge.get_tag_safelister, kwargs=dict(
             log=self.log, config=config, datastore=self.datastore), refresh=300)
@@ -59,6 +61,11 @@ class TaskingClient:
         else:
             self.cleanup = True
         self.identify = identify or forge.get_identify(config=self.config, datastore=self.datastore, use_cache=True)
+        self.event_listener.register('changes.services', self.reload_heuristics)
+        self.event_listener.start()
+
+    def reload_heuristics(self, *_, **__):
+        self.heuristics = {h.heur_id: h for h in self.datastore.list_all_heuristics()}
 
     def __enter__(self):
         return self
@@ -69,6 +76,8 @@ class TaskingClient:
     def stop(self):
         if self.cleanup:
             self.identify.stop()
+        if self.event_listener:
+            self.event_listener.stop()
 
     @elasticapm.capture_span(span_type='tasking_client')
     def upload_file(self, file_path, classification, ttl, is_section_image, expected_sha256=None):
