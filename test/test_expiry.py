@@ -78,6 +78,7 @@ class FakeCounter(object):
 
 def test_expire_all(ds_expiry):
     expiry = ExpiryManager()
+    expiry.running = True
     expiry.counter = FakeCounter()
     expiry.counter_archive = FakeCounter()
     with concurrent.futures.ThreadPoolExecutor(5) as pool:
