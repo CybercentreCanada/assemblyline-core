@@ -16,6 +16,7 @@ from random import random
 from typing import Iterable, List, Optional, Tuple
 
 import elasticapm
+from assemblyline.common.postprocess import ActionWorker
 
 from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline.common.metrics import MetricsFactory
@@ -75,41 +76,6 @@ def must_drop(length: int, maximum: int) -> bool:
         3 * maximum      0.999
     """
     return random() < drop_chance(length, maximum)
-
-
-def determine_resubmit_selected(selected: List[str], resubmit_to: List[str]) -> Optional[List[str]]:
-    resubmit_selected = None
-
-    _selected = set(selected)
-    _resubmit_to = set(resubmit_to)
-
-    if not _selected.issuperset(_resubmit_to):
-        resubmit_selected = sorted(_selected.union(_resubmit_to))
-
-    return resubmit_selected
-
-
-def should_resubmit(score: float) -> bool:
-
-    # Resubmit:
-    #
-    # 100%     with a score above 400.
-    # 10%      with a score of 301 to 400.
-    # 1%       with a score of 201 to 300.
-    # 0.1%     with a score of 101 to 200.
-    # 0.01%    with a score of 1 to 100.
-    # 0.001%   with a score of 0.
-    # 0%       with a score below 0.
-
-    if score < 0:
-        return False
-
-    if score > 400:
-        return True
-
-    resubmit_probability = 1.0 / 10 ** ((500 - score) / 100)
-
-    return random() < resubmit_probability
 
 
 @odm.model()
@@ -210,6 +176,9 @@ class Ingester(ThreadedCoreBase):
 
         # Utility object to help submit tasks to dispatching
         self.submit_client = SubmissionClient(datastore=self.datastore, redis=self.redis)
+        # Utility object to handle post-processing actions
+        self.postprocess_worker = ActionWorker(cache=True, config=self.config, datastore=self.datastore,
+                                               redis_persist=self.redis_persist)
 
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
@@ -342,7 +311,7 @@ class Ingester(ThreadedCoreBase):
                     if not task.submission.params.services.resubmit and not pprevious:
                         self.log.warning(f"No psid for what looks like a resubmission of "
                                          f"{task.submission.files[0].sha256}: {scan_key}")
-                    self.finalize(pprevious, previous, score, task)
+                    self.finalize(pprevious, previous, score, task, cache=True)
                     # End of ingest message (finalized)
                     if self.apm_client:
                         self.apm_client.end_transaction('ingest_submit', 'finalized')
@@ -594,7 +563,7 @@ class Ingester(ThreadedCoreBase):
         # (So we don't end up dropping the resubmission).
         if previous:
             self.counter.increment('duplicates')
-            self.finalize(pprevious, previous, score, task)
+            self.finalize(pprevious, previous, score, task, cache=True)
 
             # On cache hits of any kind we want to send out a completed message
             self.traffic_queue.publish(SubmissionMessage({
@@ -658,6 +627,7 @@ class Ingester(ThreadedCoreBase):
         if self.apm_client:
             elasticapm.uninstrument()
         self.submit_client.stop()
+        self.postprocess_worker.stop()
 
     def stale(self, delta: float, errors: int):
         if errors:
@@ -737,7 +707,7 @@ class Ingester(ThreadedCoreBase):
         # potential infinite loop.
         dups = [dup for dup in exhaust()]
         for dup in dups:
-            self.finalize(psid, sid, score, dup)
+            self.finalize(psid, sid, score, dup, cache=True)
 
         return scan_key
 
@@ -857,44 +827,19 @@ class Ingester(ThreadedCoreBase):
             task.retries = retries
             self.retry_queue.push(int(now(_retry_delay)), task.as_primitives())
 
-    def finalize(self, psid: str, sid: str, score: float, task: IngestTask):
+    def finalize(self, psid: str, sid: str, score: float, task: IngestTask, cache=False):
         self.log.info(f"[{task.ingest_id} :: {task.sha256}] Completed")
         if psid:
             task.params.psid = psid
         task.score = score
         task.submission.sid = sid
 
-        selected = task.params.services.selected
-        resubmit_to = task.params.services.resubmit
+        if cache:
+            did_resubmit = self.postprocess_worker.process_cachehit(task.submission, score)
 
-        resubmit_selected = determine_resubmit_selected(selected, resubmit_to)
-        will_resubmit = resubmit_selected and should_resubmit(score)
-        if will_resubmit:
-            task.extended_scan = 'submitted'
-            task.params.psid = None
-
-        if self.is_alert(task, score):
-            self.log.info(f"[{task.ingest_id} :: {task.sha256}] Notifying alerter "
-                          f"to {'update' if task.params.psid else 'create'} an alert")
-            self.alert_queue.push(task.as_primitives())
+            if did_resubmit:
+                task.extended_scan = 'submitted'
+                task.params.psid = None
 
         self.send_notification(task)
 
-        if will_resubmit:
-            self.log.info(f"[{task.ingest_id} :: {task.sha256}] Resubmitted for extended analysis")
-            task.params.psid = sid
-            task.submission.sid = None
-            task.submission.scan_key = None
-            task.params.services.resubmit = []
-            task.params.services.selected = resubmit_selected
-
-            self.unique_queue.push(task.params.priority, task.as_primitives())
-
-    def is_alert(self, task: IngestTask, score: float) -> bool:
-        if not task.params.generate_alert:
-            return False
-
-        if score < self.config.core.alerter.threshold:
-            return False
-
-        return True
