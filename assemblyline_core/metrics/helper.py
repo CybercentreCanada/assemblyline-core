@@ -1,50 +1,46 @@
-import json
 import time
 
 import elasticsearch
 
 from assemblyline.datastore.exceptions import ILMException
-from packaging import version
 
 MAX_RETRY_BACKOFF = 10
 
 
 def ilm_policy_exists(es, name):
-    conn = es.transport.get_connection()
-    pol_req = conn.session.get(f"{conn.base_url}/_ilm/policy/{name}")
-    if pol_req.status_code in [400, 401, 403, 500, 501, 503, 504]:
-        raise ILMException(f"[{pol_req.status_code}] {pol_req.reason}")
-    return pol_req.ok
+    try:
+        es.ilm.get_lifecycle(name=name)
+        return True
+    except elasticsearch.NotFoundError:
+        return False
 
 
 def create_ilm_policy(es, name, ilm_config):
     data_base = {
-        "policy": {
-            "phases": {
-                "hot": {
-                    "min_age": "0ms",
-                    "actions": {
-                        "set_priority": {
-                            "priority": 100
-                        },
-                        "rollover": {
-                            "max_age": f"{ilm_config['warm']}{ilm_config['unit']}"
-                        }
+        "phases": {
+            "hot": {
+                "min_age": "0ms",
+                "actions": {
+                    "set_priority": {
+                        "priority": 100
+                    },
+                    "rollover": {
+                        "max_age": f"{ilm_config['warm']}{ilm_config['unit']}"
                     }
-                },
-                "warm": {
-                    "actions": {
-                        "set_priority": {
-                            "priority": 50
-                        }
+                }
+            },
+            "warm": {
+                "actions": {
+                    "set_priority": {
+                        "priority": 50
                     }
-                },
-                "cold": {
-                    "min_age": f"{ilm_config['cold']}{ilm_config['unit']}",
-                    "actions": {
-                        "set_priority": {
-                            "priority": 20
-                        }
+                }
+            },
+            "cold": {
+                "min_age": f"{ilm_config['cold']}{ilm_config['unit']}",
+                "actions": {
+                    "set_priority": {
+                        "priority": 20
                     }
                 }
             }
@@ -52,17 +48,16 @@ def create_ilm_policy(es, name, ilm_config):
     }
 
     if ilm_config['delete']:
-        data_base['policy']['phases']['delete'] = {
+        data_base['phases']['delete'] = {
             "min_age": f"{ilm_config['delete']}{ilm_config['unit']}",
             "actions": {
                 "delete": {}
             }
         }
 
-    conn = es.transport.get_connection()
-    pol_req = conn.session.put(f"{conn.base_url}/_ilm/policy/{name}",
-                               headers={"Content-Type": "application/json"}, data=json.dumps(data_base))
-    if not pol_req.ok:
+    try:
+        es.ilm.put_lifecycle(name=name, policy=data_base)
+    except elasticsearch.ApiError:
         raise ILMException(f"ERROR: Failed to create ILM policy: {name}")
 
 
