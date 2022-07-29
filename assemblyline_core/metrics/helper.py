@@ -77,7 +77,7 @@ def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
                     time.sleep(1)
                     pass
 
-            if not with_retries(log, es.indices.exists_template, index):
+            if not with_retries(log, es.indices.exists_template, name=index):
                 log.debug(f"Index template {index.upper()} does not exists. Creating it now...")
 
                 template_body = {
@@ -92,10 +92,11 @@ def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
                     put_template_func = es.indices.put_index_template
                     component_name = f"{index}-settings"
                     component_body = {"template": template_body}
-                    if not es.cluster.exists_component_template(component_name):
+                    if not es.cluster.exists_component_template(name=component_name):
                         try:
                             # Create component template
-                            with_retries(log, es.cluster.put_component_template, component_name, component_body)
+                            with_retries(log, es.cluster.put_component_template,
+                                         name=component_name, body=component_body)
                         except elasticsearch.exceptions.RequestError as e:
                             if "resource_already_exists_exception" not in str(e):
                                 raise
@@ -115,20 +116,20 @@ def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
                     template_body["settings"]["index.lifecycle.rollover_alias"] = index
 
                 try:
-                    with_retries(log, put_template_func, index, template_body)
+                    with_retries(log, put_template_func, name=index, body=template_body)
                 except elasticsearch.exceptions.RequestError as e:
                     if "resource_already_exists_exception" not in str(e):
                         raise
                     log.warning(f"Tried to create an index template that already exists: {index.upper()}")
 
-            if not with_retries(log, es.indices.exists_alias, index) and not datastream_enabled:
+            if not with_retries(log, es.indices.exists_alias, name=index) and not datastream_enabled:
                 log.debug(f"Index alias {index.upper()} does not exists. Creating it now...")
 
                 index_body = {"aliases": {index: {"is_write_index": True}}}
 
                 while True:
                     try:
-                        with_retries(log, es.indices.create, f"{index}-000001", index_body)
+                        with_retries(log, es.indices.create, index=f"{index}-000001", body=index_body)
                         break
                     except elasticsearch.exceptions.RequestError as e:
                         if "resource_already_exists_exception" in str(e):
@@ -136,7 +137,7 @@ def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
                                         f"already exists: {index.upper()}-000001")
                             break
                         elif "invalid_alias_name_exception" in str(e):
-                            with_retries(log, es.indices.delete, index)
+                            with_retries(log, es.indices.delete, index=index)
                             log.warning(str(e))
                             time.sleep(1)
                         else:
