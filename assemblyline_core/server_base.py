@@ -224,6 +224,9 @@ class CoreBase(ServerBase):
             self.status_event_watcher.start()
 
             self.active = Hash('system', self.redis_persist).get(f'{component}.active')
+            if self.active == None:
+                # Initialize state to be active if not set
+                Hash('system', self.redis_persist).set(f'{component}.active', True)
             self.log.info(f"Listening for status events on: system.{component}.active")
 
         # Create a cached service data object, and access to the service status
