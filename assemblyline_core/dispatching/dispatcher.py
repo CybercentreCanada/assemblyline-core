@@ -333,7 +333,11 @@ class Dispatcher(ThreadedCoreBase):
         cpu_mark = time.process_time()
         time_mark = time.time()
 
-        while self.running and self.active:
+        while self.running:
+            while not self.active:
+                # Dispatcher is disabled... waiting for it to be reactivated
+                self.sleep(0.1)
+
             if self.finalizing.is_set():
                 finalizing_time = time.time() - self.finalizing_start
                 if self.active_submissions.length() > 0 and finalizing_time < FINALIZING_WINDOW:

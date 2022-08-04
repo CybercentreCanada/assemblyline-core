@@ -28,7 +28,6 @@ from assemblyline.datastore.exceptions import DataStoreException
 from assemblyline.filestore import CorruptedFileStoreException, FileStoreException
 from assemblyline.odm.models.filescore import FileScore
 from assemblyline.odm.messages.ingest_heartbeat import Metrics
-from assemblyline.remote.datatypes.events import EventWatcher
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
@@ -238,7 +237,11 @@ class Ingester(ThreadedCoreBase):
         # While there are entries in the ingest queue we consume chunk_size
         # entries at a time and move unique entries to uniqueq / queued and
         # duplicates to their own queues / waiting.
-        while self.running and self.active:
+        while self.running:
+            while not self.active:
+                # Ingester is disabled... waiting for it to be reactivated
+                self.sleep(0.1)
+
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
