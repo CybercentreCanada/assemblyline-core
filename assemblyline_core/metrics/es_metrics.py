@@ -525,10 +525,8 @@ class ESMetricsServer(ServerBase):
 
         # Open connections to the input and output databases
         self.input_es = elasticsearch.Elasticsearch(hosts=self.config.datastore.hosts,
-                                                    connection_class=elasticsearch.RequestsHttpConnection,
                                                     max_retries=0)
         self.target_es = elasticsearch.Elasticsearch(hosts=self.target_hosts,
-                                                     connection_class=elasticsearch.RequestsHttpConnection,
                                                      max_retries=0,
                                                      ca_certs=ca_certs)
         # Check if target_es supports datastreams (>=7.9)
