@@ -3,7 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, Future, as_completed
 import functools
-from typing import Union, TYPE_CHECKING
+from typing import Callable, Optional, Union, TYPE_CHECKING
 import elasticapm
 import time
 
@@ -27,7 +27,8 @@ EXPIRY_SIZE = 10000
 DAY_SECONDS = 24 * 60 * 60
 
 
-def file_archive_delete_worker(logger, datastore_url, collection_name, filestore_urls, file_batch, expiry_time):
+def file_archive_delete_worker(logger, datastore_url, collection_name,
+                               filestore_urls, file_batch, expiry_time) -> list[str]:
 
     datastore = AssemblylineDatastore(ESStore(datastore_url, archive_access=True))
     collection = datastore.get_collection(collection_name)
@@ -35,14 +36,15 @@ def file_archive_delete_worker(logger, datastore_url, collection_name, filestore
     try:
         filestore = FileStore(*filestore_urls)
 
-        def archive_filestore_delete(sha256):
+        def archive_filestore_delete(sha256: str) -> Optional[str]:
             # If we are working with an archive, their may be a hot entry that expires later.
             doc = collection.get_if_exists(sha256, as_obj=False)
             if doc and doc['expiry_ts'] > expiry_time:
-                return
+                return None
             filestore.delete(sha256)
             if not filestore.exists(sha256):
                 return sha256
+            return None
 
         return _file_delete_worker(logger, archive_filestore_delete, file_batch)
 
@@ -51,14 +53,15 @@ def file_archive_delete_worker(logger, datastore_url, collection_name, filestore
     return []
 
 
-def file_delete_worker(logger, filestore_urls, file_batch):
+def file_delete_worker(logger, filestore_urls, file_batch) -> list[str]:
     try:
         filestore = FileStore(*filestore_urls)
 
-        def filestore_delete(sha256):
+        def filestore_delete(sha256: str) -> Optional[str]:
             filestore.delete(sha256)
             if not filestore.exists(sha256):
                 return sha256
+            return None
 
         return _file_delete_worker(logger, filestore_delete, file_batch)
 
@@ -67,8 +70,8 @@ def file_delete_worker(logger, filestore_urls, file_batch):
     return []
 
 
-def _file_delete_worker(logger, delete_action, file_batch):
-    finished_files = []
+def _file_delete_worker(logger, delete_action: Callable[[str], Optional[str]], file_batch) -> list[str]:
+    finished_files: list[str] = []
     try:
         futures = []
 
@@ -78,7 +81,9 @@ def _file_delete_worker(logger, delete_action, file_batch):
 
             for future in as_completed(futures):
                 try:
-                    finished_files.append(future.result())
+                    erased_name = future.result()
+                    if erased_name:
+                        finished_files.append(erased_name)
                 except Exception as error:
                     logger.exception("Error in filestore worker: " + str(error))
 
