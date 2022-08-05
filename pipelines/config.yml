@@ -14,4 +14,4 @@ core:
 datastore:
   ilm:
     enabled: true
-  hosts: ["localhost:9200"]
+  hosts: ["http://elastic:devpass@localhost:9200"]

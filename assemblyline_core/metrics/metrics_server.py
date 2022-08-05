@@ -153,7 +153,6 @@ class MetricsServer(ServerBase):
 
         self.metrics_queue = CommsQueue(METRICS_QUEUE)
         self.es = elasticsearch.Elasticsearch(hosts=self.elastic_hosts,
-                                              connection_class=elasticsearch.RequestsHttpConnection,
                                               ca_certs=ca_certs)
         # Determine if ES will support data streams (>= 7.9)
         self.is_datastream = version.parse(self.es.info()['version']['number']) >= version.parse("7.9")
