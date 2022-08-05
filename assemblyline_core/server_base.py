@@ -227,6 +227,7 @@ class CoreBase(ServerBase):
             if self.active is None:
                 # Initialize state to be active if not set
                 Hash('system', self.redis_persist).set(f'{component}.active', True)
+                self.active = True
             self.log.info(f"Listening for status events on: system.{component}.active")
 
         # Create a cached service data object, and access to the service status
