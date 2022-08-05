@@ -14,12 +14,14 @@ import io
 import os
 from typing import Callable, TYPE_CHECKING
 import typing
-from assemblyline.odm.base import Optional
 
+from assemblyline.common import forge, log as al_log
+from assemblyline.odm.base import Optional
+from assemblyline.odm.models.service import Service
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline.odm.models.service import Service
-from assemblyline.common import forge, log as al_log
+from assemblyline.remote.datatypes.events import EventWatcher
+from assemblyline_core import PAUSABLE_COMPONENTS
 
 if TYPE_CHECKING:
     from assemblyline.datastore.helper import AssemblylineDatastore
@@ -40,6 +42,7 @@ class ServerBase(threading.Thread):
     This lets the main thread handle interrupts properly, even when the workload
     makes a blocking call that would normally stop this.
     """
+
     def __init__(self, component_name: str, logger: logging.Logger = None,
                  shutdown_timeout: float = None, config=None):
         super().__init__(name=component_name)
@@ -213,6 +216,20 @@ class CoreBase(ServerBase):
             private=False,
         )
 
+        component = self.__class__.__name__.lower()
+        if component in PAUSABLE_COMPONENTS:
+            # Prevent opening Redis connections where it isn't necessary
+            self.status_event_watcher = EventWatcher(self.redis)
+            self.status_event_watcher.register(f'system.{component}.active', self._handle_status_change)
+            self.status_event_watcher.start()
+
+            self.active = Hash('system', self.redis_persist).get(f'{component}.active')
+            if self.active is None:
+                # Initialize state to be active if not set
+                Hash('system', self.redis_persist).set(f'{component}.active', True)
+                self.active = True
+            self.log.info(f"Listening for status events on: system.{component}.active")
+
         # Create a cached service data object, and access to the service status
         self.service_info = typing.cast(typing.Dict[str, Service], forge.CachedObject(self._get_services))
         self._service_stage_hash = get_service_stage_hash(self.redis)
@@ -220,6 +237,10 @@ class CoreBase(ServerBase):
     def _get_services(self):
         # noinspection PyUnresolvedReferences
         return {x.name: x for x in self.datastore.list_all_services(full=True)}
+
+    def _handle_status_change(self, status: bool):
+        self.log.info(f"Status change detected: {status}")
+        self.active = status
 
     def get_service_stage(self, service_name: str, default=ServiceStage.Off) -> ServiceStage:
         return ServiceStage(self._service_stage_hash.get(service_name) or default)
