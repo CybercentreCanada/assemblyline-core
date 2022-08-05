@@ -207,6 +207,10 @@ class Ingester(ThreadedCoreBase):
         # entries at a time and move unique entries to uniqueq / queued and
         # duplicates to their own queues / waiting.
         while self.running:
+            while not self.active:
+                # Ingester is disabled... waiting for it to be reactivated
+                self.sleep(0.1)
+
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 

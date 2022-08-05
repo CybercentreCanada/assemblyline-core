@@ -103,7 +103,7 @@ class SubmissionTask:
     """Dispatcher internal model for submissions"""
 
     def __init__(self, submission, completed_queue, scheduler, results=None,
-                 file_infos=None, file_tree=None, errors: Optional[Iterable[str]]=None):
+                 file_infos=None, file_tree=None, errors: Optional[Iterable[str]] = None):
         self.submission: Submission = Submission(submission)
         if completed_queue:
             self.completed_queue = str(completed_queue)
@@ -347,6 +347,10 @@ class Dispatcher(ThreadedCoreBase):
         time_mark = time.time()
 
         while self.running:
+            while not self.active:
+                # Dispatcher is disabled... waiting for it to be reactivated
+                self.sleep(0.1)
+
             if self.finalizing.is_set():
                 finalizing_time = time.time() - self.finalizing_start
                 if self.active_submissions.length() > 0 and finalizing_time < FINALIZING_WINDOW:
