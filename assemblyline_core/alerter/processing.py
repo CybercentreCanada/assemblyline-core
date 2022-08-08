@@ -84,6 +84,14 @@ class AlertMissingError(Exception):
     pass
 
 
+class SubmissionNotFinalized(Exception):
+    pass
+
+
+class SubmissionNotFound(Exception):
+    pass
+
+
 def service_name_from_key(key):
     # noinspection PyBroadException
     try:
@@ -97,10 +105,10 @@ def get_submission_record(counter, datastore, sid):
 
     if not srecord:
         counter.increment('error')
-        raise Exception("Couldn't find submission: %s" % sid)
+        raise SubmissionNotFound("Couldn't find submission: %s" % sid)
 
     if srecord.get('state', 'unknown') != 'completed':
-        raise Exception("Submission not finalized: %s" % sid)
+        raise SubmissionNotFinalized("Submission not finalized: %s" % sid)
 
     return srecord
 
