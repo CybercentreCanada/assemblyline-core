@@ -1,13 +1,17 @@
 #!/usr/bin/env python
 
 import elasticapm
+import time
 
-from assemblyline_core.server_base import ServerBase
 from assemblyline.common import forge
+from assemblyline.common.isotime import now
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.odm.messages.alerter_heartbeat import Metrics
+
+from assemblyline_core.alerter.processing import SubmissionNotFinalized
+from assemblyline_core.server_base import ServerBase
 
 ALERT_QUEUE_NAME = 'm-alert'
 MAX_RETRIES = 10
@@ -46,7 +50,17 @@ class Alerter(ServerBase):
 
     def run_once(self):
         alert = self.alert_queue.pop(timeout=1)
+
+        # If there is no alert bail out
         if not alert:
+            return
+
+        # If there is a wait_until time set and we have not reached it,
+        # push the alert back in the queue and sleep a little to reduce
+        # the pressure on Redis
+        if 'wait_until' in alert and alert['wait_until'] > now():
+            self.alert_queue.push(alert)
+            time.sleep(0.1)
             return
 
         # Start of process alert transaction
@@ -62,15 +76,24 @@ class Alerter(ServerBase):
                 self.apm_client.end_transaction(alert_type, 'success')
 
             return alert_type
-        except Exception as ex:  # pylint: disable=W0703
+        except SubmissionNotFinalized:  # pylint: disable=W0703
+            self.counter.increment('wait')
+
+            # Wait another 15 secs for the submission to complete
+            alert['wait_until'] = now(15)
+            self.alert_queue.push(alert)
+
+            # End of process alert transaction (wait)
+            if self.apm_client:
+                self.apm_client.end_transaction('unknown', 'wait')
+        except Exception:  # pylint: disable=W0703
             retries = alert['alert_retries'] = alert.get('alert_retries', 0) + 1
             self.counter.increment('error')
             if retries > MAX_RETRIES:
                 self.log.exception(f'Max retries exceeded for: {alert}')
             else:
                 self.alert_queue.push(alert)
-                if 'Submission not finalized' not in str(ex):
-                    self.log.exception(f'Unhandled exception processing: {alert}')
+                self.log.exception(f'Unhandled exception processing: {alert}')
 
             # End of process alert transaction (failure)
             if self.apm_client:
