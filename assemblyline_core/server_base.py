@@ -247,7 +247,7 @@ class CoreBase(ServerBase):
 
 
 class ThreadedCoreBase(CoreBase):
-    def __init__(self, component_name: str, logger: logging.Logger = None,
+    def __init__(self, component_name: str, logger: typing.Optional[logging.Logger] = None,
                  shutdown_timeout: float = None, config=None, datastore=None,
                  redis=None, redis_persist=None):
         super().__init__(component_name=component_name, logger=logger, shutdown_timeout=shutdown_timeout,
