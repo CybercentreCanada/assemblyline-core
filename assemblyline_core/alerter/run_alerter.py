@@ -54,11 +54,13 @@ class Alerter(ServerBase):
         # Check if there is a due alert in the retry queue
         alert = None
         if self.next_retry_available < now():
+            # Check if the next alert in the queue has a wait_until in the past (<)
             alert = self.alert_retry_queue.peek_next()
-            if alert and alert.get('wait_until', float('inf')) > now():
+            if alert and alert.get('wait_until', 0) < now():
                 # Double check after popping it to be sure we got the alert we expected
+                # if it is in the future (>) put it back in the queue
                 alert = self.alert_retry_queue.pop(blocking=False)
-                if alert and alert.get('wait_until', float('inf')) < now():
+                if alert and alert.get('wait_until', 0) > now():
                     self.alert_retry_queue.push(alert)
                     alert = None
             elif alert:
