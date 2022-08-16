@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 import elasticapm
-import time
 
 from assemblyline.common import forge
 from assemblyline.common.isotime import now
@@ -14,6 +13,7 @@ from assemblyline_core.alerter.processing import SubmissionNotFinalized
 from assemblyline_core.server_base import ServerBase
 
 ALERT_QUEUE_NAME = 'm-alert'
+ALERT_RETRY_QUEUE_NAME = 'm-alert-retry'
 MAX_RETRIES = 10
 
 
@@ -30,8 +30,10 @@ class Alerter(ServerBase):
         )
         self.process_alert_message = forge.get_process_alert_message()
         self.running = False
+        self.next_retry_available = 0
 
-        self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.persistent_redis)
+        self.alert_queue: NamedQueue[dict] = NamedQueue(ALERT_QUEUE_NAME, self.persistent_redis)
+        self.alert_retry_queue: NamedQueue[dict] = NamedQueue(ALERT_QUEUE_NAME, self.persistent_redis)
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
             elasticapm.instrument()
@@ -49,18 +51,28 @@ class Alerter(ServerBase):
         super().stop()
 
     def run_once(self):
-        alert = self.alert_queue.pop(timeout=1)
+        # Check if there is a due alert in the retry queue
+        alert = None
+        if self.next_retry_available < now():
+            alert = self.alert_retry_queue.peek_next()
+            if alert and alert.get('wait_until', float('inf')) > now():
+                # Double check after popping it to be sure we got the alert we expected
+                alert = self.alert_retry_queue.pop(blocking=False)
+                if alert and alert.get('wait_until', float('inf')) < now():
+                    self.alert_retry_queue.push(alert)
+                    alert = None
+            elif alert:
+                # If we have peeked an alert and it isn't time for it to be processed
+                # yet, wait until then before trying to peek the retry queue again
+                self.next_retry_available = alert.get('wait_until', 0)
+                alert = None
+
+        # If we haven't gotten an alert from retry queue, pop on the main queue
+        if not alert:
+            alert = self.alert_queue.pop(timeout=1)
 
         # If there is no alert bail out
         if not alert:
-            return
-
-        # If there is a wait_until time set and we have not reached it,
-        # push the alert back in the queue and sleep a little to reduce
-        # the pressure on Redis
-        if 'wait_until' in alert and alert['wait_until'] > now():
-            self.alert_queue.push(alert)
-            time.sleep(0.1)
             return
 
         # Start of process alert transaction
@@ -76,12 +88,13 @@ class Alerter(ServerBase):
                 self.apm_client.end_transaction(alert_type, 'success')
 
             return alert_type
-        except SubmissionNotFinalized:  # pylint: disable=W0703
+        except SubmissionNotFinalized as error:
             self.counter.increment('wait')
+            self.log.error(str(error))
 
             # Wait another 15 secs for the submission to complete
             alert['wait_until'] = now(15)
-            self.alert_queue.push(alert)
+            self.alert_retry_queue.push(alert)
 
             # End of process alert transaction (wait)
             if self.apm_client:
@@ -92,7 +105,7 @@ class Alerter(ServerBase):
             if retries > MAX_RETRIES:
                 self.log.exception(f'Max retries exceeded for: {alert}')
             else:
-                self.alert_queue.push(alert)
+                self.alert_retry_queue.push(alert)
                 self.log.exception(f'Unhandled exception processing: {alert}')
 
             # End of process alert transaction (failure)

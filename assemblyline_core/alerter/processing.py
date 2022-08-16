@@ -1,3 +1,5 @@
+from __future__ import annotations
+from typing import Optional
 from assemblyline.common import forge
 from assemblyline.common.caching import TimeExpiredCache
 from assemblyline.common.dict_utils import recursive_update
@@ -11,7 +13,7 @@ CACHE_LEN = 60 * 60 * 24
 CACHE_EXPIRY_RATE = 60
 
 action_queue_map = None
-cache = TimeExpiredCache(CACHE_LEN, CACHE_EXPIRY_RATE)
+cache: TimeExpiredCache[tuple[Optional[dict], Optional[dict]]] = TimeExpiredCache(CACHE_LEN, CACHE_EXPIRY_RATE)
 Classification = forge.get_classification()
 config = forge.get_config()
 
@@ -107,8 +109,9 @@ def get_submission_record(counter, datastore, sid):
         counter.increment('error')
         raise SubmissionNotFound("Couldn't find submission: %s" % sid)
 
-    if srecord.get('state', 'unknown') != 'completed':
-        raise SubmissionNotFinalized("Submission not finalized: %s" % sid)
+    submission_state = srecord.get('state', 'unknown')
+    if submission_state != 'completed':
+        raise SubmissionNotFinalized(f"Submission not finalized: {sid} ({submission_state})")
 
     return srecord
 

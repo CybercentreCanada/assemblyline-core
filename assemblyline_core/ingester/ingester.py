@@ -9,11 +9,12 @@ score received, possibly sending a message to indicate that an alert should
 be created.
 """
 
+import logging
 import threading
 import time
 from os import environ
 from random import random
-from typing import Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 
 import elasticapm
 from assemblyline.common.postprocess import ActionWorker
@@ -28,6 +29,7 @@ from assemblyline.common import forge, exceptions, isotime
 from assemblyline.datastore.exceptions import DataStoreException
 from assemblyline.filestore import CorruptedFileStoreException, FileStoreException
 from assemblyline.odm.models.filescore import FileScore
+from assemblyline.odm.models.user import User
 from assemblyline.odm.messages.ingest_heartbeat import Metrics
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue
@@ -39,7 +41,6 @@ from assemblyline.odm.models.submission import SubmissionParams, Submission as D
 from assemblyline.odm.models.alert import EXTENDED_SCAN_VALUES
 from assemblyline.odm.messages.submission import Submission as MessageSubmission, SubmissionMessage
 
-from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
 from assemblyline_core.submission_client import SubmissionClient
 from .constants import INGEST_QUEUE_NAME, drop_chance, COMPLETE_QUEUE_NAME
 
@@ -81,7 +82,7 @@ def must_drop(length: int, maximum: int) -> bool:
 @odm.model()
 class IngestTask(odm.Model):
     # Submission Parameters
-    submission: MessageSubmission = odm.Compound(MessageSubmission)
+    submission: MessageSubmission = odm.compound(MessageSubmission)
 
     # Shortcut for properties of the submission
     @property
@@ -108,18 +109,19 @@ class IngestTask(odm.Model):
 
 
 class Ingester(ThreadedCoreBase):
-    def __init__(self, datastore=None, logger=None, classification=None, redis=None, persistent_redis=None,
+    def __init__(self, datastore=None, logger: Optional[logging.Logger] = None,
+                 classification=None, redis=None, persistent_redis=None,
                  metrics_name='ingester', config=None):
         super().__init__('assemblyline.ingester', logger, redis=redis, redis_persist=persistent_redis,
                          datastore=datastore, config=config)
 
         # Cache the user groups
         self.cache_lock = threading.RLock()
-        self._user_groups = {}
+        self._user_groups: dict[str, list[str]] = {}
         self._user_groups_reset = time.time()//HOUR_IN_SECONDS
-        self.cache = {}
-        self.notification_queues = {}
-        self.whitelisted = {}
+        self.cache: dict[str, FileScore] = {}
+        self.notification_queues: dict[str, NamedQueue] = {}
+        self.whitelisted: dict[str, Any] = {}
         self.whitelisted_lock = threading.RLock()
 
         # Module path parameters are fixed at start time. Changing these involves a restart
@@ -170,9 +172,6 @@ class Ingester(ThreadedCoreBase):
         #   are finalized as well. This has the effect that all concurrent ingestion of the same file
         #   are 'merged' into a single submission to the system.
         self.duplicate_queue = MultiQueue(self.redis_persist)
-
-        # Output. submissions that should have alerts generated
-        self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.redis_persist)
 
         # Utility object to help submit tasks to dispatching
         self.submit_client = SubmissionClient(datastore=self.datastore, redis=self.redis)
@@ -493,7 +492,7 @@ class Ingester(ThreadedCoreBase):
 
         # Get the groups for this user if not known
         if username not in self._user_groups:
-            user_data = self.datastore.user.get(username)
+            user_data: User = self.datastore.user.get(username)
             if user_data:
                 self._user_groups[username] = user_data.groups
             else:
@@ -591,7 +590,7 @@ class Ingester(ThreadedCoreBase):
         key = self.stamp_filescore_key(task)
 
         with self.cache_lock:
-            result = self.cache.get(key, None)
+            result: Optional[FileScore] = self.cache.get(key, None)
 
         if result:
             self.counter.increment('cache_hit_local')
@@ -640,7 +639,7 @@ class Ingester(ThreadedCoreBase):
             return delta >= self.config.core.ingester.stale_after_seconds
 
     @staticmethod
-    def stamp_filescore_key(task: IngestTask, sha256: str = None) -> str:
+    def stamp_filescore_key(task: IngestTask, sha256: Optional[str] = None) -> str:
         if not sha256:
             sha256 = task.submission.files[0].sha256
 
@@ -846,4 +845,3 @@ class Ingester(ThreadedCoreBase):
                 task.params.psid = None
 
         self.send_notification(task)
-
