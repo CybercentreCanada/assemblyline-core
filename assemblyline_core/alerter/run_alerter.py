@@ -90,7 +90,7 @@ class Alerter(ServerBase):
             return alert_type
         except SubmissionNotFinalized as error:
             self.counter.increment('wait')
-            self.log.info(str(error))
+            self.log.error(str(error))
 
             # Wait another 15 secs for the submission to complete
             alert['wait_until'] = now(15)
