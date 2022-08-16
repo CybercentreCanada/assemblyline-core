@@ -33,7 +33,7 @@ class Alerter(ServerBase):
         self.next_retry_available = 0
 
         self.alert_queue: NamedQueue[dict] = NamedQueue(ALERT_QUEUE_NAME, self.persistent_redis)
-        self.alert_retry_queue: NamedQueue[dict] = NamedQueue(ALERT_QUEUE_NAME, self.persistent_redis)
+        self.alert_retry_queue: NamedQueue[dict] = NamedQueue(ALERT_RETRY_QUEUE_NAME, self.persistent_redis)
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
             elasticapm.instrument()
