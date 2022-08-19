@@ -544,7 +544,7 @@ class KubernetesController(ControllerInterface):
                            shutdown_seconds: int, scale: int, labels: dict[str, str] = None,
                            volumes: list[V1Volume] = None, mounts: list[V1VolumeMount] = None,
                            core_mounts: bool = False, change_key: str = '',
-                           deployment_strategy: V1Deployment = V1Deployment()):
+                           deployment_strategy: V1DeploymentStrategy = V1DeploymentStrategy()):
         # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
