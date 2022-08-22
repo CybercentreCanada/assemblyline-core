@@ -14,14 +14,14 @@ from time import sleep
 
 
 from kubernetes import client, config, watch
-from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec, \
+from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec, V1DeploymentStrategy, \
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
     V1NetworkPolicyIngressRule, V1Secret, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext, \
     V1Probe, V1ExecAction
 from kubernetes.client.rest import ApiException
-from assemblyline.odm.models.service import DockerConfig
+from assemblyline.odm.models.service import DockerConfig, PersistentVolume
 
 from assemblyline_core.scaler.controllers.interface import ControllerInterface
 
@@ -543,7 +543,8 @@ class KubernetesController(ControllerInterface):
     def _create_deployment(self, service_name: str, deployment_name: str, docker_config: DockerConfig,
                            shutdown_seconds: int, scale: int, labels: dict[str, str] = None,
                            volumes: list[V1Volume] = None, mounts: list[V1VolumeMount] = None,
-                           core_mounts: bool = False, change_key: str = ''):
+                           core_mounts: bool = False, change_key: str = '',
+                           deployment_strategy: V1DeploymentStrategy = V1DeploymentStrategy()):
         # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
@@ -646,6 +647,7 @@ class KubernetesController(ControllerInterface):
             revision_history_limit=0,
             selector=V1LabelSelector(match_labels=all_labels),
             template=template,
+            strategy=deployment_strategy
         )
 
         deployment = V1Deployment(
@@ -768,11 +770,16 @@ class KubernetesController(ControllerInterface):
         # Setup PVC
         deployment_name = self._dependency_name(service_name, container_name)
         mounts, volumes = [], []
+        deployment_strategy = V1DeploymentStrategy()  # Default strategy should be RollingUpdate
         for volume_name, volume_spec in spec.volumes.items():
             mount_name = f'{deployment_name}-{volume_name}'
 
+            if volume_spec.access_mode == 'ReadWriteOnce':
+                # RollingUpdate strategy isn't appropriate for Deployments with RWO-attached volumes
+                deployment_strategy = V1DeploymentStrategy(type='Recreate')
+
             # Check if the PVC exists, create if not
-            self._ensure_pvc(mount_name, volume_spec.storage_class, volume_spec.capacity, deployment_name)
+            self._ensure_pvc(mount_name, volume_spec, deployment_name)
 
             # Create the volume info
             volumes.append(V1Volume(
@@ -799,7 +806,8 @@ class KubernetesController(ControllerInterface):
         spec.container.environment.append({'name': 'AL_INSTANCE_KEY', 'value': instance_key})
         self._create_deployment(service_name, deployment_name, spec.container,
                                 30, 1, labels, volumes=volumes, mounts=mounts,
-                                core_mounts=spec.run_as_core, change_key=change_key)
+                                core_mounts=spec.run_as_core, change_key=change_key,
+                                deployment_strategy=deployment_strategy)
 
         # Setup a service to direct to the deployment
         try:
@@ -827,12 +835,12 @@ class KubernetesController(ControllerInterface):
         if spec.container.ports:
             self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
 
-    def _ensure_pvc(self, name, storage_class, size, deployment_name):
-        size_Mi = f'{max(round(int(size)/1024), 1024)}Mi'
-        size_Gi = f'{max(round(int(size)/1048576), 1)}Gi'
+    def _ensure_pvc(self, name: str, volume_spec: PersistentVolume, deployment_name: str):
+        size_Mi = f'{max(round(int(volume_spec.capacity)/1024), 1024)}Mi'
+        size_Gi = f'{max(round(int(volume_spec.capacity)/1048576), 1)}Gi'
         request = V1ResourceRequirements(requests={'storage': size_Mi})
-        claim_spec = V1PersistentVolumeClaimSpec(storage_class_name=storage_class, resources=request,
-                                                 volume_mode='Filesystem', access_modes=['ReadWriteOnce'])
+        claim_spec = V1PersistentVolumeClaimSpec(storage_class_name=volume_spec.storage_class, resources=request,
+                                                 volume_mode='Filesystem', access_modes=volume_spec.access_mode)
         metadata = V1ObjectMeta(namespace=self.namespace, name=name)
         claim = V1PersistentVolumeClaim(metadata=metadata, spec=claim_spec)
 
@@ -881,8 +889,8 @@ class KubernetesController(ControllerInterface):
             for vol in dep.spec.template.spec.volumes or []:
                 if vol._persistent_volume_claim:
                     self.api.delete_namespaced_persistent_volume_claim(name=vol._persistent_volume_claim.claim_name,
-                                                                    namespace=self.namespace,
-                                                                    _request_timeout=API_TIMEOUT)
+                                                                       namespace=self.namespace,
+                                                                       _request_timeout=API_TIMEOUT)
 
     def prepare_network(self, service_name, internet, dependency_internet):
         safe_name = service_name.lower().replace('_', '-')
