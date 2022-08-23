@@ -840,7 +840,7 @@ class KubernetesController(ControllerInterface):
         size_Gi = f'{max(round(int(volume_spec.capacity)/1048576), 1)}Gi'
         request = V1ResourceRequirements(requests={'storage': size_Mi})
         claim_spec = V1PersistentVolumeClaimSpec(storage_class_name=volume_spec.storage_class, resources=request,
-                                                 volume_mode='Filesystem', access_modes=volume_spec.access_mode)
+                                                 volume_mode='Filesystem', access_modes=[volume_spec.access_mode])
         metadata = V1ObjectMeta(namespace=self.namespace, name=name)
         claim = V1PersistentVolumeClaim(metadata=metadata, spec=claim_spec)
 
