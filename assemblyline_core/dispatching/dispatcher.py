@@ -31,6 +31,7 @@ from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
+from assemblyline.odm.models.result import Result
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
@@ -112,7 +113,7 @@ class SubmissionTask:
         self.file_info: dict[str, Optional[FileInfo]] = {}
         self.file_names: dict[str, str] = {}
         self.file_schedules: dict[str, list[dict[str, Service]]] = {}
-        self.file_tags = defaultdict(list)
+        self.file_tags = defaultdict(dict)
         self.file_depth: dict[str, int] = {}
         self.file_temporary_data = defaultdict(dict)
         self.extra_errors = []
@@ -146,10 +147,13 @@ class SubmissionTask:
                         key=k, drop=result['drop_file'], score=result['result']['score'],
                         children=[r['sha256'] for r in result['response']['extracted']])
 
-                tags = []
-                for section in result['result']['sections']:
-                    tags.extend(tag_dict_to_list(flatten(section['tags'])))
-                self.file_tags[sha256] = tags
+                tags = Result(result).scored_tag_dict()
+                for key in tags.keys():
+                    if key in self.file_tags[sha256].keys():
+                        # Sum score of already known tags
+                        self.file[sha256][key]['score'] += tags[key]['score']
+                    else:
+                        self.file[sha256][key] = tags[key]
 
         if errors is not None:
             for e in errors:
@@ -567,8 +571,8 @@ class Dispatcher(ThreadedCoreBase):
 
                     # Load the list of tags we will pass
                     tags = []
-                    if service.uses_tags:
-                        tags = task.file_tags.get(sha256, [])
+                    if service.uses_tags or service.uses_tag_scores:
+                        tags = task.file_tags.get(sha256, {}).values()
 
                     # Load the temp submission data we will pass
                     temp_data = {}
@@ -579,6 +583,10 @@ class Dispatcher(ThreadedCoreBase):
                     metadata = {}
                     if service.uses_metadata:
                         metadata = submission.metadata
+
+                    tag_fields = ['type', 'value', 'short_type']
+                    if service.uses_tag_scores:
+                        tag_fields.append('score')
 
                     # Build the actual service dispatch message
                     config = self.build_service_config(service, submission)
@@ -596,9 +604,7 @@ class Dispatcher(ThreadedCoreBase):
                         ignore_cache=submission.params.ignore_cache,
                         ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
                         ignore_filtering=ignore_filtering,
-                        tags=[
-                            {'type': x['type'], 'value': x['value'], 'short_type': x['short_type']} for x in tags
-                        ],
+                        tags=[{field: x[field] for field in tag_fields} for x in tags],
                         temporary_submission_data=[
                             {'name': name, 'value': value} for name, value in temp_data.items()
                         ],
@@ -1042,8 +1048,12 @@ class Dispatcher(ThreadedCoreBase):
             if service_info and service_info.category == "Dynamic Analysis":
                 submission.params.services.runtime_excluded.append(service_name)
 
-        # Save the tags
-        task.file_tags[sha256].extend(tags)
+        # Update score of tag as it moves through different services
+        for key, value in tags.items():
+            if key in task.file_tags[sha256].keys():
+                task.file_tags[sha256][key]['score'] += value['score']
+            else:
+                task.file_tags[sha256][key] = value
 
         # Update the temporary data table for this file
         for key, value in (temporary_data or {}).items():
