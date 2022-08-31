@@ -47,6 +47,7 @@ class DockerController(ControllerInterface):
         self.core_env = core_env
         self._labels: dict[str, str] = labels or {}
         self._prefix: str = prefix
+        self.node_count = 1
 
         if self._prefix and not self._prefix.endswith("_"):
             self._prefix += "_"

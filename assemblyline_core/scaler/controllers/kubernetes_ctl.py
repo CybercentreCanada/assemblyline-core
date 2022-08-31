@@ -304,6 +304,7 @@ class KubernetesController(ControllerInterface):
     def _monitor_node_pool(self):
         self._node_pool_max_cpu = 0
         self._node_pool_max_ram = 0
+        self.node_count = 0
         watch = TypelessWatch()
 
         for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT,
@@ -314,9 +315,11 @@ class KubernetesController(ControllerInterface):
             if event['type'] == "ADDED":
                 self._node_pool_max_cpu += parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
                 self._node_pool_max_ram += parse_memory(event['raw_object']['status']['allocatable']['memory'])
+                self.node_count += 1
             elif event['type'] == "DELETED":
                 self._node_pool_max_cpu -= parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
                 self._node_pool_max_ram -= parse_memory(event['raw_object']['status']['allocatable']['memory'])
+                self.node_count -= 1
 
     def _monitor_pods(self):
         watch = TypelessWatch()
