@@ -583,6 +583,18 @@ class ScalerServer(ThreadedCoreBase):
                 self.profiles.pop(name, None)
             self.controller.set_target(name, 0)
 
+    def get_cpu_overallocation(self) -> float:
+        node_limit = self.config.core.scaler.overallocation_node_limit
+        if node_limit is not None and node_limit <= self.controller.node_count:
+            return 1
+        return self.config.core.scaler.cpu_overallocation
+
+    def get_memory_overallocation(self) -> float:
+        node_limit = self.config.core.scaler.overallocation_node_limit
+        if node_limit is not None and node_limit <= self.controller.node_count:
+            return 1
+        return self.config.core.scaler.memory_overallocation
+
     def update_scaling(self):
         """Check if we need to scale any services up or down."""
         pool = Pool()
@@ -634,11 +646,11 @@ class ScalerServer(ThreadedCoreBase):
                 # Recalculate the amount of free resources expanding the total quantity by the overallocation
                 free_cpu, total_cpu = self.controller.cpu_info()
                 used_cpu = total_cpu - free_cpu
-                free_cpu = total_cpu * self.config.core.scaler.cpu_overallocation - used_cpu
+                free_cpu = total_cpu * self.get_cpu_overallocation() - used_cpu
 
                 free_memory, total_memory = self.controller.memory_info()
                 used_memory = total_memory - free_memory
-                free_memory = total_memory * self.config.core.scaler.memory_overallocation - used_memory
+                free_memory = total_memory * self.get_memory_overallocation() - used_memory
 
                 #
                 def trim(prof: list[ServiceProfile]):
