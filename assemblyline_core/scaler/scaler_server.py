@@ -468,7 +468,8 @@ class ScalerServer(ThreadedCoreBase):
             updater_ready = stage == ServiceStage.Running
             if service.update_config:
                 for _n, dependency in dependency_config.items():
-                    key = self.controller.stateful_container_key(service.name, _n, dependency, '')
+                    key = self.controller.stateful_container_key(service.name, _n, dependency,
+                                                                 dependency_blobs.get(_n, ''))
                     if key:
                         dependency_keys.append(_n + key)
                     else:
