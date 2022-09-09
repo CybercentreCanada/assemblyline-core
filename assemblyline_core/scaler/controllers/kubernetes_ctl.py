@@ -193,11 +193,11 @@ class KubernetesController(ControllerInterface):
         self.api = client.CoreV1Api()
         self.net_api = client.NetworkingV1Api()
         self.namespace: str = namespace
-        self.config_volumes: dict[str, V1Volume] = {}
-        self.config_mounts: dict[str, V1VolumeMount] = {}
+        self.volumes: dict[str, V1Volume] = {}
+        self.mounts: dict[str, V1VolumeMount] = {}
         self.core_env: dict[str, str] = core_env
-        self.core_config_volumes: dict[str, V1Volume] = {}
-        self.core_config_mounts: dict[str, V1VolumeMount] = {}
+        self.core_volumes: dict[str, V1Volume] = {}
+        self.core_mounts: dict[str, V1VolumeMount] = {}
         self._external_profiles = weakref.WeakValueDictionary()
         self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
 
@@ -244,9 +244,12 @@ class KubernetesController(ControllerInterface):
     def _dependency_name(self, service_name: str, container_name: str):
         return f"{self._deployment_name(service_name)}-{container_name}".lower()
 
-    def config_mount(self, name: str, config_map: str, key: str, target_path: str, read_only=True):
-        if name not in self.config_volumes:
-            self.config_volumes[name] = V1Volume(
+    def add_config_mount(self, name: str, config_map: str, key: str, target_path: str, read_only=True, core=False):
+        volumes, mounts = self.volumes, self.mounts
+        if core:
+            volumes, mounts = self.core_volumes, self.core_mounts
+        if name not in volumes:
+            volumes[name] = V1Volume(
                 name=name,
                 config_map=V1ConfigMapVolumeSource(
                     name=config_map,
@@ -254,27 +257,24 @@ class KubernetesController(ControllerInterface):
                 )
             )
 
-        self.config_mounts[target_path] = V1VolumeMount(
+        mounts[target_path] = V1VolumeMount(
             name=name,
             mount_path=target_path,
             sub_path=key,
             read_only=read_only
         )
 
-    def core_config_mount(self, name, config_map, key, target_path, read_only=True):
-        if name not in self.core_config_volumes:
-            self.core_config_volumes[name] = V1Volume(
-                name=name,
-                config_map=V1ConfigMapVolumeSource(
-                    name=config_map,
-                    optional=False
-                )
-            )
+    def add_volume_mount(self, name: str, target_path: str, read_only=True, core=False):
+        volumes, mounts = self.volumes, self.mounts
+        if core:
+            mounts = self.core_volumes, self.core_mounts
 
-        self.core_config_mounts[target_path] = V1VolumeMount(
+        if name not in volumes:
+            volumes[name] = (V1Volume(name=name))
+
+        mounts[target_path] = V1VolumeMount(
             name=name,
             mount_path=target_path,
-            sub_path=key,
             read_only=read_only
         )
 
@@ -617,11 +617,11 @@ class KubernetesController(ControllerInterface):
         # then the ones specific to this container only
         all_volumes: list[V1Volume] = []
         all_mounts: list[V1VolumeMount] = []
-        all_volumes.extend(self.config_volumes.values())
-        all_mounts.extend(self.config_mounts.values())
+        all_volumes.extend(self.volumes.values())
+        all_mounts.extend(self.mounts.values())
         if core_mounts:
-            all_volumes.extend(self.core_config_volumes.values())
-            all_mounts.extend(self.core_config_mounts.values())
+            all_volumes.extend(self.core_volumes.values())
+            all_mounts.extend(self.core_mounts.values())
         all_volumes.extend(volumes or [])
         all_mounts.extend(mounts or [])
 
