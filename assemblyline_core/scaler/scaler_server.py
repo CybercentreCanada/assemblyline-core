@@ -283,6 +283,11 @@ class ScalerServer(ThreadedCoreBase):
                                                    log_level=self.config.logging.log_level,
                                                    core_env=core_env)
 
+            # Add global configuration for privileged services
+            self.controller.add_config_mount(KUBERNETES_AL_CONFIG, config_map=KUBERNETES_AL_CONFIG, key="config",
+                                             target_path="/etc/assemblyline/config.yml", read_only=True, core=True)
+
+            # Add default mounts for (non-)privileged services
             for mount in self.config.core.scaler.service_defaults.mounts:
                 if mount.config_map:
                     self.controller.add_config_mount(mount.name, config_map=mount.config_map, key=mount.key,
