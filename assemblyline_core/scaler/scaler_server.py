@@ -66,13 +66,9 @@ KUBERNETES_AL_CONFIG = os.environ.get('KUBERNETES_AL_CONFIG')
 HOSTNAME = os.getenv('HOSTNAME', platform.node())
 NAMESPACE = os.getenv('NAMESPACE', 'al')
 CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
-CLASSIFICATION_CONFIGMAP = os.getenv('CLASSIFICATION_CONFIGMAP', None)
-CLASSIFICATION_CONFIGMAP_KEY = os.getenv('CLASSIFICATION_CONFIGMAP_KEY', 'classification.yml')
 
 DOCKER_CONFIGURATION_PATH = os.getenv('DOCKER_CONFIGURATION_PATH', None)
 DOCKER_CONFIGURATION_VOLUME = os.getenv('DOCKER_CONFIGURATION_VOLUME', None)
-CONFIGURATION_CONFIGMAP = os.getenv('CONFIGURATION_CONFIGMAP', None)
-CONFIGURATION_CONFIGMAP_KEY = os.getenv('CONFIGURATION_CONFIGMAP_KEY', 'config')
 
 
 @contextmanager
@@ -286,15 +282,21 @@ class ScalerServer(ThreadedCoreBase):
                                                    cpu_reservation=self.config.services.cpu_reservation,
                                                    log_level=self.config.logging.log_level,
                                                    core_env=core_env)
-            # If we know where to find it, mount the classification into the service containers
-            if CLASSIFICATION_CONFIGMAP:
-                self.controller.config_mount('classification-config', config_map=CLASSIFICATION_CONFIGMAP,
-                                             key=CLASSIFICATION_CONFIGMAP_KEY,
-                                             target_path='/etc/assemblyline/classification.yml')
-            if CONFIGURATION_CONFIGMAP:
-                self.controller.core_config_mount('assemblyline-config', config_map=CONFIGURATION_CONFIGMAP,
-                                                  key=CONFIGURATION_CONFIGMAP_KEY,
-                                                  target_path='/etc/assemblyline/config.yml')
+
+            # Add global configuration for privileged services
+            self.controller.add_config_mount(KUBERNETES_AL_CONFIG, config_map=KUBERNETES_AL_CONFIG, key="config",
+                                             target_path="/etc/assemblyline/config.yml", read_only=True, core=True)
+
+            # Add default mounts for (non-)privileged services
+            for mount in self.config.core.scaler.service_defaults.mounts:
+                if mount.config_map:
+                    self.controller.add_config_mount(mount.name, config_map=mount.config_map, key=mount.key,
+                                                     target_path=mount.path, read_only=mount.read_only,
+                                                     core=mount.privileged_only)
+                else:
+                    # Add storage-based mount
+                    self.controller.add_volume_mount(name=mount.name, target_path=mount.path, read_only=mount.read_only,
+                                                     core=mount.privileged_only)
         else:
             self.log.info("Loading Docker cluster interface.")
             self.controller = DockerController(logger=self.log, prefix=NAMESPACE,
@@ -314,6 +316,13 @@ class ScalerServer(ThreadedCoreBase):
             # If we know where to find it, mount the classification into the service containers
             if CLASSIFICATION_HOST_PATH:
                 self.controller.global_mounts.append((CLASSIFICATION_HOST_PATH, '/etc/assemblyline/classification.yml'))
+
+            for mount in self.config.core.scaler.service_defaults.mounts:
+                # Mounts are all storage-based since there's no equivalent to ConfigMaps in Docker
+                if mount.privileged_only:
+                    self.controller.core_mounts.append((mount.name, mount.path))
+                else:
+                    self.controller.global_mounts.append((mount.name, mount.path))
 
         # Information about services
         self.profiles: dict[str, ServiceProfile] = {}
@@ -382,7 +391,11 @@ class ScalerServer(ThreadedCoreBase):
         elif data.operation == Operation.Incompatible:
             return
         else:
-            self._sync_service(self.datastore.get_service_with_delta(data.name))
+            service = self.datastore.get_service_with_delta(data.name)
+            if not service:
+                self.log.warning(f'Received change event for non-existent service: {data.name}. Ignoring..')
+                return
+            self._sync_service(service)
 
     def sync_services(self):
         while self.running:
