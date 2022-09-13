@@ -151,9 +151,9 @@ class SubmissionTask:
                 for key in tags.keys():
                     if key in self.file_tags[sha256].keys():
                         # Sum score of already known tags
-                        self.file[sha256][key]['score'] += tags[key]['score']
+                        self.file_tags[sha256][key]['score'] += tags[key]['score']
                     else:
-                        self.file[sha256][key] = tags[key]
+                        self.file_tags[sha256][key] = tags[key]
 
         if errors is not None:
             for e in errors:
