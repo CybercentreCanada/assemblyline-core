@@ -1048,6 +1048,19 @@ class Dispatcher(ThreadedCoreBase):
             if service_info and service_info.category == "Dynamic Analysis":
                 submission.params.services.runtime_excluded.append(service_name)
 
+        # Account for the possibility of cache hits or services that aren't updated (tagged as compatible but not)
+        if isinstance(tags, list):
+            self.log.warning("Deprecation: Old format of tags found. "
+                             "This format changed with the release of 4.3 on 09-2022. "
+                             f"Rebuilding {service_name} may be required or the result of a cache hit. "
+                             "Proceeding with conversion to compatible format..")
+            alt_tags = {}
+            for t in tags:
+                key = f"{t['value']}:{t['type']}"
+                t.update({'score': 0})
+                alt_tags[key] = t
+            tags = alt_tags
+
         # Update score of tag as it moves through different services
         for key, value in tags.items():
             if key in task.file_tags[sha256].keys():
