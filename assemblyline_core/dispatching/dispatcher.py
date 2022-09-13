@@ -1056,7 +1056,7 @@ class Dispatcher(ThreadedCoreBase):
                              "Proceeding with conversion to compatible format..")
             alt_tags = {}
             for t in tags:
-                key = f"{t['value']}:{t['type']}"
+                key = f"{t['type']}:{t['value']}"
                 t.update({'score': 0})
                 alt_tags[key] = t
             tags = alt_tags
