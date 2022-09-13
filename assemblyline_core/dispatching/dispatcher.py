@@ -1050,8 +1050,10 @@ class Dispatcher(ThreadedCoreBase):
 
         # Account for the possibility of cache hits or services that aren't updated (tagged as compatible but not)
         if isinstance(tags, list):
-            self.log.warning(f'Deprecation: Old format of tags found. Rebuilding {service_name} is required. '
-                             'Proceeding..')
+            self.log.warning("Deprecation: Old format of tags found. "
+                             "This format changed with the release of 4.3 on 09-2022. "
+                             f"Rebuilding {service_name} may be required or the result of a cache hit. "
+                             "Proceeding with conversion to compatible format..")
             alt_tags = {}
             for t in tags:
                 key = f"{t['value']}:{t['type']}"
