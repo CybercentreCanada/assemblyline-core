@@ -369,7 +369,7 @@ class ExpiryManager(ServerBase):
                 if collection.archive(query):
                     self.counter_archive.increment(f'{collection.name}', increment_by=expected)
                 else:
-                    self.log.error("Failed to archive range {query}")
+                    self.log.error(f"Failed to archive documents matching: '{query}'")
 
             query = f'archive_ts:[{epoch_to_iso(start)} TO {epoch_to_iso(end)}}}'
             futures.append(pool.submit(archive_chunk, query, count))
