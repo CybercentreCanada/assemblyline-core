@@ -22,8 +22,6 @@ if TYPE_CHECKING:
     from assemblyline.datastore.collection import ESCollection
 
 
-ARCHIVE_SIZE = 5000
-EXPIRY_SIZE = 10000
 DAY_SECONDS = 24 * 60 * 60
 
 
@@ -134,6 +132,14 @@ class ExpiryManager(ServerBase):
         else:
             self.apm_client = None
 
+    @property
+    def expiry_size(self):
+        return self.config.core.expiry.delete_batch_size
+
+    @property
+    def archive_size(self):
+        return self.config.core.expiry.archive_batch_size
+
     def stop(self):
         if self.counter:
             self.counter.stop()
@@ -237,8 +243,9 @@ class ExpiryManager(ServerBase):
                 if chunk_size == 0:
                     continue
 
-                # We found a small enough chunk to run on
-                if chunk_size < EXPIRY_SIZE:
+                # We found a small enough chunk to
+                #  run on
+                if chunk_size < self.expiry_size:
                     ready_chunks[(start, end)] = chunk_size
                     continue
 
@@ -331,14 +338,15 @@ class ExpiryManager(ServerBase):
         if isinstance(start, (float, int)):
             start = epoch_to_iso(start)
         query = f'expiry_ts:[{start} TO {epoch_to_iso(end)}}}'
-        return container.search(query, rows=0, as_obj=False, use_archive=True, track_total_hits=EXPIRY_SIZE)['total']
+
+        return container.search(query, rows=0, as_obj=False, use_archive=True, track_total_hits=self.expiry_size)['total']
 
     def _count_archivable(self, container: ESCollection, start: Union[float, str], end: float) -> int:
         """Count how many items need to be archived in the given window."""
         if isinstance(start, (float, int)):
             start = epoch_to_iso(start)
         query = f'archive_ts:[{start} TO {epoch_to_iso(end)}}}'
-        return container.search(query, rows=0, as_obj=False, use_archive=False, track_total_hits=ARCHIVE_SIZE)['total']
+        return container.search(query, rows=0, as_obj=False, use_archive=False, track_total_hits=self.archive_size)['total']
 
     def _archive_collection(self, collection: ESCollection, pool: ThreadPoolExecutor) -> bool:
         # Start with archiving everything up until now
@@ -356,7 +364,7 @@ class ExpiryManager(ServerBase):
 
             # If the chunk is bigger than the number we intend to archive
             # in a single call break it into parts
-            if count >= ARCHIVE_SIZE:
+            if count >= self.archive_size:
                 middle = (start + end)/2
                 chunks.append((start, middle))
                 chunks.append((middle, end))
