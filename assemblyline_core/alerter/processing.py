@@ -284,7 +284,8 @@ def perform_alert_update(datastore, logger, alert):
 
     while True:
         old_alert, version = datastore.alert.get_if_exists(
-            alert_id, as_obj=False, archive_access=config.datastore.ilm.update_archive, version=True)
+            alert_id, as_obj=False,
+            archive_access=config.datastore.archive.update_archive and config.datastore.archive.enabled, version=True)
         if old_alert is None:
             raise AlertMissingError(f"{alert_id} is missing from the alert collection.")
 
@@ -413,7 +414,8 @@ def process_alert_message(counter, datastore, logger, alert_data):
             'score': alert_data['score']
         },
         'alert_id': generate_alert_id(logger, alert_data),
-        'archive_ts': now_as_iso(config.datastore.ilm.days_until_archive * 24 * 60 * 60),
+        'archive_ts': now_as_iso(config.datastore.archive.days_until_archive * 24 * 60 * 60)
+        if config.datastore.archive.days_until_archive else None,
         'metadata': {safe_str(key): value for key, value in alert_data['submission']['metadata'].items()},
         'sid': alert_data['submission']['sid'],
         'ts': a_ts or alert_data['submission']['time'],

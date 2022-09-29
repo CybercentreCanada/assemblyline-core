@@ -93,10 +93,10 @@ def _file_delete_worker(logger, delete_action: Callable[[str], Optional[str]], f
 
 
 class ExpiryManager(ServerBase):
-    def __init__(self, force_ilm=False):
+    def __init__(self, force_archive=False):
         self.config = forge.get_config()
-        if force_ilm:
-            self.config.datastore.ilm.enabled = True
+        if force_archive:
+            self.config.datastore.archive.enabled = True
 
         super().__init__('assemblyline.expiry', shutdown_timeout=self.config.core.expiry.sleep_time + 5)
         self.datastore = forge.get_datastore(config=self.config, archive_access=True)
@@ -109,7 +109,7 @@ class ExpiryManager(ServerBase):
         self.counter_archive = MetricsFactory('archive', Metrics)
         self.file_delete_worker = ProcessPoolExecutor(self.config.core.expiry.delete_workers)
 
-        if self.config.datastore.ilm.enabled:
+        if self.config.datastore.archive.enabled:
             self.fs_hashmap = {
                 'file': self.archive_filestore_delete,
                 'cached_file': self.archive_cachestore_delete
@@ -289,7 +289,7 @@ class ExpiryManager(ServerBase):
 
     def run_archive_once(self, pool: ThreadPoolExecutor):
         reached_max = False
-        if not self.config.datastore.ilm.enabled:
+        if not self.config.datastore.archive.enabled:
             return reached_max
 
         # Start of expiry transaction
