@@ -92,7 +92,7 @@ def test_expire_all(ds_expiry):
 
 
 def test_archive_all(ds_archive):
-    expiry = ExpiryManager(force_ilm=True)
+    expiry = ExpiryManager(force_archive=True)
     expiry.counter = FakeCounter()
     expiry.counter_archive = FakeCounter()
     with concurrent.futures.ThreadPoolExecutor(5) as pool:

@@ -15,7 +15,7 @@ def ilm_policy_exists(es, name):
         return False
 
 
-def create_ilm_policy(es, name, ilm_config):
+def create_ilm_policy(es, name, archive_config):
     data_base = {
         "phases": {
             "hot": {
@@ -25,7 +25,7 @@ def create_ilm_policy(es, name, ilm_config):
                         "priority": 100
                     },
                     "rollover": {
-                        "max_age": f"{ilm_config['warm']}{ilm_config['unit']}"
+                        "max_age": f"{archive_config['warm']}{archive_config['unit']}"
                     }
                 }
             },
@@ -37,7 +37,7 @@ def create_ilm_policy(es, name, ilm_config):
                 }
             },
             "cold": {
-                "min_age": f"{ilm_config['cold']}{ilm_config['unit']}",
+                "min_age": f"{archive_config['cold']}{archive_config['unit']}",
                 "actions": {
                     "set_priority": {
                         "priority": 20
@@ -47,9 +47,9 @@ def create_ilm_policy(es, name, ilm_config):
         }
     }
 
-    if ilm_config['delete']:
+    if archive_config['delete']:
         data_base['phases']['delete'] = {
-            "min_age": f"{ilm_config['delete']}{ilm_config['unit']}",
+            "min_age": f"{archive_config['delete']}{archive_config['unit']}",
             "actions": {
                 "delete": {}
             }

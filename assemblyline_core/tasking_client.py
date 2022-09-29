@@ -90,7 +90,9 @@ class TaskingClient:
 
         # Validate SHA256 of the uploaded file
         if expected_sha256 is None or expected_sha256 == file_info['sha256']:
-            file_info['archive_ts'] = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
+            file_info['archive_ts'] = None
+            if self.config.datastore.archive.days_until_archive:
+                file_info['archive_ts'] = now_as_iso(self.config.datastore.archive.days_until_archive * 24 * 60 * 60)
             file_info['classification'] = classification
             if ttl:
                 file_info['expiry_ts'] = now_as_iso(ttl * 24 * 60 * 60)
@@ -245,7 +247,10 @@ class TaskingClient:
                 else:
                     metric_factory.increment('not_scored')
 
-                result.archive_ts = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
+                result.archive_ts = None
+                if self.config.datastore.archive.days_until_archive:
+                    result.archive_ts = now_as_iso(self.config.datastore.archive.days_until_archive * 24 * 60 * 60)
+
                 if task.ttl:
                     result.expiry_ts = now_as_iso(task.ttl * 24 * 60 * 60)
 
@@ -316,7 +321,10 @@ class TaskingClient:
                                                     is_section_image=item.get('is_section_image', False))
             return False
 
-        archive_ts = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
+        archive_ts = None
+        if self.config.datastore.archive.days_until_archive:
+            archive_ts = now_as_iso(self.config.datastore.archive.days_until_archive * 24 * 60 * 60)
+
         if task.ttl:
             expiry_ts = now_as_iso(task.ttl * 24 * 60 * 60)
         else:
@@ -433,7 +441,10 @@ class TaskingClient:
 
         # Add timestamps for creation, archive and expiry
         error['created'] = now_as_iso()
-        error['archive_ts'] = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
+        if self.config.datastore.archive.days_until_archive:
+            error['archive_ts'] = now_as_iso(self.config.datastore.archive.days_until_archive * 24 * 60 * 60)
+        else:
+            error['archive_ts'] = None
         if task.ttl:
             error['expiry_ts'] = now_as_iso(task.ttl * 24 * 60 * 60)
 

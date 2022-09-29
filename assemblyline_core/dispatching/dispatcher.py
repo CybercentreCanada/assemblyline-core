@@ -16,11 +16,9 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.dict_utils import flatten
 from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
-from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.common.postprocess import ActionWorker
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
@@ -865,7 +863,8 @@ class Dispatcher(ThreadedCoreBase):
 
         ttl = task.submission.params.ttl
         error = Error(dict(
-            archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
+            archive_ts=now_as_iso(self.config.datastore.archive.days_until_archive * 24 * 60 * 60)
+            if self.config.datastore.archive.days_until_archive else None,
             created='NOW',
             expiry_ts=now_as_iso(ttl * 24 * 60 * 60) if ttl else None,
             response=dict(
@@ -874,8 +873,7 @@ class Dispatcher(ThreadedCoreBase):
                 service_version='0',
                 status='FAIL_NONRECOVERABLE',
             ),
-            sha256=sha256,
-            type="TASK PRE-EMPTED",
+            sha256=sha256, type="TASK PRE-EMPTED",
         ))
 
         error_key = error.build_key()

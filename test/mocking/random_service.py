@@ -25,6 +25,7 @@ class RandomService(ServerBase):
 
     Including service API, in the future probably include that in this test.
     """
+
     def __init__(self, datastore=None, filestore=None):
         super().__init__('assemblyline.randomservice')
         self.config = forge.get_config()
@@ -57,7 +58,10 @@ class RandomService(ServerBase):
             if not message:
                 continue
 
-            archive_ts = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
+            archive_ts = None
+            if self.config.datastore.archive.days_until_archive:
+                archive_ts = now_as_iso(self.config.datastore.archive.days_until_archive * 24 * 60 * 60)
+
             if self.config.submission.dtl:
                 expiry_ts = now_as_iso(self.config.submission.dtl * 24 * 60 * 60)
             else:
