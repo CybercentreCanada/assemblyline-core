@@ -27,7 +27,7 @@ from typing import List, Tuple, Dict
 from assemblyline.common import forge
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
-from assemblyline.common.isotime import epoch_to_iso, now, now_as_iso
+from assemblyline.common.isotime import epoch_to_iso, now
 from assemblyline.common.str_utils import safe_str
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.filestore import FileStore
@@ -175,8 +175,7 @@ class SubmissionClient:
 
         # We should now have all the information we need to construct a submission object
         sub = Submission(dict(
-            archive_ts=now_as_iso(self.config.datastore.archive.days_until_archive * 24 * 60 * 60)
-            if self.config.datastore.archive.days_until_archive else None,
+            archive_ts=None,
             classification=submission_obj.params.classification,
             error_count=0,
             errors=[],
