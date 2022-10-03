@@ -52,7 +52,7 @@ def ds_archive(request, datastore):
             expiry_len = random.randint(MIN_OBJECTS, MAX_OBJECTS)
             for x in range(expiry_len):
                 obj = random_model_obj(collection.model_class)
-                obj.archive_ts = now_as_iso(-10000)
+                obj.archive_ts = None
                 collection.save('longer_name'+str(x), obj)
 
             archive_collections_len[name] = expiry_len
