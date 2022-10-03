@@ -414,8 +414,7 @@ def process_alert_message(counter, datastore, logger, alert_data):
             'score': alert_data['score']
         },
         'alert_id': generate_alert_id(logger, alert_data),
-        'archive_ts': now_as_iso(config.datastore.archive.days_until_archive * 24 * 60 * 60)
-        if config.datastore.archive.days_until_archive else None,
+        'archive_ts': None,
         'metadata': {safe_str(key): value for key, value in alert_data['submission']['metadata'].items()},
         'sid': alert_data['submission']['sid'],
         'ts': a_ts or alert_data['submission']['time'],
