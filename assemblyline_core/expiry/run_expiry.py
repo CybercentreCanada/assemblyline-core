@@ -2,6 +2,7 @@
 from __future__ import annotations
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, Future, as_completed
+from concurrent.futures.process import BrokenProcessPool
 import functools
 from typing import Callable, Optional, Union, TYPE_CHECKING
 import elasticapm
@@ -386,22 +387,27 @@ class ExpiryManager(ServerBase):
 
     def try_run(self):
         while self.running:
-            expiry_maxed_out = False
-            archive_maxed_out = False
+            try:
+                expiry_maxed_out = False
+                archive_maxed_out = False
 
-            with ThreadPoolExecutor(self.config.core.expiry.workers) as pool:
-                try:
-                    expiry_maxed_out = self.run_expiry_once(pool)
-                except Exception as e:
-                    self.log.exception(str(e))
+                with ThreadPoolExecutor(self.config.core.expiry.workers) as pool:
+                    try:
+                        expiry_maxed_out = self.run_expiry_once(pool)
+                    except Exception as e:
+                        self.log.exception(str(e))
 
-                try:
-                    archive_maxed_out = self.run_archive_once(pool)
-                except Exception as e:
-                    self.log.exception(str(e))
+                    try:
+                        archive_maxed_out = self.run_archive_once(pool)
+                    except Exception as e:
+                        self.log.exception(str(e))
 
-            if not expiry_maxed_out and not archive_maxed_out:
-                self.sleep_with_heartbeat(self.config.core.expiry.sleep_time)
+                if not expiry_maxed_out and not archive_maxed_out:
+                    self.sleep_with_heartbeat(self.config.core.expiry.sleep_time)
+
+            except BrokenProcessPool:
+                self.log.error("File delete worker pool crashed.")
+                self.file_delete_worker = ProcessPoolExecutor(self.config.core.expiry.delete_workers)
 
 
 if __name__ == "__main__":

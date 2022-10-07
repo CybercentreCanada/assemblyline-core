@@ -12,11 +12,10 @@ import signal
 import sys
 import io
 import os
-from typing import Callable, TYPE_CHECKING
+from typing import Callable, Optional, TYPE_CHECKING
 import typing
 
 from assemblyline.common import forge, log as al_log
-from assemblyline.odm.base import Optional
 from assemblyline.odm.models.service import Service
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
@@ -43,8 +42,8 @@ class ServerBase(threading.Thread):
     makes a blocking call that would normally stop this.
     """
 
-    def __init__(self, component_name: str, logger: logging.Logger = None,
-                 shutdown_timeout: float = None, config=None):
+    def __init__(self, component_name: str, logger: Optional[logging.Logger] = None,
+                 shutdown_timeout: Optional[float] = None, config=None):
         super().__init__(name=component_name)
         al_log.init_logging(component_name)
         self.config: Config = config or forge.get_config()
@@ -141,7 +140,7 @@ class ServerBase(threading.Thread):
     def try_run(self):
         pass
 
-    def heartbeat(self, timestamp: int = None):
+    def heartbeat(self, timestamp: Optional[int] = None):
         """Touch a special file on disk to indicate this service is responsive.
 
         This should be called in the main processing loop of a component, calling it in
@@ -198,8 +197,8 @@ def get_service_stage_hash(redis) -> Hash[int]:
 class CoreBase(ServerBase):
     """Expands the basic server setup in server base with some initialization steps most core servers take."""
 
-    def __init__(self, component_name: str, logger: logging.Logger = None,
-                 shutdown_timeout: float = None, config=None, datastore=None,
+    def __init__(self, component_name: str, logger: Optional[logging.Logger] = None,
+                 shutdown_timeout: Optional[float] = None, config=None, datastore=None,
                  redis=None, redis_persist=None):
         super().__init__(component_name=component_name, logger=logger, shutdown_timeout=shutdown_timeout, config=config)
         self.datastore: AssemblylineDatastore = datastore or forge.get_datastore(self.config)
@@ -247,8 +246,8 @@ class CoreBase(ServerBase):
 
 
 class ThreadedCoreBase(CoreBase):
-    def __init__(self, component_name: str, logger: typing.Optional[logging.Logger] = None,
-                 shutdown_timeout: float = None, config=None, datastore=None,
+    def __init__(self, component_name: str, logger: Optional[logging.Logger] = None,
+                 shutdown_timeout: Optional[float] = None, config=None, datastore=None,
                  redis=None, redis_persist=None):
         super().__init__(component_name=component_name, logger=logger, shutdown_timeout=shutdown_timeout,
                          config=config, datastore=datastore, redis=redis, redis_persist=redis_persist)
