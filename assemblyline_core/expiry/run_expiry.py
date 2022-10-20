@@ -96,10 +96,6 @@ class ExpiryManager(ServerBase):
     def expiry_size(self):
         return self.config.core.expiry.delete_batch_size
 
-    @property
-    def archive_size(self):
-        return self.config.core.expiry.archive_batch_size
-
     def stop(self):
         if self.counter:
             self.counter.stop()
@@ -249,7 +245,6 @@ class ExpiryManager(ServerBase):
         if isinstance(start, (float, int)):
             start = epoch_to_iso(start)
         query = f'expiry_ts:[{start} TO {epoch_to_iso(end)}}}'
-
         return container.search(query, rows=0, as_obj=False, track_total_hits=self.expiry_size)['total']
 
     def try_run(self):
