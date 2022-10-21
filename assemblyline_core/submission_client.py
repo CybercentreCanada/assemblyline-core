@@ -140,10 +140,15 @@ class SubmissionClient:
         max_size = self.config.submission.max_file_size
 
         for local_file in local_files:
+            if isinstance(local_file, tuple):
+                fname, local_file = local_file
+            else:
+                fname = safe_str(os.path.basename(local_file))
+
             # Upload/download, extract, analyze files
             original_classification = str(submission_obj.params.classification)
             file_hash, size, new_metadata = self._ready_file(local_file, expiry, original_classification)
-            new_name = new_metadata.pop('name', safe_str(os.path.basename(local_file)))
+            new_name = new_metadata.pop('name', fname)
             meta_classification = new_metadata.pop('classification', original_classification)
             if meta_classification != original_classification:
                 try:
