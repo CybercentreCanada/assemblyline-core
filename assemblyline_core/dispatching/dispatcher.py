@@ -16,11 +16,9 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.dict_utils import flatten
 from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
-from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.common.postprocess import ActionWorker
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
@@ -57,6 +55,7 @@ AL_SHUTDOWN_QUIT = 60
 FINALIZING_WINDOW = max(AL_SHUTDOWN_GRACE - AL_SHUTDOWN_QUIT, 0)
 RESULT_BATCH_SIZE = int(os.environ.get('DISPATCHER_RESULT_BATCH_SIZE', '50'))
 ERROR_BATCH_SIZE = int(os.environ.get('DISPATCHER_ERROR_BATCH_SIZE', '50'))
+DYNAMIC_ANALYSIS_CATEGORY = 'Dynamic Analysis'
 
 
 class Action(enum.IntEnum):
@@ -105,20 +104,25 @@ class SubmissionTask:
     def __init__(self, submission, completed_queue, scheduler, results=None,
                  file_infos=None, file_tree=None, errors: Optional[Iterable[str]] = None):
         self.submission: Submission = Submission(submission)
+
+        self.completed_queue = None
         if completed_queue:
             self.completed_queue = str(completed_queue)
-        else:
-            self.completed_queue = None
 
         self.file_info: dict[str, Optional[FileInfo]] = {}
         self.file_names: dict[str, str] = {}
         self.file_schedules: dict[str, list[dict[str, Service]]] = {}
-        self.file_tags = defaultdict(dict)
+        self.file_tags: dict[str, dict] = defaultdict(dict)
         self.file_depth: dict[str, int] = {}
-        self.file_temporary_data = defaultdict(dict)
-        self.extra_errors = []
+        self.file_temporary_data: dict[str, dict] = defaultdict(dict)
+        self.extra_errors: list[str] = []
         self.active_files: set[str] = set()
-        self.dropped_files = set()
+        self.dropped_files: set[str] = set()
+
+        # mapping from file hash to a set of services that shouldn't be run on
+        # any children (recursively) of that file
+        self._forbidden_services: dict[str, set[str]] = {}
+        self._parent_map: dict[str, set[str]] = {}
 
         self.service_results: dict[tuple[str, str], ResultSummary] = {}
         self.service_errors: dict[tuple[str, str], str] = {}
@@ -140,12 +144,25 @@ class SubmissionTask:
 
         if results is not None:
             rescan = scheduler.expand_categories(self.submission.params.services.rescan)
+
+            # Replay the process of routing files for dispatcher internal state.
+            for k, result in results.values():
+                sha256, service, _ = k.split('.', 2)
+                service = scheduler.services.get(service)
+                if not service:
+                    continue
+                if service.category == DYNAMIC_ANALYSIS_CATEGORY:
+                    self.forbid_for_children(sha256, service.name)
+
+            # Replay the process of receiving results for dispatcher internal state
             for k, result in results.items():
                 sha256, service, _ = k.split('.', 2)
                 if service not in rescan:
+                    children = [r['sha256'] for r in result['response']['extracted']]
+                    self.register_children(sha256, children)
                     self.service_results[(sha256, service)] = ResultSummary(
                         key=k, drop=result['drop_file'], score=result['result']['score'],
-                        children=[r['sha256'] for r in result['response']['extracted']])
+                        children=children)
 
                 tags = Result(result).scored_tag_dict()
                 for key in tags.keys():
@@ -163,6 +180,48 @@ class SubmissionTask:
     @property
     def sid(self):
         return self.submission.sid
+
+    def forbid_for_children(self, sha256: str, service_name: str):
+        """Mark that children of a given file should not be routed to a service."""
+        try:
+            self._forbidden_services[sha256].add(service_name)
+        except KeyError:
+            self._forbidden_services[sha256] = {service_name}
+
+    def register_children(self, parent: str, children: list[str]):
+        """
+        Note for the purposes of dynamic recursion prevention which
+        files extracted other files.
+        """
+        for child in children:
+            try:
+                self._parent_map[child].add(parent)
+            except KeyError:
+                self._parent_map[child] = {parent}
+
+    def all_ancestors(self, sha256: str) -> list[str]:
+        visited = set()
+        to_visit = [sha256]
+        while len(to_visit) > 0:
+            current = to_visit.pop()
+            for parent in self._parent_map.get(current, []):
+                if parent not in visited:
+                    visited.add(parent)
+                    to_visit.append(parent)
+        return list(visited)
+
+    def find_recursion_excluded_services(self, sha256: str) -> list[str]:
+        """
+        Return a list of services that should be excluded for the given file.
+
+        Note that this is computed dynamically from the parent map every time it is
+        called. This is to account for out of order result collection in unusual
+        circumstances like replay.
+        """
+        return list(set().union(*[
+            self._forbidden_services.get(parent, set())
+            for parent in self.all_ancestors(sha256)
+        ]))
 
 
 DISPATCH_TASK_ASSIGNMENT = 'dispatcher-tasks-assigned-to-'
@@ -505,7 +564,14 @@ class Dispatcher(ThreadedCoreBase):
                         size=filestore_info.size,
                         type=filestore_info.type,
                     ))
-                    task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type, file_depth)
+
+                    forbidden_services = None
+                    if not submission.params.ignore_dynamic_recursion_prevention:
+                        forbidden_services = task.find_recursion_excluded_services(sha256)
+
+                    task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
+                                                                                file_depth, forbidden_services)
+
         file_info = task.file_info[sha256]
         schedule: list = list(task.file_schedules[sha256])
         deep_scan, ignore_filtering = submission.params.deep_scan, submission.params.ignore_filtering
@@ -572,7 +638,7 @@ class Dispatcher(ThreadedCoreBase):
                     # Load the list of tags we will pass
                     tags = []
                     if service.uses_tags or service.uses_tag_scores:
-                        tags = task.file_tags.get(sha256, {}).values()
+                        tags = list(task.file_tags.get(sha256, {}).values())
 
                     # Load the temp submission data we will pass
                     temp_data = {}
@@ -587,6 +653,10 @@ class Dispatcher(ThreadedCoreBase):
                     tag_fields = ['type', 'value', 'short_type']
                     if service.uses_tag_scores:
                         tag_fields.append('score')
+
+                    # Mark this routing for the purposes of dynamic recursion prevention
+                    if service.category == DYNAMIC_ANALYSIS_CATEGORY:
+                        task.forbid_for_children(sha256, service_name)
 
                     # Build the actual service dispatch message
                     config = self.build_service_config(service, submission)
@@ -1042,12 +1112,6 @@ class Dispatcher(ThreadedCoreBase):
             self.log.warning(f"[{sid}/{sha256}] {service_name} returned result for file that wasn't requested.")
             return
 
-        # Check if the service is a candidate for dynamic recursion prevention
-        if not submission.params.ignore_dynamic_recursion_prevention:
-            service_info = self.scheduler.services.get(service_name, None)
-            if service_info and service_info.category == "Dynamic Analysis":
-                submission.params.services.runtime_excluded.append(service_name)
-
         # Account for the possibility of cache hits or services that aren't updated (tagged as compatible but not)
         if isinstance(tags, list):
             self.log.warning("Deprecation: Old format of tags found. "
@@ -1075,6 +1139,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Record the result as a summary
         task.service_results[(sha256, service_name)] = summary
+        task.register_children(sha256, summary.children)
 
         # Set the depth of all extracted files, even if we won't be processing them
         depth_limit = self.config.submission.max_extraction_depth

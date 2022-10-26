@@ -109,9 +109,6 @@ class SubmissionClient:
         if submission_obj.params.ttl:
             submission_obj.expiry_ts = epoch_to_iso(now() + submission_obj.params.ttl * 24 * 60 * 60)
 
-        # Clearing runtime_excluded on initial submit or resubmit
-        submission_obj.params.services.runtime_excluded = []
-
         # Save the submission
         self.datastore.submission.save(submission_obj.sid, submission_obj)
 
@@ -169,9 +166,6 @@ class SubmissionClient:
                 'size': size,
                 'sha256': file_hash,
             }))
-
-        # Clearing runtime_excluded on initial submit or resubmit
-        submission_obj.params.services.runtime_excluded = []
 
         # We should now have all the information we need to construct a submission object
         sub = Submission(dict(
