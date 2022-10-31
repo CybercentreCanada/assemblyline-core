@@ -100,7 +100,7 @@ def test_worker(config: Config, redis_connection):
 
             # Get a message from for the ingested file
             ingest_queue = NamedQueue("m-ingest", redis_connection)
-            ingested = ingest_queue.pop(timeout=5)
+            ingested = ingest_queue.pop(timeout=20)
             assert ingested is not None
             assert ingested['files'][0]['sha256'] == sha256
             assert ingest_queue.length() == 0
