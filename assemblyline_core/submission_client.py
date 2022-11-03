@@ -35,6 +35,7 @@ from assemblyline.odm.messages.submission import Submission as SubmissionObject
 from assemblyline.odm.models.file import File as FileInfo
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import File, Submission
+from assemblyline.odm.models.config import Config
 from assemblyline_core.dispatching.client import DispatchClient
 
 Classification = forge.get_classification()
@@ -59,10 +60,9 @@ class SubmissionClient:
     def __init__(self, datastore: AssemblylineDatastore = None, filestore: FileStore = None,
                  config=None, redis=None, identify=None):
         self.log = logging.getLogger('assemblyline.submission_client')
-        self.config = config or forge.CachedObject(forge.get_config)
+        self.config: Config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
         self.filestore = filestore or forge.get_filestore(self.config)
-        self.redis = redis
         if identify:
             self.cleanup = False
         else:
@@ -240,7 +240,7 @@ class SubmissionClient:
                 local_path = extracted_path
 
             self.datastore.save_or_freshen_file(fileinfo['sha256'], fileinfo, expiry,
-                                                al_meta['classification'], redis=self.redis)
+                                                al_meta['classification'])
             self.filestore.upload(local_path, fileinfo['sha256'])
             return fileinfo['sha256'], fileinfo['size'], al_meta
 
