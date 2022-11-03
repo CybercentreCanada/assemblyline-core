@@ -22,7 +22,7 @@ from assemblyline.common.classification import InvalidClassification
 import elasticapm
 import logging
 import os
-from typing import List, Tuple, Dict
+from typing import List, Optional, Tuple, Dict
 
 from assemblyline.common import forge
 from assemblyline.common.codec import decode_file
@@ -122,7 +122,8 @@ class SubmissionClient:
         return submission
 
     @elasticapm.capture_span(span_type='submission_client')
-    def submit(self, submission_obj: SubmissionObject, local_files: List = None, completed_queue=None):
+    def submit(self, submission_obj: SubmissionObject, local_files: Optional[List] = None,
+               completed_queue: Optional[str] = None, expiry: Optional[str] = None):
         """Submit several files in a single submission.
 
         After this method runs, there should be no local copies of the file left.
@@ -133,10 +134,17 @@ class SubmissionClient:
         if len(submission_obj.files) == 0 and len(local_files) == 0:
             raise SubmissionException("No files found to submit...")
 
-        if submission_obj.params.ttl:
-            expiry = epoch_to_iso(submission_obj.time.timestamp() + submission_obj.params.ttl * 24 * 60 * 60)
-        else:
-            expiry = None
+        # Figure out the expiry for the submission if none was provided
+        if expiry is None:
+            if submission_obj.params.ttl:
+                expiry = epoch_to_iso(submission_obj.time.timestamp() + submission_obj.params.ttl * 24 * 60 * 60)
+
+        # Enforce the max_dtl
+        if self.config.submission.max_dtl > 0:
+            max_expiry = now_as_iso(self.config.submission.max_dtl)
+            if not expiry or expiry > max_expiry:
+                expiry = max_expiry
+
         max_size = self.config.submission.max_file_size
 
         for local_file in local_files:
