@@ -22,7 +22,7 @@ from assemblyline.common.classification import InvalidClassification
 import elasticapm
 import logging
 import os
-from typing import List, Tuple, Dict
+from typing import List, Optional, Tuple, Dict
 
 from assemblyline.common import forge
 from assemblyline.common.codec import decode_file
@@ -35,6 +35,7 @@ from assemblyline.odm.messages.submission import Submission as SubmissionObject
 from assemblyline.odm.models.file import File as FileInfo
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import File, Submission
+from assemblyline.odm.models.config import Config
 from assemblyline_core.dispatching.client import DispatchClient
 
 Classification = forge.get_classification()
@@ -59,10 +60,9 @@ class SubmissionClient:
     def __init__(self, datastore: AssemblylineDatastore = None, filestore: FileStore = None,
                  config=None, redis=None, identify=None):
         self.log = logging.getLogger('assemblyline.submission_client')
-        self.config = config or forge.CachedObject(forge.get_config)
+        self.config: Config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
         self.filestore = filestore or forge.get_filestore(self.config)
-        self.redis = redis
         if identify:
             self.cleanup = False
         else:
@@ -119,7 +119,8 @@ class SubmissionClient:
         return submission
 
     @elasticapm.capture_span(span_type='submission_client')
-    def submit(self, submission_obj: SubmissionObject, local_files: List = None, completed_queue=None):
+    def submit(self, submission_obj: SubmissionObject, local_files: Optional[List] = None,
+               completed_queue: Optional[str] = None, expiry: Optional[str] = None):
         """Submit several files in a single submission.
 
         After this method runs, there should be no local copies of the file left.
@@ -130,10 +131,17 @@ class SubmissionClient:
         if len(submission_obj.files) == 0 and len(local_files) == 0:
             raise SubmissionException("No files found to submit...")
 
-        if submission_obj.params.ttl:
-            expiry = epoch_to_iso(submission_obj.time.timestamp() + submission_obj.params.ttl * 24 * 60 * 60)
-        else:
-            expiry = None
+        # Figure out the expiry for the submission if none was provided
+        if expiry is None:
+            if submission_obj.params.ttl:
+                expiry = epoch_to_iso(submission_obj.time.timestamp() + submission_obj.params.ttl * 24 * 60 * 60)
+
+        # Enforce the max_dtl
+        if self.config.submission.max_dtl > 0:
+            max_expiry = now_as_iso(self.config.submission.max_dtl)
+            if not expiry or expiry > max_expiry:
+                expiry = max_expiry
+
         max_size = self.config.submission.max_file_size
 
         for local_file in local_files:
@@ -226,7 +234,7 @@ class SubmissionClient:
                 local_path = extracted_path
 
             self.datastore.save_or_freshen_file(fileinfo['sha256'], fileinfo, expiry,
-                                                al_meta['classification'], redis=self.redis)
+                                                al_meta['classification'])
             self.filestore.upload(local_path, fileinfo['sha256'])
             return fileinfo['sha256'], fileinfo['size'], al_meta
 
