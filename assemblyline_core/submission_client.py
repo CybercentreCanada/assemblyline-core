@@ -39,6 +39,7 @@ from assemblyline.odm.models.config import Config
 from assemblyline_core.dispatching.client import DispatchClient
 
 Classification = forge.get_classification()
+SECONDS_PER_DAY = 24 * 60 * 60
 
 
 def assert_valid_sha256(sha256):
@@ -107,7 +108,7 @@ class SubmissionClient:
 
         # Set the new expiry
         if submission_obj.params.ttl:
-            submission_obj.expiry_ts = epoch_to_iso(now() + submission_obj.params.ttl * 24 * 60 * 60)
+            submission_obj.expiry_ts = epoch_to_iso(now() + submission_obj.params.ttl * SECONDS_PER_DAY)
 
         # Clearing runtime_excluded on initial submit or resubmit
         submission_obj.params.services.runtime_excluded = []
@@ -137,11 +138,11 @@ class SubmissionClient:
         # Figure out the expiry for the submission if none was provided
         if expiry is None:
             if submission_obj.params.ttl:
-                expiry = epoch_to_iso(submission_obj.time.timestamp() + submission_obj.params.ttl * 24 * 60 * 60)
+                expiry = epoch_to_iso(submission_obj.time.timestamp() + submission_obj.params.ttl * SECONDS_PER_DAY)
 
         # Enforce the max_dtl
         if self.config.submission.max_dtl > 0:
-            max_expiry = now_as_iso(self.config.submission.max_dtl)
+            max_expiry = now_as_iso(self.config.submission.max_dtl * SECONDS_PER_DAY)
             if not expiry or expiry > max_expiry:
                 expiry = max_expiry
 
