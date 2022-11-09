@@ -16,11 +16,9 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.dict_utils import flatten
 from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
-from assemblyline.common.tagging import tag_dict_to_list
 from assemblyline.common.postprocess import ActionWorker
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
@@ -113,12 +111,12 @@ class SubmissionTask:
         self.file_info: dict[str, Optional[FileInfo]] = {}
         self.file_names: dict[str, str] = {}
         self.file_schedules: dict[str, list[dict[str, Service]]] = {}
-        self.file_tags = defaultdict(dict)
+        self.file_tags: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         self.file_depth: dict[str, int] = {}
         self.file_temporary_data = defaultdict(dict)
-        self.extra_errors = []
+        self.extra_errors: list[str] = []
         self.active_files: set[str] = set()
-        self.dropped_files = set()
+        self.dropped_files: set[str] = set()
 
         self.service_results: dict[tuple[str, str], ResultSummary] = {}
         self.service_errors: dict[tuple[str, str], str] = {}
@@ -572,7 +570,7 @@ class Dispatcher(ThreadedCoreBase):
                     # Load the list of tags we will pass
                     tags = []
                     if service.uses_tags or service.uses_tag_scores:
-                        tags = task.file_tags.get(sha256, {}).values()
+                        tags = list(task.file_tags.get(sha256, {}).values())
 
                     # Load the temp submission data we will pass
                     temp_data = {}
@@ -835,12 +833,14 @@ class Dispatcher(ThreadedCoreBase):
         for w in watcher_list.members():
             NamedQueue(w).push(WatchQueueMessage({'status': 'STOP'}).as_primitives())
 
-        # Send the submission for alerting or resubmission
+        # Pull the tags keys and values into a searchable form
         tags = [
-            _t
+            {'value': _t['value'], 'type': _t['type']}
             for file_tags in task.file_tags.values()
-            for _t in file_tags
+            for _t in file_tags.values()
         ]
+
+        # Send the submission for alerting or resubmission
         self.postprocess_worker.process_submission(submission, tags)
 
         # Clear the timeout watcher
