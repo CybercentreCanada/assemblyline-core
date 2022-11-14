@@ -119,7 +119,7 @@ class DispatchClient:
             completed_queue=completed_queue,
         ))
 
-    def dispatch_submission(self, submission: Submission, completed_queue: str = None):
+    def dispatch_submission(self, submission: Submission, completed_queue: Optional[str] = None):
         """Insert a submission into the dispatching system.
 
         Note:

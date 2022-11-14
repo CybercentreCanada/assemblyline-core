@@ -22,7 +22,7 @@ from assemblyline.common.classification import InvalidClassification
 import elasticapm
 import logging
 import os
-from typing import List, Tuple, Dict
+from typing import List, Optional, Tuple, Dict
 
 from assemblyline.common import forge
 from assemblyline.common.codec import decode_file
@@ -35,9 +35,11 @@ from assemblyline.odm.messages.submission import Submission as SubmissionObject
 from assemblyline.odm.models.file import File as FileInfo
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import File, Submission
+from assemblyline.odm.models.config import Config
 from assemblyline_core.dispatching.client import DispatchClient
 
 Classification = forge.get_classification()
+SECONDS_PER_DAY = 24 * 60 * 60
 
 
 def assert_valid_sha256(sha256):
@@ -59,10 +61,9 @@ class SubmissionClient:
     def __init__(self, datastore: AssemblylineDatastore = None, filestore: FileStore = None,
                  config=None, redis=None, identify=None):
         self.log = logging.getLogger('assemblyline.submission_client')
-        self.config = config or forge.CachedObject(forge.get_config)
+        self.config: Config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
         self.filestore = filestore or forge.get_filestore(self.config)
-        self.redis = redis
         if identify:
             self.cleanup = False
         else:
@@ -107,10 +108,7 @@ class SubmissionClient:
 
         # Set the new expiry
         if submission_obj.params.ttl:
-            submission_obj.expiry_ts = epoch_to_iso(now() + submission_obj.params.ttl * 24 * 60 * 60)
-
-        # Clearing runtime_excluded on initial submit or resubmit
-        submission_obj.params.services.runtime_excluded = []
+            submission_obj.expiry_ts = epoch_to_iso(now() + submission_obj.params.ttl * SECONDS_PER_DAY)
 
         # Save the submission
         self.datastore.submission.save(submission_obj.sid, submission_obj)
@@ -122,7 +120,8 @@ class SubmissionClient:
         return submission
 
     @elasticapm.capture_span(span_type='submission_client')
-    def submit(self, submission_obj: SubmissionObject, local_files: List = None, completed_queue=None):
+    def submit(self, submission_obj: SubmissionObject, local_files: Optional[List] = None,
+               completed_queue: Optional[str] = None, expiry: Optional[str] = None):
         """Submit several files in a single submission.
 
         After this method runs, there should be no local copies of the file left.
@@ -133,17 +132,29 @@ class SubmissionClient:
         if len(submission_obj.files) == 0 and len(local_files) == 0:
             raise SubmissionException("No files found to submit...")
 
-        if submission_obj.params.ttl:
-            expiry = epoch_to_iso(submission_obj.time.timestamp() + submission_obj.params.ttl * 24 * 60 * 60)
-        else:
-            expiry = None
+        # Figure out the expiry for the submission if none was provided
+        if expiry is None:
+            if submission_obj.params.ttl:
+                expiry = epoch_to_iso(submission_obj.time.timestamp() + submission_obj.params.ttl * SECONDS_PER_DAY)
+
+        # Enforce the max_dtl
+        if self.config.submission.max_dtl > 0:
+            max_expiry = now_as_iso(self.config.submission.max_dtl * SECONDS_PER_DAY)
+            if not expiry or expiry > max_expiry:
+                expiry = max_expiry
+
         max_size = self.config.submission.max_file_size
 
         for local_file in local_files:
+            if isinstance(local_file, tuple):
+                fname, local_file = local_file
+            else:
+                fname = safe_str(os.path.basename(local_file))
+
             # Upload/download, extract, analyze files
             original_classification = str(submission_obj.params.classification)
             file_hash, size, new_metadata = self._ready_file(local_file, expiry, original_classification)
-            new_name = new_metadata.pop('name', safe_str(os.path.basename(local_file)))
+            new_name = new_metadata.pop('name', fname)
             meta_classification = new_metadata.pop('classification', original_classification)
             if meta_classification != original_classification:
                 try:
@@ -169,9 +180,6 @@ class SubmissionClient:
                 'size': size,
                 'sha256': file_hash,
             }))
-
-        # Clearing runtime_excluded on initial submit or resubmit
-        submission_obj.params.services.runtime_excluded = []
 
         # We should now have all the information we need to construct a submission object
         sub = Submission(dict(
@@ -227,7 +235,7 @@ class SubmissionClient:
                 local_path = extracted_path
 
             self.datastore.save_or_freshen_file(fileinfo['sha256'], fileinfo, expiry,
-                                                al_meta['classification'], redis=self.redis)
+                                                al_meta['classification'])
             self.filestore.upload(local_path, fileinfo['sha256'])
             return fileinfo['sha256'], fileinfo['size'], al_meta
 
