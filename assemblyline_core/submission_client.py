@@ -27,7 +27,7 @@ from typing import List, Optional, Tuple, Dict
 from assemblyline.common import forge
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
-from assemblyline.common.isotime import epoch_to_iso, now
+from assemblyline.common.isotime import epoch_to_iso, now, now_as_iso
 from assemblyline.common.str_utils import safe_str
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.filestore import FileStore
