@@ -209,7 +209,7 @@ class HeartbeatFormatter(object):
             except Exception:
                 self.log.exception("An exception occurred while generating ExpiryMessage")
 
-        elif m_type == "archive":
+        elif m_type == "archiver":
             try:
                 msg = {
                     "sender": self.sender,
