@@ -5,7 +5,7 @@ import tempfile
 
 from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
-from assemblyline.odm.messages.alerter_heartbeat import Metrics
+from assemblyline.odm.messages.archive_heartbeat import Metrics
 from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
@@ -62,7 +62,8 @@ class Archiver(ServerBase):
             return
         else:
             try:
-                archive_type, submission_id = message
+                archive_type, type_id, delete_after = message
+                self.counter.increment('received')
             except Exception:
                 self.log.error(f"Invalid message received: {message}")
                 return
@@ -71,61 +72,78 @@ class Archiver(ServerBase):
         if self.apm_client:
             self.apm_client.begin_transaction('Process archive message')
 
-        self.counter.increment('received')
         try:
-            # Load submission
-            submission: Submission = self.datastore.submission.get_from_archive(submission_id)
-            if not submission:
-                submission: Submission = self.datastore.submission.get_if_exists(submission_id, archive_access=False)
+            if archive_type == "submission":
+                self.counter.increment('submission')
+                # Load submission
+                submission: Submission = self.datastore.submission.get_from_archive(type_id)
                 if not submission:
-                    raise SubmissionNotFound(submission_id)
-                # TODO:
-                #    Call / wait for webhook
-                #    Save it to the archive with extra metadata
+                    submission: Submission = self.datastore.submission.get_if_exists(
+                        type_id, archive_access=False)
+                    if not submission:
+                        raise SubmissionNotFound(type_id)
+                    # TODO:
+                    #    Call / wait for webhook
+                    #    Save it to the archive with extra metadata
 
-                # Reset Expiry
-                submission.expiry_ts = None
-                self.datastore.submission.save_to_archive(submission_id, submission, delete_after=False)
+                    # Reset Expiry
+                    submission.expiry_ts = None
+                    self.datastore.submission.save_to_archive(type_id, submission, delete_after=delete_after)
+                elif delete_after:
+                    self.datastore.submission.delete(type_id, archive_access=False)
 
-            # Gather list of files and archives them
-            files = {f.sha256 for f in submission.files}
-            files.update([r[:64] for r in submission.results])
-            for sha256 in files:
-                self.datastore.file.archive(sha256)
-                if self.filestore != self.archivestore:
-                    with tempfile.NamedTemporaryFile() as buf:
-                        self.filestore.download(sha256, buf.name)
-                        try:
-                            if os.path.getsize(buf.name):
-                                self.archivestore.upload(buf.name, sha256)
-                        except Exception as e:
-                            self.log.error(
-                                f"Could not copy file {sha256} from the filestore to the archivestore. ({e})")
+                # Gather list of files and archives them
+                files = {f.sha256 for f in submission.files}
+                files.update([r[:64] for r in submission.results])
+                for sha256 in files:
+                    self.counter.increment('file')
+                    self.datastore.file.archive(sha256, delete_after=delete_after)
+                    if self.filestore != self.archivestore:
+                        with tempfile.NamedTemporaryFile() as buf:
+                            self.filestore.download(sha256, buf.name)
+                            try:
+                                if os.path.getsize(buf.name):
+                                    self.archivestore.upload(buf.name, sha256)
+                            except Exception as e:
+                                self.log.error(
+                                    f"Could not copy file {sha256} from the filestore to the archivestore. ({e})")
 
-            # Archive associated results (Skip emptys)
-            for r in submission.results:
-                if not r.endswith(".e"):
-                    self.datastore.result.archive(r)
+                # Archive associated results (Skip emptys)
+                for r in submission.results:
+                    self.counter.increment('result')
+                    if not r.endswith(".e"):
+                        self.datastore.result.archive(r, delete_after=delete_after)
 
-            # End of process alert transaction (success)
-            if self.apm_client:
-                self.apm_client.end_transaction(archive_type, 'success')
+                # End of process alert transaction (success)
+                self.log.info(f"Successfully archived submission '{type_id}'.")
+                if self.apm_client:
+                    self.apm_client.end_transaction(archive_type, 'success')
 
-            return archive_type
+            # Invalid archiving type
+            else:
+                self.counter.increment('invalid')
+                self.log.warning(f"'{archive_type}' is not a valid archive type.")
+                # End of process alert transaction (success)
+                if self.apm_client:
+                    self.apm_client.end_transaction(archive_type, 'invalid')
+
         except SubmissionNotFound:
-            self.log.warning(f"Could not archive submission '{submission_id}'. It was not found in the system.")
+            self.counter.increment('not_found')
+            self.log.warning(f"Could not archive {archive_type} '{type_id}'. It was not found in the system.")
             # End of process alert transaction (failure)
             if self.apm_client:
                 self.apm_client.end_transaction(archive_type, 'not_found')
 
         except WebhookFailed as wf:
-            self.log.warning(f"Could not archive submission '{submission_id}'. Webhook failed with error: {wf}")
+            self.counter.increment('webhook_failure')
+            self.log.warning(f"Could not archive {archive_type} '{type_id}'. Webhook failed with error: {wf}")
             # End of process alert transaction (failure)
             if self.apm_client:
                 self.apm_client.end_transaction(archive_type, 'webhook_failure')
 
         except Exception:  # pylint: disable=W0703
-            self.log.exception(f'Unhandled exception processing submission ID: {submission_id}')
+            self.counter.increment('exception')
+            self.log.exception(f'Unhandled exception processing {archive_type} ID: {type_id}')
 
             # End of process alert transaction (failure)
             if self.apm_client:
