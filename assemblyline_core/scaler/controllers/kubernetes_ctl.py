@@ -196,6 +196,7 @@ class KubernetesController(ControllerInterface):
         self.volumes: dict[str, V1Volume] = {}
         self.mounts: dict[str, V1VolumeMount] = {}
         self.core_env: dict[str, str] = core_env
+        self.core_secret_env: list[V1EnvVar] = []
         self.core_volumes: dict[str, V1Volume] = {}
         self.core_mounts: dict[str, V1VolumeMount] = {}
         self._external_profiles = weakref.WeakValueDictionary()
@@ -234,6 +235,15 @@ class KubernetesController(ControllerInterface):
         self._deployment_targets: dict[str, int] = {}
         deployment_background = threading.Thread(target=self._loop_forever(self._monitor_deployments), daemon=True)
         deployment_background.start()
+
+        # Get the deployment of this process. Use that information to fill out the secret info
+        deployment = self.apps_api.read_namespaced_deployment(name='scaler', namespace=self.namespace)
+        for env_name in list(self.core_env.keys()):
+            for container in deployment.spec.template.spec.containers:
+                for env_def in container.env:
+                    if env_def.name == env_name:
+                        self.core_secret_env.append(env_def)
+                        self.core_env.pop(env_name)
 
     def stop(self):
         self.running = False
@@ -516,6 +526,7 @@ class KubernetesController(ControllerInterface):
         # If we are launching a core container, include environment variables related to authentication for DBs
         if core_container:
             environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in self.core_env.items()]
+            environment_variables.extend(self.core_secret_env)
             environment_variables.append(V1EnvVar(name='PRIVILEGED', value='true'))
         # Overwrite them with configured special environment variables
         environment_variables += [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]
