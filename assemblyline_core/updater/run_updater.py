@@ -35,7 +35,7 @@ CONTAINER_CHECK_INTERVAL = int(os.getenv("CONTAINER_CHECK_INTERVAL", "300"))
 
 API_TIMEOUT = 90
 NAMESPACE = os.getenv('NAMESPACE', None)
-INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] + \
+INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] + \
     [
     secret.strip("${}")
     for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']]
@@ -176,12 +176,12 @@ class KubernetesUpdateInterface:
 
         # Get the deployment of this process. Use that information to fill out the secret info
         deployment = self.apps_api.read_namespaced_deployment(name='updater', namespace=self.namespace)
-        for env_name in list(INHERITED_VARIABLES.keys()):
+        for env_name in list(INHERITED_VARIABLES):
             for container in deployment.spec.template.spec.containers:
                 for env_def in container.env:
                     if env_def.name == env_name:
                         self.secret_env.append(env_def)
-                        INHERITED_VARIABLES.pop(env_name)
+                        INHERITED_VARIABLES.remove(env_name)
 
     def launch(self, name, docker_config: DockerConfig, mounts, env, blocking: bool = True):
         name = (self.prefix + 'update-' + name.lower()).replace('_', '-')
