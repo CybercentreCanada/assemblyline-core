@@ -171,6 +171,16 @@ class KubernetesUpdateInterface:
         self.priority_class = priority_class
         self.extra_labels = extra_labels
         self.log_level = log_level
+        self.secret_env = []
+
+        # Get the deployment of this process. Use that information to fill out the secret info
+        deployment = self.apps_api.read_namespaced_deployment(name='updater', namespace=self.namespace)
+        for env_name in list(INHERITED_VARIABLES.keys()):
+            for container in deployment.spec.template.spec.containers:
+                for env_def in container.env:
+                    if env_def.name == env_name:
+                        self.secret_env.append(env_def)
+                        INHERITED_VARIABLES.pop(env_name)
 
     def launch(self, name, docker_config: DockerConfig, mounts, env, blocking: bool = True):
         name = (self.prefix + 'update-' + name.lower()).replace('_', '-')
@@ -277,6 +287,7 @@ class KubernetesUpdateInterface:
         environment_variables.extend([V1EnvVar(name=k, value=v) for k, v in env.items()])
         environment_variables.extend([V1EnvVar(name=k, value=os.environ[k])
                                       for k in INHERITED_VARIABLES if k in os.environ])
+        environment_variables.extend(self.secret_env)
         environment_variables.append(V1EnvVar(name="LOG_LEVEL", value=self.log_level))
 
         cores = docker_config.cpu_cores
