@@ -6,6 +6,7 @@ from assemblyline.common.forge import get_service_queue
 from assemblyline.odm.messages.scaler_heartbeat import ScalerMessage
 from assemblyline.odm.messages.scaler_status_heartbeat import ScalerStatusMessage
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME, ALERT_RETRY_QUEUE_NAME
+from assemblyline_core.archiver.run_archiver import ARCHIVE_QUEUE_NAME
 from assemblyline_core.dispatching.dispatcher import Dispatcher
 from assemblyline_core.ingester import INGEST_QUEUE_NAME, drop_chance
 from assemblyline.common import forge, metrics
@@ -72,6 +73,7 @@ class HeartbeatFormatter(object):
         self.ingest_complete_queue = NamedQueue(COMPLETE_QUEUE_NAME, self.redis)
         self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.redis_persist)
         self.alert_retry_queue = NamedQueue(ALERT_RETRY_QUEUE_NAME, self.redis_persist)
+        self.archiver_queue = NamedQueue(ARCHIVE_QUEUE_NAME, self.redis_persist)
 
         constants = forge.get_constants(self.config)
         self.c_rng = constants.PRIORITY_RANGES['critical']
@@ -215,7 +217,8 @@ class HeartbeatFormatter(object):
                     "sender": self.sender,
                     "msg": {
                         "instances": instances,
-                        "metrics": m_data
+                        "metrics": m_data,
+                        "queued": self.archiver_queue.length()
                     }
                 }
                 self.status_queue.publish(ArchiveMessage(msg).as_primitives())
