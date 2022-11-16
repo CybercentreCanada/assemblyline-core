@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from assemblyline.datastore.collection import ESCollection
 import elasticapm
 import os
 import tempfile
@@ -88,7 +89,9 @@ class Archiver(ServerBase):
 
                     # Reset Expiry
                     submission.expiry_ts = None
+                    submission.archived = True
                     self.datastore.submission.save_to_archive(type_id, submission, delete_after=delete_after)
+                    self.datastore.submission.update(type_id, [(ESCollection.UPDATE_SET, 'archived', True)])
                 elif delete_after:
                     self.datastore.submission.delete(type_id, archive_access=False)
 
