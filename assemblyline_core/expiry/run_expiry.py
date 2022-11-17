@@ -122,7 +122,7 @@ class ExpiryManager(ServerBase):
                                               filestore_urls=list(self.config.filestore.cache),
                                               file_batch=file_batch)
 
-    def _finish_delete(self, collection: ESCollection, task: Future):
+    def _finish_delete(self, collection: ESCollection, task: Future, expire_only: list[str]):
         # Wait until the worker process finishes deleting files
         file_list: list[str] = []
         while self.running:
@@ -132,6 +132,8 @@ class ExpiryManager(ServerBase):
                 break
             except concurrent.futures.TimeoutError:
                 pass
+
+        file_list.extend(expire_only)
 
         # build a batch delete job for all the removed files
         bulk = collection.get_bulk_plan()
@@ -227,12 +229,12 @@ class ExpiryManager(ServerBase):
                         delete_objects = [k for k, v in archived_files.items() if not v]
                         expire_only = [k for k, v in archived_files.items() if v]
 
-                    delete_and_expire = self.fs_hashmap[collection.name](delete_objects, final_date_string)
+                    delete_tasks = self.fs_hashmap[collection.name](delete_objects, final_date_string)
 
                     # Proceed with deletion, but only after all the scheduled deletes for this
                     self.log.info(f"Scheduled {len(delete_objects)}/{number_to_delete} "
                                   f"files to be removed for: {collection.name}")
-                    pool.submit(self.log_errors(self._finish_delete), collection, delete_and_expire + expire_only)
+                    pool.submit(self.log_errors(self._finish_delete), collection, delete_tasks, expire_only)
 
                 else:
                     # Proceed with deletion
