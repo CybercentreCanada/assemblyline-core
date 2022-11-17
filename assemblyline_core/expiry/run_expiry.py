@@ -69,11 +69,10 @@ class ExpiryManager(ServerBase):
 
         super().__init__('assemblyline.expiry', shutdown_timeout=self.config.core.expiry.sleep_time + 5)
         self.datastore = forge.get_datastore(config=self.config)
-        self.filestore = forge.get_filestore(config=self.config)
-        self.cachestore = FileStore(*self.config.filestore.cache)
         self.expirable_collections: list[ESCollection] = []
         self.counter = MetricsFactory('expiry', Metrics)
         self.file_delete_worker = ProcessPoolExecutor(self.config.core.expiry.delete_workers)
+        self.same_storage = self.config.filestore.storage == self.config.filestore.archive
 
         self.fs_hashmap = {
             'file': self.filestore_delete,
@@ -220,12 +219,20 @@ class ExpiryManager(ServerBase):
                     delete_objects: list[str] = []
                     for item in collection.stream_search(delete_query, fl='id', as_obj=False):
                         delete_objects.append(item['id'])
-                    delete_task = self.fs_hashmap[collection.name](delete_objects, final_date_string)
+
+                    # Filter archived documents if archive filestore is the same as the filestore
+                    expire_only = []
+                    if self.same_storage and self.config.datastore.archive.enabled and collection.name == 'file':
+                        archived_files = self.datastore.file.multiexists_in_archive(delete_objects)
+                        delete_objects = [k for k, v in archived_files.items() if not v]
+                        expire_only = [k for k, v in archived_files.items() if v]
+
+                    delete_and_expire = self.fs_hashmap[collection.name](delete_objects, final_date_string)
 
                     # Proceed with deletion, but only after all the scheduled deletes for this
                     self.log.info(f"Scheduled {len(delete_objects)}/{number_to_delete} "
                                   f"files to be removed for: {collection.name}")
-                    pool.submit(self.log_errors(self._finish_delete), collection, delete_task)
+                    pool.submit(self.log_errors(self._finish_delete), collection, delete_and_expire + expire_only)
 
                 else:
                     # Proceed with deletion
