@@ -97,7 +97,7 @@ class Archiver(ServerBase):
 
                 # Gather list of files and archives them
                 files = {f.sha256 for f in submission.files}
-                files.update([r[:64] for r in submission.results])
+                files.update(self.datastore.get_file_list_from_keys(submission.results, supplementary=True))
                 for sha256 in files:
                     self.counter.increment('file')
                     self.datastore.file.archive(sha256, delete_after=delete_after)
@@ -113,8 +113,8 @@ class Archiver(ServerBase):
 
                 # Archive associated results (Skip emptys)
                 for r in submission.results:
-                    self.counter.increment('result')
                     if not r.endswith(".e"):
+                        self.counter.increment('result')
                         self.datastore.result.archive(r, delete_after=delete_after)
 
                 # End of process alert transaction (success)
