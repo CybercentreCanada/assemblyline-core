@@ -142,7 +142,7 @@ class DockerUpdateInterface:
 
 
 class KubernetesUpdateInterface:
-    def __init__(self, prefix, namespace, priority_class, extra_labels, log_level="INFO"):
+    def __init__(self, prefix, namespace, priority_class, extra_labels, log_level="INFO", default_service_account=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -171,6 +171,7 @@ class KubernetesUpdateInterface:
         self.priority_class = priority_class
         self.extra_labels = extra_labels
         self.log_level = log_level
+        self.default_service_account = default_service_account
         self.secret_env = []
 
         # Get the deployment of this process. Use that information to fill out the secret info
@@ -312,6 +313,7 @@ class KubernetesUpdateInterface:
             restart_policy='Never',
             containers=[container],
             priority_class_name=self.priority_class,
+            service_account_name=docker_config.service_account or self.default_service_account
         )
 
         if use_pull_secret:
@@ -403,7 +405,8 @@ class ServiceUpdater(ThreadedCoreBase):
             self.controller = KubernetesUpdateInterface(prefix='alsvc_', namespace=NAMESPACE,
                                                         priority_class='al-core-priority',
                                                         extra_labels=extra_labels,
-                                                        log_level=self.config.logging.log_level)
+                                                        log_level=self.config.logging.log_level,
+                                                        default_service_account=self.config.services.service_account)
         else:
             self.controller = DockerUpdateInterface(log_level=self.config.logging.log_level)
 

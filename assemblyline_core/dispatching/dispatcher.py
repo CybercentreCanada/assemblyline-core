@@ -112,7 +112,7 @@ class SubmissionTask:
         self.file_info: dict[str, Optional[FileInfo]] = {}
         self.file_names: dict[str, str] = {}
         self.file_schedules: dict[str, list[dict[str, Service]]] = {}
-        self.file_tags: dict[str, dict] = defaultdict(dict)
+        self.file_tags: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         self.file_depth: dict[str, int] = {}
         self.file_temporary_data: dict[str, dict] = defaultdict(dict)
         self.extra_errors: list[str] = []
@@ -905,12 +905,14 @@ class Dispatcher(ThreadedCoreBase):
         for w in watcher_list.members():
             NamedQueue(w).push(WatchQueueMessage({'status': 'STOP'}).as_primitives())
 
-        # Send the submission for alerting or resubmission
+        # Pull the tags keys and values into a searchable form
         tags = [
-            _t
+            {'value': _t['value'], 'type': _t['type']}
             for file_tags in task.file_tags.values()
-            for _t in file_tags
+            for _t in file_tags.values()
         ]
+
+        # Send the submission for alerting or resubmission
         self.postprocess_worker.process_submission(submission, tags)
 
         # Clear the timeout watcher

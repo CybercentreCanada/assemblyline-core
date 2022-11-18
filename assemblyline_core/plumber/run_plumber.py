@@ -20,7 +20,7 @@ from assemblyline_core.server_base import CoreBase, ServiceStage
 
 
 class Plumber(CoreBase):
-    def __init__(self, logger=None, shutdown_timeout: float = None, config=None,
+    def __init__(self, logger=None, shutdown_timeout: Optional[float] = None, config=None,
                  redis=None, redis_persist=None, datastore=None, delay=60):
         super().__init__('plumber', logger, shutdown_timeout, config=config, redis=redis,
                          redis_persist=redis_persist, datastore=datastore)
