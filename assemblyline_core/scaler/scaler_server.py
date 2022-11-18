@@ -281,7 +281,8 @@ class ScalerServer(ThreadedCoreBase):
                                                    namespace=NAMESPACE, priority='al-service-priority',
                                                    cpu_reservation=self.config.services.cpu_reservation,
                                                    log_level=self.config.logging.log_level,
-                                                   core_env=core_env)
+                                                   core_env=core_env,
+                                                   default_service_account=self.config.services.service_account)
 
             # Add global configuration for privileged services
             self.controller.add_config_mount(KUBERNETES_AL_CONFIG, config_map=KUBERNETES_AL_CONFIG, key="config",
