@@ -237,9 +237,7 @@ class DispatchClient:
             self.ds.emptyresult.save(result_key, {"expiry_ts": result.expiry_ts})
         else:
             while True:
-                archive_access = self.config.datastore.archive.update_archive and self.config.datastore.archive.enabled
-                old, version = self.ds.result.get_if_exists(
-                    result_key, archive_access=archive_access, version=True)
+                old, version = self.ds.result.get_if_exists(result_key, version=True)
                 if old:
                     if old.expiry_ts and result.expiry_ts:
                         result.expiry_ts = max(result.expiry_ts, old.expiry_ts)

@@ -3,9 +3,11 @@ import pytest
 import random
 import concurrent.futures
 
-from assemblyline_core.expiry.run_expiry import ExpiryManager
 from assemblyline.common.isotime import now_as_iso
+from assemblyline.datastore.collection import Index
 from assemblyline.odm.randomizer import random_model_obj
+
+from assemblyline_core.expiry.run_expiry import ExpiryManager
 
 MAX_OBJECTS = 10
 MIN_OBJECTS = 2
@@ -103,4 +105,4 @@ def test_archive_all(ds_archive):
         collection = getattr(ds_archive, k)
         collection.commit()
         assert collection.search("id:*")['total'] == 0
-        assert collection.search("id:*", use_archive=True)['total'] == v
+        assert collection.search("id:*", index_type=Index.HOT_AND_ARCHIVE)['total'] == v

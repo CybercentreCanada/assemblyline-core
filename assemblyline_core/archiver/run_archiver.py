@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-from assemblyline.datastore.collection import ESCollection
 import elasticapm
 import os
 import tempfile
 
 from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
+from assemblyline.datastore.collection import ESCollection, Index
 from assemblyline.odm.messages.archive_heartbeat import Metrics
 from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes import get_client
@@ -77,10 +77,9 @@ class Archiver(ServerBase):
             if archive_type == "submission":
                 self.counter.increment('submission')
                 # Load submission
-                submission: Submission = self.datastore.submission.get_from_archive(type_id)
+                submission: Submission = self.datastore.submission.get_if_exists(type_id, index_type=Index.ARCHIVE)
                 if not submission:
-                    submission: Submission = self.datastore.submission.get_if_exists(
-                        type_id, archive_access=False)
+                    submission: Submission = self.datastore.submission.get_if_exists(type_id, index_type=Index.HOT)
                     if not submission:
                         raise SubmissionNotFound(type_id)
                     # TODO:
@@ -90,10 +89,14 @@ class Archiver(ServerBase):
                     # Reset Expiry
                     submission.expiry_ts = None
                     submission.archived = True
-                    self.datastore.submission.save_to_archive(type_id, submission, delete_after=delete_after)
-                    self.datastore.submission.update(type_id, [(ESCollection.UPDATE_SET, 'archived', True)])
+                    self.datastore.submission.save(type_id, submission, index_type=Index.ARCHIVE)
+                    if delete_after:
+                        self.datastore.submission.delete(type_id, index_type=Index.HOT)
+                    else:
+                        self.datastore.submission.update(type_id, [(ESCollection.UPDATE_SET, 'archived', True)],
+                                                         index_type=Index.HOT)
                 elif delete_after:
-                    self.datastore.submission.delete(type_id, archive_access=False)
+                    self.datastore.submission.delete(type_id, index_type=Index.HOT)
 
                 # Gather list of files and archives them
                 files = {f.sha256 for f in submission.files}

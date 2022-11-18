@@ -283,9 +283,7 @@ def perform_alert_update(datastore, logger, alert):
         raise ValueError(f"We could not find the alert ID in the alert: {str(alert)}")
 
     while True:
-        old_alert, version = datastore.alert.get_if_exists(
-            alert_id, as_obj=False,
-            archive_access=config.datastore.archive.update_archive and config.datastore.archive.enabled, version=True)
+        old_alert, version = datastore.alert.get_if_exists(alert_id, as_obj=False, version=True)
         if old_alert is None:
             raise AlertMissingError(f"{alert_id} is missing from the alert collection.")
 
