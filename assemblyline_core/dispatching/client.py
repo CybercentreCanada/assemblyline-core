@@ -261,9 +261,12 @@ class DispatchClient:
 
         # Pull out file names if we have them
         file_names = {}
+        dynamic_recursion_bypass = []
         for extracted_data in result.response.extracted:
             if extracted_data.name:
                 file_names[extracted_data.sha256] = extracted_data.name
+            if extracted_data.allow_dynamic_recursion:
+                dynamic_recursion_bypass.append(extracted_data.sha256)
 
         dispatcher = task.metadata['dispatcher__']
         result_queue = self._get_queue_from_cache(DISPATCH_RESULT_QUEUE + dispatcher)
@@ -271,6 +274,7 @@ class DispatchClient:
         result_queue.push({
             # 'service_task': task.as_primitives(),
             # 'result': result.as_primitives(),
+            'dynamic_recursion_bypass': dynamic_recursion_bypass,
             'sid': task.sid,
             'sha256': result.sha256,
             'service_name': task.service_name,
