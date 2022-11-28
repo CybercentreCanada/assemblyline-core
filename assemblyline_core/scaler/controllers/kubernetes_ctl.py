@@ -161,7 +161,8 @@ def parse_cpu(string: str) -> float:
 
 
 class KubernetesController(ControllerInterface):
-    def __init__(self, logger, namespace, prefix, priority, cpu_reservation, labels=None, log_level="INFO", core_env={}):
+    def __init__(self, logger, namespace, prefix, priority, cpu_reservation, labels=None,
+                 log_level="INFO", core_env={}, default_service_account=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
         try:
@@ -196,10 +197,12 @@ class KubernetesController(ControllerInterface):
         self.volumes: dict[str, V1Volume] = {}
         self.mounts: dict[str, V1VolumeMount] = {}
         self.core_env: dict[str, str] = core_env
+        self.core_secret_env: list[V1EnvVar] = []
         self.core_volumes: dict[str, V1Volume] = {}
         self.core_mounts: dict[str, V1VolumeMount] = {}
         self._external_profiles = weakref.WeakValueDictionary()
         self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
+        self.default_service_account: Optional[str] = default_service_account
 
         # A record of previously reported events so that we don't report the same message repeatedly, fill it with
         # existing messages so we don't have a huge dump of duplicates on restart
@@ -234,6 +237,15 @@ class KubernetesController(ControllerInterface):
         self._deployment_targets: dict[str, int] = {}
         deployment_background = threading.Thread(target=self._loop_forever(self._monitor_deployments), daemon=True)
         deployment_background.start()
+
+        # Get the deployment of this process. Use that information to fill out the secret info
+        deployment = self.apps_api.read_namespaced_deployment(name='scaler', namespace=self.namespace)
+        for env_name in list(self.core_env.keys()):
+            for container in deployment.spec.template.spec.containers:
+                for env_def in container.env:
+                    if env_def.name == env_name:
+                        self.core_secret_env.append(env_def)
+                        self.core_env.pop(env_name)
 
     def stop(self):
         self.running = False
@@ -516,6 +528,7 @@ class KubernetesController(ControllerInterface):
         # If we are launching a core container, include environment variables related to authentication for DBs
         if core_container:
             environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in self.core_env.items()]
+            environment_variables.extend(self.core_secret_env)
             environment_variables.append(V1EnvVar(name='PRIVILEGED', value='true'))
         # Overwrite them with configured special environment variables
         environment_variables += [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]
@@ -628,13 +641,19 @@ class KubernetesController(ControllerInterface):
         # Build metadata
         metadata = V1ObjectMeta(name=deployment_name, labels=all_labels, annotations={CHANGE_KEY_NAME: change_key})
 
+        # Figure out which (if any) service account to use
+        service_account = self.default_service_account
+        if docker_config.service_account:
+            service_account = docker_config.service_account
+
         pod = V1PodSpec(
             volumes=all_volumes,
             containers=self._create_containers(service_name, deployment_name, docker_config,
                                                all_mounts, core_container=core_mounts),
             priority_class_name=self.priority,
             termination_grace_period_seconds=shutdown_seconds,
-            security_context=V1PodSecurityContext(fs_group=1000)
+            security_context=V1PodSecurityContext(fs_group=1000),
+            service_account_name=service_account,
         )
 
         if use_pull_secret:

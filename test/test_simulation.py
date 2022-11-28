@@ -134,6 +134,7 @@ class CoreSession:
         self.redis = None
         self.config: Config = config
         self.ingest: Ingester = ingest
+        self.dispatcher: Dispatcher
 
     @property
     def ingest_queue(self):
@@ -251,13 +252,14 @@ def core(request, redis, filestore, config, clean_datastore: AssemblylineDatasto
 
     threads = []
     fields.filestore = filestore
+    fields.dispatcher = Dispatcher(datastore=ds, redis=redis, redis_persist=redis, config=config)
     fields.pre_service = services[0]
     threads: list[ServerBase] = [
         # Start the ingester components
         ingester,
 
         # Start the dispatcher
-        Dispatcher(datastore=ds, redis=redis, redis_persist=redis, config=config),
+        fields.dispatcher,
 
         # Start plumber
         Plumber(datastore=ds, redis=redis, redis_persist=redis, delay=0.5, config=config),
@@ -1003,3 +1005,130 @@ def test_plumber_clearing(core, metrics):
         service_delta = core.ds.service_delta.get('pre')
         service_delta['enabled'] = True
         core.ds.service_delta.save('pre', service_delta)
+
+
+def test_filter(core: CoreSession, metrics):
+    from assemblyline.common.postprocess import SubmissionFilter, PostprocessAction
+    filter_string = "params.submitter: /f.*l/"
+    core.dispatcher.postprocess_worker.actions['test_process'] = \
+        SubmissionFilter(filter_string), PostprocessAction({
+            'enabled': True,
+            'raise_alert': True,
+            'filter': filter_string,
+        })
+
+    try:
+        sha, size = ready_extract(core, ready_body(core)[0])
+
+        core.ingest_queue.push(SubmissionInput(dict(
+            metadata={},
+            params=dict(
+                description="file abc123",
+                services=dict(selected=''),
+                submitter='frengl',
+                groups=['user'],
+                max_extracted=10000,
+                generate_alert=True,
+            ),
+            notification=dict(
+                queue='text-filter',
+                threshold=0
+            ),
+            files=[dict(
+                sha256=sha,
+                size=size,
+                name='abc123'
+            )]
+        )).as_primitives())
+
+        notification_queue = NamedQueue('nq-text-filter', core.redis)
+        task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
+        assert task
+        task = IngestTask(task)
+        sub = core.ds.submission.get(task.submission.sid)
+        assert len(sub.files) == 1
+        assert len(sub.results) == 8
+        assert len(sub.errors) == 0
+
+        metrics.expect('ingester', 'submissions_ingested', 1)
+        metrics.expect('ingester', 'submissions_completed', 1)
+        metrics.expect('dispatcher', 'submissions_completed', 1)
+        metrics.expect('dispatcher', 'files_completed', 2)
+
+        alert = core.dispatcher.postprocess_worker.alert_queue.pop(timeout=5)
+        assert alert['submission']['sid'] == sub['sid']
+
+    finally:
+        core.dispatcher.postprocess_worker.actions.pop('test_process')
+
+
+def test_tag_filter(core: CoreSession, metrics):
+    from assemblyline.common.postprocess import SubmissionFilter, PostprocessAction
+    filter_string = "tags.file.behavior: exist"
+    core.dispatcher.postprocess_worker.actions['test_process'] = \
+        SubmissionFilter(filter_string), PostprocessAction({
+            'enabled': True,
+            'raise_alert': True,
+            'filter': filter_string,
+        })
+
+    try:
+        sha, size = ready_body(core, {
+            'pre': {'result': {'result': {
+                'sections': [
+                    {
+                        'body': 'info',
+                        'body_format': 'TEXT',
+                        'classification': 'U',
+                        'depth': 0,
+                        'tags': {
+                            'file': {
+                                'behavior': ['exist']
+                            }
+                        },
+                        'title_text': 'title'
+                    }
+                ]
+            }}}
+        })
+
+        core.ingest_queue.push(SubmissionInput(dict(
+            metadata={},
+            params=dict(
+                description="file abc123",
+                services=dict(selected=''),
+                submitter='frengl',
+                groups=['user'],
+                max_extracted=10000,
+                generate_alert=True,
+            ),
+            notification=dict(
+                queue='tag-filter',
+                threshold=0
+            ),
+            files=[dict(
+                sha256=sha,
+                size=size,
+                name='abc123'
+            )]
+        )).as_primitives())
+
+        notification_queue = NamedQueue('nq-tag-filter', core.redis)
+        task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
+        assert task
+        task = IngestTask(task)
+        sub = core.ds.submission.get(task.submission.sid)
+        assert len(sub.files) == 1
+        assert len(sub.results) == 4
+        assert len(sub.errors) == 0
+
+        metrics.expect('ingester', 'submissions_ingested', 1)
+        metrics.expect('ingester', 'submissions_completed', 1)
+        metrics.expect('dispatcher', 'submissions_completed', 1)
+        metrics.expect('dispatcher', 'files_completed', 1)
+
+        alert = core.dispatcher.postprocess_worker.alert_queue.pop(timeout=5)
+        assert alert['submission']['sid'] == sub['sid']
+
+    finally:
+        core.dispatcher.postprocess_worker.actions.pop('test_process')

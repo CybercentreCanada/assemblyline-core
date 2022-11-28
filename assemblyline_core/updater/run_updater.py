@@ -35,7 +35,7 @@ CONTAINER_CHECK_INTERVAL = int(os.getenv("CONTAINER_CHECK_INTERVAL", "300"))
 
 API_TIMEOUT = 90
 NAMESPACE = os.getenv('NAMESPACE', None)
-INHERITED_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] + \
+INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] + \
     [
     secret.strip("${}")
     for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']]
@@ -142,7 +142,7 @@ class DockerUpdateInterface:
 
 
 class KubernetesUpdateInterface:
-    def __init__(self, prefix, namespace, priority_class, extra_labels, log_level="INFO"):
+    def __init__(self, prefix, namespace, priority_class, extra_labels, log_level="INFO", default_service_account=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -171,6 +171,17 @@ class KubernetesUpdateInterface:
         self.priority_class = priority_class
         self.extra_labels = extra_labels
         self.log_level = log_level
+        self.default_service_account = default_service_account
+        self.secret_env = []
+
+        # Get the deployment of this process. Use that information to fill out the secret info
+        deployment = self.apps_api.read_namespaced_deployment(name='updater', namespace=self.namespace)
+        for env_name in list(INHERITED_VARIABLES):
+            for container in deployment.spec.template.spec.containers:
+                for env_def in container.env:
+                    if env_def.name == env_name:
+                        self.secret_env.append(env_def)
+                        INHERITED_VARIABLES.remove(env_name)
 
     def launch(self, name, docker_config: DockerConfig, mounts, env, blocking: bool = True):
         name = (self.prefix + 'update-' + name.lower()).replace('_', '-')
@@ -277,6 +288,7 @@ class KubernetesUpdateInterface:
         environment_variables.extend([V1EnvVar(name=k, value=v) for k, v in env.items()])
         environment_variables.extend([V1EnvVar(name=k, value=os.environ[k])
                                       for k in INHERITED_VARIABLES if k in os.environ])
+        environment_variables.extend(self.secret_env)
         environment_variables.append(V1EnvVar(name="LOG_LEVEL", value=self.log_level))
 
         cores = docker_config.cpu_cores
@@ -301,6 +313,7 @@ class KubernetesUpdateInterface:
             restart_policy='Never',
             containers=[container],
             priority_class_name=self.priority_class,
+            service_account_name=docker_config.service_account or self.default_service_account
         )
 
         if use_pull_secret:
@@ -392,7 +405,8 @@ class ServiceUpdater(ThreadedCoreBase):
             self.controller = KubernetesUpdateInterface(prefix='alsvc_', namespace=NAMESPACE,
                                                         priority_class='al-core-priority',
                                                         extra_labels=extra_labels,
-                                                        log_level=self.config.logging.log_level)
+                                                        log_level=self.config.logging.log_level,
+                                                        default_service_account=self.config.services.service_account)
         else:
             self.controller = DockerUpdateInterface(log_level=self.config.logging.log_level)
 
