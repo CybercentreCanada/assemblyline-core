@@ -20,10 +20,6 @@ class SubmissionNotFound(Exception):
     pass
 
 
-class WebhookFailed(Exception):
-    pass
-
-
 class Archiver(ServerBase):
     def __init__(self):
         super().__init__('assemblyline.archiver')
@@ -77,33 +73,21 @@ class Archiver(ServerBase):
             if archive_type == "submission":
                 self.counter.increment('submission')
                 # Load submission
-                submission: Submission = self.datastore.submission.get_if_exists(type_id, index_type=Index.ARCHIVE)
+                submission: Submission = self.datastore.submission.get_if_exists(type_id)
                 if not submission:
-                    submission: Submission = self.datastore.submission.get_if_exists(type_id, index_type=Index.HOT)
-                    if not submission:
-                        raise SubmissionNotFound(type_id)
-                    # TODO:
-                    #    Call / wait for webhook
-                    #    Save it to the archive with extra metadata
+                    raise SubmissionNotFound(type_id)
 
-                    # Reset Expiry
-                    submission.expiry_ts = None
-                    submission.archived = True
-                    self.datastore.submission.save(type_id, submission, index_type=Index.ARCHIVE)
-                    if delete_after:
-                        self.datastore.submission.delete(type_id, index_type=Index.HOT)
-                    else:
-                        self.datastore.submission.update(type_id, [(ESCollection.UPDATE_SET, 'archived', True)],
-                                                         index_type=Index.HOT)
-                elif delete_after:
-                    self.datastore.submission.delete(type_id, index_type=Index.HOT)
+                self.datastore.submission.archive(type_id, delete_after=delete_after)
+                if not delete_after:
+                    self.datastore.submission.update(type_id, [(ESCollection.UPDATE_SET, 'archived', True)],
+                                                     index_type=Index.HOT)
 
                 # Gather list of files and archives them
                 files = {f.sha256 for f in submission.files}
                 files.update(self.datastore.get_file_list_from_keys(submission.results, supplementary=True))
                 for sha256 in files:
                     self.counter.increment('file')
-                    self.datastore.file.archive(sha256, delete_after=delete_after)
+                    self.datastore.file.archive(sha256, delete_after=delete_after, allow_missing=True)
                     if self.filestore != self.archivestore:
                         with tempfile.NamedTemporaryFile() as buf:
                             self.filestore.download(sha256, buf.name)
@@ -118,7 +102,7 @@ class Archiver(ServerBase):
                 for r in submission.results:
                     if not r.endswith(".e"):
                         self.counter.increment('result')
-                        self.datastore.result.archive(r, delete_after=delete_after)
+                        self.datastore.result.archive(r, delete_after=delete_after, allow_missing=True)
 
                 # End of process alert transaction (success)
                 self.log.info(f"Successfully archived submission '{type_id}'.")
@@ -139,13 +123,6 @@ class Archiver(ServerBase):
             # End of process alert transaction (failure)
             if self.apm_client:
                 self.apm_client.end_transaction(archive_type, 'not_found')
-
-        except WebhookFailed as wf:
-            self.counter.increment('webhook_failure')
-            self.log.warning(f"Could not archive {archive_type} '{type_id}'. Webhook failed with error: {wf}")
-            # End of process alert transaction (failure)
-            if self.apm_client:
-                self.apm_client.end_transaction(archive_type, 'webhook_failure')
 
         except Exception:  # pylint: disable=W0703
             self.counter.increment('exception')
