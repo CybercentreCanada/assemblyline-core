@@ -163,9 +163,9 @@ class DispatchClient:
                      timeout: float = 60, blocking=True, low_priority=False) -> Optional[ServiceTask]:
         """Pull work from the service queue for the service in question.
 
-        :param service_version:
         :param worker_id:
         :param service_name: Which service needs work.
+        :param service_version: The version of the service that needs work
         :param timeout: How many seconds to block before returning if blocking is true.
         :param blocking: Whether to wait for jobs to enter the queue, or if false, return immediately
         :return: The job found, and a boolean value indicating if this is the first time this task has
