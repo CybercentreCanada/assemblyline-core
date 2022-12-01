@@ -4,6 +4,7 @@ import os
 import tempfile
 
 from assemblyline.common import forge
+from assemblyline.common.archiving import ARCHIVE_QUEUE_NAME
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.datastore.collection import ESCollection, Index
 from assemblyline.odm.messages.archive_heartbeat import Metrics
@@ -12,8 +13,6 @@ from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from assemblyline_core.server_base import ServerBase
-
-ARCHIVE_QUEUE_NAME = 'm-archive'
 
 
 class SubmissionNotFound(Exception):
