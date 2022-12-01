@@ -118,6 +118,7 @@ class SubmissionTask:
         self.extra_errors: list[str] = []
         self.active_files: set[str] = set()
         self.dropped_files: set[str] = set()
+        self.dynamic_recursion_bypass: set[str] = set()
 
         # mapping from file hash to a set of services that shouldn't be run on
         # any children (recursively) of that file
@@ -566,7 +567,10 @@ class Dispatcher(ThreadedCoreBase):
                     ))
 
                     forbidden_services = None
-                    if not submission.params.ignore_dynamic_recursion_prevention:
+
+                    # If Dynamic Recursion Prevention is in effect and the file is not part of the bypass list,
+                    # Find the list of services this file is forbidden from being sent to.
+                    if not submission.params.ignore_dynamic_recursion_prevention and sha256 not in task.dynamic_recursion_bypass:
                         forbidden_services = task.find_recursion_excluded_services(sha256)
 
                     task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
@@ -1087,10 +1091,14 @@ class Dispatcher(ThreadedCoreBase):
             tags = data['tags']
             temporary_data = data['temporary_data'] or {}
             extracted_names = data['extracted_names']
+            dynamic_recursion_bypass = data.get('dynamic_recursion_bypass', [])
 
         except KeyError as missing:
             self.log.exception(f"Malformed result message, missing key: {missing}")
             return
+
+        # Add SHA256s of files that allowed to run regardless of Dynamic Recursion Prevention
+        task.dynamic_recursion_bypass = task.dynamic_recursion_bypass.union(set(dynamic_recursion_bypass))
 
         # Immediately remove timeout so we don't cancel now
         self.clear_timeout(task, sha256, service_name)

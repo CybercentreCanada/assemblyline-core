@@ -26,6 +26,24 @@ from test_scheduler import dummy_service
 logger = logging.getLogger('assemblyline.test')
 
 
+class DRPScheduler(RealScheduler):
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def build_schedule(self, *args):
+        return [
+            {'extract': ''},
+            {'sandbox': ''},
+        ]
+
+    @property
+    def services(self):
+        return {
+            'extract': dummy_service('extract', 'pre', extra_data=True),
+            'sandbox': dummy_service('sandbox', 'core', 'Dynamic Analysis')
+        }
+
+
 class Scheduler(RealScheduler):
     def __init__(self, *args, **kwargs):
         pass
@@ -246,6 +264,99 @@ def test_dispatch_extracted(clean_redis, clean_datastore):
 
     #
     job = client.request_work('0', 'extract', '0')
+    assert job.fileinfo.sha256 == second_file_hash
+    assert job.filename == 'second-*'
+
+
+@mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
+@mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', DRPScheduler)
+def test_dispatch_extracted_bypass_drp(clean_redis, clean_datastore):
+    # Dynamic Recursion Prevention is to prevent services belonging to the 'Dynamic Analysis' from analyzing the children
+    # of files they've analyzed.
+
+    # The bypass should allow services to specify files to run through Dynamic Analysis regardless of the
+    # Dynamic Recursion Prevention parameter.
+
+    redis = clean_redis
+    ds = clean_datastore
+
+    # def service_queue(name): return get_service_queue(name, redis)
+
+    # Setup the fake datastore
+    file_hash = get_random_hash(64)
+    second_file_hash = get_random_hash(64)
+
+    for fh in [file_hash, second_file_hash]:
+        obj = random_model_obj(models.file.File)
+        obj.sha256 = fh
+        ds.file.save(fh, obj)
+
+    # Inject the fake submission
+    submission = random_model_obj(models.submission.Submission)
+    submission.params.ignore_dynamic_recursion_prevention = False
+    submission.params.services.selected = ['extract', 'sandbox']
+    submission.files = [dict(name='./file', sha256=file_hash)]
+    sid = submission.sid = 'first-submission'
+
+    disp = Dispatcher(ds, redis, redis)
+    disp.running = ToggleTrue()
+    client = DispatchClient(ds, redis, redis)
+    client.dispatcher_data_age = time.time()
+    client.dispatcher_data.append(disp.instance_id)
+
+    # Launch the submission
+    client.dispatch_submission(submission)
+    disp.pull_submissions()
+    disp.service_worker(disp.process_queue_index(sid))
+
+    # 'extract' service extracts a file and yields a result
+    job = client.request_work('0', 'extract', '0')
+    assert job.fileinfo.sha256 == file_hash
+    assert job.filename == './file'
+    new_result: Result = random_minimal_obj(Result)
+    new_result.sha256 = file_hash
+    new_result.response.service_name = 'extract'
+    # This extracted file should be able to bypass Dynamic Recursion Prevention
+    new_result.response.extracted = [dict(sha256=second_file_hash, name='second-*',
+                                          description='abc', classification='U', allow_dynamic_recursion=True)]
+    client.service_finished(sid, 'extract-done', new_result)
+
+    # process the result
+    disp.pull_service_results()
+    disp.service_worker(disp.process_queue_index(sid))
+    disp.service_worker(disp.process_queue_index(sid))
+
+    # Then 'sandbox' service will analyze the same file, give result
+    job = client.request_work('0', 'sandbox', '0')
+    assert job.fileinfo.sha256 == file_hash
+    assert job.filename == './file'
+    new_result: Result = random_minimal_obj(Result)
+    new_result.sha256 = file_hash
+    new_result.response.service_name = 'sandbox'
+    client.service_finished(sid, 'sandbox-done', new_result)
+
+    # process the result
+    disp.pull_service_results()
+    disp.service_worker(disp.process_queue_index(sid))
+    disp.service_worker(disp.process_queue_index(sid))
+
+    # 'extract' service should have a task for the extracted file, give results to move onto next stage
+    job = client.request_work('0', 'extract', '0')
+    assert job.fileinfo.sha256 == second_file_hash
+    assert job.filename == 'second-*'
+    new_result: Result = random_minimal_obj(Result)
+    new_result.sha256 = second_file_hash
+    new_result.response.service_name = 'extract'
+    client.service_finished(sid, 'extract-done', new_result)
+
+    # process the result
+    disp.pull_service_results()
+    disp.service_worker(disp.process_queue_index(sid))
+    disp.service_worker(disp.process_queue_index(sid))
+
+    # 'sandbox' should have a task for the extracted file
+    #disp.dispatch_file(disp.tasks.get(sid), second_file_hash)
+    job = client.request_work('0', 'sandbox', '0')
     assert job.fileinfo.sha256 == second_file_hash
     assert job.filename == 'second-*'
 
