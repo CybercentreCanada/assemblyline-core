@@ -258,7 +258,7 @@ def test_dispatch_extracted(clean_redis, clean_datastore):
     client.service_finished(sid, 'extracted-done', new_result)
 
     # process the result
-    disp.pull_service_results(disp.tasks.get())
+    disp.pull_service_results()
     disp.service_worker(disp.process_queue_index(sid))
     disp.service_worker(disp.process_queue_index(sid))
 
