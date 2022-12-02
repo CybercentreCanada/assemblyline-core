@@ -41,7 +41,7 @@ class ReplayLoader(ReplayBase):
             # Check the datastore periodically for the last Replay bundle that was imported
             if datetime.now() > self.last_sync_check + timedelta(seconds=self.replay_config.loader.sync_check_interval):
                 if not self.client.al_client.search.alert(
-                        query=f"metadata.replay.loaded:[now-{self.replay_config.loader.sync_check_interval}s TO now]",
+                        query=f"metadata.bundle.loaded:[now-{self.replay_config.loader.sync_check_interval}s TO now]",
                         track_total_hits=True):
                     self.log.warning("Haven't received a new bundle since the last check!")
                 self.last_sync_check = datetime.now()
