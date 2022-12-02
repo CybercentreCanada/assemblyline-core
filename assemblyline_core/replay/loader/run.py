@@ -1,6 +1,8 @@
 import shelve
 import os
 
+from datetime import datetime, timedelta
+
 from assemblyline_core.replay.client import APIClient, DirectClient
 from assemblyline_core.replay.replay import ReplayBase
 
@@ -16,6 +18,7 @@ class ReplayLoader(ReplayBase):
 
         # Create/Load the cache
         self.cache = shelve.open(os.path.join(self.replay_config.loader.working_directory, 'loader_cache.db'))
+        self.last_sync_check = datetime.now()
         if 'files' not in self.cache:
             self.cache['files'] = set()
 
@@ -34,6 +37,15 @@ class ReplayLoader(ReplayBase):
         while self.running:
             new_files = False
             new_cache = set()
+
+            # Check the datastore periodically for the last Replay bundle that was imported
+            if datetime.now() > self.last_sync_check + timedelta(seconds=self.replay_config.loader.sync_check_interval):
+                if not self.client.al_client.search.alert(
+                        query=f"metadata.replay.loaded:[now-{self.replay_config.loader.sync_check_interval}s TO now]",
+                        track_total_hits=True):
+                    self.log.warning("Haven't received a new bundle since the last check!")
+                self.last_sync_check = datetime.now()
+
             for root, _, files in os.walk(self.replay_config.loader.input_directory, topdown=False):
                 for name in files:
                     # Unexpected files that could be the result of external transfer mechanisms
