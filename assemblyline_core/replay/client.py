@@ -144,6 +144,9 @@ class ClientBase(object):
             if once:
                 break
 
+    def query_alerts(self, query="*", track_total_hits=False):
+        raise NotImplementedError()
+
     def get_next_alert(self):
         raise NotImplementedError()
 
@@ -211,6 +214,9 @@ class APIClient(ClientBase):
     def set_single_submission_complete(self, sid):
         self.al_client.replay.set_complete('submission', sid)
 
+    def query_alerts(self, query="*", track_total_hits=False):
+        return self.al_client.search.alert(query=query, track_total_hits=track_total_hits)
+
     def get_next_alert(self):
         return self.al_client.replay.get_message('alert')
 
@@ -242,6 +248,9 @@ class DirectClient(ClientBase):
         self.submission_queue = NamedQueue("replay_submission", host=redis)
 
         super().__init__(log, alert_fqs=alert_fqs, submission_fqs=submission_fqs, lookback_time=lookback_time)
+
+    def query_alerts(self, query="*", track_total_hits=False):
+        return self.datastore.alert.search(query=query, track_total_hits=track_total_hits)
 
     def _get_next_alert_ids(self, query, filter_queries):
         return self.datastore.alert.search(
