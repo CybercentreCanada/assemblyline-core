@@ -90,7 +90,7 @@ class TaskingClient:
 
         # Validate SHA256 of the uploaded file
         if expected_sha256 is None or expected_sha256 == file_info['sha256']:
-            file_info['archive_ts'] = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
+            file_info['archive_ts'] = None
             file_info['classification'] = classification
             if ttl:
                 file_info['expiry_ts'] = now_as_iso(ttl * 24 * 60 * 60)
@@ -245,7 +245,8 @@ class TaskingClient:
                 else:
                     metric_factory.increment('not_scored')
 
-                result.archive_ts = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
+                result.archive_ts = None
+
                 if task.ttl:
                     result.expiry_ts = now_as_iso(task.ttl * 24 * 60 * 60)
 
@@ -308,7 +309,7 @@ class TaskingClient:
             if file_info is None or not self.filestore.exists(item['sha256']):
                 return True
             else:
-                file_info['archive_ts'] = archive_ts
+                file_info['archive_ts'] = None
                 file_info['expiry_ts'] = expiry_ts
                 file_info['classification'] = item['classification']
                 self.datastore.save_or_freshen_file(item['sha256'], file_info,
@@ -316,7 +317,6 @@ class TaskingClient:
                                                     is_section_image=item.get('is_section_image', False))
             return False
 
-        archive_ts = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
         if task.ttl:
             expiry_ts = now_as_iso(task.ttl * 24 * 60 * 60)
         else:
@@ -368,7 +368,7 @@ class TaskingClient:
 
         # Add timestamps for creation, archive and expiry
         result['created'] = now_as_iso()
-        result['archive_ts'] = archive_ts
+        result['archive_ts'] = None
         result['expiry_ts'] = expiry_ts
 
         # Pop the temporary submission data
@@ -433,7 +433,7 @@ class TaskingClient:
 
         # Add timestamps for creation, archive and expiry
         error['created'] = now_as_iso()
-        error['archive_ts'] = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
+        error['archive_ts'] = None
         if task.ttl:
             error['expiry_ts'] = now_as_iso(task.ttl * 24 * 60 * 60)
 

@@ -47,7 +47,7 @@ def config():
     config.logging.log_as_json = False
     config.core.metrics.apm_server.server_url = None
     config.core.metrics.export_interval = 1
-    config.datastore.ilm.enabled = True
+    config.datastore.archive.enabled = True
     return config
 
 

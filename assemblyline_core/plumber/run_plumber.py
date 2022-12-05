@@ -62,7 +62,7 @@ class Plumber(CoreBase):
                             break
 
                         error = Error(dict(
-                            archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
+                            archive_ts=None,
                             created='NOW',
                             expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60) if task.ttl else None,
                             response=dict(
@@ -107,7 +107,7 @@ class Plumber(CoreBase):
                     break
 
                 error = Error(dict(
-                    archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
+                    archive_ts=None,
                     created='NOW',
                     expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60) if task.ttl else None,
                     response=dict(

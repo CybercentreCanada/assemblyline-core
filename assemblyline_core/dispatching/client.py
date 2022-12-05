@@ -163,9 +163,9 @@ class DispatchClient:
                      timeout: float = 60, blocking=True, low_priority=False) -> Optional[ServiceTask]:
         """Pull work from the service queue for the service in question.
 
-        :param service_version:
         :param worker_id:
         :param service_name: Which service needs work.
+        :param service_version: The version of the service that needs work
         :param timeout: How many seconds to block before returning if blocking is true.
         :param blocking: Whether to wait for jobs to enter the queue, or if false, return immediately
         :return: The job found, and a boolean value indicating if this is the first time this task has
@@ -234,12 +234,10 @@ class DispatchClient:
         # Save or freshen the result, the CONTENT of the result shouldn't change, but we need to keep the
         # most distant expiry time to prevent pulling it out from under another submission too early
         if result.is_empty():
-            # Empty Result will not be archived therefore result.archive_ts drives their deletion
-            self.ds.emptyresult.save(result_key, {"expiry_ts": result.archive_ts})
+            self.ds.emptyresult.save(result_key, {"expiry_ts": result.expiry_ts})
         else:
             while True:
-                old, version = self.ds.result.get_if_exists(
-                    result_key, archive_access=self.config.datastore.ilm.update_archive, version=True)
+                old, version = self.ds.result.get_if_exists(result_key, version=True)
                 if old:
                     if old.expiry_ts and result.expiry_ts:
                         result.expiry_ts = max(result.expiry_ts, old.expiry_ts)
@@ -270,7 +268,7 @@ class DispatchClient:
 
         dispatcher = task.metadata['dispatcher__']
         result_queue = self._get_queue_from_cache(DISPATCH_RESULT_QUEUE + dispatcher)
-        ex_ts = result.expiry_ts.strftime(DATEFORMAT) if result.expiry_ts else result.archive_ts.strftime(DATEFORMAT)
+        ex_ts = result.expiry_ts.strftime(DATEFORMAT) if result.expiry_ts else None
         result_queue.push({
             # 'service_task': task.as_primitives(),
             # 'result': result.as_primitives(),
@@ -280,7 +278,7 @@ class DispatchClient:
             'service_name': task.service_name,
             'service_version': result.response.service_version,
             'service_tool_version': result.response.service_tool_version,
-            'archive_ts': result.archive_ts.strftime(DATEFORMAT),
+            'archive_ts': None,
             'expiry_ts': ex_ts,
             'result_summary': {
                 'key': result_key,

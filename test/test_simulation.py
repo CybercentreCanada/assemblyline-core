@@ -106,7 +106,7 @@ class MockService(ServerBase):
                 continue
 
             result_data = {
-                'archive_ts': time.time() + 300,
+                'archive_ts': None,
                 'classification': 'U',
                 'response': {
                     'service_version': '0',
@@ -671,7 +671,7 @@ def test_service_error(core, metrics):
     sha, size = ready_body(core, {
         'core-a': {
             'error': {
-                'archive_ts': time.time() + 250,
+                'archive_ts': None,
                 'sha256': 'a'*64,
                 'response': {
                     'message': 'words',
