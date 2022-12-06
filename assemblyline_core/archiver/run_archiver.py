@@ -22,6 +22,9 @@ class SubmissionNotFound(Exception):
 class Archiver(ServerBase):
     def __init__(self):
         super().__init__('assemblyline.archiver')
+        self.apm_client = None
+        self.counter = None
+
         if self.config.datastore.archive.enabled:
             # Publish counters to the metrics sink.
             self.counter = MetricsFactory('archiver', Metrics)
@@ -40,11 +43,9 @@ class Archiver(ServerBase):
                 elasticapm.instrument()
                 self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
                                                     service_name="alerter")
-            else:
-                self.apm_client = None
         else:
             self.log.warning("Archive is not enabled in the config, no need to run archiver.")
-            super().stop()
+            exit()
 
     def stop(self):
         if self.counter:
