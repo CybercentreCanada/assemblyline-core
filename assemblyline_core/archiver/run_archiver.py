@@ -22,25 +22,30 @@ class SubmissionNotFound(Exception):
 class Archiver(ServerBase):
     def __init__(self):
         super().__init__('assemblyline.archiver')
-        # Publish counters to the metrics sink.
-        self.counter = MetricsFactory('archiver', Metrics)
-        self.datastore = forge.get_datastore(self.config, archive_access=True)
-        self.filestore = forge.get_filestore(config=self.config)
-        self.archivestore = forge.get_archivestore(config=self.config)
-        self.persistent_redis = get_client(
-            host=self.config.core.redis.persistent.host,
-            port=self.config.core.redis.persistent.port,
-            private=False,
-        )
+        self.apm_client = None
+        self.counter = None
 
-        self.archive_queue: NamedQueue[dict] = NamedQueue(ARCHIVE_QUEUE_NAME, self.persistent_redis)
-        if self.config.core.metrics.apm_server.server_url is not None:
-            self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
-            elasticapm.instrument()
-            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                service_name="alerter")
+        if self.config.datastore.archive.enabled:
+            # Publish counters to the metrics sink.
+            self.counter = MetricsFactory('archiver', Metrics)
+            self.datastore = forge.get_datastore(self.config, archive_access=True)
+            self.filestore = forge.get_filestore(config=self.config)
+            self.archivestore = forge.get_archivestore(config=self.config)
+            self.persistent_redis = get_client(
+                host=self.config.core.redis.persistent.host,
+                port=self.config.core.redis.persistent.port,
+                private=False,
+            )
+
+            self.archive_queue: NamedQueue[dict] = NamedQueue(ARCHIVE_QUEUE_NAME, self.persistent_redis)
+            if self.config.core.metrics.apm_server.server_url is not None:
+                self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
+                elasticapm.instrument()
+                self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
+                                                    service_name="alerter")
         else:
-            self.apm_client = None
+            self.log.warning("Archive is not enabled in the config, no need to run archiver.")
+            exit()
 
     def stop(self):
         if self.counter:
