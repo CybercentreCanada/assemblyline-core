@@ -10,7 +10,7 @@ import time
 
 from datemath import dm
 
-from assemblyline.common.isotime import epoch_to_iso, now_as_iso
+from assemblyline.common.isotime import epoch_to_iso, now_as_iso, iso_to_epoch
 from assemblyline_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
@@ -19,9 +19,6 @@ from assemblyline.odm.messages.expiry_heartbeat import Metrics
 
 if TYPE_CHECKING:
     from assemblyline.datastore.collection import ESCollection
-
-
-DAY_SECONDS = 24 * 60 * 60
 
 
 def file_delete_worker(logger, filestore_urls, file_batch) -> list[str]:
@@ -178,10 +175,10 @@ class ExpiryManager(ServerBase):
             final_date_string = epoch_to_iso(final_date)
 
             # Break down the expiry window into smaller chunks of data
-            unchecked_chunks: list[tuple[float, float]] = [(0, final_date)]
+            unchecked_chunks: list[tuple[float, float]] = [(self._find_expiry_start(collection), final_date)]
             ready_chunks: dict[tuple[float, float], int] = {}
             while unchecked_chunks and len(ready_chunks) < self.config.core.expiry.iteration_max_tasks:
-                start, end = unchecked_chunks.pop(0)
+                start, end = unchecked_chunks.pop()
                 chunk_size = self._count_expired(collection, start, end)
 
                 # Empty chunks are fine
@@ -195,10 +192,7 @@ class ExpiryManager(ServerBase):
                     continue
 
                 # Break this chunk into parts
-                if start == 0:
-                    middle = end - DAY_SECONDS
-                else:
-                    middle = (end + start)/2
+                middle = (end + start)/2
                 unchecked_chunks.append((middle, end))
                 unchecked_chunks.append((start, middle))
 
@@ -246,6 +240,14 @@ class ExpiryManager(ServerBase):
                 self.apm_client.end_transaction(collection.name, 'deleted')
 
         return reached_max
+
+    def _find_expiry_start(self, container: ESCollection):
+        """Find earliest expiring item in this container."""
+        rows = container.search(f"expiry_ts: [* TO {epoch_to_iso(time.time())}]",
+                                rows=1, sort='expiry_ts asc', as_obj=False, fl='expiry_ts')
+        if rows['items']:
+            return iso_to_epoch(rows['items'][0]['expiry_ts'])
+        return time.time()
 
     def _count_expired(self, container: ESCollection, start: Union[float, str], end: float) -> int:
         """Count how many items need to be erased in the given window."""
