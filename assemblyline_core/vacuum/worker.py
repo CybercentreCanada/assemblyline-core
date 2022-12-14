@@ -478,12 +478,14 @@ class FileProcessor(threading.Thread):
                     if key and value
                 })
                 metadata['ingest_id'] = ingest_id
-                metadata['type'] = 'VACUUM'
                 metadata.update(al_meta)
                 if 'ts' not in metadata:
                     metadata['ts'] = now_as_iso()
                 else:
                     metadata['ts'] = arrow.get(metadata['ts']).isoformat()
+
+                # Set ingest type
+                s_params['type'] = self.config.core.vacuum.ingest_type
 
                 # Extract email body strings or similar password settings
                 password_strings = metadata.pop("email_strings", [])
