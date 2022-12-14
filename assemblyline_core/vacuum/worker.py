@@ -13,6 +13,7 @@ from multiprocessing import Lock, Event
 import threading
 
 import elasticapm
+import arrow
 
 from assemblyline.common.forge import CachedObject, get_classification, get_config, get_datastore, get_filestore
 from assemblyline.common.codec import decode_file
@@ -481,6 +482,18 @@ class FileProcessor(threading.Thread):
                 metadata.update(al_meta)
                 if 'ts' not in metadata:
                     metadata['ts'] = now_as_iso()
+                else:
+                    metadata['ts'] = arrow.get(metadata['ts']).isoformat()
+
+                # Extract email body strings or similar password settings
+                password_strings = metadata.pop("email_strings", [])
+                if not isinstance(password_strings, list):
+                    logger.warning("Unsupported password list format: " + str(password_strings))
+                    password_strings = []
+
+                if password_strings:
+                    init_data = json.dumps(dict(passwords=password_strings))
+                    s_params['initial_data'] = init_data
 
                 # Set description if it does not exists
                 s_params['description'] = f"[{s_params['type']}] Inspection of file: {file_sha256}"
