@@ -183,7 +183,7 @@ class SubmissionClient:
 
         # We should now have all the information we need to construct a submission object
         sub = Submission(dict(
-            archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
+            archive_ts=None,
             classification=submission_obj.params.classification,
             error_count=0,
             errors=[],

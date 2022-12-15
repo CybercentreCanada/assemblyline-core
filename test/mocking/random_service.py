@@ -25,6 +25,7 @@ class RandomService(ServerBase):
 
     Including service API, in the future probably include that in this test.
     """
+
     def __init__(self, datastore=None, filestore=None):
         super().__init__('assemblyline.randomservice')
         self.config = forge.get_config()
@@ -57,7 +58,6 @@ class RandomService(ServerBase):
             if not message:
                 continue
 
-            archive_ts = now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60)
             if self.config.submission.dtl:
                 expiry_ts = now_as_iso(self.config.submission.dtl * 24 * 60 * 60)
             else:
@@ -86,7 +86,7 @@ class RandomService(ServerBase):
                     result = random_model_obj(Result)
                 result.sha256 = task.fileinfo.sha256
                 result.response.service_name = task.service_name
-                result.archive_ts = archive_ts
+                result.archive_ts = None
                 result.expiry_ts = expiry_ts
                 result.response.extracted = result.response.extracted[task.depth+2:]
                 result.response.supplementary = result.response.supplementary[task.depth+2:]
@@ -101,7 +101,7 @@ class RandomService(ServerBase):
                 for f in new_files:
                     if not self.datastore.file.get(f.sha256):
                         random_file = random_model_obj(File)
-                        random_file.archive_ts = archive_ts
+                        random_file.archive_ts = None
                         random_file.expiry_ts = expiry_ts
                         random_file.sha256 = f.sha256
                         self.datastore.file.save(f.sha256, random_file)
@@ -120,7 +120,7 @@ class RandomService(ServerBase):
 
             else:
                 error = random_model_obj(Error)
-                error.archive_ts = archive_ts
+                error.archive_ts = None
                 error.expiry_ts = expiry_ts
                 error.sha256 = task.fileinfo.sha256
                 error.response.service_name = task.service_name

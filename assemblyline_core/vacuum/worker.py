@@ -224,7 +224,8 @@ class FileProcessor(threading.Thread):
     def prepare_settings(self) -> dict:
         default_settings: dict[str, Any] = UserSettings().as_primitives()
 
-        settings: dict = self.datastore.user_settings.get_if_exists(self.config.core.vacuum.assemblyline_user, as_obj=False)
+        settings: dict = self.datastore.user_settings.get_if_exists(
+            self.config.core.vacuum.assemblyline_user, as_obj=False)
         def_srv_list = None
 
         srv_list: list[dict] = [x for x in self.service_list if x['enabled']]
@@ -426,7 +427,7 @@ class FileProcessor(threading.Thread):
             #     config.submission.max_dtl) if int(s_params['ttl']) else config.submission.max_dtl
 
             with self.timed('get_info'):
-                fileinfo: dict = self.datastore.file.get_if_exists(sha256, as_obj=False, archive_access=False)
+                fileinfo: dict = self.datastore.file.get_if_exists(sha256, as_obj=False)
 
             # No need to re-calculate fileinfo if we have it already
             active_file = working_file

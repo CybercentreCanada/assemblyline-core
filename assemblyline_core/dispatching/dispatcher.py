@@ -540,7 +540,7 @@ class Dispatcher(ThreadedCoreBase):
                 if filestore_info is None:
                     task.dropped_files.add(sha256)
                     self._dispatching_error(task, Error({
-                        'archive_ts': task.submission.archive_ts,
+                        'archive_ts': None,
                         'expiry_ts': task.submission.expiry_ts,
                         'response': {
                             'message': f"Couldn't find file info for {sha256} in submission {sid}",
@@ -941,7 +941,7 @@ class Dispatcher(ThreadedCoreBase):
 
         ttl = task.submission.params.ttl
         error = Error(dict(
-            archive_ts=now_as_iso(self.config.datastore.ilm.days_until_archive * 24 * 60 * 60),
+            archive_ts=None,
             created='NOW',
             expiry_ts=now_as_iso(ttl * 24 * 60 * 60) if ttl else None,
             response=dict(
@@ -950,8 +950,7 @@ class Dispatcher(ThreadedCoreBase):
                 service_version='0',
                 status='FAIL_NONRECOVERABLE',
             ),
-            sha256=sha256,
-            type="TASK PRE-EMPTED",
+            sha256=sha256, type="TASK PRE-EMPTED",
         ))
 
         error_key = error.build_key()
@@ -1085,7 +1084,6 @@ class Dispatcher(ThreadedCoreBase):
             service_name = data['service_name']
             service_version = data['service_version']
             service_tool_version = data['service_tool_version']
-            archive_ts = data['archive_ts']
             expiry_ts = data['expiry_ts']
 
             sha256 = data['sha256']
@@ -1176,7 +1174,7 @@ class Dispatcher(ThreadedCoreBase):
                         self.log.info(f'[{sid}] hit extraction limit, dropping {extracted_sha256}')
                         task.dropped_files.add(extracted_sha256)
                         self._dispatching_error(task, Error({
-                            'archive_ts': archive_ts,
+                            'archive_ts': None,
                             'expiry_ts': expiry_ts,
                             'response': {
                                 'message': f"Too many files extracted for submission {sid} "
@@ -1201,7 +1199,7 @@ class Dispatcher(ThreadedCoreBase):
                 for extracted_sha256 in summary.children:
                     task.dropped_files.add(sha256)
                     self._dispatching_error(task, Error({
-                        'archive_ts': archive_ts,
+                        'archive_ts': None,
                         'expiry_ts': expiry_ts,
                         'response': {
                             'message': f"{service_name} has extracted a file "
