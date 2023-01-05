@@ -262,6 +262,9 @@ class FileProcessor(threading.Thread):
 
         settings['ttl'] = int(settings.get('ttl', self.config.submission.dtl))
 
+        # Ignore external sources
+        settings.pop('default_external_sources', None)
+
         # Remove UI specific params
         settings.pop('default_zip_password', None)
         settings.pop('download_encoding', None)
