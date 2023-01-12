@@ -13,7 +13,9 @@ from assemblyline_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 
+from os import environ
 from packaging import version
+from urllib.parse import urlparse
 
 
 class ESMetricsServer(ServerBase):
@@ -517,18 +519,21 @@ class ESMetricsServer(ServerBase):
 
     def try_run(self):
         # If our connection to the metrics database requires a custom ca cert, prepare it
-        ca_certs = None
+        ca_certs = client_cert = client_key = None
         if self.config.core.metrics.elasticsearch.host_certificates:
             with tempfile.NamedTemporaryFile(delete=False) as ca_certs_file:
                 ca_certs = ca_certs_file.name
                 ca_certs_file.write(self.config.core.metrics.elasticsearch.host_certificates.encode())
+        elif self.config.system.internal_encryption.enabled:
+            hostname = urlparse(self.target_hosts[0]).hostname
+            ca_certs = environ.get('METRICSTORE_ROOT_CA_PATH', '/etc/assemblyline/ssl/al_root-ca.crt')
+            client_cert = environ.get('METRICSTORE_CLIENT_CERT_PATH', f'/etc/assemblyline/ssl/{hostname}.crt')
+            client_key = environ.get('METRICSTORE_CLIENT_KEY_PATH', f'/etc/assemblyline/ssl/{hostname}.key')
 
         # Open connections to the input and output databases
-        self.input_es = elasticsearch.Elasticsearch(hosts=self.config.datastore.hosts,
-                                                    max_retries=0)
-        self.target_es = elasticsearch.Elasticsearch(hosts=self.target_hosts,
-                                                     max_retries=0,
-                                                     ca_certs=ca_certs)
+        self.input_es = forge.get_datastore().ds.client
+        self.target_es = elasticsearch.Elasticsearch(hosts=self.target_hosts, max_retries=0,
+                                                     ca_certs=ca_certs, client_cert=client_cert, client_key=client_key)
         # Check if target_es supports datastreams (>=7.9)
         es_metric_indices = ['es_cluster', 'es_nodes', 'es_indices']
         self.is_datastream = version.parse(self.target_es.info()['version']['number']) >= version.parse("7.9")
