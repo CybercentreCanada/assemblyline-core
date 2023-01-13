@@ -25,6 +25,8 @@ from assemblyline.odm.models.service import DockerConfig, Service
 from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config
+from assemblyline_core.scaler.scaler_server import \
+    PRIVILEGED_SERVICE_CONFIGURATION_VOLUME, KUBERNETES_AL_CONFIG as CONFIGURATION_CONFIGMAP
 from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline_core.updater.helper import get_latest_tag_for_service
 
@@ -36,12 +38,9 @@ CONTAINER_CHECK_INTERVAL = int(os.getenv("CONTAINER_CHECK_INTERVAL", "300"))
 API_TIMEOUT = 90
 NAMESPACE = os.getenv('NAMESPACE', None)
 INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] + \
-    [
-    secret.strip("${}")
-    for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']]
+    [secret.strip("${}")
+     for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']]
 
-CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
-CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'core')
 
 
@@ -71,8 +70,8 @@ class DockerUpdateInterface:
         """Run a container to completion."""
         docker_mounts = dict()
         # Add the configuration file if path is given
-        if CONFIGURATION_HOST_PATH:
-            docker_mounts[CONFIGURATION_HOST_PATH] = {
+        if PRIVILEGED_SERVICE_CONFIGURATION_VOLUME:
+            docker_mounts[PRIVILEGED_SERVICE_CONFIGURATION_VOLUME] = {
                 'bind': '/etc/assemblyline/',
                 'mode': 'ro'
             }
