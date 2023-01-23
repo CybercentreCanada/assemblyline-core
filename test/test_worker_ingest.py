@@ -119,6 +119,7 @@ def test_ingest_stale_score_exists(ingest_harness):
     finally:
         datastore.filescore.get_if_exists = get_if_exists
 
+
 def test_ingest_score_exists(ingest_harness):
     datastore, ingester, in_queue = ingest_harness
     get_if_exists = datastore.filescore.get_if_exists
