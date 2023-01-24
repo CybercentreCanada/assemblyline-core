@@ -759,7 +759,8 @@ class Ingester(ThreadedCoreBase):
                     break
 
             if not dropped:
-                if task.file_size > self.config.submission.max_file_size or task.file_size == 0:
+                if (task.file_size > self.config.submission.max_file_size and not task.params.ignore_size) \
+                        or task.file_size == 0:
                     dropped = True
 
         if task.params.never_drop or not dropped:
