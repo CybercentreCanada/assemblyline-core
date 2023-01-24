@@ -254,10 +254,8 @@ class KubernetesUpdateInterface:
                 name=mount.name,
                 mount_path=mount.path,
                 read_only=mount.read_only,
+                sub_path=mount.resource_key
             )
-            if mount.resource_key:
-                # If subpath-ing is specified, then use
-                vol_mount_kwargs.update(dict(sub_path=mount.resource_key))
 
             volumes.append(V1Volume(**vol_kwargs))
             volume_mounts.append(V1VolumeMount(**vol_mount_kwargs))

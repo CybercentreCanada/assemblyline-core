@@ -6,7 +6,6 @@ import functools
 import threading
 from collections import defaultdict
 from string import Template
-from shutil import copytree, copyfile
 from typing import Optional, Any
 import os
 import re
@@ -34,7 +33,6 @@ from assemblyline.odm.messages.changes import ServiceChange, Operation
 from assemblyline.common.forge import get_classification, get_service_queue
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
-from assemblyline_core.cert_manager import AL_CERT_DIR, get_server_bundle
 from assemblyline_core.scaler.controllers import KubernetesController
 from assemblyline_core.scaler.controllers.interface import ServiceControlError
 from assemblyline_core.server_base import ServiceStage, ThreadedCoreBase
@@ -69,10 +67,8 @@ HOSTNAME = os.getenv('HOSTNAME', platform.node())
 NAMESPACE = os.getenv('NAMESPACE', 'al')
 CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
 
-PRIVILEGED_SERVICE_CONFIGURATION_PATH = os.getenv('PRIVILEGED_SERVICE_CONFIGURATION_PATH', None)
-PRIVILEGED_SERVICE_CONFIGURATION_VOLUME = os.getenv('PRIVILEGED_SERVICE_CONFIGURATION_VOLUME', None)
-SERVICE_CONFIGURATION_PATH = os.getenv('SERVICE_CONFIGURATION_PATH', None)
-SERVICE_CONFIGURATION_VOLUME = os.getenv('SERVICE_CONFIGURATION_VOLUME', None)
+DOCKER_CONFIGURATION_PATH = os.getenv('DOCKER_CONFIGURATION_PATH', None)
+DOCKER_CONFIGURATION_VOLUME = os.getenv('DOCKER_CONFIGURATION_VOLUME', None)
 
 
 @contextmanager
@@ -294,11 +290,17 @@ class ScalerServer(ThreadedCoreBase):
 
             # Add default mounts for (non-)privileged services
             for mount in self.config.core.scaler.service_defaults.mounts:
-                if mount.config_map:
-                    self.controller.add_config_mount(mount.name, config_map=mount.config_map, key=mount.key,
+                if mount.resource_type == 'configmap':
+                    # ConfigMap-based mount
+                    self.controller.add_config_mount(mount.name, config_map=mount.resource_name, key=mount.resource_key,
                                                      target_path=mount.path, read_only=mount.read_only,
                                                      core=mount.privileged_only)
-                else:
+                elif mount.resource_type == 'secret':
+                    # Secret-based mount
+                    self.controller.add_secret_mount(mount.name, secret_name=mount.resource_name,
+                                                     sub_path=mount.resource_key, target_path=mount.path,
+                                                     read_only=mount.read_only, core=mount.privileged_only)
+                elif mount.resource_type == 'volume':
                     # Add storage-based mount
                     self.controller.add_volume_mount(name=mount.name, target_path=mount.path, read_only=mount.read_only,
                                                      core=mount.privileged_only)
@@ -309,40 +311,18 @@ class ScalerServer(ThreadedCoreBase):
                                                core_env=core_env)
             self._service_stage_hash.delete()
 
-            if PRIVILEGED_SERVICE_CONFIGURATION_PATH and PRIVILEGED_SERVICE_CONFIGURATION_VOLUME:
-                # Intended for use by privileged containers
-                self.controller.core_mounts.append((PRIVILEGED_SERVICE_CONFIGURATION_VOLUME, '/etc/assemblyline/'))
+            if DOCKER_CONFIGURATION_PATH and DOCKER_CONFIGURATION_VOLUME:
+                self.controller.core_mounts.append((DOCKER_CONFIGURATION_VOLUME, '/etc/assemblyline/'))
 
-                with open(os.path.join(PRIVILEGED_SERVICE_CONFIGURATION_PATH, 'config.yml'), 'w') as handle:
+                with open(os.path.join(DOCKER_CONFIGURATION_PATH, 'config.yml'), 'w') as handle:
                     yaml.dump(self.config.as_primitives(), handle)
 
-                with open(os.path.join(PRIVILEGED_SERVICE_CONFIGURATION_PATH, 'classification.yml'), 'w') as handle:
+                with open(os.path.join(DOCKER_CONFIGURATION_PATH, 'classification.yml'), 'w') as handle:
                     yaml.dump(get_classification().original_definition, handle)
 
-                if self.config.system.internal_encryption.enabled:
-                    # Copy all certificates for core/privileged services
-                    copytree(src=AL_CERT_DIR, dst=os.path.join(PRIVILEGED_SERVICE_CONFIGURATION_PATH, 'ssl'),
-                             dirs_exist_ok=True)
-
-            if SERVICE_CONFIGURATION_PATH and SERVICE_CONFIGURATION_VOLUME:
-                # Intended for use by non-privileged containers
-                self.controller.global_mounts.append((SERVICE_CONFIGURATION_VOLUME, '/etc/assemblyline/'))
-
-                # Write the classification.yml
-                with open(os.path.join(SERVICE_CONFIGURATION_PATH, 'classification.yml'), 'w') as handle:
-                    yaml.dump(get_classification().original_definition, handle)
-
-                if self.config.system.internal_encryption.enabled:
-                    # Copy service-server files for encryption
-                    cert_dir = os.path.join(SERVICE_CONFIGURATION_PATH, 'ssl')
-                    os.makedirs(cert_dir, exist_ok=True)
-                    [copyfile(path, os.path.join(cert_dir, os.path.basename(path)))
-                     for path in get_server_bundle('service-server')]
-
-            # TODO: Deprecate CLASSIFICATION_HOST_PATH, sharing should be done through SERVICE_CONFIGURATION_PATH
-            # Classification should be mounted to core to ensure syncronicity
-            # if CLASSIFICATION_HOST_PATH:
-            #     self.controller.global_mounts.append((CLASSIFICATION_HOST_PATH, '/etc/assemblyline/classification.yml'))
+            # If we know where to find it, mount the classification into the service containers
+            if CLASSIFICATION_HOST_PATH:
+                self.controller.global_mounts.append((CLASSIFICATION_HOST_PATH, '/etc/assemblyline/classification.yml'))
 
             for mount in self.config.core.scaler.service_defaults.mounts:
                 # Mounts are all storage-based since there's no equivalent to ConfigMaps in Docker
