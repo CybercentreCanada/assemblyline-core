@@ -23,7 +23,6 @@ from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes.events import EventWatcher
 from assemblyline_core import PAUSABLE_COMPONENTS
-from assemblyline_core.cert_manager import CERT_SERVER_HOST, CERT_SERVER_TOKEN, AL_CERT_DIR
 
 if TYPE_CHECKING:
     from assemblyline.datastore.helper import AssemblylineDatastore
@@ -61,13 +60,6 @@ class ServerBase(threading.Thread):
         self._old_sigterm: Optional[Callable[..., None]] = None
         self._stopped = False
         self._last_heartbeat = 0.0
-
-        # # If internal encryption is enabled, then fetch the required files
-        if self.config.system.internal_encryption.enabled:
-            all_cert_tar = io.BytesIO(requests.get(f'http://{CERT_SERVER_HOST}:8000/all', verify=False,
-                                                   headers={'Authorization': f'Bearer {CERT_SERVER_TOKEN}'}).content)
-            with tarfile.open(fileobj=all_cert_tar) as tar:
-                tar.extractall(AL_CERT_DIR)
 
     def __enter__(self):
         self.log.info("Initialized")
