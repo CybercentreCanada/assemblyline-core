@@ -18,7 +18,7 @@ from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec,
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
-    V1NetworkPolicyIngressRule, V1Secret, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext, \
+    V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext, \
     V1Probe, V1ExecAction
 from kubernetes.client.rest import ApiException
 from assemblyline.odm.models.service import DockerConfig, PersistentVolume
@@ -35,6 +35,8 @@ DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() == 'true'
 CONTAINER_RESTART_THRESHOLD = int(os.environ.get('CONTAINER_RESTART_THRESHOLD', 1))
 SERVICE_LIVENESS_PERIOD = int(os.environ.get('SERVICE_LIVENESS_PERIOD', 300))
 SERVICE_LIVENESS_TIMEOUT = int(os.environ.get('SERVICE_LIVENESS_TIMEOUT', 60))
+
+AL_ROOT_CA = os.environ.get('AL_ROOT_CA', '/etc/assemblyline/ssl/al_root-ca.crt')
 
 _exponents = {
     'ki': 2**10,
@@ -276,10 +278,25 @@ class KubernetesController(ControllerInterface):
             read_only=read_only
         )
 
+    def add_secret_mount(self, name, secret_name, target_path, sub_path=None, read_only=True, core=False):
+        volumes, mounts = self.volumes, self.mounts
+        if core:
+            volumes, mounts = self.core_volumes, self.core_mounts
+
+        if name not in volumes:
+            volumes[name] = V1Volume(name=name, secret=V1SecretVolumeSource(secret_name=secret_name))
+
+        mounts[target_path] = V1VolumeMount(
+            name=name,
+            mount_path=target_path,
+            read_only=read_only,
+            sub_path=sub_path
+        )
+
     def add_volume_mount(self, name: str, target_path: str, read_only=True, core=False):
         volumes, mounts = self.volumes, self.mounts
         if core:
-            mounts = self.core_volumes, self.core_mounts
+            volumes, mounts = self.core_volumes, self.core_mounts
 
         if name not in volumes:
             volumes[name] = (V1Volume(name=name))
@@ -792,6 +809,13 @@ class KubernetesController(ControllerInterface):
         # Setup PVC
         deployment_name = self._dependency_name(service_name, container_name)
         mounts, volumes = [], []
+
+        if container_name == 'updates' and os.path.exists(AL_ROOT_CA):
+            # Specifically for service updaters when internal encryption is enabled on the cluster
+            volumes.append(V1Volume(name='updates-cert', secret=V1SecretVolumeSource(secret_name='updates-cert')))
+            mounts.append(V1VolumeMount(name="updates-cert", mount_path="/etc/assemblyline/ssl/al_updates",
+                                        read_only=True))
+
         deployment_strategy = V1DeploymentStrategy()  # Default strategy should be RollingUpdate
         for volume_name, volume_spec in spec.volumes.items():
             mount_name = f'{deployment_name}-{volume_name}'

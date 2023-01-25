@@ -40,7 +40,7 @@ class DockerRegistry(ContainerRegistry):
         if resp and resp.ok:
             # Test for positive list of tags
             resp_data = resp.json()
-            return resp_data['tags']
+            return resp_data['tags'] or []
         return []
 
 
