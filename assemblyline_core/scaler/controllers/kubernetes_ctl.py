@@ -36,6 +36,8 @@ CONTAINER_RESTART_THRESHOLD = int(os.environ.get('CONTAINER_RESTART_THRESHOLD', 
 SERVICE_LIVENESS_PERIOD = int(os.environ.get('SERVICE_LIVENESS_PERIOD', 300))
 SERVICE_LIVENESS_TIMEOUT = int(os.environ.get('SERVICE_LIVENESS_TIMEOUT', 60))
 
+AL_ROOT_CA = os.environ.get('AL_ROOT_CA', '/etc/assemblyline/ssl/al_root-ca.crt')
+
 _exponents = {
     'ki': 2**10,
     'k': 2**10,
@@ -807,6 +809,13 @@ class KubernetesController(ControllerInterface):
         # Setup PVC
         deployment_name = self._dependency_name(service_name, container_name)
         mounts, volumes = [], []
+
+        if container_name == 'updates' and os.path.exists(AL_ROOT_CA):
+            # Specifically for service updaters when internal encryption is enabled on the cluster
+            volumes.append(V1Volume(name='updates-cert', secret=V1SecretVolumeSource(secret_name='updates-cert')))
+            mounts.append(V1VolumeMount(name="updates-cert", mount_path="/etc/assemblyline/ssl/al_updates",
+                                        read_only=True))
+
         deployment_strategy = V1DeploymentStrategy()  # Default strategy should be RollingUpdate
         for volume_name, volume_spec in spec.volumes.items():
             mount_name = f'{deployment_name}-{volume_name}'
