@@ -8,8 +8,6 @@ import functools
 import time
 import threading
 import logging
-import requests
-import tarfile
 import signal
 import sys
 import io
