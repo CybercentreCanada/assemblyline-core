@@ -241,21 +241,34 @@ class KubernetesUpdateInterface:
         volume_mounts = []
 
         for mount in mounts:
-            vol_kwargs = dict(name=mount.name)
-            if mount.resource_type == 'secret':
-                # Secret-based source
-                vol_kwargs.update(dict(secret=V1SecretVolumeSource(secret_name=mount.resource_name)))
-            elif mount.resource_type == 'configmap':
-                # ConfigMap-based source
-                vol_kwargs.update(dict(secret=V1ConfigMapVolumeSource(name=mount.resource_name)))
-
             # Initialize with required set of params
+            vol_kwargs = dict(name=mount.name)
             vol_mount_kwargs = dict(
                 name=mount.name,
                 mount_path=mount.path,
                 read_only=mount.read_only,
-                sub_path=mount.resource_key
             )
+
+            if mount.config_map:
+                # Deprecated configuration for mounting ConfigMap
+                # TODO: Deprecate code on next major change
+                self.log.warning(
+                    "DEPRECATED: Migrate default service mounts using ConfigMaps to use: "
+                    f"resource_type='configmap', resource_name={mount.config_map}, resource_key={mount.key or ''}. "
+                    "Continuing deprecated mounting.."
+                )
+                vol_kwargs.update(dict(config_map=V1ConfigMapVolumeSource(name=mount.config_map, optional=False)))
+                vol_mount_kwargs.update(dict(sub_path=mount.key))
+
+            elif mount.resource_type == 'secret':
+                # Secret-based source
+                vol_kwargs.update(dict(secret=V1SecretVolumeSource(secret_name=mount.resource_name)))
+                vol_mount_kwargs.update(dict(sub_path=mount.resource_key))
+
+            elif mount.resource_type == 'configmap':
+                # ConfigMap-based source
+                vol_kwargs.update(dict(config_map=V1ConfigMapVolumeSource(name=mount.resource_name, optional=False)))
+                vol_mount_kwargs.update(dict(sub_path=mount.resource_key))
 
             volumes.append(V1Volume(**vol_kwargs))
             volume_mounts.append(V1VolumeMount(**vol_mount_kwargs))
