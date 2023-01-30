@@ -14,7 +14,7 @@ from typing import Any, List
 import docker
 
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
-    V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
+    V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
     V1ConfigMapVolumeSource, V1Secret, V1SecretVolumeSource, V1LocalObjectReference
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
@@ -44,6 +44,10 @@ INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http
 CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'core')
+
+SERVICE_API_HOST = os.getenv('SERVICE_API_HOST')
+UI_SERVER = os.getenv('UI_SERVER')
+RELEASE_NAME = os.getenv('RELEASE_NAME')
 
 
 class DockerUpdateInterface:
@@ -422,6 +426,17 @@ class ServiceUpdater(ThreadedCoreBase):
             extra_labels = {}
             if self.config.core.scaler.additional_labels:
                 extra_labels = {k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)}
+
+            # If Updater has envs that set the service-server to use HTTPS, then assume a Root CA needs to be mounted
+            if SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'):
+                self.config.core.scaler.service_defaults.mounts.append(dict(
+                    name="root-ca",
+                    path="/etc/assemblyline/ssl/al_root-ca.crt",
+                    resource_type="secret",
+                    resource_name=f"{RELEASE_NAME}.internal-generated-ca",
+                    resource_key="tls.crt"
+                ))
+
             self.controller = KubernetesUpdateInterface(prefix='alsvc_', namespace=NAMESPACE,
                                                         priority_class='al-core-priority',
                                                         extra_labels=extra_labels,
