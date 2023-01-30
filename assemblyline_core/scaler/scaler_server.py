@@ -64,11 +64,15 @@ MAX_CONTAINER_ALLOCATION = 10
 KUBERNETES_AL_CONFIG = os.environ.get('KUBERNETES_AL_CONFIG')
 
 HOSTNAME = os.getenv('HOSTNAME', platform.node())
+RELEASE_NAME = os.getenv('RELEASE_NAME', 'assemblyline')
 NAMESPACE = os.getenv('NAMESPACE', 'al')
 CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
 
 DOCKER_CONFIGURATION_PATH = os.getenv('DOCKER_CONFIGURATION_PATH', None)
 DOCKER_CONFIGURATION_VOLUME = os.getenv('DOCKER_CONFIGURATION_VOLUME', None)
+
+SERVICE_API_HOST = os.getenv('SERVICE_API_HOST', None)
+UI_SERVER = os.getenv('UI_SERVER', None)
 
 
 @contextmanager
@@ -272,6 +276,14 @@ class ScalerServer(ThreadedCoreBase):
             'privilege': 'service'
         }
 
+        # If Scaler has envs that set the service-server, internal-ui host details, use them
+        if SERVICE_API_HOST:
+            self.config.core.scaler.service_defaults.environment.append(dict(name="SERVICE_API_HOST",
+                                                                             value=SERVICE_API_HOST))
+        if UI_SERVER:
+            self.config.core.scaler.service_defaults.environment.append(dict(name="UI_SERVER",
+                                                                             value=UI_SERVER))
+
         if self.config.core.scaler.additional_labels:
             labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)})
 
@@ -287,6 +299,17 @@ class ScalerServer(ThreadedCoreBase):
             # Add global configuration for privileged services
             self.controller.add_config_mount(KUBERNETES_AL_CONFIG, config_map=KUBERNETES_AL_CONFIG, key="config",
                                              target_path="/etc/assemblyline/config.yml", read_only=True, core=True)
+
+            # If we're passed an override for server-server and it's defining an HTTPS connection, then add a global
+            # mount for the Root CA that needs to be mounted
+            if SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'):
+                self.config.core.scaler.service_defaults.mounts.append(dict(
+                    name="root-ca",
+                    path="/etc/assemblyline/ssl/al_root-ca.crt",
+                    resource_type="secret",
+                    resource_name=f"{RELEASE_NAME}.internal-generated-ca",
+                    resource_key="tls.crt"
+                ))
 
             # Add default mounts for (non-)privileged services
             for mount in self.config.core.scaler.service_defaults.mounts:
