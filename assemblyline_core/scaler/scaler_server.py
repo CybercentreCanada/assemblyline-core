@@ -73,6 +73,7 @@ DOCKER_CONFIGURATION_VOLUME = os.getenv('DOCKER_CONFIGURATION_VOLUME', None)
 
 SERVICE_API_HOST = os.getenv('SERVICE_API_HOST', None)
 UI_SERVER = os.getenv('UI_SERVER', None)
+INTERNAL_ENCRYPT = bool(SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'))
 
 
 @contextmanager
@@ -302,7 +303,7 @@ class ScalerServer(ThreadedCoreBase):
 
             # If we're passed an override for server-server and it's defining an HTTPS connection, then add a global
             # mount for the Root CA that needs to be mounted
-            if SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'):
+            if INTERNAL_ENCRYPT:
                 self.config.core.scaler.service_defaults.mounts.append(dict(
                     name="root-ca",
                     path="/etc/assemblyline/ssl/al_root-ca.crt",
@@ -517,7 +518,7 @@ class ScalerServer(ThreadedCoreBase):
                 dependency.container = prepare_container(dependency.container)
                 dependency_config[_n] = dependency
                 dep_hash = get_id_from_data(dependency, length=16)
-                dependency_blobs[_n] = f"dh={dep_hash}v={service.version}p={service.privileged}"
+                dependency_blobs[_n] = f"dh={dep_hash}v={service.version}p={service.privileged}ssl={INTERNAL_ENCRYPT}"
 
             # Check if the service dependencies have been deployed.
             dependency_keys = []
@@ -569,7 +570,7 @@ class ScalerServer(ThreadedCoreBase):
                 cfg_items = get_recursive_sorted_tuples(service.config)
                 dep_keys = ''.join(sorted(dependency_keys))
                 config_blob = (f"c={cfg_items}sp={service.submission_params}"
-                               f"dk={dep_keys}p={service.privileged}d={docker_config}")
+                               f"dk={dep_keys}p={service.privileged}d={docker_config}ssl={INTERNAL_ENCRYPT}")
 
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:
