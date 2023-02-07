@@ -790,7 +790,10 @@ class KubernetesController(ControllerInterface):
     def stateful_container_key(self, service_name: str, container_name: str, spec, change_key: str) -> Optional[str]:
         deployment_name = self._dependency_name(service_name, container_name)
         try:
-            old_deployment = self.apps_api.read_namespaced_deployment(deployment_name, self.namespace)
+            old_deployment: V1Deployment = self.apps_api.read_namespaced_deployment(deployment_name, self.namespace)
+            if old_deployment.metadata.annotations.get(CHANGE_KEY_NAME) != change_key:
+                # A change occurred, declare dependency not ready yet.
+                return
             for container in old_deployment.spec.template.spec.containers:
                 for env in container.env:
                     if env.name == 'AL_INSTANCE_KEY':
