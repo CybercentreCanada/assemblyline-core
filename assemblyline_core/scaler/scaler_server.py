@@ -64,11 +64,16 @@ MAX_CONTAINER_ALLOCATION = 10
 KUBERNETES_AL_CONFIG = os.environ.get('KUBERNETES_AL_CONFIG')
 
 HOSTNAME = os.getenv('HOSTNAME', platform.node())
+RELEASE_NAME = os.getenv('RELEASE_NAME', 'assemblyline')
 NAMESPACE = os.getenv('NAMESPACE', 'al')
 CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
 
 DOCKER_CONFIGURATION_PATH = os.getenv('DOCKER_CONFIGURATION_PATH', None)
 DOCKER_CONFIGURATION_VOLUME = os.getenv('DOCKER_CONFIGURATION_VOLUME', None)
+
+SERVICE_API_HOST = os.getenv('SERVICE_API_HOST', None)
+UI_SERVER = os.getenv('UI_SERVER', None)
+INTERNAL_ENCRYPT = bool(SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'))
 
 
 @contextmanager
@@ -272,6 +277,14 @@ class ScalerServer(ThreadedCoreBase):
             'privilege': 'service'
         }
 
+        # If Scaler has envs that set the service-server, internal-ui host details, use them
+        if SERVICE_API_HOST:
+            self.config.core.scaler.service_defaults.environment.append(dict(name="SERVICE_API_HOST",
+                                                                             value=SERVICE_API_HOST))
+        if UI_SERVER:
+            self.config.core.scaler.service_defaults.environment.append(dict(name="UI_SERVER",
+                                                                             value=UI_SERVER))
+
         if self.config.core.scaler.additional_labels:
             labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)})
 
@@ -288,13 +301,43 @@ class ScalerServer(ThreadedCoreBase):
             self.controller.add_config_mount(KUBERNETES_AL_CONFIG, config_map=KUBERNETES_AL_CONFIG, key="config",
                                              target_path="/etc/assemblyline/config.yml", read_only=True, core=True)
 
+            # If we're passed an override for server-server and it's defining an HTTPS connection, then add a global
+            # mount for the Root CA that needs to be mounted
+            if INTERNAL_ENCRYPT:
+                self.config.core.scaler.service_defaults.mounts.append(dict(
+                    name="root-ca",
+                    path="/etc/assemblyline/ssl/al_root-ca.crt",
+                    resource_type="secret",
+                    resource_name=f"{RELEASE_NAME}.internal-generated-ca",
+                    resource_key="tls.crt"
+                ))
+
             # Add default mounts for (non-)privileged services
             for mount in self.config.core.scaler.service_defaults.mounts:
+                # Deprecated configuration for mounting ConfigMap
+                # TODO: Deprecate code on next major change
                 if mount.config_map:
                     self.controller.add_config_mount(mount.name, config_map=mount.config_map, key=mount.key,
                                                      target_path=mount.path, read_only=mount.read_only,
                                                      core=mount.privileged_only)
-                else:
+                    self.log.warning(
+                        "DEPRECATED: Migrate default service mounts using ConfigMaps to use: "
+                        f"resource_type='configmap', resource_name={mount.config_map}, resource_key={mount.key or ''}. "
+                        "Continuing deprecated mounting.."
+                    )
+                    continue
+
+                if mount.resource_type == 'configmap':
+                    # ConfigMap-based mount
+                    self.controller.add_config_mount(mount.name, config_map=mount.resource_name, key=mount.resource_key,
+                                                     target_path=mount.path, read_only=mount.read_only,
+                                                     core=mount.privileged_only)
+                elif mount.resource_type == 'secret':
+                    # Secret-based mount
+                    self.controller.add_secret_mount(mount.name, secret_name=mount.resource_name,
+                                                     sub_path=mount.resource_key, target_path=mount.path,
+                                                     read_only=mount.read_only, core=mount.privileged_only)
+                elif mount.resource_type == 'volume':
                     # Add storage-based mount
                     self.controller.add_volume_mount(name=mount.name, target_path=mount.path, read_only=mount.read_only,
                                                      core=mount.privileged_only)
@@ -475,7 +518,7 @@ class ScalerServer(ThreadedCoreBase):
                 dependency.container = prepare_container(dependency.container)
                 dependency_config[_n] = dependency
                 dep_hash = get_id_from_data(dependency, length=16)
-                dependency_blobs[_n] = f"dh={dep_hash}v={service.version}p={service.privileged}"
+                dependency_blobs[_n] = f"dh={dep_hash}v={service.version}p={service.privileged}ssl={INTERNAL_ENCRYPT}"
 
             # Check if the service dependencies have been deployed.
             dependency_keys = []
@@ -527,7 +570,7 @@ class ScalerServer(ThreadedCoreBase):
                 cfg_items = get_recursive_sorted_tuples(service.config)
                 dep_keys = ''.join(sorted(dependency_keys))
                 config_blob = (f"c={cfg_items}sp={service.submission_params}"
-                               f"dk={dep_keys}p={service.privileged}d={docker_config}")
+                               f"dk={dep_keys}p={service.privileged}d={docker_config}ssl={INTERNAL_ENCRYPT}")
 
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:

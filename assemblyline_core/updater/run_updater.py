@@ -9,18 +9,19 @@ import time
 import uuid
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, List
 
 import docker
 
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
-    V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
-    V1ConfigMapVolumeSource, V1Secret, V1LocalObjectReference
+    V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
+    V1ConfigMapVolumeSource, V1Secret, V1SecretVolumeSource, V1LocalObjectReference
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
 from assemblyline.common import isotime
 from assemblyline.odm.messages.changes import Operation, ServiceChange
+from assemblyline.odm.models.config import Mount
 from assemblyline.odm.models.service import DockerConfig, Service
 from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import Hash
@@ -43,6 +44,10 @@ INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http
 CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'core')
+
+SERVICE_API_HOST = os.getenv('SERVICE_API_HOST')
+UI_SERVER = os.getenv('UI_SERVER')
+RELEASE_NAME = os.getenv('RELEASE_NAME')
 
 
 class DockerUpdateInterface:
@@ -183,7 +188,7 @@ class KubernetesUpdateInterface:
                         self.secret_env.append(env_def)
                         INHERITED_VARIABLES.remove(env_name)
 
-    def launch(self, name, docker_config: DockerConfig, mounts, env, blocking: bool = True):
+    def launch(self, name, docker_config: DockerConfig, mounts: List[Mount], env, blocking: bool = True):
         name = (self.prefix + 'update-' + name.lower()).replace('_', '-')
 
         # If we have been given a username or password for the registry, we have to
@@ -239,21 +244,38 @@ class KubernetesUpdateInterface:
         volumes = []
         volume_mounts = []
 
-        for index, mnt in enumerate(mounts):
-            volumes.append(V1Volume(
-                name=f'mount-{index}',
-                persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
-                    claim_name=mnt['volume'],
-                    read_only=False
-                ),
-            ))
+        for mount in mounts:
+            # Initialize with required set of params
+            vol_kwargs = dict(name=mount.name)
+            vol_mount_kwargs = dict(
+                name=mount.name,
+                mount_path=mount.path,
+                read_only=mount.read_only,
+            )
 
-            volume_mounts.append(V1VolumeMount(
-                name=f'mount-{index}',
-                mount_path=mnt['dest_path'],
-                sub_path=mnt['source_path'],
-                read_only=False,
-            ))
+            if mount.config_map:
+                # Deprecated configuration for mounting ConfigMap
+                # TODO: Deprecate code on next major change
+                self.log.warning(
+                    "DEPRECATED: Migrate default service mounts using ConfigMaps to use: "
+                    f"resource_type='configmap', resource_name={mount.config_map}, resource_key={mount.key or ''}. "
+                    "Continuing deprecated mounting.."
+                )
+                vol_kwargs.update(dict(config_map=V1ConfigMapVolumeSource(name=mount.config_map, optional=False)))
+                vol_mount_kwargs.update(dict(sub_path=mount.key))
+
+            elif mount.resource_type == 'secret':
+                # Secret-based source
+                vol_kwargs.update(dict(secret=V1SecretVolumeSource(secret_name=mount.resource_name)))
+                vol_mount_kwargs.update(dict(sub_path=mount.resource_key))
+
+            elif mount.resource_type == 'configmap':
+                # ConfigMap-based source
+                vol_kwargs.update(dict(config_map=V1ConfigMapVolumeSource(name=mount.resource_name, optional=False)))
+                vol_mount_kwargs.update(dict(sub_path=mount.resource_key))
+
+            volumes.append(V1Volume(**vol_kwargs))
+            volume_mounts.append(V1VolumeMount(**vol_mount_kwargs))
 
         if CONFIGURATION_CONFIGMAP:
             volumes.append(V1Volume(
@@ -398,16 +420,30 @@ class ServiceUpdater(ThreadedCoreBase):
         self.incompatible_services = set()
         self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
+        self.mounts = []
 
         if 'KUBERNETES_SERVICE_HOST' in os.environ and NAMESPACE:
             extra_labels = {}
             if self.config.core.scaler.additional_labels:
                 extra_labels = {k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)}
+
+            # If Updater has envs that set the service-server to use HTTPS, then assume a Root CA needs to be mounted
+            if SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'):
+                self.config.core.scaler.service_defaults.mounts.append(dict(
+                    name="root-ca",
+                    path="/etc/assemblyline/ssl/al_root-ca.crt",
+                    resource_type="secret",
+                    resource_name=f"{RELEASE_NAME}.internal-generated-ca",
+                    resource_key="tls.crt"
+                ))
+
             self.controller = KubernetesUpdateInterface(prefix='alsvc_', namespace=NAMESPACE,
                                                         priority_class='al-core-priority',
                                                         extra_labels=extra_labels,
                                                         log_level=self.config.logging.log_level,
                                                         default_service_account=self.config.services.service_account)
+            # Add all additional mounts to privileged services
+            self.mounts = self.config.core.scaler.service_defaults.mounts
         else:
             self.controller = DockerUpdateInterface(log_level=self.config.logging.log_level)
 
@@ -455,7 +491,7 @@ class ServiceUpdater(ThreadedCoreBase):
                     self.controller.launch(
                         name=service_name,
                         docker_config=docker_config,
-                        mounts=[],
+                        mounts=self.mounts,
                         env={
                             "SERVICE_TAG": tag_name,
                             "REGISTER_ONLY": 'true',
@@ -542,7 +578,7 @@ class ServiceUpdater(ThreadedCoreBase):
                             image=update_data['image'],
                             ports=[]
                         )),
-                        mounts=[],
+                        mounts=self.mounts,
                         env={
                             "SERVICE_TAG": update_data['latest_tag'],
                             "REGISTER_ONLY": 'true',
