@@ -583,8 +583,10 @@ class KubernetesController(ControllerInterface):
         # systems returning differently formatted data
         lbls = sorted((labels or {}).items())
         svc_env = sorted(self._service_limited_env[service_name].items())
-        change_key = str(hash(f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
-                              f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}"))
+        change_key = str(f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
+                         f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}")
+        self.logger.debug(f"{deployment_name} actual change_key: {change_key}")
+        change_key = str(hash(change_key))
 
         # Check if a deployment already exists, and if it does check if it has the same change key set
         replace = None
@@ -813,11 +815,13 @@ class KubernetesController(ControllerInterface):
         # Generate the expected change key
         senv = sorted(self._service_limited_env[service_name].items())
         labels = [('container', container_name), ('dependency_for', service_name)]
-        volumes, mounts, _ = self._get_volumes_mounts_strategy(deployment_name, container_name, spec)
-        temp_dc = DockerConfig(spec.container.as_primitives())
-        temp_dc.environment.append(dict(name='AL_INSTANCE_KEY', value=container_key))
-        change_key = f"n={deployment_name}{change_key}dc={temp_dc}ss={30}l={labels}v={volumes}m={mounts}cm={True}senv={senv}"
+        temp_spec = DependencyConfig(spec.as_primitives())
+        volumes, mounts, _ = self._get_volumes_mounts_strategy(deployment_name, container_name, temp_spec)
+        temp_spec.container.environment.append(dict(name='AL_INSTANCE_KEY', value=container_key))
+        change_key = str(f"n={deployment_name}{change_key}dc={temp_spec.container}ss={30}"
+                         f"l={labels}v={volumes}m={mounts}cm={True}senv={senv}")
 
+        self.logger.debug(f"{deployment_name} expected change_key: {change_key}")
         if old_deployment.metadata.annotations.get(CHANGE_KEY_NAME) != str(hash(change_key)):
             # A change occurred, declare dependency not ready yet.
             return
