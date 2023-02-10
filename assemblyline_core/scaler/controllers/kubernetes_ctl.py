@@ -9,7 +9,7 @@ import weakref
 import urllib3
 
 from collections import OrderedDict, defaultdict
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 from time import sleep
 
 
@@ -21,7 +21,7 @@ from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec,
     V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext, \
     V1Probe, V1ExecAction
 from kubernetes.client.rest import ApiException
-from assemblyline.odm.models.service import DockerConfig, PersistentVolume
+from assemblyline.odm.models.service import DependencyConfig, DockerConfig, PersistentVolume
 
 from assemblyline_core.scaler.controllers.interface import ControllerInterface
 
@@ -583,8 +583,10 @@ class KubernetesController(ControllerInterface):
         # systems returning differently formatted data
         lbls = sorted((labels or {}).items())
         svc_env = sorted(self._service_limited_env[service_name].items())
-        change_key = str(hash(f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
-                              f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}"))
+        change_key = str(f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
+                         f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}")
+        self.logger.debug(f"{deployment_name} actual change_key: {change_key}")
+        change_key = str(hash(change_key))
 
         # Check if a deployment already exists, and if it does check if it has the same change key set
         replace = None
@@ -787,13 +789,12 @@ class KubernetesController(ControllerInterface):
 
         return new
 
-    def stateful_container_key(self, service_name: str, container_name: str, spec, change_key: str) -> Optional[str]:
+    def stateful_container_key(self, service_name: str, container_name: str, spec: DependencyConfig,
+                               change_key: str) -> Optional[str]:
+        container_key = None
         deployment_name = self._dependency_name(service_name, container_name)
         try:
             old_deployment: V1Deployment = self.apps_api.read_namespaced_deployment(deployment_name, self.namespace)
-            if old_deployment.metadata.annotations.get(CHANGE_KEY_NAME) != change_key:
-                # A change occurred, declare dependency not ready yet.
-                return
             for container in old_deployment.spec.template.spec.containers:
                 for env in container.env:
                     if env.name == 'AL_INSTANCE_KEY':
@@ -801,18 +802,37 @@ class KubernetesController(ControllerInterface):
                         self._service_limited_env[service_name][f'{container_name}_key'] = env.value
                         if spec.container.ports:
                             self._service_limited_env[service_name][f'{container_name}_port'] = spec.container.ports[0]
-                        return env.value
+                        container_key = env.value
+                        break
         except ApiException as error:
             if error.status != 404:
                 raise
-        return None
 
-    def start_stateful_container(self, service_name: str, container_name: str,
-                                 spec, labels: dict[str, str], change_key: str):
-        # Setup PVC
-        deployment_name = self._dependency_name(service_name, container_name)
-        mounts, volumes = [], []
+        if not container_key:
+            # No existing instance found
+            return
 
+        # Generate the expected change key
+        senv = sorted(self._service_limited_env[service_name].items())
+        labels = [('container', container_name), ('dependency_for', service_name)]
+        temp_spec = DependencyConfig(spec.as_primitives())
+        volumes, mounts, _ = self._get_volumes_mounts_strategy(deployment_name, container_name, temp_spec)
+        temp_spec.container.environment.append(dict(name='AL_INSTANCE_KEY', value=container_key))
+        change_key = str(f"n={deployment_name}{change_key}dc={temp_spec.container}ss={30}"
+                         f"l={labels}v={volumes}m={mounts}cm={True}senv={senv}")
+
+        self.logger.debug(f"{deployment_name} expected change_key: {change_key}")
+        if old_deployment.metadata.annotations.get(CHANGE_KEY_NAME) != str(hash(change_key)):
+            # A change occurred, declare dependency not ready yet.
+            return
+
+        return container_key
+
+    def _get_volumes_mounts_strategy(
+            self, deployment_name: str, container_name: str, spec: DependencyConfig) -> Tuple[
+            List[V1Volume],
+            List[V1VolumeMount]]:
+        volumes, mounts = [], []
         if container_name == 'updates' and os.path.exists(AL_ROOT_CA):
             # Specifically for service updaters when internal encryption is enabled on the cluster
             update_cert_dir = "/etc/assemblyline/ssl/al_updates"
@@ -840,6 +860,13 @@ class KubernetesController(ControllerInterface):
                 persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(mount_name)
             ))
             mounts.append(V1VolumeMount(mount_path=volume_spec.mount_path, name=mount_name))
+        return volumes, mounts, deployment_strategy
+
+    def start_stateful_container(self, service_name: str, container_name: str,
+                                 spec, labels: dict[str, str], change_key: str):
+        # Setup PVC
+        deployment_name = self._dependency_name(service_name, container_name)
+        volumes, mounts, deployment_strategy = self._get_volumes_mounts_strategy(deployment_name, container_name, spec)
 
         # Read the key being used for the deployment instance or generate a new one
         instance_key = uuid.uuid4().hex
