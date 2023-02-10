@@ -26,7 +26,7 @@ from assemblyline.remote.datatypes.queues.priority import PriorityQueue, length 
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline.remote.datatypes.events import EventWatcher, EventSender
-from assemblyline.odm.models.service import Service, DockerConfig
+from assemblyline.odm.models.service import Service, DockerConfig, EnvironmentVariable
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
 from assemblyline.odm.messages.scaler_status_heartbeat import Status
 from assemblyline.odm.messages.changes import ServiceChange, Operation
@@ -277,13 +277,11 @@ class ScalerServer(ThreadedCoreBase):
             'privilege': 'service'
         }
 
-        # If Scaler has envs that set the service-server, internal-ui host details, use them
+        # If Scaler has envs that set service-server env, then that should override configured values
         if SERVICE_API_HOST:
-            self.config.core.scaler.service_defaults.environment.append(dict(name="SERVICE_API_HOST",
-                                                                             value=SERVICE_API_HOST))
-        if UI_SERVER:
-            self.config.core.scaler.service_defaults.environment.append(dict(name="UI_SERVER",
-                                                                             value=UI_SERVER))
+            self.config.core.scaler.service_defaults.environment = \
+                [EnvironmentVariable(dict(name="SERVICE_API_HOST", value=SERVICE_API_HOST))] + \
+                [env for env in self.config.core.scaler.service_defaults.environment if env.name != "SERVICE_API_HOST"]
 
         if self.config.core.scaler.additional_labels:
             labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)})
