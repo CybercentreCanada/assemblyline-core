@@ -185,6 +185,15 @@ class DockerController(ControllerInterface):
             env.append('PRIVILEGED=true')
             volumes.update({row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.core_mounts})
 
+        healthcheck = {
+            'test': ["CMD", "python3", "-m", "assemblyline_v4_service.healthz"],
+            'interval': SERVICE_LIVENESS_PERIOD,
+            'timeout': SERVICE_LIVENESS_TIMEOUT
+        }
+
+        if 'assemblyline' not in cfg.image:
+            healthcheck = None
+
         container = self.client.containers.run(
             image=cfg.image,
             name=container_name,
@@ -198,11 +207,7 @@ class DockerController(ControllerInterface):
             network=self._get_network(service_name).name,
             environment=env,
             detach=True,
-            healthcheck={
-                'test': ["CMD", "python3", "-m", "assemblyline_v4_service.healthz"],
-                'interval': SERVICE_LIVENESS_PERIOD,
-                'timeout': SERVICE_LIVENESS_TIMEOUT
-            }
+            healthcheck=healthcheck
         )
 
         if prof.privileged:

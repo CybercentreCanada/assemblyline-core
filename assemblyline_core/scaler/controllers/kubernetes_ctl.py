@@ -542,6 +542,10 @@ class KubernetesController(ControllerInterface):
             timeout_seconds=SERVICE_LIVENESS_TIMEOUT,
             period_seconds=SERVICE_LIVENESS_PERIOD)
 
+        if 'assemblyline' not in container_config.image:
+            # We can't assign an Assemblyline-based probe to a non-Assemblyline-based container image
+            health_probe = None
+
         # If we are launching a core container, include environment variables related to authentication for DBs
         if core_container:
             environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in self.core_env.items()]
