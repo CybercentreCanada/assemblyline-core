@@ -30,7 +30,7 @@ from assemblyline.odm.models.service import Service, DockerConfig, EnvironmentVa
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
 from assemblyline.odm.messages.scaler_status_heartbeat import Status
 from assemblyline.odm.messages.changes import ServiceChange, Operation
-from assemblyline.common.forge import get_classification, get_service_queue
+from assemblyline.common.forge import get_classification, get_service_queue, get_apm_client
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
 from assemblyline_core.scaler.controllers import KubernetesController
@@ -379,8 +379,7 @@ class ScalerServer(ThreadedCoreBase):
         self.apm_client = None
         if self.config.core.metrics.apm_server.server_url:
             elasticapm.instrument()
-            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                service_name="scaler")
+            self.apm_client = get_apm_client("scaler")
 
     def log_crashes(self, fn):
         @functools.wraps(fn)
