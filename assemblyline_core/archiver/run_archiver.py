@@ -41,8 +41,7 @@ class Archiver(ServerBase):
             if self.config.core.metrics.apm_server.server_url is not None:
                 self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
                 elasticapm.instrument()
-                self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                    service_name="alerter")
+                self.apm_client = forge.get_apm_client("archiver")
         else:
             self.log.warning("Archive is not enabled in the config, no need to run archiver.")
             exit()

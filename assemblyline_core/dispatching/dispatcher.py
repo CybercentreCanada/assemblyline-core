@@ -16,7 +16,7 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.forge import get_service_queue
+from assemblyline.common.forge import get_service_queue, get_apm_client
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.postprocess import ActionWorker
@@ -313,8 +313,7 @@ class Dispatcher(ThreadedCoreBase):
         self.apm_client = None
         if self.config.core.metrics.apm_server.server_url:
             elasticapm.instrument()
-            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                service_name="dispatcher")
+            self.apm_client = get_apm_client("dispatcher")
 
         self._service_timeouts: TimeoutTable[tuple[str, str, str], str] = TimeoutTable()
         self._submission_timeouts: TimeoutTable[str, None] = TimeoutTable()
