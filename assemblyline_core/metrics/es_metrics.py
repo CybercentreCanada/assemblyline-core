@@ -50,8 +50,7 @@ class ESMetricsServer(ServerBase):
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
             elasticapm.instrument()
-            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                service_name="es_metrics")
+            self.apm_client = forge.get_apm_client("es_metrics")
         else:
             self.apm_client = None
 

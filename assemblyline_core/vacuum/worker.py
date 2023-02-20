@@ -15,7 +15,7 @@ import threading
 import elasticapm
 import arrow
 
-from assemblyline.common.forge import CachedObject, get_classification, get_config, get_datastore, get_filestore
+from assemblyline.common.forge import CachedObject, get_classification, get_config, get_datastore, get_filestore, get_apm_client
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
 from assemblyline.common.log import init_logging
@@ -674,8 +674,7 @@ def run(config=None, redis=None, persistent_redis=None):
     apm_client = None
     if config.core.metrics.apm_server.server_url:
         elasticapm.instrument()
-        apm_client = elasticapm.Client(server_url=config.core.metrics.apm_server.server_url,
-                                       service_name="vacuum_worker")
+        apm_client = get_apm_client("vacuum_worker")
 
     container_id = os.environ.get("HOSTNAME", 'vacuum-worker') + '-'
     FileProcessor.total_rounds = threading.Semaphore(value=vacuum_config.worker_rollover*vacuum_config.worker_threads)
