@@ -95,7 +95,7 @@ class ResultSummary:
         self.key: str = key
         self.drop: bool = drop
         self.score: int = score
-        self.children: list[str] = children
+        self.children: list[str, str] = children
 
 
 class SubmissionTask:
@@ -466,6 +466,7 @@ class Dispatcher(ThreadedCoreBase):
         """
         submission = task.submission
         sid = submission.sid
+        sha256 = submission.files[0].sha256
 
         if not self.submissions_assignments.add(sid, self.instance_id):
             self.log.warning(f"[{sid}] Received an assigned submission dropping")
@@ -495,7 +496,7 @@ class Dispatcher(ThreadedCoreBase):
         # Apply initial data parameter
         if submission.params.initial_data:
             try:
-                task.file_temporary_data[submission.files[0].sha256] = {
+                task.file_temporary_data[sha256] = {
                     key: value
                     for key, value in dict(json.loads(submission.params.initial_data)).items()
                     if len(str(value)) <= self.config.submission.max_temp_data_length
@@ -507,10 +508,13 @@ class Dispatcher(ThreadedCoreBase):
         self.tasks[sid] = task
         self._submission_timeouts.set(task.sid, SUBMISSION_TOTAL_TIMEOUT, None)
 
-        task.file_depth[submission.files[0].sha256] = 0
-        task.file_names[submission.files[0].sha256] = submission.files[0].name or submission.files[0].sha256
-        task.active_files.add(submission.files[0].sha256)
-        action = DispatchAction(kind=Action.dispatch_file, sid=sid, sha=submission.files[0].sha256)
+        task.file_depth[sha256] = 0
+        task.file_names[sha256] = submission.files[0].name or sha256
+        # Initialize ancestry chain by identifying the root file
+        task.file_temporary_data[sha256] = {'ancestry': [[dict(type=self.datastore.file.get(sha256).type,
+                                                               parent_relation="ROOT")]]}
+        task.active_files.add(sha256)
+        action = DispatchAction(kind=Action.dispatch_file, sid=sid, sha=sha256)
         self.find_process_queue(sid).put(action)
 
     @elasticapm.capture_span(span_type='dispatcher')
@@ -866,7 +870,6 @@ class Dispatcher(ThreadedCoreBase):
         submission = task.submission
         sid = submission.sid
 
-        #
         results = list(task.service_results.values())
         errors = list(task.service_errors.values())
         errors.extend(task.extra_errors)
@@ -1166,6 +1169,10 @@ class Dispatcher(ThreadedCoreBase):
                 parent_data = task.file_temporary_data[sha256]
 
                 for extracted_sha256 in summary.children:
+                    parent_relation = "EXTRACTED"
+                    if isinstance(extracted_sha256, tuple):
+                        extracted_sha256, parent_relation = extracted_sha256
+
                     if extracted_sha256 in task.dropped_files or extracted_sha256 in task.active_files:
                         continue
 
@@ -1191,7 +1198,15 @@ class Dispatcher(ThreadedCoreBase):
 
                     dispatched += 1
                     task.active_files.add(extracted_sha256)
+                    parent_ancestry = parent_data['ancestry']
+                    existing_ancestry = task.file_temporary_data.get(extracted_sha256, {}).get('ancestry', [])
+                    current_ancestry_node = dict(type=self.datastore.file.get(extracted_sha256).type,
+                                                 parent_relation=parent_relation)
+
                     task.file_temporary_data[extracted_sha256] = dict(parent_data)
+                    task.file_temporary_data[extracted_sha256]['ancestry'] = existing_ancestry
+                    [task.file_temporary_data[extracted_sha256]['ancestry'].append(ancestry + [current_ancestry_node])
+                     for ancestry in parent_ancestry]
                     self.find_process_queue(sid).put(DispatchAction(kind=Action.dispatch_file, sid=sid,
                                                                     sha=extracted_sha256))
             else:

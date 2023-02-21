@@ -284,7 +284,7 @@ class DispatchClient:
                 'key': result_key,
                 'drop': result.drop_file,
                 'score': result.result.score,
-                'children': [r.sha256 for r in result.response.extracted],
+                'children': [(r.sha256, r.parent_relation) for r in result.response.extracted],
             },
             'tags': tags,
             'extracted_names': file_names,
