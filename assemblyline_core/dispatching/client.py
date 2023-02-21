@@ -185,7 +185,7 @@ class DispatchClient:
                     'submission': sid
                 })
             }).as_primitives())
-            return queue.pop(timeout=30)
+            return queue.pop(timeout=5)
         return {}
 
     @elasticapm.capture_span(span_type='dispatch_client')
