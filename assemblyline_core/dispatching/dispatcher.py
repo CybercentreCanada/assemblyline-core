@@ -341,9 +341,8 @@ class Dispatcher(ThreadedCoreBase):
                                                redis_persist=self.redis_persist)
 
         # Update bad sid list
-        self.bad_sids: set[str] = set()
         self.redis_bad_sids = Set(BAD_SID_HASH, host=self.redis_persist)
-        self.update_bad_sids()
+        self.bad_sids: set[str] = set(self.redis_bad_sids.members())
 
     def stop(self):
         super().stop()
