@@ -18,7 +18,7 @@ from assemblyline.common.forge import CachedObject, get_service_queue
 from assemblyline.datastore.exceptions import VersionConflictException
 from assemblyline.odm.base import DATEFORMAT
 from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, \
-    CreateWatch, LIST_OUTSTANDING, ListOutstanding
+    CreateWatch, LIST_OUTSTANDING, ListOutstanding, UPDATE_BAD_SID
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.file import File
 from assemblyline.odm.models.result import Result
@@ -27,9 +27,12 @@ from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes import get_client, reply_queue_name
 from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.remote.datatypes.set import ExpiringSet
+from assemblyline.remote.datatypes.set import ExpiringSet, Set
 from assemblyline_core.dispatching.dispatcher import DISPATCH_START_EVENTS, DISPATCH_RESULT_QUEUE, \
-    DISPATCH_COMMAND_QUEUE, QUEUE_EXPIRY, ServiceTask, Dispatcher
+    DISPATCH_COMMAND_QUEUE, QUEUE_EXPIRY, BAD_SID_HASH, ServiceTask, Dispatcher
+
+
+MAX_CANCEL_RESPONSE_WAIT = 10
 
 
 def weak_lru(maxsize=128, typed=False):
@@ -77,6 +80,7 @@ class DispatchClient:
         self.files = self.ds.file
         self.submission_assignments = ExpiringHash(DISPATCH_TASK_HASH, host=self.redis_persist)
         self.running_tasks = Hash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
+        self.bad_sids = Set(BAD_SID_HASH, host=self.redis_persist)
         self.service_data = cast(dict[str, Service], CachedObject(self._get_services))
         self.dispatcher_data = []
         self.dispatcher_data_age = 0.0
@@ -133,6 +137,32 @@ class DispatchClient:
             submission=submission.as_primitives(),
             completed_queue=completed_queue,
         ))
+
+    def cancel_submission(self, sid):
+        """
+        If the submission is running make sure it is saved with the to_be_deleted flag set.
+        """
+        # Mark the sid as bad
+        self.bad_sids.add(sid)
+
+        # Tell all the known dispatchers that they need to update their bad list
+        queue_name = reply_queue_name(prefix="D", suffix="ResponseQueue")
+        queue: NamedQueue[dict[str, int]] = NamedQueue(queue_name, host=self.redis, ttl=30)
+        listed_dispatchers = set()
+
+        for dispatcher_id in Dispatcher.all_instances(self.redis_persist):
+            listed_dispatchers.add(dispatcher_id)
+            command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+dispatcher_id, ttl=QUEUE_EXPIRY, host=self.redis)
+            command_queue.push(DispatcherCommandMessage({
+                'kind': UPDATE_BAD_SID,
+                'payload_data': queue_name
+            }).as_primitives())
+
+        # Wait to hear back from the dispatchers that they have processed the changes to the bad sid list
+        wait_start_time = time.time()
+        while listed_dispatchers and time.time() - wait_start_time > MAX_CANCEL_RESPONSE_WAIT:
+            dispatcher_id = queue.pop(timeout=5)
+            listed_dispatchers.discard(dispatcher_id)
 
     def outstanding_services(self, sid) -> Optional[dict[str, int]]:
         """
