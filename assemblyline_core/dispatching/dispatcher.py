@@ -626,7 +626,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
-            sent, enqueued, running = [], [], []
+            sent, enqueued, running, skipped = [], [], [], []
 
             for service_name, service in outstanding.items():
                 with elasticapm.capture_span('dispatch_task', labels={'service': service_name}):
@@ -647,6 +647,7 @@ class Dispatcher(ThreadedCoreBase):
 
                     # If its not in queue already check we aren't dispatching anymore
                     if task.submission.to_be_deleted:
+                        skipped.append(service_name)
                         continue
 
                     # Check if we have attempted this too many times already.
@@ -714,20 +715,25 @@ class Dispatcher(ThreadedCoreBase):
                 self.log.info(f"[{sid}] File {sha256} sent to: {sent} "
                               f"already in queue for: {enqueued} "
                               f"running on: {running}")
+                return False
+            elif skipped:
+                # Not waiting for anything, and have started skipping what is left over
+                # because this submission is terminated. Drop through to the base
+                # case where the file is complete
+                pass
             else:
                 # If we are not waiting, and have not taken an action, we must have hit the
                 # retry limit on the only service running. In that case, we can move directly
                 # onto the next stage of services, so recurse to trigger them.
                 return self.dispatch_file(task, sha256)
 
+        self.counter.increment('files_completed')
+        if len(task.queue_keys) > 0 or len(task.running_services) > 0:
+            self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete "
+                            f"(queued: {len(task.queue_keys)} running: {len(task.running_services)})")
         else:
-            self.counter.increment('files_completed')
-            if len(task.queue_keys) > 0 or len(task.running_services) > 0:
-                self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete "
-                              f"(queued: {len(task.queue_keys)} running: {len(task.running_services)})")
-            else:
-                self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
-                return self.check_submission(task)
+            self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
+            return self.check_submission(task)
         return False
 
     @elasticapm.capture_span(span_type='dispatcher')
