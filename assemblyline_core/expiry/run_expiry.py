@@ -66,6 +66,8 @@ class ExpiryManager(ServerBase):
 
         super().__init__('assemblyline.expiry', shutdown_timeout=self.config.core.expiry.sleep_time + 5)
         self.datastore = forge.get_datastore(config=self.config)
+        self.filestore = forge.get_filestore(config=self.config)
+        self.classification = forge.get_classification()
         self.expirable_collections: list[ESCollection] = []
         self.counter = MetricsFactory('expiry', Metrics)
         self.file_delete_worker = ProcessPoolExecutor(self.config.core.expiry.delete_workers)
@@ -154,6 +156,16 @@ class ExpiryManager(ServerBase):
     def run_expiry_once(self, pool: ThreadPoolExecutor):
         now = now_as_iso()
         reached_max = False
+
+        # Delete canceled submissions
+        for submission in self.datastore.submission.stream_search("to_be_deleted:true", fl="sid"):
+            if self.apm_client:
+                self.apm_client.begin_transaction("Delete canceled submissions")
+
+            self.datastore.delete_submission_tree_bulk(submission.sid, self.classification, transport=self.filestore)
+
+            if self.apm_client:
+                self.apm_client.end_transaction("canceled_submissions", 'deleted')
 
         # Expire data
         for collection in self.expirable_collections:
