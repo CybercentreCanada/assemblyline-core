@@ -172,6 +172,7 @@ class ExpiryManager(ServerBase):
             if self.apm_client:
                 self.apm_client.begin_transaction("Delete canceled submissions")
 
+            self.log.info(f"Deleting incomplete submission {submission.sid}...")
             self.datastore.delete_submission_tree_bulk(submission.sid, self.classification, transport=self.filestore)
             self.redis_bad_sids.remove(submission.sid)
 
