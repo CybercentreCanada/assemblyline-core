@@ -12,10 +12,13 @@ from datemath import dm
 
 from assemblyline.common.isotime import epoch_to_iso, now_as_iso, iso_to_epoch
 from assemblyline_core.server_base import ServerBase
+from assemblyline_core.dispatching.dispatcher import BAD_SID_HASH
 from assemblyline.common import forge
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.expiry_heartbeat import Metrics
+from assemblyline.remote.datatypes import get_client
+from assemblyline.remote.datatypes.set import Set
 
 if TYPE_CHECKING:
     from assemblyline.datastore.collection import ESCollection
@@ -61,15 +64,24 @@ def _file_delete_worker(logger, delete_action: Callable[[str], Optional[str]], f
 
 
 class ExpiryManager(ServerBase):
-    def __init__(self):
+    def __init__(self, redis_persist=None):
         self.config = forge.get_config()
 
         super().__init__('assemblyline.expiry', shutdown_timeout=self.config.core.expiry.sleep_time + 5)
         self.datastore = forge.get_datastore(config=self.config)
+        self.filestore = forge.get_filestore(config=self.config)
+        self.classification = forge.get_classification()
         self.expirable_collections: list[ESCollection] = []
         self.counter = MetricsFactory('expiry', Metrics)
         self.file_delete_worker = ProcessPoolExecutor(self.config.core.expiry.delete_workers)
         self.same_storage = self.config.filestore.storage == self.config.filestore.archive
+
+        self.redis_persist = redis_persist or get_client(
+            host=self.config.core.redis.persistent.host,
+            port=self.config.core.redis.persistent.port,
+            private=False,
+        )
+        self.redis_bad_sids = Set(BAD_SID_HASH, host=self.redis_persist)
 
         self.fs_hashmap = {
             'file': self.filestore_delete,
@@ -154,6 +166,18 @@ class ExpiryManager(ServerBase):
     def run_expiry_once(self, pool: ThreadPoolExecutor):
         now = now_as_iso()
         reached_max = False
+
+        # Delete canceled submissions
+        for submission in self.datastore.submission.stream_search("to_be_deleted:true", fl="sid"):
+            if self.apm_client:
+                self.apm_client.begin_transaction("Delete canceled submissions")
+
+            self.log.info(f"Deleting incomplete submission {submission.sid}...")
+            self.datastore.delete_submission_tree_bulk(submission.sid, self.classification, transport=self.filestore)
+            self.redis_bad_sids.remove(submission.sid)
+
+            if self.apm_client:
+                self.apm_client.end_transaction("canceled_submissions", 'deleted')
 
         # Expire data
         for collection in self.expirable_collections:

@@ -23,7 +23,7 @@ from assemblyline.common.postprocess import ActionWorker
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch, DispatcherCommandMessage, \
-    CREATE_WATCH, LIST_OUTSTANDING, ListOutstanding
+    CREATE_WATCH, LIST_OUTSTANDING, UPDATE_BAD_SID, ListOutstanding
 from assemblyline.odm.messages.submission import SubmissionMessage, from_datastore_submission
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.error import Error
@@ -32,6 +32,7 @@ from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.result import Result
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import Hash
+from assemblyline.remote.datatypes.set import Set
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
@@ -64,6 +65,7 @@ class Action(enum.IntEnum):
     dispatch_file = 2
     service_timeout = 3
     check_submission = 4
+    bad_sid = 5
 
 
 @dataclasses.dataclass(order=True)
@@ -74,6 +76,7 @@ class DispatchAction:
     service_name: Optional[str] = dataclasses.field(compare=False, default=None)
     worker_id: Optional[str] = dataclasses.field(compare=False, default=None)
     data: Any = dataclasses.field(compare=False, default=None)
+    event: Optional[threading.Event] = dataclasses.field(compare=False, default=None)
 
 
 @contextmanager
@@ -231,6 +234,7 @@ DISPATCH_START_EVENTS = 'dispatcher-start-events-'
 DISPATCH_RESULT_QUEUE = 'dispatcher-results-'
 DISPATCH_COMMAND_QUEUE = 'dispatcher-commands-'
 DISPATCH_DIRECTORY = 'dispatchers-directory'
+BAD_SID_HASH = 'bad-sid-hash'
 QUEUE_EXPIRY = 60*60
 SERVICE_VERSION_EXPIRY_TIME = 30 * 60  # How old service version info can be before we ignore it
 GUARD_TIMEOUT = 60*2
@@ -335,6 +339,10 @@ class Dispatcher(ThreadedCoreBase):
         # Utility object to handle post-processing actions
         self.postprocess_worker = ActionWorker(cache=False, config=self.config, datastore=self.datastore,
                                                redis_persist=self.redis_persist)
+
+        # Update bad sid list
+        self.redis_bad_sids = Set(BAD_SID_HASH, host=self.redis_persist)
+        self.bad_sids: set[str] = set(self.redis_bad_sids.members())
 
     def stop(self):
         super().stop()
@@ -447,6 +455,11 @@ class Dispatcher(ThreadedCoreBase):
                 with apm_span(self.apm_client, 'submission_message'):
                     # This is probably a complete task
                     task = SubmissionTask(scheduler=self.scheduler, **message)
+
+                    # Check the sid table
+                    if task.sid in self.bad_sids:
+                        task.submission.to_be_deleted = True
+
                     if self.apm_client:
                         elasticapm.label(sid=task.submission.sid)
                     self.dispatch_submission(task)
@@ -613,7 +626,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
-            sent, enqueued, running = [], [], []
+            sent, enqueued, running, skipped = [], [], [], []
 
             for service_name, service in outstanding.items():
                 with elasticapm.capture_span('dispatch_task', labels={'service': service_name}):
@@ -631,6 +644,11 @@ class Dispatcher(ThreadedCoreBase):
                         if dispatch_key is not None and service_queue.rank(dispatch_key) is not None:
                             enqueued.append(service_name)
                             continue
+
+                    # If its not in queue already check we aren't dispatching anymore
+                    if task.submission.to_be_deleted:
+                        skipped.append(service_name)
+                        continue
 
                     # Check if we have attempted this too many times already.
                     task.service_attempts[key] += 1
@@ -697,20 +715,25 @@ class Dispatcher(ThreadedCoreBase):
                 self.log.info(f"[{sid}] File {sha256} sent to: {sent} "
                               f"already in queue for: {enqueued} "
                               f"running on: {running}")
+                return False
+            elif skipped:
+                # Not waiting for anything, and have started skipping what is left over
+                # because this submission is terminated. Drop through to the base
+                # case where the file is complete
+                pass
             else:
                 # If we are not waiting, and have not taken an action, we must have hit the
                 # retry limit on the only service running. In that case, we can move directly
                 # onto the next stage of services, so recurse to trigger them.
                 return self.dispatch_file(task, sha256)
 
+        self.counter.increment('files_completed')
+        if len(task.queue_keys) > 0 or len(task.running_services) > 0:
+            self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete "
+                            f"(queued: {len(task.queue_keys)} running: {len(task.running_services)})")
         else:
-            self.counter.increment('files_completed')
-            if len(task.queue_keys) > 0 or len(task.running_services) > 0:
-                self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete "
-                              f"(queued: {len(task.queue_keys)} running: {len(task.running_services)})")
-            else:
-                self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
-                return self.check_submission(task)
+            self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
+            return self.check_submission(task)
         return False
 
     @elasticapm.capture_span(span_type='dispatcher')
@@ -785,6 +808,11 @@ class Dispatcher(ThreadedCoreBase):
                     if key in task.queue_keys and service_queue.rank(task.queue_keys[key]) is not None:
                         processing_files.append(sha256)
                         continue
+
+                    # Don't worry about pending files if we aren't dispatching anymore and they weren't caught
+                    # by the prior checks for outstanding tasks
+                    if task.submission.to_be_deleted:
+                        break
 
                     # Since the service is not finished or in progress, it must still need to start
                     pending_files.append(sha256)
@@ -908,15 +936,24 @@ class Dispatcher(ThreadedCoreBase):
         for w in watcher_list.members():
             NamedQueue(w).push(WatchQueueMessage({'status': 'STOP'}).as_primitives())
 
-        # Pull the tags keys and values into a searchable form
-        tags = [
-            {'value': _t['value'], 'type': _t['type']}
-            for file_tags in task.file_tags.values()
-            for _t in file_tags.values()
-        ]
+        # Don't run post processing and traffic notifications if the submission is terminated
+        if not task.submission.to_be_deleted:
+            # Pull the tags keys and values into a searchable form
+            tags = [
+                {'value': _t['value'], 'type': _t['type']}
+                for file_tags in task.file_tags.values()
+                for _t in file_tags.values()
+            ]
 
-        # Send the submission for alerting or resubmission
-        self.postprocess_worker.process_submission(submission, tags)
+            # Send the submission for alerting or resubmission
+            self.postprocess_worker.process_submission(submission, tags)
+
+            # Write all finished submissions to the traffic queue
+            self.traffic_queue.publish(SubmissionMessage({
+                'msg': from_datastore_submission(submission),
+                'msg_type': 'SubmissionCompleted',
+                'sender': 'dispatcher',
+            }).as_primitives())
 
         # Clear the timeout watcher
         watcher_list.delete()
@@ -926,13 +963,6 @@ class Dispatcher(ThreadedCoreBase):
 
         # Count the submission as 'complete' either way
         self.counter.increment('submissions_completed')
-
-        # Write all finished submissions to the traffic queue
-        self.traffic_queue.publish(SubmissionMessage({
-            'msg': from_datastore_submission(submission),
-            'msg_type': 'SubmissionCompleted',
-            'sender': 'dispatcher',
-        }).as_primitives())
 
     def retry_error(self, task: SubmissionTask, sha256, service_name):
         self.log.warning(f"[{task.submission.sid}/{sha256}] "
@@ -1071,6 +1101,18 @@ class Dispatcher(ThreadedCoreBase):
                 task = self.tasks.get(message.sid)
                 if task:
                     self.dispatch_file(task, message.sha)
+
+            elif kind == Action.bad_sid:
+                task = self.tasks.get(message.sid)
+                if task:
+                    task.submission.to_be_deleted = True
+                    self.active_submissions.add(message.sid, {
+                        'completed_queue': task.completed_queue,
+                        'submission': task.submission.as_primitives()
+                    })
+
+                if message.event:
+                    message.event.set()
 
             else:
                 self.log.warning(f'Invalid work order kind {kind}')
@@ -1456,6 +1498,9 @@ class Dispatcher(ThreadedCoreBase):
                 elif command.kind == LIST_OUTSTANDING:
                     payload: ListOutstanding = command.payload()
                     self.list_outstanding(payload.submission, payload.response_queue)
+                elif command.kind == UPDATE_BAD_SID:
+                    self.update_bad_sids()
+                    NamedQueue(command.payload_data, host=self.redis).push(self.instance_id)
                 else:
                     self.log.warning(f"Unknown command code: {command.kind}")
 
@@ -1604,3 +1649,19 @@ class Dispatcher(ThreadedCoreBase):
             completed_queue=completed_queue,
         ))
         return True
+
+    def update_bad_sids(self):
+        # Pull new sid list
+        remote_sid_list = set(self.redis_bad_sids.members())
+        new_sid_events = []
+
+        # Kick off updates for any new sids
+        for bad_sid in remote_sid_list - self.bad_sids:
+            self.bad_sids.add(bad_sid)
+            event = threading.Event()
+            self.find_process_queue(bad_sid).put(DispatchAction(kind=Action.bad_sid, sid=bad_sid, event=event))
+            new_sid_events.append(event)
+
+        # Wait for those updates to finish
+        for event in new_sid_events:
+            event.wait()
