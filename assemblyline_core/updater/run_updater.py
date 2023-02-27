@@ -53,10 +53,11 @@ RELEASE_NAME = os.getenv('RELEASE_NAME')
 class DockerUpdateInterface:
     """Wrap docker interface for the commands used in the update process."""
 
-    def __init__(self, log_level="INFO"):
+    def __init__(self, logger, log_level="INFO"):
         self.client = docker.from_env()
         self._external_network = None
         self.log_level = log_level
+        self.log = logger
 
     @property
     def external_network(self):
@@ -147,7 +148,7 @@ class DockerUpdateInterface:
 
 
 class KubernetesUpdateInterface:
-    def __init__(self, prefix, namespace, priority_class, extra_labels, log_level="INFO", default_service_account=None):
+    def __init__(self, logger, prefix, namespace, priority_class, extra_labels, log_level="INFO", default_service_account=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -168,6 +169,7 @@ class KubernetesUpdateInterface:
             # Load again with our settings set
             config.load_kube_config(client_configuration=cfg)
 
+        self.log = logger
         self.prefix = prefix.lower()
         self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
@@ -437,7 +439,7 @@ class ServiceUpdater(ThreadedCoreBase):
                     resource_key="tls.crt"
                 ))
 
-            self.controller = KubernetesUpdateInterface(prefix='alsvc_', namespace=NAMESPACE,
+            self.controller = KubernetesUpdateInterface(logger=self.log, prefix='alsvc_', namespace=NAMESPACE,
                                                         priority_class='al-core-priority',
                                                         extra_labels=extra_labels,
                                                         log_level=self.config.logging.log_level,
@@ -445,7 +447,7 @@ class ServiceUpdater(ThreadedCoreBase):
             # Add all additional mounts to privileged services
             self.mounts = self.config.core.scaler.service_defaults.mounts
         else:
-            self.controller = DockerUpdateInterface(log_level=self.config.logging.log_level)
+            self.controller = DockerUpdateInterface(logger=self.log, log_level=self.config.logging.log_level)
 
     def _handle_service_change_event(self, data: ServiceChange):
         if data.operation == Operation.Incompatible:
