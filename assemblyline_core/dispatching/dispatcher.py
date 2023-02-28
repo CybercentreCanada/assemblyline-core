@@ -150,7 +150,7 @@ class SubmissionTask:
             rescan = scheduler.expand_categories(self.submission.params.services.rescan)
 
             # Replay the process of routing files for dispatcher internal state.
-            for k, result in results.values():
+            for k, result in results.items():
                 sha256, service, _ = k.split('.', 2)
                 service = scheduler.services.get(service)
                 if not service:
