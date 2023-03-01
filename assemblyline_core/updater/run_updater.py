@@ -148,7 +148,8 @@ class DockerUpdateInterface:
 
 
 class KubernetesUpdateInterface:
-    def __init__(self, logger, prefix, namespace, priority_class, extra_labels, log_level="INFO", default_service_account=None):
+    def __init__(self, logger, prefix, namespace, priority_class, extra_labels, log_level="INFO",
+                 default_service_account=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -424,6 +425,10 @@ class ServiceUpdater(ThreadedCoreBase):
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
         self.mounts = []
 
+        # We only want changes with value, we also don't want to override the image
+        self.job_dockerconfig = {k: v for k, v in self.config.core.updater.job_dockerconfig.as_primitives().items()
+                                 if (v and k != 'image')}
+
         if 'KUBERNETES_SERVICE_HOST' in os.environ and NAMESPACE:
             extra_labels = {}
             if self.config.core.scaler.additional_labels:
@@ -475,24 +480,19 @@ class ServiceUpdater(ThreadedCoreBase):
                     image_name, tag_name, auth = get_latest_tag_for_service(
                         service,  self.config, self.log, prefix="[CI] ")
 
-                    docker_config = DockerConfig(dict(
-                        # remove allow internet access
-                        allow_internet_access=True,
-                        cpu_cores=1,
-                        environment=[],
-                        image=image_name + ":" + tag_name,
-                        ports=[]
-                    ))
-
+                    docker_config = dict(image=f"{image_name}:{tag_name}")
                     if auth:
-                        docker_config.registry_username = auth['username']
-                        docker_config.registry_password = auth['password']
+                        docker_config.update(dict(registry_username=auth['username'],
+                                                  registry_password=auth['password']))
+
+                    # Apply any container configuration changes specifically for jobs
+                    docker_config.update(self.job_dockerconfig)
 
                     self.log.info(f"[CI] Service {service_name} is being installed to version {tag_name}...")
 
                     self.controller.launch(
                         name=service_name,
-                        docker_config=docker_config,
+                        docker_config=DockerConfig(docker_config),
                         mounts=self.mounts,
                         env={
                             "SERVICE_TAG": tag_name,
@@ -558,28 +558,23 @@ class ServiceUpdater(ThreadedCoreBase):
             def update_service(service_name: str, update_data: dict) -> str:
                 self.log.info(f"[CU] Service {service_name} is being updated to version {update_data['latest_tag']}...")
 
+                docker_config = dict(image=update_data['image'])
+
                 # Load authentication params
-                username = None
-                password = None
                 auth = update_data['auth'] or {}
                 if auth:
-                    username = auth.get('username', None)
-                    password = auth.get('password', None)
+                    docker_config.update(dict(registry_username=auth.get('username'),
+                                              registry_password=auth.get('password')))
+
+                # Apply any container configuration changes specifically for jobs
+                docker_config.update(self.job_dockerconfig)
 
                 latest_tag = update_data['latest_tag'].replace('stable', '')
                 service_key = f"{service_name}_{latest_tag}"
                 try:
                     self.controller.launch(
                         name=service_name,
-                        docker_config=DockerConfig(dict(
-                            allow_internet_access=True,
-                            registry_username=username,
-                            registry_password=password,
-                            cpu_cores=1,
-                            environment=[],
-                            image=update_data['image'],
-                            ports=[]
-                        )),
+                        docker_config=DockerConfig(docker_config),
                         mounts=self.mounts,
                         env={
                             "SERVICE_TAG": update_data['latest_tag'],
