@@ -1,3 +1,4 @@
+import json
 import requests
 import re
 import socket
@@ -138,7 +139,7 @@ def get_latest_tag_for_service(
         auth = f"Basic {b64encode(upass.encode()).decode()}"
 
     registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
-    proxies = system_config.core.updater.registry_proxies.get(server)
+    proxies = json.loads(system_config.core.updater.registry_proxies).get(server) or None
 
     if server == DEFAULT_DOCKER_REGISTRY:
         tags = _get_dockerhub_tags(image_name, update_channel, proxies)
