@@ -139,7 +139,11 @@ def get_latest_tag_for_service(
         auth = f"Basic {b64encode(upass.encode()).decode()}"
 
     registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
-    proxies = json.loads(system_config.core.updater.registry_proxies).get(server) or None
+    proxies = None
+    for reg_conf in system_config.core.updater.registry_configs:
+        if reg_conf.name == server:
+            proxies = reg_conf.proxies or None
+            break
 
     if server == DEFAULT_DOCKER_REGISTRY:
         tags = _get_dockerhub_tags(image_name, update_channel, proxies)
