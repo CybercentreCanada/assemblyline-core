@@ -57,6 +57,7 @@ FINALIZING_WINDOW = max(AL_SHUTDOWN_GRACE - AL_SHUTDOWN_QUIT, 0)
 RESULT_BATCH_SIZE = int(os.environ.get('DISPATCHER_RESULT_BATCH_SIZE', '50'))
 ERROR_BATCH_SIZE = int(os.environ.get('DISPATCHER_ERROR_BATCH_SIZE', '50'))
 DYNAMIC_ANALYSIS_CATEGORY = 'Dynamic Analysis'
+DAY_IN_SECONDS = 24 * 60 * 60
 
 
 class Action(enum.IntEnum):
@@ -234,6 +235,7 @@ DISPATCH_START_EVENTS = 'dispatcher-start-events-'
 DISPATCH_RESULT_QUEUE = 'dispatcher-results-'
 DISPATCH_COMMAND_QUEUE = 'dispatcher-commands-'
 DISPATCH_DIRECTORY = 'dispatchers-directory'
+DISPATCH_DIRECTORY_FINALIZE = 'dispatchers-directory-finalizing'
 BAD_SID_HASH = 'bad-sid-hash'
 QUEUE_EXPIRY = 60*60
 SERVICE_VERSION_EXPIRY_TIME = 30 * 60  # How old service version info can be before we ignore it
@@ -294,7 +296,8 @@ class Dispatcher(ThreadedCoreBase):
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
 
         # Table to track the running dispatchers
-        self.dispatchers_directory = Hash(DISPATCH_DIRECTORY, host=self.redis_persist)
+        self.dispatchers_directory: Hash[int] = Hash(DISPATCH_DIRECTORY, host=self.redis_persist)
+        self.dispatchers_directory_finalize: Hash[int] = Hash(DISPATCH_DIRECTORY_FINALIZE, host=self.redis_persist)
         self.running_dispatchers_estimate = 1
 
         # Tables to track what submissions are running where
@@ -353,6 +356,7 @@ class Dispatcher(ThreadedCoreBase):
         self.finalizing_start = time.time()
         self._shutdown_timeout = AL_SHUTDOWN_QUIT
         self.finalizing.set()
+        self.dispatchers_directory_finalize.set(self.instance_id, int(time.time()))
 
     def process_queue_index(self, key: str) -> int:
         return sum(ord(_x) for _x in key) % RESULT_THREADS
@@ -582,7 +586,8 @@ class Dispatcher(ThreadedCoreBase):
 
                     # If Dynamic Recursion Prevention is in effect and the file is not part of the bypass list,
                     # Find the list of services this file is forbidden from being sent to.
-                    if not submission.params.ignore_dynamic_recursion_prevention and sha256 not in task.dynamic_recursion_bypass:
+                    ignore_drp = submission.params.ignore_dynamic_recursion_prevention
+                    if not ignore_drp and sha256 not in task.dynamic_recursion_bypass:
                         forbidden_services = task.find_recursion_excluded_services(sha256)
 
                     task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
@@ -730,7 +735,7 @@ class Dispatcher(ThreadedCoreBase):
         self.counter.increment('files_completed')
         if len(task.queue_keys) > 0 or len(task.running_services) > 0:
             self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete "
-                            f"(queued: {len(task.queue_keys)} running: {len(task.running_services)})")
+                          f"(queued: {len(task.queue_keys)} running: {len(task.running_services)})")
         else:
             self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
             return self.check_submission(task)
@@ -1410,9 +1415,16 @@ class Dispatcher(ThreadedCoreBase):
         finally:
             if not self.running:
                 self.dispatchers_directory.pop(self.instance_id)
+                self.dispatchers_directory_finalize.pop(self.instance_id)
 
     def work_thief(self):
 
+        # Clean up the finalize list once in a while
+        for id, timestamp in self.dispatchers_directory_finalize.items().items():
+            if int(time.time()) - timestamp > DAY_IN_SECONDS:
+                self.dispatchers_directory_finalize.pop(id)
+
+        # Keep a table of the last recorded status for other dispatchers
         last_seen = {}
 
         try:
@@ -1421,6 +1433,7 @@ class Dispatcher(ThreadedCoreBase):
                 time_mark = time.time()
 
                 # Load guards
+                finalizing = self.dispatchers_directory_finalize.items()
                 last_seen.update(self.dispatchers_directory.items())
 
                 # List all dispatchers with jobs assigned
@@ -1429,7 +1442,7 @@ class Dispatcher(ThreadedCoreBase):
                     key = key[len(DISPATCH_TASK_ASSIGNMENT):]
                     if key not in last_seen:
                         last_seen[key] = time.time()
-                self.running_dispatchers_estimate = len(last_seen)
+                self.running_dispatchers_estimate = len(set(last_seen.keys()) - set(finalizing.keys()))
 
                 self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
                 self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
@@ -1444,6 +1457,7 @@ class Dispatcher(ThreadedCoreBase):
         finally:
             if not self.running:
                 self.dispatchers_directory.pop(self.instance_id)
+                self.dispatchers_directory_finalize.pop(self.instance_id)
 
     def steal_work(self, target):
         target_jobs = Hash(DISPATCH_TASK_ASSIGNMENT+target, host=self.redis_persist)
@@ -1477,6 +1491,7 @@ class Dispatcher(ThreadedCoreBase):
 
         self.log.info(f'Finished stealing work from {target}')
         self.dispatchers_directory.pop(target)
+        self.dispatchers_directory_finalize.pop(target)
 
     def handle_commands(self):
         while self.running:
