@@ -727,8 +727,11 @@ class KubernetesController(ControllerInterface):
                 return
             except ApiException as error:
                 if error.status == 422:
-                    # Replacement of an immutable field (ie. labels); Delete and re-create
-                    self.stop_containers(labels=dict(component=service_name))
+                    # Replacement of an immutable field (ie. labels) attempted
+                    existing_labels = self.apps_api.read_namespaced_deployment(name=metadata.name,
+                                                                               namespace=self.namespace).metadata.labels
+                    # Delete deployments with the same labels and re-create
+                    self.stop_containers(labels=existing_labels, exact_label_match=True)
 
         else:
             self.logger.info("Requesting kubernetes create deployment info for: " + metadata.name)
@@ -979,11 +982,15 @@ class KubernetesController(ControllerInterface):
         self.api.create_namespaced_persistent_volume_claim(namespace=self.namespace, body=claim,
                                                            _request_timeout=API_TIMEOUT)
 
-    def stop_containers(self, labels, fields={}):
+    def stop_containers(self, labels, fields={}, exact_label_match=False):
         label_selector = ','.join(f'{_n}={_v}' for _n, _v in labels.items())
         deployments = self.apps_api.list_namespaced_deployment(namespace=self.namespace, label_selector=label_selector,
                                                                _request_timeout=API_TIMEOUT)
         for dep in deployments.items:
+            if exact_label_match and dep.metadata.labels != labels:
+                # We're only interested in deployments with exact label matches
+                continue
+
             # Remove deployments with matching labels
             self.apps_api.delete_namespaced_deployment(name=dep.metadata.name, namespace=self.namespace,
                                                        _request_timeout=API_TIMEOUT)
