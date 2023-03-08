@@ -42,27 +42,32 @@ class TaskingClient:
     """
 
     def __init__(self, datastore: AssemblylineDatastore = None, filestore: FileStore = None,
-                 config=None, redis=None, redis_persist=None, identify=None):
+                 config=None, redis=None, redis_persist=None, identify=None, register_only=False):
         self.log = logging.getLogger('assemblyline.tasking_client')
         self.config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
-        self.dispatch_client = DispatchClient(self.datastore, redis=redis, redis_persist=redis_persist)
         self.event_sender = EventSender('changes', redis)
-        self.event_listener = EventWatcher(redis)
-        self.filestore = filestore or forge.get_filestore(self.config)
-        self.heuristic_handler = HeuristicHandler(self.datastore)
-        self.heuristics: dict[str, Heuristic] = {}
-        self.reload_heuristics({})
-        self.status_table = ExpiringHash(SERVICE_STATE_HASH, ttl=60*30, host=redis)
-        self.tag_safelister = forge.CachedObject(forge.get_tag_safelister, kwargs=dict(
-            log=self.log, config=config, datastore=self.datastore), refresh=300)
-        if identify:
-            self.cleanup = False
-        else:
-            self.cleanup = True
-        self.identify = identify or forge.get_identify(config=self.config, datastore=self.datastore, use_cache=True)
-        self.event_listener.register('changes.heuristics', self.reload_heuristics)
-        self.event_listener.start()
+        self.cleanup = False
+        self.event_listener = None
+
+        # If we're performing service registration, we only need a connection to the datastore
+        if not register_only:
+            self.dispatch_client = DispatchClient(self.datastore, redis=redis, redis_persist=redis_persist)
+            self.event_listener = EventWatcher(redis)
+            self.filestore = filestore or forge.get_filestore(self.config)
+            self.heuristic_handler = HeuristicHandler(self.datastore)
+            self.heuristics: dict[str, Heuristic] = {}
+            self.reload_heuristics({})
+            self.status_table = ExpiringHash(SERVICE_STATE_HASH, ttl=60*30, host=redis)
+            self.tag_safelister = forge.CachedObject(forge.get_tag_safelister, kwargs=dict(
+                log=self.log, config=config, datastore=self.datastore), refresh=300)
+            if identify:
+                self.cleanup = False
+            else:
+                self.cleanup = True
+            self.identify = identify or forge.get_identify(config=self.config, datastore=self.datastore, use_cache=True)
+            self.event_listener.register('changes.heuristics', self.reload_heuristics)
+            self.event_listener.start()
 
     def reload_heuristics(self, data: dict):
         service_name = data.get('service_name')
