@@ -19,7 +19,7 @@ from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec,
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
     V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext, \
-    V1Probe, V1ExecAction
+    V1Probe, V1ExecAction, V1SecurityContext
 from kubernetes.client.rest import ApiException
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig, PersistentVolume
 
@@ -669,7 +669,25 @@ class KubernetesController(ControllerInterface):
         if docker_config.service_account:
             service_account = docker_config.service_account
 
+        # Prepare initContainers, if necessary
+        init_containers: List[V1Container] = []
+
+        # Ensure AL user has the right access on volume mounts
+        # Ignore ownership changes involving Secret/ConfigMap mounts
+        chown_mounts: List[V1VolumeMount] = [m for i, m in enumerate(all_mounts)
+                                             if not (all_volumes[i].config_map or all_volumes[i].secret)]
+        if chown_mounts:
+            # Ensure AL user has the right access
+            init_containers.append(V1Container(
+                name="chown-mounts",
+                image=docker_config.image,
+                command=['chown', '-R', '1000:1000'] + [m.mount_path for m in chown_mounts],
+                security_context=V1SecurityContext(run_as_user=0),
+                volume_mounts=chown_mounts
+            ))
+
         pod = V1PodSpec(
+            init_containers=init_containers,
             volumes=all_volumes,
             containers=self._create_containers(service_name, deployment_name, docker_config,
                                                all_mounts, core_container=core_mounts),
@@ -709,8 +727,11 @@ class KubernetesController(ControllerInterface):
                 return
             except ApiException as error:
                 if error.status == 422:
-                    # Replacement of an immutable field (ie. labels); Delete and re-create
-                    self.stop_containers(labels=dict(component=service_name))
+                    # Replacement of an immutable field (ie. labels) attempted
+                    existing_labels = self.apps_api.read_namespaced_deployment(name=metadata.name,
+                                                                               namespace=self.namespace).metadata.labels
+                    # Delete deployments with the same labels and re-create
+                    self.stop_containers(labels=existing_labels, exact_label_match=True)
 
         else:
             self.logger.info("Requesting kubernetes create deployment info for: " + metadata.name)
@@ -961,11 +982,15 @@ class KubernetesController(ControllerInterface):
         self.api.create_namespaced_persistent_volume_claim(namespace=self.namespace, body=claim,
                                                            _request_timeout=API_TIMEOUT)
 
-    def stop_containers(self, labels, fields={}):
+    def stop_containers(self, labels, fields={}, exact_label_match=False):
         label_selector = ','.join(f'{_n}={_v}' for _n, _v in labels.items())
         deployments = self.apps_api.list_namespaced_deployment(namespace=self.namespace, label_selector=label_selector,
                                                                _request_timeout=API_TIMEOUT)
         for dep in deployments.items:
+            if exact_label_match and dep.metadata.labels != labels:
+                # We're only interested in deployments with exact label matches
+                continue
+
             # Remove deployments with matching labels
             self.apps_api.delete_namespaced_deployment(name=dep.metadata.name, namespace=self.namespace,
                                                        _request_timeout=API_TIMEOUT)
