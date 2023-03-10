@@ -1147,6 +1147,10 @@ class Dispatcher(ThreadedCoreBase):
             if len(str(value)) <= self.config.submission.max_temp_data_length:
                 task.file_temporary_data[sha256][key] = value
 
+        # Update children to include parent_relation, likely EXTRACTED
+        if summary.children and isinstance(summary.children[0], str):
+            summary.children = [(c, 'EXTRACTED') for c in summary.children]
+
         # Record the result as a summary
         task.service_results[(sha256, service_name)] = summary
         task.register_children(sha256, [c for c, _ in summary.children])
@@ -1168,11 +1172,7 @@ class Dispatcher(ThreadedCoreBase):
                 # these newly extract files
                 parent_data = task.file_temporary_data[sha256]
 
-                for extracted_sha256 in summary.children:
-                    parent_relation = "EXTRACTED"
-                    if isinstance(extracted_sha256, tuple) or \
-                            (isinstance(extracted_sha256, list) and len(extracted_sha256) == 2):
-                        extracted_sha256, parent_relation = extracted_sha256
+                for extracted_sha256, parent_relation in summary.children:
 
                     if extracted_sha256 in task.dropped_files or extracted_sha256 in task.active_files:
                         continue
