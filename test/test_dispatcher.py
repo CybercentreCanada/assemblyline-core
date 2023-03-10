@@ -159,8 +159,9 @@ def test_simple(clean_redis, clean_datastore):
     logger.info('==== third dispatch')
     job = client.request_work('0', 'extract', '0')
     assert job.temporary_submission_data == [
-        {"name": "ancestry", "value": [[{"type": "unknown", "parent_relation": "ROOT"}]]},
-        {'name': 'cats', 'value': 'big'}]
+        {'name': 'cats', 'value': 'big'},
+        {"name": "ancestry", "value": [[{"type": "unknown", "parent_relation": "ROOT"}]]}
+    ]
     client.service_failed(sid, 'abc123', make_error(file_hash, 'extract'))
     # Deliberately do in the wrong order to make sure that works
     disp.pull_service_results()

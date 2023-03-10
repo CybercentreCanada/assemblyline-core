@@ -511,8 +511,8 @@ class Dispatcher(ThreadedCoreBase):
         task.file_depth[sha256] = 0
         task.file_names[sha256] = submission.files[0].name or sha256
         # Initialize ancestry chain by identifying the root file
-        task.file_temporary_data[sha256] = {'ancestry': [[dict(type=self.datastore.file.get(sha256).type,
-                                                               parent_relation="ROOT")]]}
+        task.file_temporary_data[sha256]['ancestry'] = [[dict(type=self.datastore.file.get(sha256).type,
+                                                              parent_relation="ROOT")]]
         task.active_files.add(sha256)
         action = DispatchAction(kind=Action.dispatch_file, sid=sid, sha=sha256)
         self.find_process_queue(sid).put(action)
@@ -1149,12 +1149,12 @@ class Dispatcher(ThreadedCoreBase):
 
         # Record the result as a summary
         task.service_results[(sha256, service_name)] = summary
-        task.register_children(sha256, summary.children)
+        task.register_children(sha256, [c for c, _ in summary.children])
 
         # Set the depth of all extracted files, even if we won't be processing them
         depth_limit = self.config.submission.max_extraction_depth
         new_depth = task.file_depth[sha256] + 1
-        for extracted_sha256 in summary.children:
+        for extracted_sha256, _ in summary.children:
             task.file_depth.setdefault(extracted_sha256, new_depth)
             extracted_name = extracted_names.get(extracted_sha256)
             if extracted_name and extracted_sha256 not in task.file_names:
@@ -1170,7 +1170,8 @@ class Dispatcher(ThreadedCoreBase):
 
                 for extracted_sha256 in summary.children:
                     parent_relation = "EXTRACTED"
-                    if isinstance(extracted_sha256, tuple):
+                    if isinstance(extracted_sha256, tuple) or \
+                            (isinstance(extracted_sha256, list) and len(extracted_sha256) == 2):
                         extracted_sha256, parent_relation = extracted_sha256
 
                     if extracted_sha256 in task.dropped_files or extracted_sha256 in task.active_files:
@@ -1210,7 +1211,7 @@ class Dispatcher(ThreadedCoreBase):
                     self.find_process_queue(sid).put(DispatchAction(kind=Action.dispatch_file, sid=sid,
                                                                     sha=extracted_sha256))
             else:
-                for extracted_sha256 in summary.children:
+                for extracted_sha256, _ in summary.children:
                     task.dropped_files.add(sha256)
                     self._dispatching_error(task, Error({
                         'archive_ts': None,
