@@ -773,7 +773,7 @@ class Dispatcher(ThreadedCoreBase):
 
                         # Collect information about the result
                         file_scores[sha256] = file_scores.get(sha256, 0) + result.score
-                        unchecked.update(set(result.children) - checked)
+                        unchecked.update(set([c for c, _ in result.children]) - checked)
                         continue
 
                     # If the file is in process, we may not need to dispatch it, but we aren't finished
