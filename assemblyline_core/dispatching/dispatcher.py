@@ -529,7 +529,8 @@ class Dispatcher(ThreadedCoreBase):
         task.file_names[sha256] = submission.files[0].name or sha256
         # Initialize ancestry chain by identifying the root file
         task.file_temporary_data[sha256]['ancestry'] = [[dict(type=self.datastore.file.get(sha256).type,
-                                                              parent_relation="ROOT")]]
+                                                              parent_relation="ROOT",
+                                                              sha256=sha256)]]
         task.active_files.add(sha256)
         action = DispatchAction(kind=Action.dispatch_file, sid=sid, sha=sha256)
         self.find_process_queue(sid).put(action)
@@ -1249,7 +1250,7 @@ class Dispatcher(ThreadedCoreBase):
                     parent_ancestry = parent_data['ancestry']
                     existing_ancestry = task.file_temporary_data.get(extracted_sha256, {}).get('ancestry', [])
                     current_ancestry_node = dict(type=self.datastore.file.get(extracted_sha256).type,
-                                                 parent_relation=parent_relation)
+                                                 parent_relation=parent_relation, sha256=extracted_sha256)
 
                     task.file_temporary_data[extracted_sha256] = dict(parent_data)
                     task.file_temporary_data[extracted_sha256]['ancestry'] = existing_ancestry
