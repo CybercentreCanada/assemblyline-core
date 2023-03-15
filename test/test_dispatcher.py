@@ -160,7 +160,7 @@ def test_simple(clean_redis, clean_datastore):
     job = client.request_work('0', 'extract', '0')
     assert job.temporary_submission_data == [
         {'name': 'cats', 'value': 'big'},
-        {"name": "ancestry", "value": [[{"type": "unknown", "parent_relation": "ROOT"}]]}
+        {"name": "ancestry", "value": [[{"type": "unknown", "parent_relation": "ROOT", "sha256": file.sha256}]]}
     ]
     client.service_failed(sid, 'abc123', make_error(file_hash, 'extract'))
     # Deliberately do in the wrong order to make sure that works
