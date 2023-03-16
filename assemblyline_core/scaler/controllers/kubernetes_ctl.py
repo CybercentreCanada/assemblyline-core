@@ -769,6 +769,7 @@ class KubernetesController(ControllerInterface):
                         self.add_profile(profile, scale=target)
                     return
                 raise
+        self.logger.error(f"Repeated conflict scaling {service_name} will not retry.")
 
     def stop_container(self, service_name, container_id):
         try:

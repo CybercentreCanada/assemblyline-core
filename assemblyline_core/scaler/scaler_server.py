@@ -49,6 +49,7 @@ SCALE_INTERVAL = 5
 METRIC_SYNC_INTERVAL = 0.5
 CONTAINER_EVENTS_LOG_INTERVAL = 2
 HEARTBEAT_INTERVAL = 5
+MAX_TIME_TO_ACK = 20
 
 # How many times to let a service generate an error in this module before we disable it.
 # This is only for analysis services, core services we keep retrying forever
@@ -744,8 +745,18 @@ class ScalerServer(ThreadedCoreBase):
                                 continue
                             self.profiles[name].target_instances = value
                             old = old_targets[name]
+
+                            # We want to change the target in kubernetes
                             if value != old:
                                 self.log.info(f"Scaling service {name}: {old} -> {value}")
+                                pool.call(self.controller.set_target, name, value)
+
+                            # We havn't changed the target, but what the environment is
+                            # reporting doesn't match what we expect.
+                            # Its been at least SCALE_INTERVAL since we told it to scale, so
+                            # even if the container hasn't started, we expect the environment
+                            # to at least be reporting the right target
+                            elif value != self.controller.get_target(name):
                                 pool.call(self.controller.set_target, name, value)
 
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
