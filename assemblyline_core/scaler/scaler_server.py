@@ -710,7 +710,8 @@ class ScalerServer(ThreadedCoreBase):
                 used_memory = total_memory - free_memory
                 free_memory = total_memory * self.get_memory_overallocation() - used_memory
 
-                #
+                # Make adjustments to the targets until everything is satisified
+                # or we don't have the resouces to make more adjustments
                 def trim(prof: list[ServiceProfile]):
                     prof = [_p for _p in prof if _p.desired_instances > targets[_p.name]]
                     drop = [_p for _p in prof if _p.cpu > free_cpu or _p.ram > free_memory]
@@ -721,7 +722,6 @@ class ScalerServer(ThreadedCoreBase):
                     return prof
 
                 remaining_profiles: list[ServiceProfile] = trim(list(all_profiles.values()))
-
                 while remaining_profiles:
                     # TODO do we need to add balancing metrics other than 'least running' for this? probably
                     remaining_profiles.sort(key=lambda _p: targets[_p.name])
