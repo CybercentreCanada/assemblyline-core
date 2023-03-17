@@ -28,7 +28,7 @@ from assemblyline_core.scaler.controllers.interface import ControllerInterface
 # RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
 
 API_TIMEOUT = 90
-WATCH_TIMEOUT = 45
+WATCH_TIMEOUT = 10 * 60
 WATCH_API_TIMEOUT = WATCH_TIMEOUT + 10
 CHANGE_KEY_NAME = 'al_change_key'
 DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() == 'true'
@@ -507,6 +507,9 @@ class KubernetesController(ControllerInterface):
         for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
                                   namespace=self.namespace, label_selector=label_selector,
                                   timeout_seconds=WATCH_TIMEOUT, _request_timeout=WATCH_API_TIMEOUT):
+            if 'dependency_for' in event['raw_object']['metadata']['labels']:
+                continue
+
             if event['type'] in ['ADDED', 'MODIFIED']:
                 name = event['raw_object']['metadata']['labels'].get('component', None)
                 if name is not None:
