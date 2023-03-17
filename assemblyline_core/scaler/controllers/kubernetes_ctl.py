@@ -28,7 +28,7 @@ from assemblyline_core.scaler.controllers.interface import ControllerInterface
 # RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
 
 API_TIMEOUT = 90
-WATCH_TIMEOUT = 10 * 60
+WATCH_TIMEOUT = 45
 WATCH_API_TIMEOUT = WATCH_TIMEOUT + 10
 CHANGE_KEY_NAME = 'al_change_key'
 DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() == 'true'
