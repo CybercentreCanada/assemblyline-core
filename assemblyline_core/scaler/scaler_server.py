@@ -24,7 +24,7 @@ import yaml
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue, length as pq_length
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
-from assemblyline.remote.datatypes.hash import ExpiringHash
+from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.events import EventWatcher, EventSender
 from assemblyline.odm.models.service import Service, DockerConfig, EnvironmentVariable
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
@@ -627,6 +627,9 @@ class ScalerServer(ThreadedCoreBase):
             self.controller.stop_containers(labels={
                 'dependency_for': name
             })
+
+            # Clear related dependency caching from Redis
+            Hash(f'service-updates-{name}', self.redis_persist).delete()
 
             # Mark this service as not running in the shared record
             self._service_stage_hash.set(name, ServiceStage.Off)
