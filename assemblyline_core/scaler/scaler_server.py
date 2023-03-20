@@ -660,7 +660,10 @@ class ScalerServer(ThreadedCoreBase):
                     with self.profiles_lock:
                         all_profiles: dict[str, ServiceProfile] = copy.deepcopy(self.profiles)
                     raw_targets = self.controller.get_targets()
+                    # This is the list of targets we will adjust
                     targets = {_p.name: raw_targets.get(_p.name, 0) for _p in all_profiles.values()}
+                    # This represents what the environment is currently running
+                    old_targets = dict(targets)
 
                 for name, profile in all_profiles.items():
                     self.log.debug(f'{name}')
@@ -707,7 +710,8 @@ class ScalerServer(ThreadedCoreBase):
                 used_memory = total_memory - free_memory
                 free_memory = total_memory * self.get_memory_overallocation() - used_memory
 
-                #
+                # Make adjustments to the targets until everything is satisified
+                # or we don't have the resouces to make more adjustments
                 def trim(prof: list[ServiceProfile]):
                     prof = [_p for _p in prof if _p.desired_instances > targets[_p.name]]
                     drop = [_p for _p in prof if _p.cpu > free_cpu or _p.ram > free_memory]
@@ -718,10 +722,6 @@ class ScalerServer(ThreadedCoreBase):
                     return prof
 
                 remaining_profiles: list[ServiceProfile] = trim(list(all_profiles.values()))
-                # The target values up until now should be in sync with the container orchestrator
-                # create a copy, so we can track which ones change in the following loop
-                old_targets = dict(targets)
-
                 while remaining_profiles:
                     # TODO do we need to add balancing metrics other than 'least running' for this? probably
                     remaining_profiles.sort(key=lambda _p: targets[_p.name])
@@ -744,6 +744,7 @@ class ScalerServer(ThreadedCoreBase):
                                 continue
                             self.profiles[name].target_instances = value
                             old = old_targets[name]
+
                             if value != old:
                                 self.log.info(f"Scaling service {name}: {old} -> {value}")
                                 pool.call(self.controller.set_target, name, value)
