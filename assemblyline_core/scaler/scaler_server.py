@@ -527,10 +527,11 @@ class ScalerServer(ThreadedCoreBase):
                         dependency_keys[_n] = _n + key
             else:
                 # Services without an update configuration are born ready
+                self._service_stage_hash.set(name, ServiceStage.Running)
                 stage = ServiceStage.Running
 
             # If dependency container(s) are missing, start the setup process
-            if len(dependency_keys) != len(dependency_config):
+            if set(dependency_keys.keys()) != set(dependency_config.keys()):
                 self.log.info(f'Preparing environment for {service.name}')
                 # Services that don't need to wait for an update can be declared ready
                 if service.update_config and not service.update_config.wait_for_update:
