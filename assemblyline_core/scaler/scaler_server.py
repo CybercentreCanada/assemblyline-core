@@ -518,25 +518,22 @@ class ScalerServer(ThreadedCoreBase):
                 dependency_blobs[_n] = f"dh={dep_hash}v={service.version}p={service.privileged}ssl={INTERNAL_ENCRYPT}"
 
             # Check if the service dependencies have been deployed.
-            dependency_keys = []
-            updater_ready = stage == ServiceStage.Running
+            dependency_keys = dict()
             if service.update_config:
                 for _n, dependency in dependency_config.items():
                     key = self.controller.stateful_container_key(service.name, _n, dependency,
                                                                  dependency_blobs.get(_n, ''))
                     if key:
-                        dependency_keys.append(_n + key)
-                    else:
-                        updater_ready = False
+                        dependency_keys[_n] = _n + key
+            else:
+                # Services without an update configuration are born ready
+                stage = ServiceStage.Running
 
-            # If stage is not set to running or a dependency container is missing start the setup process
-            if not updater_ready:
+            # If dependency container(s) are missing, start the setup process
+            if len(dependency_keys) != len(dependency_config):
                 self.log.info(f'Preparing environment for {service.name}')
-                # Move to the next service stage (do this first because the container we are starting may care)
-                if service.update_config and service.update_config.wait_for_update:
-                    self._service_stage_hash.set(name, ServiceStage.Update)
-                    stage = ServiceStage.Update
-                else:
+                # Services that don't need to wait for an update can be declared ready
+                if service.update_config and not service.update_config.wait_for_update:
                     self._service_stage_hash.set(name, ServiceStage.Running)
                     stage = ServiceStage.Running
 
@@ -544,9 +541,12 @@ class ScalerServer(ThreadedCoreBase):
                 dependency_internet = [(name, dependency.container.allow_internet_access)
                                        for name, dependency in dependency_config.items()]
 
-                self.controller.prepare_network(
-                    service.name, service.docker_config.allow_internet_access, dependency_internet)
+                self.controller.prepare_network(service.name, service.docker_config.allow_internet_access,
+                                                dependency_internet)
                 for _n, dependency in dependency_config.items():
+                    if dependency_keys.get(_n):
+                        # Dependency already exists, skip
+                        continue
                     self.log.info(f'Launching {service.name} dependency {_n}')
                     self.controller.start_stateful_container(
                         service_name=service.name,
@@ -565,7 +565,7 @@ class ScalerServer(ThreadedCoreBase):
                 # Compute a blob of service properties not include in the docker config, that
                 # should still result in a service being restarted when changed
                 cfg_items = get_recursive_sorted_tuples(service.config)
-                dep_keys = ''.join(sorted(dependency_keys))
+                dep_keys = ''.join(sorted(dependency_keys.values()))
                 config_blob = (f"c={cfg_items}sp={service.submission_params}"
                                f"dk={dep_keys}p={service.privileged}d={docker_config}ssl={INTERNAL_ENCRYPT}")
 
@@ -615,7 +615,10 @@ class ScalerServer(ThreadedCoreBase):
                             profile.config_blob = config_blob
                             self.controller.restart(profile)
                             self.log.info(f"Deployment information for {name} replaced")
-
+            # If service has already been scaled but is not running, scale down until ready
+            elif name in self.profiles:
+                self.log.info(f"System has deemed {name} not ready/running. Scaling down..")
+                self.controller.set_target(name, 0)
         except Exception:
             self.log.exception(f"Error applying service settings from: {service.name}")
             self.handle_service_error(service.name)
@@ -661,7 +664,10 @@ class ScalerServer(ThreadedCoreBase):
                 # Figure out what services are expected to be running and how many
                 with elasticapm.capture_span('read_profiles'):
                     with self.profiles_lock:
-                        all_profiles: dict[str, ServiceProfile] = copy.deepcopy(self.profiles)
+                        # We want to evaluate 'active' service profiles
+                        all_profiles: dict[str, ServiceProfile] = {_n: _v
+                                                                   for _n, _v in copy.deepcopy(self.profiles).items()
+                                                                   if self.get_service_stage(_n) == ServiceStage.Running}
                     raw_targets = self.controller.get_targets()
                     # This is the list of targets we will adjust
                     targets = {_p.name: raw_targets.get(_p.name, 0) for _p in all_profiles.values()}
