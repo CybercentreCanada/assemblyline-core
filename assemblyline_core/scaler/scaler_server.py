@@ -666,8 +666,8 @@ class ScalerServer(ThreadedCoreBase):
                 with elasticapm.capture_span('read_profiles'):
                     with self.profiles_lock:
                         # We want to evaluate 'active' service profiles
-                        all_profiles: dict[str, ServiceProfile] = {_n: _v
-                                                                   for _n, _v in copy.deepcopy(self.profiles).items()
+                        all_profiles: dict[str, ServiceProfile] = {_n: copy.deepcopy(_v)
+                                                                   for _n, _v in self.profiles.items()
                                                                    if self.get_service_stage(_n) == ServiceStage.Running}
                     raw_targets = self.controller.get_targets()
                     # This is the list of targets we will adjust
