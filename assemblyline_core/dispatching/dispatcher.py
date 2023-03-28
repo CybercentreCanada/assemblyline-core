@@ -647,7 +647,6 @@ class Dispatcher(ThreadedCoreBase):
                     # Check if the task is already running
                     if key in task.running_services:
                         running.append(service_name)
-                        task.service_logs[key].append(f'Running during check at {now_as_iso()}')
                         continue
 
                     # Check if this task is already sitting in queue
@@ -655,7 +654,6 @@ class Dispatcher(ThreadedCoreBase):
                         dispatch_key = task.queue_keys.get(key, None)
                         if dispatch_key is not None and service_queue.rank(dispatch_key) is not None:
                             enqueued.append(service_name)
-                            task.service_logs[key].append(f'In queue during check at {now_as_iso()}')
                             continue
 
                     # If its not in queue already check we aren't dispatching anymore
