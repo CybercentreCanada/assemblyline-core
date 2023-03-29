@@ -163,8 +163,9 @@ def parse_cpu(string: str) -> float:
 
 
 class KubernetesController(ControllerInterface):
-    def __init__(self, logger, namespace, prefix, priority, cpu_reservation, labels=None,
-                 log_level="INFO", core_env={}, default_service_account=None):
+    def __init__(self, logger, namespace: str, prefix: str, priority: str, dependency_priority: str,
+                 cpu_reservation: float, labels=None, log_level="INFO", core_env={},
+                 default_service_account=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
         try:
@@ -188,6 +189,7 @@ class KubernetesController(ControllerInterface):
         self.running: bool = True
         self.prefix: str = prefix.lower()
         self.priority: str = priority
+        self.dependency_priority: str = dependency_priority
         self.cpu_reservation: float = max(0.0, min(cpu_reservation, 1.0))
         self.logger = logger
         self.log_level: str = log_level
@@ -583,7 +585,7 @@ class KubernetesController(ControllerInterface):
     def _create_deployment(self, service_name: str, deployment_name: str, docker_config: DockerConfig,
                            shutdown_seconds: int, scale: int, labels: dict[str, str] = None,
                            volumes: list[V1Volume] = None, mounts: list[V1VolumeMount] = None,
-                           core_mounts: bool = False, change_key: str = '',
+                           core_mounts: bool = False, change_key: str = '', high_priority: bool = False,
                            deployment_strategy: V1DeploymentStrategy = V1DeploymentStrategy()):
         # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
@@ -694,7 +696,7 @@ class KubernetesController(ControllerInterface):
             volumes=all_volumes,
             containers=self._create_containers(service_name, deployment_name, docker_config,
                                                all_mounts, core_container=core_mounts),
-            priority_class_name=self.priority,
+            priority_class_name=self.dependency_priority if high_priority else self.priority,
             termination_grace_period_seconds=shutdown_seconds,
             security_context=V1PodSecurityContext(fs_group=1000),
             service_account_name=service_account,
@@ -914,7 +916,7 @@ class KubernetesController(ControllerInterface):
         labels['container'] = container_name
         spec.container.environment.append({'name': 'AL_INSTANCE_KEY', 'value': instance_key})
         self._create_deployment(service_name, deployment_name, spec.container,
-                                30, 1, labels, volumes=volumes, mounts=mounts,
+                                30, 1, labels, volumes=volumes, mounts=mounts, high_priority=True,
                                 core_mounts=spec.run_as_core, change_key=change_key,
                                 deployment_strategy=deployment_strategy)
 
