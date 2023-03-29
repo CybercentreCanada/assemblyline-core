@@ -720,7 +720,7 @@ class Dispatcher(ThreadedCoreBase):
                     queue_key = service_queue.push(service_task.priority, service_task.as_primitives())
                     task.queue_keys[key] = queue_key
                     sent.append(service_name)
-                    task.service_logs[key].append(f'Submitted to queue at {now_as_iso()} as {queue_key}')
+                    task.service_logs[key].append(f'Submitted to queue at {now_as_iso()}')
 
             if sent or enqueued or running:
                 # If we have confirmed that we are waiting, or have taken an action, log that.
@@ -1116,9 +1116,9 @@ class Dispatcher(ThreadedCoreBase):
                     continue
 
                 if task:
-                    self.timeout_service(task, message.sha, message.service_name, message.worker_id)
                     task.service_logs[(message.sha, message.service_name)].append(
                         f'Service timeout at {now_as_iso()} on worker {message.worker_id}')
+                    self.timeout_service(task, message.sha, message.service_name, message.worker_id)
 
             elif kind == Action.dispatch_file:
                 task = self.tasks.get(message.sid)
