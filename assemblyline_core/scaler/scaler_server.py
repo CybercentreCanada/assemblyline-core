@@ -290,6 +290,7 @@ class ScalerServer(ThreadedCoreBase):
             self.log.info(f"Loading Kubernetes cluster interface on namespace: {NAMESPACE}")
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
                                                    namespace=NAMESPACE, priority='al-service-priority',
+                                                   dependency_priority='al-core-priority',
                                                    cpu_reservation=self.config.services.cpu_reservation,
                                                    log_level=self.config.logging.log_level,
                                                    core_env=core_env,
