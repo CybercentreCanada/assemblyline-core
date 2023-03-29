@@ -123,6 +123,7 @@ class SubmissionTask:
         self.active_files: set[str] = set()
         self.dropped_files: set[str] = set()
         self.dynamic_recursion_bypass: set[str] = set()
+        self.service_logs: dict[tuple[str, str], list[str]] = defaultdict(list)
 
         # mapping from file hash to a set of services that shouldn't be run on
         # any children (recursively) of that file
@@ -717,8 +718,9 @@ class Dispatcher(ThreadedCoreBase):
 
                     # Its a new task, send it to the service
                     queue_key = service_queue.push(service_task.priority, service_task.as_primitives())
-                    task.queue_keys[(sha256, service_name)] = queue_key
+                    task.queue_keys[key] = queue_key
                     sent.append(service_name)
+                    task.service_logs[key].append(f'Submitted to queue at {now_as_iso()} as {queue_key}')
 
             if sent or enqueued or running:
                 # If we have confirmed that we are waiting, or have taken an action, log that.
@@ -977,13 +979,16 @@ class Dispatcher(ThreadedCoreBase):
         self.log.warning(f"[{task.submission.sid}/{sha256}] "
                          f"{service_name} marking task failed: TASK PREEMPTED ")
 
+        # Pull out any details to include in error message
+        error_details = '; '.join(task.service_logs[(sha256, service_name)])
+
         ttl = task.submission.params.ttl
         error = Error(dict(
             archive_ts=None,
             created='NOW',
             expiry_ts=now_as_iso(ttl * 24 * 60 * 60) if ttl else None,
             response=dict(
-                message='The number of retries has passed the limit.',
+                message='The number of retries has passed the limit. ' + error_details,
                 service_name=service_name,
                 service_version='0',
                 status='FAIL_NONRECOVERABLE',
@@ -1075,6 +1080,8 @@ class Dispatcher(ThreadedCoreBase):
                         if key in task.service_errors or key in task.service_results:
                             continue
                         self.set_timeout(task, message.sha, message.service_name, message.worker_id)
+                        task.service_logs[(message.sha, message.service_name)].append(
+                            f'Popped from queue and running at {now_as_iso()} on worker {message.worker_id}')
 
             elif kind == Action.result:
                 self.queue_ready_signals[self.process_queue_index(message.sid)].release()
@@ -1103,8 +1110,15 @@ class Dispatcher(ThreadedCoreBase):
 
             elif kind == Action.service_timeout:
                 task = self.tasks.get(message.sid)
+
+                if not message.sha or not message.service_name:
+                    self.log.warning(f'[{message.sid}] Service timeout missing data.')
+                    continue
+
                 if task:
                     self.timeout_service(task, message.sha, message.service_name, message.worker_id)
+                    task.service_logs[(message.sha, message.service_name)].append(
+                        f'Service timeout at {now_as_iso()} on worker {message.worker_id}')
 
             elif kind == Action.dispatch_file:
                 task = self.tasks.get(message.sid)
@@ -1152,6 +1166,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Immediately remove timeout so we don't cancel now
         self.clear_timeout(task, sha256, service_name)
+        task.service_logs.pop((sha256, service_name), None)
 
         # Don't process duplicates
         if (sha256, service_name) in task.service_results:
@@ -1299,8 +1314,10 @@ class Dispatcher(ThreadedCoreBase):
     def process_service_error(self, task: SubmissionTask, error_key, error):
         self.log.info(f'[{task.submission.sid}] Error from service {error.response.service_name} on {error.sha256}')
         self.clear_timeout(task, error.sha256, error.response.service_name)
+        task.service_logs[(error.sha256, error.response.service_name)].append("Service error may retry")
         if error.response.status == "FAIL_NONRECOVERABLE":
             task.service_errors[(error.sha256, error.response.service_name)] = error_key
+            task.service_logs.pop((error.sha256, error.response.service_name), None)
         self.dispatch_file(task, error.sha256)
 
     def pull_service_starts(self):
