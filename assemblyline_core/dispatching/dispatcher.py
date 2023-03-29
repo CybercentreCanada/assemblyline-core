@@ -1311,13 +1311,15 @@ class Dispatcher(ThreadedCoreBase):
             NamedQueue(w).push(msg)
 
     @elasticapm.capture_span(span_type='dispatcher')
-    def process_service_error(self, task: SubmissionTask, error_key, error):
+    def process_service_error(self, task: SubmissionTask, error_key, error: Error):
         self.log.info(f'[{task.submission.sid}] Error from service {error.response.service_name} on {error.sha256}')
         self.clear_timeout(task, error.sha256, error.response.service_name)
-        task.service_logs[(error.sha256, error.response.service_name)].append("Service error may retry")
+        key = (error.sha256, error.response.service_name)
         if error.response.status == "FAIL_NONRECOVERABLE":
-            task.service_errors[(error.sha256, error.response.service_name)] = error_key
-            task.service_logs.pop((error.sha256, error.response.service_name), None)
+            task.service_errors[key] = error_key
+            task.service_logs.pop(key, None)
+        else:
+            task.service_logs[key].append(f"Service error: {error.response.message}")
         self.dispatch_file(task, error.sha256)
 
     def pull_service_starts(self):
