@@ -980,7 +980,9 @@ class Dispatcher(ThreadedCoreBase):
                          f"{service_name} marking task failed: TASK PREEMPTED ")
 
         # Pull out any details to include in error message
-        error_details = '; '.join(task.service_logs[(sha256, service_name)])
+        error_details = '\n '.join(task.service_logs[(sha256, service_name)])
+        if error_details:
+            error_details = '\n\n' + error_details
 
         ttl = task.submission.params.ttl
         error = Error(dict(
@@ -988,7 +990,7 @@ class Dispatcher(ThreadedCoreBase):
             created='NOW',
             expiry_ts=now_as_iso(ttl * 24 * 60 * 60) if ttl else None,
             response=dict(
-                message='The number of retries has passed the limit. ' + error_details,
+                message='The number of retries has passed the limit.' + error_details,
                 service_name=service_name,
                 service_version='0',
                 status='FAIL_NONRECOVERABLE',
