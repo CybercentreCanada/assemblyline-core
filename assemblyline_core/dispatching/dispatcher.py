@@ -980,7 +980,7 @@ class Dispatcher(ThreadedCoreBase):
                          f"{service_name} marking task failed: TASK PREEMPTED ")
 
         # Pull out any details to include in error message
-        error_details = '\n '.join(task.service_logs[(sha256, service_name)])
+        error_details = '\n'.join(task.service_logs[(sha256, service_name)])
         if error_details:
             error_details = '\n\n' + error_details
 
