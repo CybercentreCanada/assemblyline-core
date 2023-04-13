@@ -80,11 +80,6 @@ jobs:
           sudo env "PATH=$PATH" python -m pip install --no-cache-dir -e .[test]
         displayName: Install assemblyline_core
         workingDirectory: $(Pipeline.Workspace)/s/assemblyline-core
-      - script: sudo env "PATH=$PATH" python -m pytest -x -rsx -vv --cov=assemblyline_core --cov=$(Pipeline.Workspace)/s/assemblyline-base/assemblyline --cov-report=xml
+      - script: sudo env "PATH=$PATH" python -m pytest -x -rsx -vv
         displayName: Test
         workingDirectory: $(Pipeline.Workspace)/s/assemblyline-core
-      - script: python -m codecov
-        displayName: Upload Coverage
-        workingDirectory: $(Pipeline.Workspace)/s/assemblyline-core
-        env:
-          CODECOV_TOKEN: $(CODECOV_TOKEN)
