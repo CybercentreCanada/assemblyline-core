@@ -44,14 +44,11 @@ setup(
     extras_require={
         'test': [
             'pytest',
-            'pytest-cov',
-            'codecov',
             'assemblyline_client'
         ]
     },
     tests_require=[
         'pytest',
-        'pytest-cov',
     ],
     package_data={
         '': ["*classification.yml", "*.magic", "VERSION"]

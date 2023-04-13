@@ -1,5 +1,3 @@
 # Only used in test files
 pytest
-pytest-cov
-codecov
 assemblyline_client
