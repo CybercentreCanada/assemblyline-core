@@ -13,8 +13,9 @@ from multiprocessing import Lock, Event
 import threading
 
 import elasticapm
+import arrow
 
-from assemblyline.common.forge import CachedObject, get_classification, get_config, get_datastore, get_filestore
+from assemblyline.common.forge import CachedObject, get_classification, get_config, get_datastore, get_filestore, get_apm_client
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
 from assemblyline.common.log import init_logging
@@ -261,6 +262,9 @@ class FileProcessor(threading.Thread):
 
         settings['ttl'] = int(settings.get('ttl', self.config.submission.dtl))
 
+        # Ignore external sources
+        settings.pop('default_external_sources', None)
+
         # Remove UI specific params
         settings.pop('default_zip_password', None)
         settings.pop('download_encoding', None)
@@ -477,10 +481,24 @@ class FileProcessor(threading.Thread):
                     if key and value
                 })
                 metadata['ingest_id'] = ingest_id
-                metadata['type'] = 'VACUUM'
                 metadata.update(al_meta)
                 if 'ts' not in metadata:
                     metadata['ts'] = now_as_iso()
+                else:
+                    metadata['ts'] = arrow.get(metadata['ts']).isoformat()
+
+                # Set ingest type
+                s_params['type'] = self.config.core.vacuum.ingest_type
+
+                # Extract email body strings or similar password settings
+                password_strings = metadata.pop("email_strings", [])
+                if not isinstance(password_strings, list):
+                    logger.warning("Unsupported password list format: " + str(password_strings))
+                    password_strings = []
+
+                if password_strings:
+                    init_data = json.dumps(dict(passwords=password_strings))
+                    s_params['initial_data'] = init_data
 
                 # Set description if it does not exists
                 s_params['description'] = f"[{s_params['type']}] Inspection of file: {file_sha256}"
@@ -656,8 +674,7 @@ def run(config=None, redis=None, persistent_redis=None):
     apm_client = None
     if config.core.metrics.apm_server.server_url:
         elasticapm.instrument()
-        apm_client = elasticapm.Client(server_url=config.core.metrics.apm_server.server_url,
-                                       service_name="vacuum_worker")
+        apm_client = get_apm_client("vacuum_worker")
 
     container_id = os.environ.get("HOSTNAME", 'vacuum-worker') + '-'
     FileProcessor.total_rounds = threading.Semaphore(value=vacuum_config.worker_rollover*vacuum_config.worker_threads)

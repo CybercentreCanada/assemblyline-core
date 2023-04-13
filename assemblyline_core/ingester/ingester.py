@@ -182,8 +182,7 @@ class Ingester(ThreadedCoreBase):
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
             elasticapm.instrument()
-            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                service_name="ingester")
+            self.apm_client = forge.get_apm_client("ingester")
         else:
             self.apm_client = None
 
@@ -759,7 +758,8 @@ class Ingester(ThreadedCoreBase):
                     break
 
             if not dropped:
-                if task.file_size > self.config.submission.max_file_size or task.file_size == 0:
+                if (task.file_size > self.config.submission.max_file_size and not task.params.ignore_size) \
+                        or task.file_size == 0:
                     dropped = True
 
         if task.params.never_drop or not dropped:

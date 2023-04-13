@@ -16,12 +16,15 @@ from assemblyline_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common import forge
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
+from os import environ, path
 from packaging import version
-
+from urllib.parse import urlparse
 
 METRICS_QUEUE = "assemblyline_metrics"
 NON_AGGREGATED = ['scaler', 'scaler_status']
 NON_AGGREGATED_COUNTERS = {'dispatcher': {'save_queue', 'error_queue'}}
+
+METRICSTORE_ROOT_CA_PATH = environ.get('METRICSTORE_ROOT_CA_PATH', '/etc/assemblyline/ssl/al_root-ca.crt')
 
 
 def cleanup_metrics(input_dict):
@@ -67,8 +70,7 @@ class StatisticsAggregator(ServerBase):
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
             elasticapm.instrument()
-            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                service_name="metrics_aggregator")
+            self.apm_client = forge.get_apm_client("metrics_aggregator")
         else:
             self.apm_client = None
 
@@ -138,22 +140,20 @@ class MetricsServer(ServerBase):
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
             elasticapm.instrument()
-            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                service_name="metrics_aggregator")
+            self.apm_client = forge.get_apm_client("metrics_aggregator")
         else:
             self.apm_client = None
 
     def try_run(self):
         # If our connection to the metrics database requires a custom ca cert, prepare it
-        ca_certs = None
+        ca_certs = None if not path.exists(METRICSTORE_ROOT_CA_PATH) else METRICSTORE_ROOT_CA_PATH
         if self.config.core.metrics.elasticsearch.host_certificates:
             with tempfile.NamedTemporaryFile(delete=False) as ca_certs_file:
                 ca_certs = ca_certs_file.name
                 ca_certs_file.write(self.config.core.metrics.elasticsearch.host_certificates.encode())
 
         self.metrics_queue = CommsQueue(METRICS_QUEUE)
-        self.es = elasticsearch.Elasticsearch(hosts=self.elastic_hosts,
-                                              ca_certs=ca_certs)
+        self.es = elasticsearch.Elasticsearch(hosts=self.elastic_hosts, ca_certs=ca_certs)
         # Determine if ES will support data streams (>= 7.9)
         self.is_datastream = version.parse(self.es.info()['version']['number']) >= version.parse("7.9")
 
@@ -270,8 +270,7 @@ class HeartbeatManager(ServerBase):
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
             elasticapm.instrument()
-            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                service_name="heartbeat_manager")
+            self.apm_client = forge.get_apm_client("heartbeat_manager")
         else:
             self.apm_client = None
 

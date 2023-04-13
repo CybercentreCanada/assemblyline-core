@@ -16,14 +16,14 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.forge import get_service_queue
+from assemblyline.common.forge import get_service_queue, get_apm_client
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.postprocess import ActionWorker
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch, DispatcherCommandMessage, \
-    CREATE_WATCH, LIST_OUTSTANDING, ListOutstanding
+    CREATE_WATCH, LIST_OUTSTANDING, UPDATE_BAD_SID, ListOutstanding
 from assemblyline.odm.messages.submission import SubmissionMessage, from_datastore_submission
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.error import Error
@@ -32,6 +32,7 @@ from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.result import Result
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import Hash
+from assemblyline.remote.datatypes.set import Set
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet
@@ -56,6 +57,7 @@ FINALIZING_WINDOW = max(AL_SHUTDOWN_GRACE - AL_SHUTDOWN_QUIT, 0)
 RESULT_BATCH_SIZE = int(os.environ.get('DISPATCHER_RESULT_BATCH_SIZE', '50'))
 ERROR_BATCH_SIZE = int(os.environ.get('DISPATCHER_ERROR_BATCH_SIZE', '50'))
 DYNAMIC_ANALYSIS_CATEGORY = 'Dynamic Analysis'
+DAY_IN_SECONDS = 24 * 60 * 60
 
 
 class Action(enum.IntEnum):
@@ -64,6 +66,7 @@ class Action(enum.IntEnum):
     dispatch_file = 2
     service_timeout = 3
     check_submission = 4
+    bad_sid = 5
 
 
 @dataclasses.dataclass(order=True)
@@ -74,6 +77,7 @@ class DispatchAction:
     service_name: Optional[str] = dataclasses.field(compare=False, default=None)
     worker_id: Optional[str] = dataclasses.field(compare=False, default=None)
     data: Any = dataclasses.field(compare=False, default=None)
+    event: Optional[threading.Event] = dataclasses.field(compare=False, default=None)
 
 
 @contextmanager
@@ -95,7 +99,7 @@ class ResultSummary:
         self.key: str = key
         self.drop: bool = drop
         self.score: int = score
-        self.children: list[str] = children
+        self.children: list[str, str] = children
 
 
 class SubmissionTask:
@@ -119,6 +123,7 @@ class SubmissionTask:
         self.active_files: set[str] = set()
         self.dropped_files: set[str] = set()
         self.dynamic_recursion_bypass: set[str] = set()
+        self.service_logs: dict[tuple[str, str], list[str]] = defaultdict(list)
 
         # mapping from file hash to a set of services that shouldn't be run on
         # any children (recursively) of that file
@@ -147,7 +152,7 @@ class SubmissionTask:
             rescan = scheduler.expand_categories(self.submission.params.services.rescan)
 
             # Replay the process of routing files for dispatcher internal state.
-            for k, result in results.values():
+            for k, result in results.items():
                 sha256, service, _ = k.split('.', 2)
                 service = scheduler.services.get(service)
                 if not service:
@@ -231,6 +236,8 @@ DISPATCH_START_EVENTS = 'dispatcher-start-events-'
 DISPATCH_RESULT_QUEUE = 'dispatcher-results-'
 DISPATCH_COMMAND_QUEUE = 'dispatcher-commands-'
 DISPATCH_DIRECTORY = 'dispatchers-directory'
+DISPATCH_DIRECTORY_FINALIZE = 'dispatchers-directory-finalizing'
+BAD_SID_HASH = 'bad-sid-hash'
 QUEUE_EXPIRY = 60*60
 SERVICE_VERSION_EXPIRY_TIME = 30 * 60  # How old service version info can be before we ignore it
 GUARD_TIMEOUT = 60*2
@@ -290,7 +297,8 @@ class Dispatcher(ThreadedCoreBase):
         self.submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
 
         # Table to track the running dispatchers
-        self.dispatchers_directory = Hash(DISPATCH_DIRECTORY, host=self.redis_persist)
+        self.dispatchers_directory: Hash[int] = Hash(DISPATCH_DIRECTORY, host=self.redis_persist)
+        self.dispatchers_directory_finalize: Hash[int] = Hash(DISPATCH_DIRECTORY_FINALIZE, host=self.redis_persist)
         self.running_dispatchers_estimate = 1
 
         # Tables to track what submissions are running where
@@ -313,8 +321,7 @@ class Dispatcher(ThreadedCoreBase):
         self.apm_client = None
         if self.config.core.metrics.apm_server.server_url:
             elasticapm.instrument()
-            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                service_name="dispatcher")
+            self.apm_client = get_apm_client("dispatcher")
 
         self._service_timeouts: TimeoutTable[tuple[str, str, str], str] = TimeoutTable()
         self._submission_timeouts: TimeoutTable[str, None] = TimeoutTable()
@@ -337,6 +344,10 @@ class Dispatcher(ThreadedCoreBase):
         self.postprocess_worker = ActionWorker(cache=False, config=self.config, datastore=self.datastore,
                                                redis_persist=self.redis_persist)
 
+        # Update bad sid list
+        self.redis_bad_sids = Set(BAD_SID_HASH, host=self.redis_persist)
+        self.bad_sids: set[str] = set(self.redis_bad_sids.members())
+
     def stop(self):
         super().stop()
         self.postprocess_worker.stop()
@@ -346,6 +357,7 @@ class Dispatcher(ThreadedCoreBase):
         self.finalizing_start = time.time()
         self._shutdown_timeout = AL_SHUTDOWN_QUIT
         self.finalizing.set()
+        self.dispatchers_directory_finalize.set(self.instance_id, int(time.time()))
 
     def process_queue_index(self, key: str) -> int:
         return sum(ord(_x) for _x in key) % RESULT_THREADS
@@ -448,6 +460,11 @@ class Dispatcher(ThreadedCoreBase):
                 with apm_span(self.apm_client, 'submission_message'):
                     # This is probably a complete task
                     task = SubmissionTask(scheduler=self.scheduler, **message)
+
+                    # Check the sid table
+                    if task.sid in self.bad_sids:
+                        task.submission.to_be_deleted = True
+
                     if self.apm_client:
                         elasticapm.label(sid=task.submission.sid)
                     self.dispatch_submission(task)
@@ -467,6 +484,7 @@ class Dispatcher(ThreadedCoreBase):
         """
         submission = task.submission
         sid = submission.sid
+        sha256 = submission.files[0].sha256
 
         if not self.submissions_assignments.add(sid, self.instance_id):
             self.log.warning(f"[{sid}] Received an assigned submission dropping")
@@ -496,7 +514,7 @@ class Dispatcher(ThreadedCoreBase):
         # Apply initial data parameter
         if submission.params.initial_data:
             try:
-                task.file_temporary_data[submission.files[0].sha256] = {
+                task.file_temporary_data[sha256] = {
                     key: value
                     for key, value in dict(json.loads(submission.params.initial_data)).items()
                     if len(str(value)) <= self.config.submission.max_temp_data_length
@@ -508,10 +526,14 @@ class Dispatcher(ThreadedCoreBase):
         self.tasks[sid] = task
         self._submission_timeouts.set(task.sid, SUBMISSION_TOTAL_TIMEOUT, None)
 
-        task.file_depth[submission.files[0].sha256] = 0
-        task.file_names[submission.files[0].sha256] = submission.files[0].name or submission.files[0].sha256
-        task.active_files.add(submission.files[0].sha256)
-        action = DispatchAction(kind=Action.dispatch_file, sid=sid, sha=submission.files[0].sha256)
+        task.file_depth[sha256] = 0
+        task.file_names[sha256] = submission.files[0].name or sha256
+        # Initialize ancestry chain by identifying the root file
+        task.file_temporary_data[sha256]['ancestry'] = [[dict(type=self.datastore.file.get(sha256).type,
+                                                              parent_relation="ROOT",
+                                                              sha256=sha256)]]
+        task.active_files.add(sha256)
+        action = DispatchAction(kind=Action.dispatch_file, sid=sid, sha=sha256)
         self.find_process_queue(sid).put(action)
 
     @elasticapm.capture_span(span_type='dispatcher')
@@ -570,7 +592,8 @@ class Dispatcher(ThreadedCoreBase):
 
                     # If Dynamic Recursion Prevention is in effect and the file is not part of the bypass list,
                     # Find the list of services this file is forbidden from being sent to.
-                    if not submission.params.ignore_dynamic_recursion_prevention and sha256 not in task.dynamic_recursion_bypass:
+                    ignore_drp = submission.params.ignore_dynamic_recursion_prevention
+                    if not ignore_drp and sha256 not in task.dynamic_recursion_bypass:
                         forbidden_services = task.find_recursion_excluded_services(sha256)
 
                     task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
@@ -614,7 +637,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Try to retry/dispatch any outstanding services
         if outstanding:
-            sent, enqueued, running = [], [], []
+            sent, enqueued, running, skipped = [], [], [], []
 
             for service_name, service in outstanding.items():
                 with elasticapm.capture_span('dispatch_task', labels={'service': service_name}):
@@ -632,6 +655,11 @@ class Dispatcher(ThreadedCoreBase):
                         if dispatch_key is not None and service_queue.rank(dispatch_key) is not None:
                             enqueued.append(service_name)
                             continue
+
+                    # If its not in queue already check we aren't dispatching anymore
+                    if task.submission.to_be_deleted:
+                        skipped.append(service_name)
+                        continue
 
                     # Check if we have attempted this too many times already.
                     task.service_attempts[key] += 1
@@ -690,28 +718,34 @@ class Dispatcher(ThreadedCoreBase):
 
                     # Its a new task, send it to the service
                     queue_key = service_queue.push(service_task.priority, service_task.as_primitives())
-                    task.queue_keys[(sha256, service_name)] = queue_key
+                    task.queue_keys[key] = queue_key
                     sent.append(service_name)
+                    task.service_logs[key].append(f'Submitted to queue at {now_as_iso()}')
 
             if sent or enqueued or running:
                 # If we have confirmed that we are waiting, or have taken an action, log that.
                 self.log.info(f"[{sid}] File {sha256} sent to: {sent} "
                               f"already in queue for: {enqueued} "
                               f"running on: {running}")
+                return False
+            elif skipped:
+                # Not waiting for anything, and have started skipping what is left over
+                # because this submission is terminated. Drop through to the base
+                # case where the file is complete
+                pass
             else:
                 # If we are not waiting, and have not taken an action, we must have hit the
                 # retry limit on the only service running. In that case, we can move directly
                 # onto the next stage of services, so recurse to trigger them.
                 return self.dispatch_file(task, sha256)
 
+        self.counter.increment('files_completed')
+        if len(task.queue_keys) > 0 or len(task.running_services) > 0:
+            self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete "
+                          f"(queued: {len(task.queue_keys)} running: {len(task.running_services)})")
         else:
-            self.counter.increment('files_completed')
-            if len(task.queue_keys) > 0 or len(task.running_services) > 0:
-                self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete "
-                              f"(queued: {len(task.queue_keys)} running: {len(task.running_services)})")
-            else:
-                self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
-                return self.check_submission(task)
+            self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
+            return self.check_submission(task)
         return False
 
     @elasticapm.capture_span(span_type='dispatcher')
@@ -770,7 +804,7 @@ class Dispatcher(ThreadedCoreBase):
 
                         # Collect information about the result
                         file_scores[sha256] = file_scores.get(sha256, 0) + result.score
-                        unchecked.update(set(result.children) - checked)
+                        unchecked.update(set([c for c, _ in result.children]) - checked)
                         continue
 
                     # If the file is in process, we may not need to dispatch it, but we aren't finished
@@ -786,6 +820,11 @@ class Dispatcher(ThreadedCoreBase):
                     if key in task.queue_keys and service_queue.rank(task.queue_keys[key]) is not None:
                         processing_files.append(sha256)
                         continue
+
+                    # Don't worry about pending files if we aren't dispatching anymore and they weren't caught
+                    # by the prior checks for outstanding tasks
+                    if task.submission.to_be_deleted:
+                        break
 
                     # Since the service is not finished or in progress, it must still need to start
                     pending_files.append(sha256)
@@ -867,7 +906,6 @@ class Dispatcher(ThreadedCoreBase):
         submission = task.submission
         sid = submission.sid
 
-        #
         results = list(task.service_results.values())
         errors = list(task.service_errors.values())
         errors.extend(task.extra_errors)
@@ -909,15 +947,24 @@ class Dispatcher(ThreadedCoreBase):
         for w in watcher_list.members():
             NamedQueue(w).push(WatchQueueMessage({'status': 'STOP'}).as_primitives())
 
-        # Pull the tags keys and values into a searchable form
-        tags = [
-            {'value': _t['value'], 'type': _t['type']}
-            for file_tags in task.file_tags.values()
-            for _t in file_tags.values()
-        ]
+        # Don't run post processing and traffic notifications if the submission is terminated
+        if not task.submission.to_be_deleted:
+            # Pull the tags keys and values into a searchable form
+            tags = [
+                {'value': _t['value'], 'type': _t['type']}
+                for file_tags in task.file_tags.values()
+                for _t in file_tags.values()
+            ]
 
-        # Send the submission for alerting or resubmission
-        self.postprocess_worker.process_submission(submission, tags)
+            # Send the submission for alerting or resubmission
+            self.postprocess_worker.process_submission(submission, tags)
+
+            # Write all finished submissions to the traffic queue
+            self.traffic_queue.publish(SubmissionMessage({
+                'msg': from_datastore_submission(submission),
+                'msg_type': 'SubmissionCompleted',
+                'sender': 'dispatcher',
+            }).as_primitives())
 
         # Clear the timeout watcher
         watcher_list.delete()
@@ -928,16 +975,14 @@ class Dispatcher(ThreadedCoreBase):
         # Count the submission as 'complete' either way
         self.counter.increment('submissions_completed')
 
-        # Write all finished submissions to the traffic queue
-        self.traffic_queue.publish(SubmissionMessage({
-            'msg': from_datastore_submission(submission),
-            'msg_type': 'SubmissionCompleted',
-            'sender': 'dispatcher',
-        }).as_primitives())
-
     def retry_error(self, task: SubmissionTask, sha256, service_name):
         self.log.warning(f"[{task.submission.sid}/{sha256}] "
                          f"{service_name} marking task failed: TASK PREEMPTED ")
+
+        # Pull out any details to include in error message
+        error_details = '\n'.join(task.service_logs[(sha256, service_name)])
+        if error_details:
+            error_details = '\n\n' + error_details
 
         ttl = task.submission.params.ttl
         error = Error(dict(
@@ -945,7 +990,7 @@ class Dispatcher(ThreadedCoreBase):
             created='NOW',
             expiry_ts=now_as_iso(ttl * 24 * 60 * 60) if ttl else None,
             response=dict(
-                message='The number of retries has passed the limit.',
+                message='The number of retries has passed the limit.' + error_details,
                 service_name=service_name,
                 service_version='0',
                 status='FAIL_NONRECOVERABLE',
@@ -1037,6 +1082,8 @@ class Dispatcher(ThreadedCoreBase):
                         if key in task.service_errors or key in task.service_results:
                             continue
                         self.set_timeout(task, message.sha, message.service_name, message.worker_id)
+                        task.service_logs[(message.sha, message.service_name)].append(
+                            f'Popped from queue and running at {now_as_iso()} on worker {message.worker_id}')
 
             elif kind == Action.result:
                 self.queue_ready_signals[self.process_queue_index(message.sid)].release()
@@ -1065,13 +1112,32 @@ class Dispatcher(ThreadedCoreBase):
 
             elif kind == Action.service_timeout:
                 task = self.tasks.get(message.sid)
+
+                if not message.sha or not message.service_name:
+                    self.log.warning(f'[{message.sid}] Service timeout missing data.')
+                    continue
+
                 if task:
+                    task.service_logs[(message.sha, message.service_name)].append(
+                        f'Service timeout at {now_as_iso()} on worker {message.worker_id}')
                     self.timeout_service(task, message.sha, message.service_name, message.worker_id)
 
             elif kind == Action.dispatch_file:
                 task = self.tasks.get(message.sid)
                 if task:
                     self.dispatch_file(task, message.sha)
+
+            elif kind == Action.bad_sid:
+                task = self.tasks.get(message.sid)
+                if task:
+                    task.submission.to_be_deleted = True
+                    self.active_submissions.add(message.sid, {
+                        'completed_queue': task.completed_queue,
+                        'submission': task.submission.as_primitives()
+                    })
+
+                if message.event:
+                    message.event.set()
 
             else:
                 self.log.warning(f'Invalid work order kind {kind}')
@@ -1102,6 +1168,7 @@ class Dispatcher(ThreadedCoreBase):
 
         # Immediately remove timeout so we don't cancel now
         self.clear_timeout(task, sha256, service_name)
+        task.service_logs.pop((sha256, service_name), None)
 
         # Don't process duplicates
         if (sha256, service_name) in task.service_results:
@@ -1145,14 +1212,18 @@ class Dispatcher(ThreadedCoreBase):
             if len(str(value)) <= self.config.submission.max_temp_data_length:
                 task.file_temporary_data[sha256][key] = value
 
+        # Update children to include parent_relation, likely EXTRACTED
+        if summary.children and isinstance(summary.children[0], str):
+            summary.children = [(c, 'EXTRACTED') for c in summary.children]
+
         # Record the result as a summary
         task.service_results[(sha256, service_name)] = summary
-        task.register_children(sha256, summary.children)
+        task.register_children(sha256, [c for c, _ in summary.children])
 
         # Set the depth of all extracted files, even if we won't be processing them
         depth_limit = self.config.submission.max_extraction_depth
         new_depth = task.file_depth[sha256] + 1
-        for extracted_sha256 in summary.children:
+        for extracted_sha256, _ in summary.children:
             task.file_depth.setdefault(extracted_sha256, new_depth)
             extracted_name = extracted_names.get(extracted_sha256)
             if extracted_name and extracted_sha256 not in task.file_names:
@@ -1166,7 +1237,8 @@ class Dispatcher(ThreadedCoreBase):
                 # these newly extract files
                 parent_data = task.file_temporary_data[sha256]
 
-                for extracted_sha256 in summary.children:
+                for extracted_sha256, parent_relation in summary.children:
+
                     if extracted_sha256 in task.dropped_files or extracted_sha256 in task.active_files:
                         continue
 
@@ -1192,11 +1264,19 @@ class Dispatcher(ThreadedCoreBase):
 
                     dispatched += 1
                     task.active_files.add(extracted_sha256)
+                    parent_ancestry = parent_data['ancestry']
+                    existing_ancestry = task.file_temporary_data.get(extracted_sha256, {}).get('ancestry', [])
+                    current_ancestry_node = dict(type=self.datastore.file.get(extracted_sha256).type,
+                                                 parent_relation=parent_relation, sha256=extracted_sha256)
+
                     task.file_temporary_data[extracted_sha256] = dict(parent_data)
+                    task.file_temporary_data[extracted_sha256]['ancestry'] = existing_ancestry
+                    [task.file_temporary_data[extracted_sha256]['ancestry'].append(ancestry + [current_ancestry_node])
+                     for ancestry in parent_ancestry]
                     self.find_process_queue(sid).put(DispatchAction(kind=Action.dispatch_file, sid=sid,
                                                                     sha=extracted_sha256))
             else:
-                for extracted_sha256 in summary.children:
+                for extracted_sha256, _ in summary.children:
                     task.dropped_files.add(sha256)
                     self._dispatching_error(task, Error({
                         'archive_ts': None,
@@ -1233,11 +1313,15 @@ class Dispatcher(ThreadedCoreBase):
             NamedQueue(w).push(msg)
 
     @elasticapm.capture_span(span_type='dispatcher')
-    def process_service_error(self, task: SubmissionTask, error_key, error):
+    def process_service_error(self, task: SubmissionTask, error_key, error: Error):
         self.log.info(f'[{task.submission.sid}] Error from service {error.response.service_name} on {error.sha256}')
         self.clear_timeout(task, error.sha256, error.response.service_name)
+        key = (error.sha256, error.response.service_name)
         if error.response.status == "FAIL_NONRECOVERABLE":
-            task.service_errors[(error.sha256, error.response.service_name)] = error_key
+            task.service_errors[key] = error_key
+            task.service_logs.pop(key, None)
+        else:
+            task.service_logs[key].append(f"Service error: {error.response.message}")
         self.dispatch_file(task, error.sha256)
 
     def pull_service_starts(self):
@@ -1369,9 +1453,16 @@ class Dispatcher(ThreadedCoreBase):
         finally:
             if not self.running:
                 self.dispatchers_directory.pop(self.instance_id)
+                self.dispatchers_directory_finalize.pop(self.instance_id)
 
     def work_thief(self):
 
+        # Clean up the finalize list once in a while
+        for id, timestamp in self.dispatchers_directory_finalize.items().items():
+            if int(time.time()) - timestamp > DAY_IN_SECONDS:
+                self.dispatchers_directory_finalize.pop(id)
+
+        # Keep a table of the last recorded status for other dispatchers
         last_seen = {}
 
         try:
@@ -1380,6 +1471,7 @@ class Dispatcher(ThreadedCoreBase):
                 time_mark = time.time()
 
                 # Load guards
+                finalizing = self.dispatchers_directory_finalize.items()
                 last_seen.update(self.dispatchers_directory.items())
 
                 # List all dispatchers with jobs assigned
@@ -1388,7 +1480,7 @@ class Dispatcher(ThreadedCoreBase):
                     key = key[len(DISPATCH_TASK_ASSIGNMENT):]
                     if key not in last_seen:
                         last_seen[key] = time.time()
-                self.running_dispatchers_estimate = len(last_seen)
+                self.running_dispatchers_estimate = len(set(last_seen.keys()) - set(finalizing.keys()))
 
                 self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
                 self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
@@ -1403,6 +1495,7 @@ class Dispatcher(ThreadedCoreBase):
         finally:
             if not self.running:
                 self.dispatchers_directory.pop(self.instance_id)
+                self.dispatchers_directory_finalize.pop(self.instance_id)
 
     def steal_work(self, target):
         target_jobs = Hash(DISPATCH_TASK_ASSIGNMENT+target, host=self.redis_persist)
@@ -1436,6 +1529,7 @@ class Dispatcher(ThreadedCoreBase):
 
         self.log.info(f'Finished stealing work from {target}')
         self.dispatchers_directory.pop(target)
+        self.dispatchers_directory_finalize.pop(target)
 
     def handle_commands(self):
         while self.running:
@@ -1457,6 +1551,9 @@ class Dispatcher(ThreadedCoreBase):
                 elif command.kind == LIST_OUTSTANDING:
                     payload: ListOutstanding = command.payload()
                     self.list_outstanding(payload.submission, payload.response_queue)
+                elif command.kind == UPDATE_BAD_SID:
+                    self.update_bad_sids()
+                    NamedQueue(command.payload_data, host=self.redis).push(self.instance_id)
                 else:
                     self.log.warning(f"Unknown command code: {command.kind}")
 
@@ -1605,3 +1702,19 @@ class Dispatcher(ThreadedCoreBase):
             completed_queue=completed_queue,
         ))
         return True
+
+    def update_bad_sids(self):
+        # Pull new sid list
+        remote_sid_list = set(self.redis_bad_sids.members())
+        new_sid_events = []
+
+        # Kick off updates for any new sids
+        for bad_sid in remote_sid_list - self.bad_sids:
+            self.bad_sids.add(bad_sid)
+            event = threading.Event()
+            self.find_process_queue(bad_sid).put(DispatchAction(kind=Action.bad_sid, sid=bad_sid, event=event))
+            new_sid_events.append(event)
+
+        # Wait for those updates to finish
+        for event in new_sid_events:
+            event.wait()

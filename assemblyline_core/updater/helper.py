@@ -1,11 +1,16 @@
+import json
 import requests
 import re
 import socket
 import string
 
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
-from collections import defaultdict
+from assemblyline.odm.models.config import Config as SystemConfig
+from assemblyline.odm.models.service import Service as ServiceConfig
+
 from base64 import b64encode
+from collections import defaultdict
+from logging import Logger
 from packaging.version import parse, Version
 
 DEFAULT_DOCKER_REGISTRY = "registry.hub.docker.com"
@@ -18,7 +23,7 @@ class ContainerRegistry():
 
 
 class DockerRegistry(ContainerRegistry):
-    def _get_proprietary_registry_tags(self, server, image_name, auth, verify):
+    def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None):
         # Find latest tag for each types
         url = f"https://{server}/v2/{image_name}/tags/list"
 
@@ -29,23 +34,23 @@ class DockerRegistry(ContainerRegistry):
 
         resp = None
         try:
-            resp = requests.get(url, headers=headers, verify=verify)
+            resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
         except requests.exceptions.SSLError:
             # Connect to insecure registry over HTTP (development only)
             if not verify:
                 url = f"http://{server}/v2/{image_name}/tags/list"
-                resp = requests.get(url, headers=headers, verify=verify)
+                resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
 
         # Test for valid response
         if resp and resp.ok:
             # Test for positive list of tags
             resp_data = resp.json()
-            return resp_data['tags']
+            return resp_data['tags'] or []
         return []
 
 
 class HarborRegistry(ContainerRegistry):
-    def _get_proprietary_registry_tags(self, server, image_name, auth, verify):
+    def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None):
         # Determine project/repo IDs from image name
         project_id, repo_id = image_name.split('/', 1)
         repo_id = repo_id.replace('/', "%2F")
@@ -57,12 +62,12 @@ class HarborRegistry(ContainerRegistry):
 
         resp = None
         try:
-            resp = requests.get(url, headers=headers, verify=verify)
+            resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
         except requests.exceptions.SSLError:
             # Connect to insecure registry over HTTP (development only)
             if not verify:
                 url = f"http://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts"
-                resp = requests.get(url, headers=headers, verify=verify)
+                resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
 
         if resp and resp.ok:
             return [tag['name'] for image in resp.json() if image['tags'] for tag in image['tags']]
@@ -75,7 +80,8 @@ REGISTRY_TYPE_MAPPING = {
 }
 
 
-def get_latest_tag_for_service(service_config, system_config, logger, prefix=""):
+def get_latest_tag_for_service(
+        service_config: ServiceConfig, system_config: SystemConfig, logger: Logger, prefix: str = ""):
     def process_image(image):
         # Find which server to search in
         server = image.split("/")[0]
@@ -133,12 +139,17 @@ def get_latest_tag_for_service(service_config, system_config, logger, prefix="")
         auth = f"Basic {b64encode(upass.encode()).decode()}"
 
     registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
+    proxies = None
+    for reg_conf in system_config.core.updater.registry_configs:
+        if reg_conf.name == server:
+            proxies = reg_conf.proxies or None
+            break
 
     if server == DEFAULT_DOCKER_REGISTRY:
-        tags = _get_dockerhub_tags(image_name, update_channel)
+        tags = _get_dockerhub_tags(image_name, update_channel, proxies)
     else:
         tags = registry._get_proprietary_registry_tags(server, image_name, auth,
-                                                       not system_config.services.allow_insecure_registry)
+                                                       not system_config.services.allow_insecure_registry, proxies)
 
     tag_name = None
 
@@ -175,13 +186,13 @@ def get_latest_tag_for_service(service_config, system_config, logger, prefix="")
 
 
 # Default for obtaining tags from DockerHub
-def _get_dockerhub_tags(image_name, update_channel):
+def _get_dockerhub_tags(image_name, update_channel, proxies=None):
     # Find latest tag for each types
     url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/repositories/{image_name}/tags" \
         f"?page_size=5&page=1&name={update_channel}"
 
     # Get tag list
-    resp = requests.get(url)
+    resp = requests.get(url, proxies=proxies)
 
     # Test for valid response
     if resp.ok:

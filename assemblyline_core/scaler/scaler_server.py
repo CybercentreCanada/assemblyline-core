@@ -24,13 +24,13 @@ import yaml
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue, length as pq_length
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
-from assemblyline.remote.datatypes.hash import ExpiringHash
+from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.events import EventWatcher, EventSender
-from assemblyline.odm.models.service import Service, DockerConfig
+from assemblyline.odm.models.service import Service, DockerConfig, EnvironmentVariable
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
 from assemblyline.odm.messages.scaler_status_heartbeat import Status
 from assemblyline.odm.messages.changes import ServiceChange, Operation
-from assemblyline.common.forge import get_classification, get_service_queue
+from assemblyline.common.forge import get_classification, get_service_queue, get_apm_client
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
 from assemblyline_core.scaler.controllers import KubernetesController
@@ -64,11 +64,16 @@ MAX_CONTAINER_ALLOCATION = 10
 KUBERNETES_AL_CONFIG = os.environ.get('KUBERNETES_AL_CONFIG')
 
 HOSTNAME = os.getenv('HOSTNAME', platform.node())
+RELEASE_NAME = os.getenv('RELEASE_NAME', 'assemblyline')
 NAMESPACE = os.getenv('NAMESPACE', 'al')
 CLASSIFICATION_HOST_PATH = os.getenv('CLASSIFICATION_HOST_PATH', None)
 
 DOCKER_CONFIGURATION_PATH = os.getenv('DOCKER_CONFIGURATION_PATH', None)
 DOCKER_CONFIGURATION_VOLUME = os.getenv('DOCKER_CONFIGURATION_VOLUME', None)
+
+SERVICE_API_HOST = os.getenv('SERVICE_API_HOST', None)
+UI_SERVER = os.getenv('UI_SERVER', None)
+INTERNAL_ENCRYPT = bool(SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'))
 
 
 @contextmanager
@@ -272,6 +277,12 @@ class ScalerServer(ThreadedCoreBase):
             'privilege': 'service'
         }
 
+        # If Scaler has envs that set service-server env, then that should override configured values
+        if SERVICE_API_HOST:
+            self.config.core.scaler.service_defaults.environment = \
+                [EnvironmentVariable(dict(name="SERVICE_API_HOST", value=SERVICE_API_HOST))] + \
+                [env for env in self.config.core.scaler.service_defaults.environment if env.name != "SERVICE_API_HOST"]
+
         if self.config.core.scaler.additional_labels:
             labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)})
 
@@ -279,6 +290,7 @@ class ScalerServer(ThreadedCoreBase):
             self.log.info(f"Loading Kubernetes cluster interface on namespace: {NAMESPACE}")
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
                                                    namespace=NAMESPACE, priority='al-service-priority',
+                                                   dependency_priority='al-core-priority',
                                                    cpu_reservation=self.config.services.cpu_reservation,
                                                    log_level=self.config.logging.log_level,
                                                    core_env=core_env,
@@ -288,13 +300,43 @@ class ScalerServer(ThreadedCoreBase):
             self.controller.add_config_mount(KUBERNETES_AL_CONFIG, config_map=KUBERNETES_AL_CONFIG, key="config",
                                              target_path="/etc/assemblyline/config.yml", read_only=True, core=True)
 
+            # If we're passed an override for server-server and it's defining an HTTPS connection, then add a global
+            # mount for the Root CA that needs to be mounted
+            if INTERNAL_ENCRYPT:
+                self.config.core.scaler.service_defaults.mounts.append(dict(
+                    name="root-ca",
+                    path="/etc/assemblyline/ssl/al_root-ca.crt",
+                    resource_type="secret",
+                    resource_name=f"{RELEASE_NAME}.internal-generated-ca",
+                    resource_key="tls.crt"
+                ))
+
             # Add default mounts for (non-)privileged services
             for mount in self.config.core.scaler.service_defaults.mounts:
+                # Deprecated configuration for mounting ConfigMap
+                # TODO: Deprecate code on next major change
                 if mount.config_map:
                     self.controller.add_config_mount(mount.name, config_map=mount.config_map, key=mount.key,
                                                      target_path=mount.path, read_only=mount.read_only,
                                                      core=mount.privileged_only)
-                else:
+                    self.log.warning(
+                        "DEPRECATED: Migrate default service mounts using ConfigMaps to use: "
+                        f"resource_type='configmap', resource_name={mount.config_map}, resource_key={mount.key or ''}. "
+                        "Continuing deprecated mounting.."
+                    )
+                    continue
+
+                if mount.resource_type == 'configmap':
+                    # ConfigMap-based mount
+                    self.controller.add_config_mount(mount.name, config_map=mount.resource_name, key=mount.resource_key,
+                                                     target_path=mount.path, read_only=mount.read_only,
+                                                     core=mount.privileged_only)
+                elif mount.resource_type == 'secret':
+                    # Secret-based mount
+                    self.controller.add_secret_mount(mount.name, secret_name=mount.resource_name,
+                                                     sub_path=mount.resource_key, target_path=mount.path,
+                                                     read_only=mount.read_only, core=mount.privileged_only)
+                elif mount.resource_type == 'volume':
                     # Add storage-based mount
                     self.controller.add_volume_mount(name=mount.name, target_path=mount.path, read_only=mount.read_only,
                                                      core=mount.privileged_only)
@@ -338,8 +380,7 @@ class ScalerServer(ThreadedCoreBase):
         self.apm_client = None
         if self.config.core.metrics.apm_server.server_url:
             elasticapm.instrument()
-            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                service_name="scaler")
+            self.apm_client = get_apm_client("scaler")
 
     def log_crashes(self, fn):
         @functools.wraps(fn)
@@ -475,28 +516,26 @@ class ScalerServer(ThreadedCoreBase):
                 dependency.container = prepare_container(dependency.container)
                 dependency_config[_n] = dependency
                 dep_hash = get_id_from_data(dependency, length=16)
-                dependency_blobs[_n] = f"dh={dep_hash}v={service.version}p={service.privileged}"
+                dependency_blobs[_n] = f"dh={dep_hash}v={service.version}p={service.privileged}ssl={INTERNAL_ENCRYPT}"
 
             # Check if the service dependencies have been deployed.
-            dependency_keys = []
-            updater_ready = stage == ServiceStage.Running
+            dependency_keys = dict()
             if service.update_config:
                 for _n, dependency in dependency_config.items():
                     key = self.controller.stateful_container_key(service.name, _n, dependency,
                                                                  dependency_blobs.get(_n, ''))
                     if key:
-                        dependency_keys.append(_n + key)
-                    else:
-                        updater_ready = False
+                        dependency_keys[_n] = _n + key
+            else:
+                # Services without an update configuration are born ready
+                self._service_stage_hash.set(name, ServiceStage.Running)
+                stage = ServiceStage.Running
 
-            # If stage is not set to running or a dependency container is missing start the setup process
-            if not updater_ready:
+            # If dependency container(s) are missing, start the setup process
+            if set(dependency_keys.keys()) != set(dependency_config.keys()):
                 self.log.info(f'Preparing environment for {service.name}')
-                # Move to the next service stage (do this first because the container we are starting may care)
-                if service.update_config and service.update_config.wait_for_update:
-                    self._service_stage_hash.set(name, ServiceStage.Update)
-                    stage = ServiceStage.Update
-                else:
+                # Services that don't need to wait for an update can be declared ready
+                if service.update_config and not service.update_config.wait_for_update:
                     self._service_stage_hash.set(name, ServiceStage.Running)
                     stage = ServiceStage.Running
 
@@ -504,9 +543,12 @@ class ScalerServer(ThreadedCoreBase):
                 dependency_internet = [(name, dependency.container.allow_internet_access)
                                        for name, dependency in dependency_config.items()]
 
-                self.controller.prepare_network(
-                    service.name, service.docker_config.allow_internet_access, dependency_internet)
+                self.controller.prepare_network(service.name, service.docker_config.allow_internet_access,
+                                                dependency_internet)
                 for _n, dependency in dependency_config.items():
+                    if dependency_keys.get(_n):
+                        # Dependency already exists, skip
+                        continue
                     self.log.info(f'Launching {service.name} dependency {_n}')
                     self.controller.start_stateful_container(
                         service_name=service.name,
@@ -525,9 +567,9 @@ class ScalerServer(ThreadedCoreBase):
                 # Compute a blob of service properties not include in the docker config, that
                 # should still result in a service being restarted when changed
                 cfg_items = get_recursive_sorted_tuples(service.config)
-                dep_keys = ''.join(sorted(dependency_keys))
+                dep_keys = ''.join(sorted(dependency_keys.values()))
                 config_blob = (f"c={cfg_items}sp={service.submission_params}"
-                               f"dk={dep_keys}p={service.privileged}d={docker_config}")
+                               f"dk={dep_keys}p={service.privileged}d={docker_config}ssl={INTERNAL_ENCRYPT}")
 
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:
@@ -575,7 +617,10 @@ class ScalerServer(ThreadedCoreBase):
                             profile.config_blob = config_blob
                             self.controller.restart(profile)
                             self.log.info(f"Deployment information for {name} replaced")
-
+            # If service has already been scaled but is not running, scale down until ready
+            elif name in self.profiles:
+                self.log.info(f"System has deemed {name} not ready/running. Scaling down..")
+                self.controller.set_target(name, 0)
         except Exception:
             self.log.exception(f"Error applying service settings from: {service.name}")
             self.handle_service_error(service.name)
@@ -587,6 +632,9 @@ class ScalerServer(ThreadedCoreBase):
             self.controller.stop_containers(labels={
                 'dependency_for': name
             })
+
+            # Clear related dependency caching from Redis
+            Hash(f'service-updates-{name}', self.redis_persist).delete()
 
             # Mark this service as not running in the shared record
             self._service_stage_hash.set(name, ServiceStage.Off)
@@ -618,9 +666,15 @@ class ScalerServer(ThreadedCoreBase):
                 # Figure out what services are expected to be running and how many
                 with elasticapm.capture_span('read_profiles'):
                     with self.profiles_lock:
-                        all_profiles: dict[str, ServiceProfile] = copy.deepcopy(self.profiles)
+                        # We want to evaluate 'active' service profiles
+                        all_profiles: dict[str, ServiceProfile] = {_n: copy.deepcopy(_v)
+                                                                   for _n, _v in self.profiles.items()
+                                                                   if self.get_service_stage(_n) == ServiceStage.Running}
                     raw_targets = self.controller.get_targets()
+                    # This is the list of targets we will adjust
                     targets = {_p.name: raw_targets.get(_p.name, 0) for _p in all_profiles.values()}
+                    # This represents what the environment is currently running
+                    old_targets = dict(targets)
 
                 for name, profile in all_profiles.items():
                     self.log.debug(f'{name}')
@@ -667,7 +721,8 @@ class ScalerServer(ThreadedCoreBase):
                 used_memory = total_memory - free_memory
                 free_memory = total_memory * self.get_memory_overallocation() - used_memory
 
-                #
+                # Make adjustments to the targets until everything is satisified
+                # or we don't have the resouces to make more adjustments
                 def trim(prof: list[ServiceProfile]):
                     prof = [_p for _p in prof if _p.desired_instances > targets[_p.name]]
                     drop = [_p for _p in prof if _p.cpu > free_cpu or _p.ram > free_memory]
@@ -678,10 +733,6 @@ class ScalerServer(ThreadedCoreBase):
                     return prof
 
                 remaining_profiles: list[ServiceProfile] = trim(list(all_profiles.values()))
-                # The target values up until now should be in sync with the container orchestrator
-                # create a copy, so we can track which ones change in the following loop
-                old_targets = dict(targets)
-
                 while remaining_profiles:
                     # TODO do we need to add balancing metrics other than 'least running' for this? probably
                     remaining_profiles.sort(key=lambda _p: targets[_p.name])
@@ -704,6 +755,7 @@ class ScalerServer(ThreadedCoreBase):
                                 continue
                             self.profiles[name].target_instances = value
                             old = old_targets[name]
+
                             if value != old:
                                 self.log.info(f"Scaling service {name}: {old} -> {value}")
                                 pool.call(self.controller.set_target, name, value)

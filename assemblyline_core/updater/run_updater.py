@@ -9,19 +9,20 @@ import time
 import uuid
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, List
 
 import docker
 
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
-    V1PersistentVolumeClaimVolumeSource, V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
-    V1ConfigMapVolumeSource, V1Secret, V1LocalObjectReference
+    V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
+    V1ConfigMapVolumeSource, V1Secret, V1SecretVolumeSource, V1LocalObjectReference
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
 from assemblyline.common import isotime
 from assemblyline.odm.messages.changes import Operation, ServiceChange
-from assemblyline.odm.models.service import DockerConfig
+from assemblyline.odm.models.config import Mount
+from assemblyline.odm.models.service import DockerConfig, Service
 from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config
@@ -44,14 +45,19 @@ CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'core')
 
+SERVICE_API_HOST = os.getenv('SERVICE_API_HOST')
+UI_SERVER = os.getenv('UI_SERVER')
+RELEASE_NAME = os.getenv('RELEASE_NAME')
+
 
 class DockerUpdateInterface:
     """Wrap docker interface for the commands used in the update process."""
 
-    def __init__(self, log_level="INFO"):
+    def __init__(self, logger, log_level="INFO"):
         self.client = docker.from_env()
         self._external_network = None
         self.log_level = log_level
+        self.log = logger
 
     @property
     def external_network(self):
@@ -142,7 +148,8 @@ class DockerUpdateInterface:
 
 
 class KubernetesUpdateInterface:
-    def __init__(self, prefix, namespace, priority_class, extra_labels, log_level="INFO", default_service_account=None):
+    def __init__(self, logger, prefix, namespace, priority_class, extra_labels, log_level="INFO",
+                 default_service_account=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -163,6 +170,7 @@ class KubernetesUpdateInterface:
             # Load again with our settings set
             config.load_kube_config(client_configuration=cfg)
 
+        self.log = logger
         self.prefix = prefix.lower()
         self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
@@ -183,7 +191,7 @@ class KubernetesUpdateInterface:
                         self.secret_env.append(env_def)
                         INHERITED_VARIABLES.remove(env_name)
 
-    def launch(self, name, docker_config: DockerConfig, mounts, env, blocking: bool = True):
+    def launch(self, name, docker_config: DockerConfig, mounts: List[Mount], env, blocking: bool = True):
         name = (self.prefix + 'update-' + name.lower()).replace('_', '-')
 
         # If we have been given a username or password for the registry, we have to
@@ -239,21 +247,38 @@ class KubernetesUpdateInterface:
         volumes = []
         volume_mounts = []
 
-        for index, mnt in enumerate(mounts):
-            volumes.append(V1Volume(
-                name=f'mount-{index}',
-                persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
-                    claim_name=mnt['volume'],
-                    read_only=False
-                ),
-            ))
+        for mount in mounts:
+            # Initialize with required set of params
+            vol_kwargs = dict(name=mount.name)
+            vol_mount_kwargs = dict(
+                name=mount.name,
+                mount_path=mount.path,
+                read_only=mount.read_only,
+            )
 
-            volume_mounts.append(V1VolumeMount(
-                name=f'mount-{index}',
-                mount_path=mnt['dest_path'],
-                sub_path=mnt['source_path'],
-                read_only=False,
-            ))
+            if mount.config_map:
+                # Deprecated configuration for mounting ConfigMap
+                # TODO: Deprecate code on next major change
+                self.log.warning(
+                    "DEPRECATED: Migrate default service mounts using ConfigMaps to use: "
+                    f"resource_type='configmap', resource_name={mount.config_map}, resource_key={mount.key or ''}. "
+                    "Continuing deprecated mounting.."
+                )
+                vol_kwargs.update(dict(config_map=V1ConfigMapVolumeSource(name=mount.config_map, optional=False)))
+                vol_mount_kwargs.update(dict(sub_path=mount.key))
+
+            elif mount.resource_type == 'secret':
+                # Secret-based source
+                vol_kwargs.update(dict(secret=V1SecretVolumeSource(secret_name=mount.resource_name)))
+                vol_mount_kwargs.update(dict(sub_path=mount.resource_key))
+
+            elif mount.resource_type == 'configmap':
+                # ConfigMap-based source
+                vol_kwargs.update(dict(config_map=V1ConfigMapVolumeSource(name=mount.resource_name, optional=False)))
+                vol_mount_kwargs.update(dict(sub_path=mount.resource_key))
+
+            volumes.append(V1Volume(**vol_kwargs))
+            volume_mounts.append(V1VolumeMount(**vol_mount_kwargs))
 
         if CONFIGURATION_CONFIGMAP:
             volumes.append(V1Volume(
@@ -391,28 +416,138 @@ class ServiceUpdater(ThreadedCoreBase):
                          redis_persist=redis_persist, redis=redis)
 
         self.container_update: Hash[dict[str, Any]] = Hash('container-update', self.redis_persist)
+        self.container_install: Hash[dict[str, Any]] = Hash('container-install', self.redis_persist)
         self.latest_service_tags: Hash[dict[str, str]] = Hash('service-tags', self.redis_persist)
         self.service_events = EventSender('changes.services', host=self.redis)
 
         self.incompatible_services = set()
         self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
+        self.mounts = []
+
+        # We only want changes with value, we also don't want to override the image
+        self.job_dockerconfig = {k: v for k, v in self.config.core.updater.job_dockerconfig.as_primitives().items()
+                                 if (v and k != 'image')}
 
         if 'KUBERNETES_SERVICE_HOST' in os.environ and NAMESPACE:
             extra_labels = {}
             if self.config.core.scaler.additional_labels:
                 extra_labels = {k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)}
-            self.controller = KubernetesUpdateInterface(prefix='alsvc_', namespace=NAMESPACE,
+
+            # If Updater has envs that set the service-server to use HTTPS, then assume a Root CA needs to be mounted
+            if SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'):
+                self.config.core.scaler.service_defaults.mounts.append(dict(
+                    name="root-ca",
+                    path="/etc/assemblyline/ssl/al_root-ca.crt",
+                    resource_type="secret",
+                    resource_name=f"{RELEASE_NAME}.internal-generated-ca",
+                    resource_key="tls.crt"
+                ))
+
+            self.controller = KubernetesUpdateInterface(logger=self.log, prefix='alsvc_', namespace=NAMESPACE,
                                                         priority_class='al-core-priority',
                                                         extra_labels=extra_labels,
                                                         log_level=self.config.logging.log_level,
                                                         default_service_account=self.config.services.service_account)
+            # Add all additional mounts to privileged services
+            self.mounts = self.config.core.scaler.service_defaults.mounts
         else:
-            self.controller = DockerUpdateInterface(log_level=self.config.logging.log_level)
+            self.controller = DockerUpdateInterface(logger=self.log, log_level=self.config.logging.log_level)
 
     def _handle_service_change_event(self, data: ServiceChange):
         if data.operation == Operation.Incompatible:
             self.incompatible_services.add(data.name)
+
+    def container_installs(self):
+        """Go through the list of services and check what are the latest tags for it"""
+        while self.running:
+            self.log.info("[CI] Installing all services marked for install...")
+
+            # Install function for services
+            def install_service(service_name: str, install_data: dict) -> str:
+                if self.config.services.preferred_update_channel == 'stable':
+                    tag = 'stable'
+                else:
+                    tag = 'latest'
+                service_key = None
+                try:
+                    service = Service(
+                        {'name': service_name,
+                         'update_channel': self.config.services.preferred_update_channel,
+                         'version': tag,
+                         'docker_config': {'image': install_data.get('image')}})
+
+                    image_name, tag_name, auth = get_latest_tag_for_service(
+                        service,  self.config, self.log, prefix="[CI] ")
+
+                    docker_config = dict(image=f"{image_name}:{tag_name}")
+                    if auth:
+                        docker_config.update(dict(registry_username=auth['username'],
+                                                  registry_password=auth['password']))
+
+                    # Apply any container configuration changes specifically for jobs
+                    docker_config.update(self.job_dockerconfig)
+
+                    self.log.info(f"[CI] Service {service_name} is being installed to version {tag_name}...")
+
+                    self.controller.launch(
+                        name=service_name,
+                        docker_config=DockerConfig(docker_config),
+                        mounts=self.mounts,
+                        env={
+                            "SERVICE_TAG": tag_name,
+                            "REGISTER_ONLY": 'true',
+                            "PRIVILEGED": 'true',
+                        },
+                        blocking=True
+                    )
+
+                    service_key = f"{service_name}_{tag_name.replace('stable', '')}"
+
+                except Exception as e:
+                    self.log.error(
+                        f"[CI] Service {service_name} has failed to install. Install procedure cancelled... [{str(e)}]")
+                return service_key
+
+            # Start up installs for services in parallel
+            install_threads = []
+            with ThreadPoolExecutor() as service_installs_exec:
+                for service_name, install_data in self.container_install.items().items():
+                    install_threads.append(service_installs_exec.submit(install_service, service_name, install_data))
+
+            # Once all threads are completed, check the status of the installs
+            for thread in install_threads:
+                service_key = thread.result()
+                service_name, latest_tag = service_key.split("_")
+
+                if self.datastore.service.get_if_exists(service_key):
+                    operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
+
+                    # Check if a service was previously disabled and re-enable it
+                    if service_name in self.incompatible_services:
+                        self.incompatible_services.remove(service_name)
+                        operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
+
+                    if self.datastore.service_delta.update(service_name, operations):
+                        # Update completed, cleanup
+                        self.service_events.send(service_name, {
+                            'operation': Operation.Added,
+                            'name': service_name
+                        })
+                        self.log.info(f"[CI] Service {service_name}_{latest_tag} install successful!")
+                    else:
+                        self.log.error(f"[CI] Service {service_name} has failed to install because it cannot set "
+                                       f"{latest_tag} as the new version. Install procedure cancelled...")
+                else:
+                    self.log.error(f"[CI] Service {service_name} has failed to install because resulting "
+                                   f"service key ({service_key}) does not exist. Install procedure cancelled...")
+                self.container_install.pop(service_name)
+
+            # Clear out any old dead containers
+            self.controller.cleanup_stale()
+
+            self.log.info(f"[CI] Done installing services, waiting {UPDATE_CHECK_INTERVAL} seconds for next install...")
+            time.sleep(UPDATE_CHECK_INTERVAL)
 
     def container_updates(self):
         """Go through the list of services and check what are the latest tags for it"""
@@ -423,29 +558,24 @@ class ServiceUpdater(ThreadedCoreBase):
             def update_service(service_name: str, update_data: dict) -> str:
                 self.log.info(f"[CU] Service {service_name} is being updated to version {update_data['latest_tag']}...")
 
+                docker_config = dict(image=update_data['image'])
+
                 # Load authentication params
-                username = None
-                password = None
                 auth = update_data['auth'] or {}
                 if auth:
-                    username = auth.get('username', None)
-                    password = auth.get('password', None)
+                    docker_config.update(dict(registry_username=auth.get('username'),
+                                              registry_password=auth.get('password')))
+
+                # Apply any container configuration changes specifically for jobs
+                docker_config.update(self.job_dockerconfig)
 
                 latest_tag = update_data['latest_tag'].replace('stable', '')
                 service_key = f"{service_name}_{latest_tag}"
                 try:
                     self.controller.launch(
                         name=service_name,
-                        docker_config=DockerConfig(dict(
-                            allow_internet_access=True,
-                            registry_username=username,
-                            registry_password=password,
-                            cpu_cores=1,
-                            environment=[],
-                            image=update_data['image'],
-                            ports=[]
-                        )),
-                        mounts=[],
+                        docker_config=DockerConfig(docker_config),
+                        mounts=self.mounts,
                         env={
                             "SERVICE_TAG": update_data['latest_tag'],
                             "REGISTER_ONLY": 'true',
@@ -526,7 +656,8 @@ class ServiceUpdater(ThreadedCoreBase):
         # Load and maintain threads
         threads = {
             'Container version check': self.container_versions,
-            'Container updates': self.container_updates
+            'Container updates': self.container_updates,
+            'Container installs': self.container_installs
         }
         self.maintain_threads(threads)
 

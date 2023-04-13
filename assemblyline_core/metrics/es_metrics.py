@@ -13,7 +13,11 @@ from assemblyline_core.server_base import ServerBase
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 
+from os import environ, path
 from packaging import version
+from urllib.parse import urlparse
+
+METRICSTORE_ROOT_CA_PATH = environ.get('METRICSTORE_ROOT_CA_PATH', '/etc/assemblyline/ssl/al_root-ca.crt')
 
 
 class ESMetricsServer(ServerBase):
@@ -46,8 +50,7 @@ class ESMetricsServer(ServerBase):
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
             elasticapm.instrument()
-            self.apm_client = elasticapm.Client(server_url=self.config.core.metrics.apm_server.server_url,
-                                                service_name="es_metrics")
+            self.apm_client = forge.get_apm_client("es_metrics")
         else:
             self.apm_client = None
 
@@ -517,18 +520,15 @@ class ESMetricsServer(ServerBase):
 
     def try_run(self):
         # If our connection to the metrics database requires a custom ca cert, prepare it
-        ca_certs = None
+        ca_certs = None if not path.exists(METRICSTORE_ROOT_CA_PATH) else METRICSTORE_ROOT_CA_PATH
         if self.config.core.metrics.elasticsearch.host_certificates:
             with tempfile.NamedTemporaryFile(delete=False) as ca_certs_file:
                 ca_certs = ca_certs_file.name
                 ca_certs_file.write(self.config.core.metrics.elasticsearch.host_certificates.encode())
 
         # Open connections to the input and output databases
-        self.input_es = elasticsearch.Elasticsearch(hosts=self.config.datastore.hosts,
-                                                    max_retries=0)
-        self.target_es = elasticsearch.Elasticsearch(hosts=self.target_hosts,
-                                                     max_retries=0,
-                                                     ca_certs=ca_certs)
+        self.input_es = forge.get_datastore().ds.client
+        self.target_es = elasticsearch.Elasticsearch(hosts=self.target_hosts, max_retries=0, ca_certs=ca_certs)
         # Check if target_es supports datastreams (>=7.9)
         es_metric_indices = ['es_cluster', 'es_nodes', 'es_indices']
         self.is_datastream = version.parse(self.target_es.info()['version']['number']) >= version.parse("7.9")

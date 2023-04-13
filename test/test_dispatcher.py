@@ -123,6 +123,7 @@ def test_simple(clean_redis, clean_datastore):
     sub.sid = sid = 'first-submission'
     sub.params.ignore_cache = False
     sub.params.max_extracted = 5
+    sub.to_be_deleted = False
     sub.params.classification = get_classification().UNRESTRICTED
     sub.params.initial_data = json.dumps({'cats': 'big'})
     sub.files = [dict(sha256=file_hash, name='file')]
@@ -158,7 +159,10 @@ def test_simple(clean_redis, clean_datastore):
 
     logger.info('==== third dispatch')
     job = client.request_work('0', 'extract', '0')
-    assert job.temporary_submission_data == [{'name': 'cats', 'value': 'big'}]
+    assert job.temporary_submission_data == [
+        {'name': 'cats', 'value': 'big'},
+        {"name": "ancestry", "value": [[{"type": "unknown", "parent_relation": "ROOT", "sha256": file.sha256}]]}
+    ]
     client.service_failed(sid, 'abc123', make_error(file_hash, 'extract'))
     # Deliberately do in the wrong order to make sure that works
     disp.pull_service_results()
@@ -232,6 +236,7 @@ def test_dispatch_extracted(clean_redis, clean_datastore):
 
     # Inject the fake submission
     submission = random_model_obj(models.submission.Submission)
+    submission.to_be_deleted = False
     submission.files = [dict(name='./file', sha256=file_hash)]
     sid = submission.sid = 'first-submission'
 
@@ -293,6 +298,7 @@ def test_dispatch_extracted_bypass_drp(clean_redis, clean_datastore):
 
     # Inject the fake submission
     submission = random_model_obj(models.submission.Submission)
+    submission.to_be_deleted = False
     submission.params.ignore_dynamic_recursion_prevention = False
     submission.params.services.selected = ['extract', 'sandbox']
     submission.files = [dict(name='./file', sha256=file_hash)]
