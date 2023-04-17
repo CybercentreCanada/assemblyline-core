@@ -337,20 +337,43 @@ class KubernetesController(ControllerInterface):
         self._node_pool_max_ram = 0
         self.node_count = 0
         watch = TypelessWatch()
+        ready_nodes: dict[str, tuple[float, float]] = {}
 
         for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT,
                                   _request_timeout=WATCH_API_TIMEOUT):
             if not self.running:
                 break
 
-            if event['type'] == "ADDED":
-                self._node_pool_max_cpu += parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
-                self._node_pool_max_ram += parse_memory(event['raw_object']['status']['allocatable']['memory'])
-                self.node_count += 1
+            name: str = event['raw_object']['metadata']['name']
+
+            if event['type'] in ["ADDED", "MODIFIED"]:
+                # Check for node ready condition
+                ready = False
+                for condition in event['raw_object']['status']['conditions']:
+                    if condition['type'] == 'Ready':
+                        ready = condition['status'] == 'True'
+                        break
+
+                if ready:
+                    cpu = parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
+                    ram = parse_memory(event['raw_object']['status']['allocatable']['memory'])
+                    ready_nodes[name] = (cpu, ram)
+                else:
+                    ready_nodes.pop(name, None)
+
             elif event['type'] == "DELETED":
-                self._node_pool_max_cpu -= parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
-                self._node_pool_max_ram -= parse_memory(event['raw_object']['status']['allocatable']['memory'])
-                self.node_count -= 1
+                # Remove deleted nodes
+                ready_nodes.pop(name, None)
+
+            # Update the totals
+            self.node_count = len(ready_nodes)
+            max_cpu = 0
+            max_ram = 0
+            for cpu, ram in ready_nodes.values():
+                max_cpu += cpu
+                max_ram += ram
+            self._node_pool_max_cpu = max_cpu
+            self._node_pool_max_ram = max_ram
 
     def _monitor_pods(self):
         watch = TypelessWatch()
