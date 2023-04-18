@@ -184,7 +184,7 @@ class SubmissionTask:
                 self.service_errors[(sha256, service)] = e
 
     @property
-    def sid(self):
+    def sid(self) -> str:
         return self.submission.sid
 
     def forbid_for_children(self, sha256: str, service_name: str):
@@ -528,13 +528,58 @@ class Dispatcher(ThreadedCoreBase):
 
         task.file_depth[sha256] = 0
         task.file_names[sha256] = submission.files[0].name or sha256
+
         # Initialize ancestry chain by identifying the root file
-        task.file_temporary_data[sha256]['ancestry'] = [[dict(type=self.datastore.file.get(sha256).type,
-                                                              parent_relation="ROOT",
-                                                              sha256=sha256)]]
+        file_info = self.get_fileinfo(task, sha256)
+        file_type = file_info.type if file_info else 'NOT_FOUND'
+        task.file_temporary_data[sha256]['ancestry'] = [[dict(type=file_type, parent_relation="ROOT", sha256=sha256)]]
+
+        # Start the file dispatching
         task.active_files.add(sha256)
         action = DispatchAction(kind=Action.dispatch_file, sid=sid, sha=sha256)
         self.find_process_queue(sid).put(action)
+
+    @elasticapm.capture_span(span_type='dispatcher')
+    def get_fileinfo(self, task: SubmissionTask, sha256: str) -> Optional[FileInfo]:
+        # First try to get the info from local cache
+        file_info = task.file_info.get(sha256, None)
+        if file_info:
+            return file_info
+
+        # get the info from datastore
+        filestore_info: Optional[File] = self.datastore.file.get(sha256)
+
+        if filestore_info is None:
+            # Store an error and mark this file as unprocessable
+            task.dropped_files.add(sha256)
+            self._dispatching_error(task, Error({
+                'archive_ts': None,
+                'expiry_ts': task.submission.expiry_ts,
+                'response': {
+                    'message': f"Couldn't find file info for {sha256} in submission {task.sid}",
+                    'service_name': 'Dispatcher',
+                    'service_tool_version': '4.0',
+                    'service_version': '4.0',
+                    'status': 'FAIL_NONRECOVERABLE'
+                },
+                'sha256': sha256,
+                'type': 'UNKNOWN'
+            }))
+            task.file_info[sha256] = None
+            task.file_schedules[sha256] = []
+            return None
+        else:
+            # Translate the file info format
+            file_info = task.file_info[sha256] = FileInfo(dict(
+                magic=filestore_info.magic,
+                md5=filestore_info.md5,
+                mime=filestore_info.mime,
+                sha1=filestore_info.sha1,
+                sha256=filestore_info.sha256,
+                size=filestore_info.size,
+                type=filestore_info.type,
+            ))
+        return file_info
 
     @elasticapm.capture_span(span_type='dispatcher')
     def dispatch_file(self, task: SubmissionTask, sha256: str) -> bool:
@@ -555,49 +600,21 @@ class Dispatcher(ThreadedCoreBase):
         file_depth: int = task.file_depth[sha256]
         # If its the first time we've seen this file, we won't have a schedule for it
         if sha256 not in task.file_schedules:
-            with elasticapm.capture_span('build_schedule'):
-                # We are processing this file, load the file info, and build the schedule
-                filestore_info: Optional[File] = self.datastore.file.get(sha256)
+            # We are processing this file, load the file info, and build the schedule
+            file_info = self.get_fileinfo(task, sha256)
+            if file_info is None:
+                return False
 
-                if filestore_info is None:
-                    task.dropped_files.add(sha256)
-                    self._dispatching_error(task, Error({
-                        'archive_ts': None,
-                        'expiry_ts': task.submission.expiry_ts,
-                        'response': {
-                            'message': f"Couldn't find file info for {sha256} in submission {sid}",
-                            'service_name': 'Dispatcher',
-                            'service_tool_version': '4.0',
-                            'service_version': '4.0',
-                            'status': 'FAIL_NONRECOVERABLE'
-                        },
-                        'sha256': sha256,
-                        'type': 'UNKNOWN'
-                    }))
-                    task.file_info[sha256] = None
-                    task.file_schedules[sha256] = []
-                    return False
-                else:
-                    file_info = task.file_info[sha256] = FileInfo(dict(
-                        magic=filestore_info.magic,
-                        md5=filestore_info.md5,
-                        mime=filestore_info.mime,
-                        sha1=filestore_info.sha1,
-                        sha256=filestore_info.sha256,
-                        size=filestore_info.size,
-                        type=filestore_info.type,
-                    ))
+            forbidden_services = None
 
-                    forbidden_services = None
+            # If Dynamic Recursion Prevention is in effect and the file is not part of the bypass list,
+            # Find the list of services this file is forbidden from being sent to.
+            ignore_drp = submission.params.ignore_dynamic_recursion_prevention
+            if not ignore_drp and sha256 not in task.dynamic_recursion_bypass:
+                forbidden_services = task.find_recursion_excluded_services(sha256)
 
-                    # If Dynamic Recursion Prevention is in effect and the file is not part of the bypass list,
-                    # Find the list of services this file is forbidden from being sent to.
-                    ignore_drp = submission.params.ignore_dynamic_recursion_prevention
-                    if not ignore_drp and sha256 not in task.dynamic_recursion_bypass:
-                        forbidden_services = task.find_recursion_excluded_services(sha256)
-
-                    task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
-                                                                                file_depth, forbidden_services)
+            task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
+                                                                        file_depth, forbidden_services)
 
         file_info = task.file_info[sha256]
         schedule: list = list(task.file_schedules[sha256])
@@ -1266,8 +1283,10 @@ class Dispatcher(ThreadedCoreBase):
                     task.active_files.add(extracted_sha256)
                     parent_ancestry = parent_data['ancestry']
                     existing_ancestry = task.file_temporary_data.get(extracted_sha256, {}).get('ancestry', [])
-                    current_ancestry_node = dict(type=self.datastore.file.get(extracted_sha256).type,
-                                                 parent_relation=parent_relation, sha256=extracted_sha256)
+                    file_info = self.get_fileinfo(task, extracted_sha256)
+                    file_type = file_info.type if file_info else 'NOT_FOUND'
+                    current_ancestry_node = dict(type=file_type, parent_relation=parent_relation,
+                                                 sha256=extracted_sha256)
 
                     task.file_temporary_data[extracted_sha256] = dict(parent_data)
                     task.file_temporary_data[extracted_sha256]['ancestry'] = existing_ancestry
