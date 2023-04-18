@@ -261,7 +261,9 @@ class ScalerServer(ThreadedCoreBase):
         self.error_count: dict[str, list[float]] = {}
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
         self.service_event_sender = EventSender('changes.services', host=self.redis)
-        self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
+        self.service_watcher_wakeup = threading.Event()
+        self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize,
+                                                   error_event=self.service_watcher_wakeup)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
 
         core_env: dict[str, str] = {}
@@ -423,6 +425,7 @@ class ScalerServer(ThreadedCoreBase):
     def stop(self):
         super().stop()
         self.service_change_watcher.stop()
+        self.service_watcher_wakeup.set()
         self.controller.stop()
 
     def _handle_service_change_event(self, data: ServiceChange):
@@ -457,7 +460,9 @@ class ScalerServer(ThreadedCoreBase):
                     stage = self.get_service_stage(stray_service)
                     self.stop_service(stray_service, stage)
 
-            self.sleep(SERVICE_SYNC_INTERVAL)
+            # Wait for the interval or until someone wakes us up
+            self.service_watcher_wakeup.wait(timeout=SERVICE_SYNC_INTERVAL)
+            self.service_watcher_wakeup.clear()
 
     def _sync_service(self, service: Service):
         name = service.name
