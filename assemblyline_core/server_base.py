@@ -236,9 +236,14 @@ class CoreBase(ServerBase):
         # noinspection PyUnresolvedReferences
         return {x.name: x for x in self.datastore.list_all_services(full=True)}
 
-    def _handle_status_change(self, status: bool):
-        self.log.info(f"Status change detected: {status}")
-        self.active = status
+    def _handle_status_change(self, status: Optional[bool]):
+        if status is None:
+            self.log.info("Refreshing status")
+            component = self.__class__.__name__.lower()
+            self.active = Hash('system', self.redis_persist).get(f'{component}.active')
+        else:
+            self.log.info(f"Status change detected: {status}")
+            self.active = status
 
     def get_service_stage(self, service_name: str, default=ServiceStage.Off) -> ServiceStage:
         return ServiceStage(self._service_stage_hash.get(service_name) or default)
