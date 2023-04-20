@@ -359,6 +359,15 @@ class Dispatcher(ThreadedCoreBase):
         self.finalizing.set()
         self.dispatchers_directory_finalize.set(self.instance_id, int(time.time()))
 
+    def _handle_status_change(self, status: Optional[bool]):
+        super()._handle_status_change(status)
+
+        # If we may have lost redis connection check all of our submissions
+        if status is None:
+            for sid in self.tasks.keys():
+                _q = self.find_process_queue(sid)
+                _q.put(DispatchAction(kind=Action.check_submission, sid=sid))
+
     def process_queue_index(self, key: str) -> int:
         return sum(ord(_x) for _x in key) % RESULT_THREADS
 
