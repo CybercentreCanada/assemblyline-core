@@ -9,7 +9,7 @@ import time
 import uuid
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, List
+from typing import Any, List, Optional
 
 import docker
 
@@ -454,9 +454,10 @@ class ServiceUpdater(ThreadedCoreBase):
         else:
             self.controller = DockerUpdateInterface(logger=self.log, log_level=self.config.logging.log_level)
 
-    def _handle_service_change_event(self, data: ServiceChange):
-        if data.operation == Operation.Incompatible:
-            self.incompatible_services.add(data.name)
+    def _handle_service_change_event(self, data: Optional[ServiceChange]):
+        if data is not None:
+            if data.operation == Operation.Incompatible:
+                self.incompatible_services.add(data.name)
 
     def container_installs(self):
         """Go through the list of services and check what are the latest tags for it"""

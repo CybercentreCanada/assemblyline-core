@@ -1,7 +1,7 @@
 import concurrent.futures
 import logging
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import elasticapm
 
@@ -69,8 +69,11 @@ class TaskingClient:
             self.event_listener.register('changes.heuristics', self.reload_heuristics)
             self.event_listener.start()
 
-    def reload_heuristics(self, data: dict):
-        service_name = data.get('service_name')
+    def reload_heuristics(self, data: Optional[dict]):
+        service_name = None
+        if data is not None:
+            service_name = data.get('service_name')
+
         if service_name:
             self.heuristics.update({h.heur_id: h for h in self.datastore.list_service_heuristics(service_name)})
         else:

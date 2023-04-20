@@ -262,8 +262,7 @@ class ScalerServer(ThreadedCoreBase):
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
         self.service_event_sender = EventSender('changes.services', host=self.redis)
         self.service_watcher_wakeup = threading.Event()
-        self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize,
-                                                   error_event=self.service_watcher_wakeup)
+        self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
 
         core_env: dict[str, str] = {}
@@ -428,19 +427,22 @@ class ScalerServer(ThreadedCoreBase):
         self.service_watcher_wakeup.set()
         self.controller.stop()
 
-    def _handle_service_change_event(self, data: ServiceChange):
-        if data.operation == Operation.Removed:
-            self.log.info(f'Service appears to be deleted, removing {data.name}')
-            stage = self.get_service_stage(data.name)
-            self.stop_service(data.name, stage)
-        elif data.operation == Operation.Incompatible:
-            return
+    def _handle_service_change_event(self, data: Optional[ServiceChange]):
+        if data is None:
+            self.service_watcher_wakeup.set()
         else:
-            service = self.datastore.get_service_with_delta(data.name)
-            if not service:
-                self.log.warning(f'Received change event for non-existent service: {data.name}. Ignoring..')
+            if data.operation == Operation.Removed:
+                self.log.info(f'Service appears to be deleted, removing {data.name}')
+                stage = self.get_service_stage(data.name)
+                self.stop_service(data.name, stage)
+            elif data.operation == Operation.Incompatible:
                 return
-            self._sync_service(service)
+            else:
+                service = self.datastore.get_service_with_delta(data.name)
+                if not service:
+                    self.log.warning(f'Received change event for non-existent service: {data.name}. Ignoring..')
+                    return
+                self._sync_service(service)
 
     def sync_services(self):
         while self.running:
