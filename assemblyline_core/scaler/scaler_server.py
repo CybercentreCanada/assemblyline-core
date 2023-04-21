@@ -447,6 +447,7 @@ class ScalerServer(ThreadedCoreBase):
     def sync_services(self):
         while self.running:
             with apm_span(self.apm_client, 'sync_services'):
+                self.log.info('Synchronizing service configuration')
                 with self.profiles_lock:
                     current_services = set(self.profiles.keys())
                 discovered_services: list[str] = []
@@ -461,12 +462,18 @@ class ScalerServer(ThreadedCoreBase):
                     self.log.info(f'Service appears to be deleted, removing stray {stray_service}')
                     stage = self.get_service_stage(stray_service)
                     self.stop_service(stray_service, stage)
+                self.log.info('Finish synchronizing service configuration')
 
             # Wait for the interval or until someone wakes us up
             self.service_watcher_wakeup.wait(timeout=SERVICE_SYNC_INTERVAL)
             self.service_watcher_wakeup.clear()
 
     def _sync_service(self, service: Service):
+        """
+        Synchronize the state of the service in the database with the orchestration environment.
+
+        :param service: Service data from the database.
+        """
         name = service.name
         stage = self.get_service_stage(service.name)
         default_settings = self.config.core.scaler.service_defaults
