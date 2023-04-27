@@ -261,6 +261,7 @@ class ScalerServer(ThreadedCoreBase):
         self.error_count: dict[str, list[float]] = {}
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
         self.service_event_sender = EventSender('changes.services', host=self.redis)
+        self.service_watcher_wakeup = threading.Event()
         self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
 
@@ -423,25 +424,30 @@ class ScalerServer(ThreadedCoreBase):
     def stop(self):
         super().stop()
         self.service_change_watcher.stop()
+        self.service_watcher_wakeup.set()
         self.controller.stop()
 
-    def _handle_service_change_event(self, data: ServiceChange):
-        if data.operation == Operation.Removed:
-            self.log.info(f'Service appears to be deleted, removing {data.name}')
-            stage = self.get_service_stage(data.name)
-            self.stop_service(data.name, stage)
-        elif data.operation == Operation.Incompatible:
-            return
+    def _handle_service_change_event(self, data: Optional[ServiceChange]):
+        if data is None:
+            self.service_watcher_wakeup.set()
         else:
-            service = self.datastore.get_service_with_delta(data.name)
-            if not service:
-                self.log.warning(f'Received change event for non-existent service: {data.name}. Ignoring..')
+            if data.operation == Operation.Removed:
+                self.log.info(f'Service appears to be deleted, removing {data.name}')
+                stage = self.get_service_stage(data.name)
+                self.stop_service(data.name, stage)
+            elif data.operation == Operation.Incompatible:
                 return
-            self._sync_service(service)
+            else:
+                service = self.datastore.get_service_with_delta(data.name)
+                if not service:
+                    self.log.warning(f'Received change event for non-existent service: {data.name}. Ignoring..')
+                    return
+                self._sync_service(service)
 
     def sync_services(self):
         while self.running:
             with apm_span(self.apm_client, 'sync_services'):
+                self.log.info('Synchronizing service configuration')
                 with self.profiles_lock:
                     current_services = set(self.profiles.keys())
                 discovered_services: list[str] = []
@@ -456,10 +462,18 @@ class ScalerServer(ThreadedCoreBase):
                     self.log.info(f'Service appears to be deleted, removing stray {stray_service}')
                     stage = self.get_service_stage(stray_service)
                     self.stop_service(stray_service, stage)
+                self.log.info('Finish synchronizing service configuration')
 
-            self.sleep(SERVICE_SYNC_INTERVAL)
+            # Wait for the interval or until someone wakes us up
+            self.service_watcher_wakeup.wait(timeout=SERVICE_SYNC_INTERVAL)
+            self.service_watcher_wakeup.clear()
 
     def _sync_service(self, service: Service):
+        """
+        Synchronize the state of the service in the database with the orchestration environment.
+
+        :param service: Service data from the database.
+        """
         name = service.name
         stage = self.get_service_stage(service.name)
         default_settings = self.config.core.scaler.service_defaults
