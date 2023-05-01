@@ -556,7 +556,7 @@ class FileProcessor(threading.Thread):
         try:
             with self.timed('load_json'):
                 if not os.path.exists(meta_path):
-                    logger.warning("File %s was not found..." % meta_path)
+                    logger.info("File %s not found. Probably already processed." % meta_path)
                     self.counter.increment('skipped')
                     return
 
@@ -617,17 +617,18 @@ class FileProcessor(threading.Thread):
             self.counter.increment('errors')
             logger.exception("%s: %s" % (e.__class__.__name__, str(e)))
         finally:
-            with self.timed('cleanup_meta'):
-                try:
-                    if flush_file:
-                        os.unlink(meta_path)
-                    else:
-                        os.rename(meta_path, meta_path + '.bad')
-                except Exception as error:
-                    logger.exception(f"Exception caught deleting file: {meta_path} {error}")
-                finally:
-                    if os.path.exists(meta_path):
-                        logger.warning("File '%s' could not be deleted by vacuum worker" % meta_path)
+            if os.path.exists(meta_path):
+                with self.timed('cleanup_meta'):
+                    try:
+                        if flush_file:
+                            os.unlink(meta_path)
+                        else:
+                            os.rename(meta_path, meta_path + '.bad')
+                    except Exception as error:
+                        logger.exception(f"Exception caught deleting file: {meta_path} {error}")
+                    finally:
+                        if os.path.exists(meta_path):
+                            logger.warning("File '%s' could not be deleted by vacuum worker" % meta_path)
 
     def run(self):
         logger.info('Waiting for files...')
