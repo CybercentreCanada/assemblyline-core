@@ -15,7 +15,8 @@ import threading
 import elasticapm
 import arrow
 
-from assemblyline.common.forge import CachedObject, get_classification, get_config, get_datastore, get_filestore, get_apm_client
+from assemblyline.common.forge import CachedObject, get_classification, get_config, get_datastore, get_filestore, \
+    get_apm_client
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
 from assemblyline.common.log import init_logging
