@@ -531,7 +531,7 @@ class Ingester(ThreadedCoreBase):
         # Set the groups from the user, if they aren't already set
         if not task.params.groups:
             task.params.groups = [g for g in self.get_groups_from_user(
-                task.params.submitter) if g in task.params.classification] or ['USERS']
+                task.params.submitter) if g in task.params.classification]
 
         # Check if this file is already being processed
         self.stamp_filescore_key(task)

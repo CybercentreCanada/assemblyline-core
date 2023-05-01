@@ -412,7 +412,7 @@ class FileProcessor(threading.Thread):
                 s_params['services']['resubmit'] = ['Dynamic Analysis']
 
                 if 'groups' not in s_params:
-                    s_params['groups'] = [g for g in user['groups'] if g in active_cc] or ['USERS']
+                    s_params['groups'] = [g for g in user['groups'] if g in active_cc]
 
                 # Override final parameters
                 s_params.update({
