@@ -94,17 +94,37 @@ class Archiver(ServerBase):
                     # Get the tags for this file
                     tags = self.datastore.get_tag_list_from_keys(
                         [r for r in submission.results if r.startswith(sha256)])
-                    attribution = [x['value'] for x in tags if x['type'].startswith('attribution.')]
+                    attributions = {x['value'] for x in tags if x['type']
+                                    in self.config.submission.tag_types.attribution}
+                    techniques = {x['type'].rsplit('.', 1)[1] for x in tags if x['type'].startswith('technique.')}
+                    infos = {'ioc' for x in tags if x['type'] in self.config.submission.tag_types.ioc}
+                    infos = infos.union({'password' for x in tags if x['type'] == 'info.password'})
 
+                    # Create the archive file
                     self.datastore.file.archive(sha256, delete_after=delete_after, allow_missing=True)
 
                     # Auto-Labelling
-                    op_labels = [(self.datastore.file.UPDATE_APPEND_IF_MISSING, 'labels', x) for x in attribution]
-                    self.datastore.file.update(sha256, operations=op_labels, index_type=Index.ARCHIVE)
-                    op_attrib = [
+                    operations = []
+
+                    # Create default labels
+                    operations += [(self.datastore.file.UPDATE_APPEND_IF_MISSING, 'labels', x) for x in attributions]
+                    operations += [(self.datastore.file.UPDATE_APPEND_IF_MISSING, 'labels', x) for x in techniques]
+                    operations += [(self.datastore.file.UPDATE_APPEND_IF_MISSING, 'labels', x) for x in infos]
+
+                    # create type specific labels
+                    operations += [
                         (self.datastore.file.UPDATE_APPEND_IF_MISSING, 'label_categories.attribution', x)
-                        for x in attribution]
-                    self.datastore.file.update(sha256, operations=op_attrib, index_type=Index.ARCHIVE)
+                        for x in attributions]
+                    operations += [
+                        (self.datastore.file.UPDATE_APPEND_IF_MISSING, 'label_categories.type', x)
+                        for x in techniques]
+                    operations += [
+                        (self.datastore.file.UPDATE_APPEND_IF_MISSING, 'label_categories.info', x)
+                        for x in infos]
+
+                    # Apply auto-created labels
+                    self.datastore.file.update(sha256, operations=operations, index_type=Index.ARCHIVE)
+                    self.datastore.file.update(sha256, operations=operations, index_type=Index.HOT)
 
                     if self.filestore != self.archivestore:
                         with tempfile.NamedTemporaryFile() as buf:
