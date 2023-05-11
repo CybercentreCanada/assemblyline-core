@@ -90,7 +90,22 @@ class Archiver(ServerBase):
                 files.update(self.datastore.get_file_list_from_keys(submission.results, supplementary=True))
                 for sha256 in files:
                     self.counter.increment('file')
+
+                    # Get the tags for this file
+                    tags = self.datastore.get_tag_list_from_keys(
+                        [r for r in submission.results if r.startswith(sha256)])
+                    attribution = [x['value'] for x in tags if x['type'].startswith('attribution.')]
+
                     self.datastore.file.archive(sha256, delete_after=delete_after, allow_missing=True)
+
+                    # Auto-Labelling
+                    op_labels = [(self.datastore.file.UPDATE_APPEND_IF_MISSING, 'labels', x) for x in attribution]
+                    self.datastore.file.update(sha256, operations=op_labels, index_type=Index.ARCHIVE)
+                    op_attrib = [
+                        (self.datastore.file.UPDATE_APPEND_IF_MISSING, 'label_categories.attribution', x)
+                        for x in attribution]
+                    self.datastore.file.update(sha256, operations=op_attrib, index_type=Index.ARCHIVE)
+
                     if self.filestore != self.archivestore:
                         with tempfile.NamedTemporaryFile() as buf:
                             self.filestore.download(sha256, buf.name)
