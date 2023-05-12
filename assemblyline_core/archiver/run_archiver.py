@@ -128,8 +128,8 @@ class Archiver(ServerBase):
 
                     if self.filestore != self.archivestore:
                         with tempfile.NamedTemporaryFile() as buf:
-                            self.filestore.download(sha256, buf.name)
                             try:
+                                self.filestore.download(sha256, buf.name)
                                 if os.path.getsize(buf.name):
                                     self.archivestore.upload(buf.name, sha256)
                             except Exception as e:
