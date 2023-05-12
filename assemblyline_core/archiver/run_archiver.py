@@ -116,7 +116,7 @@ class Archiver(ServerBase):
                         (self.datastore.file.UPDATE_APPEND_IF_MISSING, 'label_categories.attribution', x)
                         for x in attributions]
                     operations += [
-                        (self.datastore.file.UPDATE_APPEND_IF_MISSING, 'label_categories.type', x)
+                        (self.datastore.file.UPDATE_APPEND_IF_MISSING, 'label_categories.technique', x)
                         for x in techniques]
                     operations += [
                         (self.datastore.file.UPDATE_APPEND_IF_MISSING, 'label_categories.info', x)
