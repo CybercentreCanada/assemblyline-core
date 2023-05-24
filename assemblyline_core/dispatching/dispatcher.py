@@ -16,7 +16,7 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.forge import get_service_queue, get_apm_client
+from assemblyline.common.forge import get_service_queue, get_apm_client, get_datastore
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.postprocess import ActionWorker
@@ -27,9 +27,10 @@ from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch
 from assemblyline.odm.messages.submission import SubmissionMessage, from_datastore_submission
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.error import Error
+from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
-from assemblyline.odm.models.result import Result
+from assemblyline.odm.models.user import User
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes.set import Set
@@ -108,6 +109,7 @@ class SubmissionTask:
     def __init__(self, submission, completed_queue, scheduler, results=None,
                  file_infos=None, file_tree=None, errors: Optional[Iterable[str]] = None):
         self.submission: Submission = Submission(submission)
+        self.submitter: User = get_datastore().user.get(self.submission.params.submitter)
 
         self.completed_queue = None
         if completed_queue:
@@ -623,7 +625,8 @@ class Dispatcher(ThreadedCoreBase):
                 forbidden_services = task.find_recursion_excluded_services(sha256)
 
             task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
-                                                                        file_depth, forbidden_services)
+                                                                        file_depth, forbidden_services,
+                                                                        task.submitter.classification.value)
 
         file_info = task.file_info[sha256]
         schedule: list = list(task.file_schedules[sha256])

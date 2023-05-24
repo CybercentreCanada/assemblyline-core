@@ -30,7 +30,8 @@ class Scheduler:
         self.service_stage = get_service_stage_hash(redis)
 
     def build_schedule(self, submission: Submission, file_type: str, file_depth: int = 0,
-                       runtime_excluded: Optional[list[str]] = None) -> list[dict[str, Service]]:
+                       runtime_excluded: Optional[list[str]] = None,
+                       submitter_c12n: str = Classification.UNRESTRICTED) -> list[dict[str, Service]]:
         all_services = dict(self.services)
 
         # Load the selected and excluded services by category
@@ -71,7 +72,6 @@ class Scheduler:
             rejected = bool(service.rejects) and re.match(service.rejects, file_type)
 
             # Ensure that the submission's submitter is allowed to use this service before adding to schedule
-            submitter_c12n = self.datastore.user.get(submission.params.submitter, as_obj=False)['classification']
             if not Classification.is_accessible(submitter_c12n, service.classification):
                 skipped.append(name)
             elif accepted and not rejected:
