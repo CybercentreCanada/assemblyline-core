@@ -5,7 +5,7 @@ import logging
 import os
 import re
 
-from assemblyline.common.forge import CachedObject
+from assemblyline.common.forge import CachedObject, get_classification
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.service import Service
@@ -17,6 +17,7 @@ from assemblyline_core.server_base import get_service_stage_hash, ServiceStage
 # set an environment variable SKIP_SERVICE_SETUP to true for all dispatcher containers
 SKIP_SERVICE_SETUP = os.environ.get('SKIP_SERVICE_SETUP', 'false').lower() in ['true', '1']
 
+Classification = get_classification()
 
 class Scheduler:
     """This object encapsulates building the schedule for a given file type for a submission."""
@@ -69,7 +70,11 @@ class Scheduler:
             accepted = not service.accepts or re.match(service.accepts, file_type)
             rejected = bool(service.rejects) and re.match(service.rejects, file_type)
 
-            if accepted and not rejected:
+            # Ensure that the submission's submitter is allowed to use this service before adding to schedule
+            submitter_c12n = self.datastore.user.get(submission.params.submitter, as_obj=False)['classification']
+            if not Classification.is_accessible(submitter_c12n, service.classification):
+                skipped.append(name)
+            elif accepted and not rejected:
                 schedule[self.stage_index(service.stage)][name] = service
                 selected.append(name)
             else:
