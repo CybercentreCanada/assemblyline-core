@@ -1016,7 +1016,7 @@ def test_plumber_clearing(core, metrics):
 
 def test_filter(core: CoreSession, metrics):
     from assemblyline.common.postprocess import SubmissionFilter, PostprocessAction
-    filter_string = "params.submitter: /f.*l/"
+    filter_string = "params.submitter: user"
     core.dispatcher.postprocess_worker.actions['test_process'] = \
         SubmissionFilter(filter_string), PostprocessAction({
             'enabled': True,
