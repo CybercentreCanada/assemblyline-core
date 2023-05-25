@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, Optional, cast
+from typing import Dict, Optional, Set, cast
 
 import logging
 import os
@@ -25,14 +25,19 @@ class Scheduler:
     def __init__(self, datastore: AssemblylineDatastore, config: Config, redis):
         self.datastore = datastore
         self.config = config
-        self._services: dict[str, Service] = {}
+        self._services: Dict[str, Service] = {}
         self.services = cast(Dict[str, Service], CachedObject(self._get_services))
         self.service_stage = get_service_stage_hash(redis)
+        self.c12n_services: Dict[str, Set[str]] = {}
 
     def build_schedule(self, submission: Submission, file_type: str, file_depth: int = 0,
                        runtime_excluded: Optional[list[str]] = None,
                        submitter_c12n: str = Classification.UNRESTRICTED) -> list[dict[str, Service]]:
+        # Get the set of all services currently enabled on the system
         all_services = dict(self.services)
+
+        # Retrieve a list of services that the classfication group is allowed to submit to
+        accessible = self.get_accessible_services(submitter_c12n)
 
         # Load the selected and excluded services by category
         excluded = self.expand_categories(submission.params.services.excluded)
@@ -57,7 +62,7 @@ class Scheduler:
 
         # Add all selected, accepted, and not rejected services to the schedule
         schedule: list[dict[str, Service]] = [{} for _ in self.config.services.stages]
-        services = list(set(selected) - set(excluded) - set(runtime_excluded))
+        services = list(set(selected).intersection(accessible) - set(excluded) - set(runtime_excluded))
         selected = []
         skipped = []
         for name in services:
@@ -71,10 +76,7 @@ class Scheduler:
             accepted = not service.accepts or re.match(service.accepts, file_type)
             rejected = bool(service.rejects) and re.match(service.rejects, file_type)
 
-            # Ensure that the submission's submitter is allowed to use this service before adding to schedule
-            if not Classification.is_accessible(submitter_c12n, service.classification):
-                skipped.append(name)
-            elif accepted and not rejected:
+            if accepted and not rejected:
                 schedule[self.stage_index(service.stage)][name] = service
                 selected.append(name)
             else:
@@ -123,6 +125,14 @@ class Scheduler:
             except KeyError:
                 all_categories[service.category] = [service.name]
         return all_categories
+
+    def get_accessible_services(self, user_c12n: str) -> Set[str]:
+        if not self.c12n_services.get(user_c12n):
+            # Cache services that are accessible to a classification group
+            self.c12n_services[user_c12n] = {_ for _, service in dict(self.services).items()
+                                             if Classification.is_accessible(user_c12n, service.classification)}
+
+        return self.c12n_services[user_c12n]
 
     def stage_index(self, stage):
         return self.config.services.stages.index(stage)
