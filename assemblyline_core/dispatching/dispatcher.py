@@ -16,10 +16,11 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.forge import get_service_queue, get_apm_client
+from assemblyline.common.forge import get_service_queue, get_apm_client, get_datastore, get_classification
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.postprocess import ActionWorker
+from assemblyline.odm.messages.changes import ServiceChange, Operation
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch, DispatcherCommandMessage, \
@@ -27,15 +28,16 @@ from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch
 from assemblyline.odm.messages.submission import SubmissionMessage, from_datastore_submission
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.error import Error
+from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
-from assemblyline.odm.models.result import Result
+from assemblyline.odm.models.user import User
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
+from assemblyline.remote.datatypes.events import EventWatcher
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline.remote.datatypes.set import Set
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.remote.datatypes.set import ExpiringSet
+from assemblyline.remote.datatypes.set import ExpiringSet, Set
 from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
 from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
@@ -108,6 +110,7 @@ class SubmissionTask:
     def __init__(self, submission, completed_queue, scheduler, results=None,
                  file_infos=None, file_tree=None, errors: Optional[Iterable[str]] = None):
         self.submission: Submission = Submission(submission)
+        self.submitter: User = get_datastore().user.get(self.submission.params.submitter)
 
         self.completed_queue = None
         if completed_queue:
@@ -289,8 +292,8 @@ class Dispatcher(ThreadedCoreBase):
         self.running_tasks = Hash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
 
-        # self.classification_engine = forge.get_classification()
-        #
+        self.classification_engine = get_classification()
+
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
         self.traffic_queue = CommsQueue('submissions', self.redis)
         self.quota_tracker = UserQuotaTracker('submissions', timeout=60 * 60, host=self.redis_persist)
@@ -348,8 +351,14 @@ class Dispatcher(ThreadedCoreBase):
         self.redis_bad_sids = Set(BAD_SID_HASH, host=self.redis_persist)
         self.bad_sids: set[str] = set(self.redis_bad_sids.members())
 
+        # Event Watchers
+        self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
+        self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
+
+
     def stop(self):
         super().stop()
+        self.service_change_watcher.stop()
         self.postprocess_worker.stop()
 
     def interrupt_handler(self, signum, stack_frame):
@@ -368,6 +377,23 @@ class Dispatcher(ThreadedCoreBase):
                 _q = self.find_process_queue(sid)
                 _q.put(DispatchAction(kind=Action.check_submission, sid=sid))
 
+    def _handle_service_change_event(self, data: ServiceChange):
+        if data.operation == Operation.Removed:
+            # Remove all current instances of service from scheduler cache
+            [service_set.remove(data.name) for service_set in self.scheduler.c12n_services.values()
+             if data.name in service_set]
+        else:
+            # If Added/Modifed, pull the service information and modify cache
+            service: Service = self.datastore.get_service_with_delta(data.name)
+            for c12n, service_set in self.scheduler.c12n_services.items():
+                if self.classification_engine.is_accessible(c12n, service.classification):
+                    # Classification group is allowed to use this service
+                    service_set.add(service.name)
+                else:
+                    # Classification group isn't allowed to use this service
+                    if service.name in service_set:
+                        service_set.remove(service.name)
+
     def process_queue_index(self, key: str) -> int:
         return sum(ord(_x) for _x in key) % RESULT_THREADS
 
@@ -381,6 +407,7 @@ class Dispatcher(ThreadedCoreBase):
 
     def try_run(self):
         self.log.info(f'Using dispatcher id {self.instance_id}')
+        self.service_change_watcher.start()
         threads = {
             # Pull in new submissions
             'Pull Submissions': self.pull_submissions,
@@ -623,7 +650,8 @@ class Dispatcher(ThreadedCoreBase):
                 forbidden_services = task.find_recursion_excluded_services(sha256)
 
             task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
-                                                                        file_depth, forbidden_services)
+                                                                        file_depth, forbidden_services,
+                                                                        task.submitter.classification.value)
 
         file_info = task.file_info[sha256]
         schedule: list = list(task.file_schedules[sha256])

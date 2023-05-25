@@ -1,11 +1,11 @@
 from __future__ import annotations
-from typing import Dict, Optional, cast
+from typing import Dict, Optional, Set, cast
 
 import logging
 import os
 import re
 
-from assemblyline.common.forge import CachedObject
+from assemblyline.common.forge import CachedObject, get_classification
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.service import Service
@@ -17,6 +17,7 @@ from assemblyline_core.server_base import get_service_stage_hash, ServiceStage
 # set an environment variable SKIP_SERVICE_SETUP to true for all dispatcher containers
 SKIP_SERVICE_SETUP = os.environ.get('SKIP_SERVICE_SETUP', 'false').lower() in ['true', '1']
 
+Classification = get_classification()
 
 class Scheduler:
     """This object encapsulates building the schedule for a given file type for a submission."""
@@ -24,13 +25,19 @@ class Scheduler:
     def __init__(self, datastore: AssemblylineDatastore, config: Config, redis):
         self.datastore = datastore
         self.config = config
-        self._services: dict[str, Service] = {}
+        self._services: Dict[str, Service] = {}
         self.services = cast(Dict[str, Service], CachedObject(self._get_services))
         self.service_stage = get_service_stage_hash(redis)
+        self.c12n_services: Dict[str, Set[str]] = {}
 
     def build_schedule(self, submission: Submission, file_type: str, file_depth: int = 0,
-                       runtime_excluded: Optional[list[str]] = None) -> list[dict[str, Service]]:
+                       runtime_excluded: Optional[list[str]] = None,
+                       submitter_c12n: str = Classification.UNRESTRICTED) -> list[dict[str, Service]]:
+        # Get the set of all services currently enabled on the system
         all_services = dict(self.services)
+
+        # Retrieve a list of services that the classfication group is allowed to submit to
+        accessible = self.get_accessible_services(submitter_c12n)
 
         # Load the selected and excluded services by category
         excluded = self.expand_categories(submission.params.services.excluded)
@@ -55,7 +62,7 @@ class Scheduler:
 
         # Add all selected, accepted, and not rejected services to the schedule
         schedule: list[dict[str, Service]] = [{} for _ in self.config.services.stages]
-        services = list(set(selected) - set(excluded) - set(runtime_excluded))
+        services = list(set(selected).intersection(accessible) - set(excluded) - set(runtime_excluded))
         selected = []
         skipped = []
         for name in services:
@@ -118,6 +125,14 @@ class Scheduler:
             except KeyError:
                 all_categories[service.category] = [service.name]
         return all_categories
+
+    def get_accessible_services(self, user_c12n: str) -> Set[str]:
+        if not self.c12n_services.get(user_c12n):
+            # Cache services that are accessible to a classification group
+            self.c12n_services[user_c12n] = {_ for _, service in dict(self.services).items()
+                                             if Classification.is_accessible(user_c12n, service.classification)}
+
+        return self.c12n_services[user_c12n]
 
     def stage_index(self, stage):
         return self.config.services.stages.index(stage)
