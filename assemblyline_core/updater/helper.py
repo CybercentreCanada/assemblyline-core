@@ -12,76 +12,114 @@ from base64 import b64encode
 from collections import defaultdict
 from logging import Logger
 from packaging.version import parse, Version
+from typing import Any, Dict, List, Tuple
 
 DEFAULT_DOCKER_REGISTRY = "registry.hub.docker.com"
 
 
 class ContainerRegistry():
+    def __init__(self, server, headers: Dict[str, str] = None, verify: bool = True,
+                 proxies: Dict[str, str] = None, *args, **kwargs):
+        self.server = server
+        self.session = requests.Session()
+        self.session.headers = headers
+        self.session.verify = verify
+        self.session.proxies = proxies
+
+    def _make_request(self, path: str) -> Dict[str, Any]:
+        request_path = f"{self.server}{path}"
+        resp = None
+        try:
+            resp = self.session.get(f"https://{request_path}")
+        except requests.exceptions.SSLError:
+            # Connect to insecure registry over HTTP (development only)
+            if not self.session.verify:
+                resp = self.session.get(f"http://{request_path}")
+        # Test for valid response
+        if resp and resp.ok:
+            return resp.json()
+        return None
+
     # Provide a means of obtaining a list of tags from a container registry
-    def _get_proprietary_registry_tags(self, server, image_name, auth, verify):
+    def get_image_tags(self, image_name) -> List[str]:
+        raise NotImplementedError()
+
+    # Provide a means of obtaining the compatible operating system for the container image
+    def get_image_os(self, image_name, image_tag) -> str:
         raise NotImplementedError()
 
 
-class DockerRegistry(ContainerRegistry):
-    def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None):
-        # Find latest tag for each types
-        url = f"https://{server}/v2/{image_name}/tags/list"
+class DockerHub(ContainerRegistry):
+    def __init__(self, update_channel, proxies: Dict[str, str] = None, *args, **kwargs):
+        super().__init__(DEFAULT_DOCKER_REGISTRY, None, True, proxies)
+        self.update_channel = update_channel
 
-        # Get tag list
-        headers = {}
-        if auth:
-            headers["Authorization"] = auth
-
-        resp = None
-        try:
-            resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
-        except requests.exceptions.SSLError:
-            # Connect to insecure registry over HTTP (development only)
-            if not verify:
-                url = f"http://{server}/v2/{image_name}/tags/list"
-                resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
-
-        # Test for valid response
-        if resp and resp.ok:
-            # Test for positive list of tags
-            resp_data = resp.json()
-            return resp_data['tags'] or []
+    def get_image_tags(self, image_name) -> List[str]:
+        resp = self._make_request(f"/v2/repositories/{image_name}/tags?page_size=5&page=1&name={self.update_channel}")
+        if resp:
+            return [x['name'] for x in resp['results']]
         return []
 
+    def get_image_os(self, image_name, image_tag) -> str:
+        resp = self._make_request(f"/v2/repositories/{image_name}/tags/{image_tag}")
+        if resp:
+            return resp['images'][0]['os']
+        return None
 
+
+# Ref: https://docs.docker.com/registry/spec/api/#detail
+class DockerRegistry(ContainerRegistry):
+    def get_image_tags(self, image_name) -> List[str]:
+        # Find latest tag for each types
+        resp = self._make_request(f"/v2/{image_name}/tags/list")
+        if resp:
+            return resp['tags'] or []
+        return []
+
+    def get_image_os(self, image_name, image_tag) -> str:
+        resp = self._make_request(f"/v2/{image_name}/manifests/{image_tag}")
+        if resp:
+            # Retrieve OS compatibilty from historical record
+            return json.loads(resp['history'][0]['v1Compatibility'])['os']
+
+        # Unable to determine the OS compatibility
+        return None
+
+
+# Ref: https://github.com/goharbor/harbor/blob/main/api/v2.0/swagger.yaml
 class HarborRegistry(ContainerRegistry):
-    def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None):
+    def _get_project_repo_ids(self, image_name) -> Tuple[str, str]:
         # Determine project/repo IDs from image name
         project_id, repo_id = image_name.split('/', 1)
         repo_id = repo_id.replace('/', "%2F")
-        url = f"https://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts?page_size=0"
+        return project_id, repo_id
 
-        headers = {}
-        if auth:
-            headers["Authorization"] = auth
-
-        resp = None
-        try:
-            resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
-        except requests.exceptions.SSLError:
-            # Connect to insecure registry over HTTP (development only)
-            if not verify:
-                url = f"http://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts"
-                resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
-
-        if resp and resp.ok:
-            return [tag['name'] for image in resp.json() if image['tags'] for tag in image['tags']]
+    def get_image_tags(self, image_name) -> List[str]:
+        project_id, repo_id = self._get_project_repo_ids(image_name)
+        resp = self._make_request(f"/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts?page_size=0")
+        if resp:
+            return [tag['name'] for image in resp if image['tags'] for tag in image['tags']]
         return []
+
+    def get_image_os(self, image_name, image_tag) -> str:
+        project_id, repo_id = self._get_project_repo_ids(image_name)
+        resp = self._make_request(f"/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts/{image_tag}")
+        if resp:
+            # Retrieve OS compatibilty from reference
+            return resp['references'][0]['platform']['os']
+
+        # Unable to determine the OS compatibility
+        return None
 
 
 REGISTRY_TYPE_MAPPING = {
-    'docker': DockerRegistry(),
-    'harbor': HarborRegistry()
+    'dockerhub': DockerHub,
+    'docker': DockerRegistry,
+    'harbor': HarborRegistry
 }
 
 
-def get_latest_tag_for_service(
-        service_config: ServiceConfig, system_config: SystemConfig, logger: Logger, prefix: str = ""):
+def get_latest_tag_for_service(service_config: ServiceConfig, system_config: SystemConfig, logger: Logger, prefix: str = ""):
     def process_image(image):
         # Find which server to search in
         server = image.split("/")[0]
@@ -138,21 +176,25 @@ def get_latest_tag_for_service(
         upass = f"{service_config.docker_config.registry_username}:{service_config.docker_config.registry_password}"
         auth = f"Basic {b64encode(upass.encode()).decode()}"
 
-    registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
     proxies = None
     for reg_conf in system_config.core.updater.registry_configs:
         if reg_conf.name == server:
             proxies = reg_conf.proxies or None
             break
 
-    if server == DEFAULT_DOCKER_REGISTRY:
-        tags = _get_dockerhub_tags(image_name, update_channel, proxies)
-    else:
-        tags = registry._get_proprietary_registry_tags(server, image_name, auth,
-                                                       not system_config.services.allow_insecure_registry, proxies)
+    registry_type = 'dockerhub' if server == DEFAULT_DOCKER_REGISTRY else service_config.docker_config.registry_type
+    registry_args = {
+        'server': server,
+        'headers': {'Authorization': auth},
+        'verify': not system_config.services.allow_insecure_registry,
+        'proxies': proxies,
+        'update_channel': update_channel
+    }
+
+    registry: ContainerRegistry = REGISTRY_TYPE_MAPPING[registry_type](**registry_args)
+    tags = registry.get_image_tags(image_name)
 
     tag_name = None
-
     # Pre-filter tags to only consider 'compatible' tags relative to the running system
     tags = [t for t in tags
             if re.match(f"({FRAMEWORK_VERSION})[.]({SYSTEM_VERSION})[.]\\d+[.]({update_channel})\\d+", t)]
@@ -176,28 +218,10 @@ def get_latest_tag_for_service(
     image_variables = defaultdict(str)
     image_variables.update(system_config.services.image_variables)
     image = string.Template(image).safe_substitute(image_variables)
-    server, image_name = process_image(image)
+    os = registry.get_image_os(image_name, tag_name)
 
     # Append server to image if not the default server
-    if server != "registry.hub.docker.com":
+    if server != DEFAULT_DOCKER_REGISTRY:
         image_name = "/".join([server, image_name])
 
-    return image_name, tag_name, auth_config
-
-
-# Default for obtaining tags from DockerHub
-def _get_dockerhub_tags(image_name, update_channel, proxies=None):
-    # Find latest tag for each types
-    url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/repositories/{image_name}/tags" \
-        f"?page_size=5&page=1&name={update_channel}"
-
-    # Get tag list
-    resp = requests.get(url, proxies=proxies)
-
-    # Test for valid response
-    if resp.ok:
-        # Test for positive list of tags
-        resp_data = resp.json()
-        return [x['name'] for x in resp_data['results']]
-
-    return []
+    return image_name, tag_name, auth_config, os
