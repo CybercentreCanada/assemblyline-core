@@ -494,7 +494,7 @@ class Dispatcher(ThreadedCoreBase):
                 # Start of process dispatcher transaction
                 with apm_span(self.apm_client, 'submission_message'):
                     # This is probably a complete task
-                    task = SubmissionTask(scheduler=self.scheduler, datasore=self.datastore, **message)
+                    task = SubmissionTask(scheduler=self.scheduler, datastore=self.datastore, **message)
 
                     # Check the sid table
                     if task.sid in self.bad_sids:
