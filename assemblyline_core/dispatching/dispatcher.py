@@ -16,7 +16,7 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.forge import get_service_queue, get_apm_client, get_datastore, get_classification
+from assemblyline.common.forge import get_service_queue, get_apm_client, get_classification
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.postprocess import ActionWorker
@@ -107,10 +107,10 @@ class ResultSummary:
 class SubmissionTask:
     """Dispatcher internal model for submissions"""
 
-    def __init__(self, submission, completed_queue, scheduler, results=None,
+    def __init__(self, submission, completed_queue, scheduler, datastore, results=None,
                  file_infos=None, file_tree=None, errors: Optional[Iterable[str]] = None):
         self.submission: Submission = Submission(submission)
-        self.submitter: User = get_datastore().user.get(self.submission.params.submitter)
+        self.submitter: User = datastore.user.get(self.submission.params.submitter)
 
         self.completed_queue = None
         if completed_queue:
@@ -355,7 +355,6 @@ class Dispatcher(ThreadedCoreBase):
         self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
 
-
     def stop(self):
         super().stop()
         self.service_change_watcher.stop()
@@ -495,7 +494,7 @@ class Dispatcher(ThreadedCoreBase):
                 # Start of process dispatcher transaction
                 with apm_span(self.apm_client, 'submission_message'):
                     # This is probably a complete task
-                    task = SubmissionTask(scheduler=self.scheduler, **message)
+                    task = SubmissionTask(scheduler=self.scheduler, datasore=self.datastore, **message)
 
                     # Check the sid table
                     if task.sid in self.bad_sids:
