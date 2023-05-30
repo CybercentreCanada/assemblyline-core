@@ -25,6 +25,8 @@ from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service_delta import ServiceDelta
 from assemblyline.odm.models.submission import Submission
+from assemblyline.odm.models.user import User
+from assemblyline.odm.randomizer import random_model_obj
 from assemblyline.odm.messages.submission import Submission as SubmissionInput
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
@@ -235,8 +237,13 @@ def core(request, redis, filestore, config, clean_datastore: AssemblylineDatasto
         stages.set(svc, ServiceStage.Running)
         services.append(MockService(svc, ds, redis, filestore))
 
+    user = random_model_obj(User)
+    user.uname = "user"
+    ds.user.save("user", user)
+
     ds.service.commit()
     ds.service_delta.commit()
+    ds.user.commit()
 
     listed_services = ds.list_all_services(full=True)
     assert len(listed_services) == 4
@@ -1009,7 +1016,7 @@ def test_plumber_clearing(core, metrics):
 
 def test_filter(core: CoreSession, metrics):
     from assemblyline.common.postprocess import SubmissionFilter, PostprocessAction
-    filter_string = "params.submitter: /f.*l/"
+    filter_string = "params.submitter: user"
     core.dispatcher.postprocess_worker.actions['test_process'] = \
         SubmissionFilter(filter_string), PostprocessAction({
             'enabled': True,
@@ -1025,7 +1032,7 @@ def test_filter(core: CoreSession, metrics):
             params=dict(
                 description="file abc123",
                 services=dict(selected=''),
-                submitter='frengl',
+                submitter='user',
                 groups=['user'],
                 max_extracted=10000,
                 generate_alert=True,
@@ -1097,7 +1104,7 @@ def test_tag_filter(core: CoreSession, metrics):
             params=dict(
                 description="file abc123",
                 services=dict(selected=''),
-                submitter='frengl',
+                submitter='user',
                 groups=['user'],
                 max_extracted=10000,
                 generate_alert=True,
