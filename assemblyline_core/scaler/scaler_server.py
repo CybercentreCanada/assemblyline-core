@@ -545,20 +545,22 @@ class ScalerServer(ThreadedCoreBase):
                 self._service_stage_hash.set(name, ServiceStage.Running)
                 stage = ServiceStage.Running
 
+            self.log.info(f'Preparing environment for {service.name}')
+
+            # Configure the necessary network policies for the service and it's dependencies, if applicable
+            dependency_internet = [(name, dependency.container.allow_internet_access)
+                                   for name, dependency in dependency_config.items()]
+
+            self.controller.prepare_network(service.name, service.docker_config.allow_internet_access,
+                                            dependency_internet)
+
             # If dependency container(s) are missing, start the setup process
             if set(dependency_keys.keys()) != set(dependency_config.keys()):
-                self.log.info(f'Preparing environment for {service.name}')
                 # Services that don't need to wait for an update can be declared ready
                 if service.update_config and not service.update_config.wait_for_update:
                     self._service_stage_hash.set(name, ServiceStage.Running)
                     stage = ServiceStage.Running
 
-                # Enable this service's dependencies before trying to launch the service containers
-                dependency_internet = [(name, dependency.container.allow_internet_access)
-                                       for name, dependency in dependency_config.items()]
-
-                self.controller.prepare_network(service.name, service.docker_config.allow_internet_access,
-                                                dependency_internet)
                 for _n, dependency in dependency_config.items():
                     if dependency_keys.get(_n):
                         # Dependency already exists, skip
