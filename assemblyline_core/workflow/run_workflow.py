@@ -12,87 +12,6 @@ from assemblyline.datastore.exceptions import SearchException
 from assemblyline.odm.models.workflow import Workflow
 
 
-def run_workflow(workflow: Workflow, start_ts: str, end_ts: str, datastore, logger, apm_client=None) -> int:
-    # Start of transaction
-    if apm_client:
-        apm_client.begin_transaction("Execute workflows")
-        elasticapm.label(query=workflow.query,
-                         labels=workflow.labels,
-                         status=workflow.status,
-                         priority=workflow.priority,
-                         user=workflow.creator)
-
-    logger.info(f'Executing workflow filter: {workflow.name}')
-    labels = workflow.labels or []
-    status = workflow.status or None
-    priority = workflow.priority or None
-
-    if not status and not labels and not priority:
-        # End of transaction
-        if apm_client:
-            apm_client.end_transaction(workflow.name, 'no_action')
-        return 0
-
-    fq = ["reporting_ts:[{start_ts} TO {end_ts}]".format(start_ts=start_ts, end_ts=end_ts)]
-
-    operations = []
-    fq_items = []
-    if labels:
-        operations.extend([(datastore.alert.UPDATE_APPEND_IF_MISSING, 'label', lbl)
-                           for lbl in labels])
-        for label in labels:
-            fq_items.append("label:\"{label}\"".format(label=label))
-    if priority:
-        operations.append((datastore.alert.UPDATE_SET, 'priority', priority))
-        fq_items.append("priority:*")
-    if status:
-        operations.append((datastore.alert.UPDATE_SET, 'status', status))
-        fq_items.append("(status:MALICIOUS OR status:NON-MALICIOUS OR status:ASSESS)")
-
-    fq.append("NOT ({exclusion})".format(exclusion=" AND ".join(fq_items)))
-
-    try:
-        count = datastore.alert.update_by_query(workflow.query, operations, filters=fq)
-        if apm_client:
-            elasticapm.label(affected_alerts=count)
-
-        if count:
-            logger.info("{count} Alert(s) were affected by this filter.".format(count=count))
-            if workflow.workflow_id != "DEFAULT":
-                seen = now_as_iso()
-                operations = [
-                    (datastore.alert.UPDATE_INC, 'hit_count', count),
-                    (datastore.alert.UPDATE_SET, 'last_seen', seen),
-                ]
-                if not workflow.first_seen:
-                    # Set first seen for workflow if not set
-                    operations.append((datastore.alert.UPDATE_SET, 'first_seen', seen))
-                datastore.workflow.update(workflow.id, operations)
-
-            # For every alert that applies to workflow, append the workflow ID to it's collection
-            for alert in datastore.alert.search(query=workflow.query, filters=fq, fl="alert_id")['items']:
-                datastore.alert.update(
-                    alert.alert_id,
-                    [(datastore.alert.UPDATE_APPEND_IF_MISSING, 'workflow_ids', workflow.workflow_id)]
-                )
-
-    except SearchException:
-        logger.warning(f"Invalid query '{safe_str(workflow.query or '')}' in workflow "
-                       f"'{workflow.name or 'unknown'}' by '{workflow.created_by or 'unknown'}'")
-
-        # End of transaction
-        if apm_client:
-            apm_client.end_transaction(workflow.name, 'search_exception')
-
-        return 0
-
-    # End of transaction
-    if apm_client:
-        apm_client.end_transaction(workflow.name, 'success')
-
-    return count
-
-
 class WorkflowManager(ServerBase):
     def __init__(self):
         super().__init__('assemblyline.workflow')
@@ -184,8 +103,72 @@ class WorkflowManager(ServerBase):
                     elasticapm.label(number_of_workflows=len(workflow_queries))
                     self.apm_client.end_transaction('loading_workflows', 'success')
 
-                count = sum([run_workflow(workflow, self.start_ts, end_ts, self.datastore, self.log, self.apm_client)
-                             for workflow in workflow_queries])
+                for workflow in workflow_queries:
+                    # Start of transaction
+                    if self.apm_client:
+                        self.apm_client.begin_transaction("Execute workflows")
+                        elasticapm.label(query=workflow.query,
+                                         labels=workflow.labels,
+                                         status=workflow.status,
+                                         priority=workflow.priority,
+                                         user=workflow.creator)
+
+                    self.log.info(f'Executing workflow filter: {workflow.name}')
+                    labels = workflow.labels or []
+                    status = workflow.status or None
+                    priority = workflow.priority or None
+
+                    if not status and not labels and not priority:
+                        # End of transaction
+                        if self.apm_client:
+                            self.apm_client.end_transaction(workflow.name, 'no_action')
+                        continue
+
+                    fq = ["reporting_ts:[{start_ts} TO {end_ts}]".format(start_ts=self.start_ts, end_ts=end_ts)]
+
+                    operations = []
+                    fq_items = []
+                    if labels:
+                        operations.extend([(self.datastore.alert.UPDATE_APPEND_IF_MISSING, 'label', lbl)
+                                           for lbl in labels])
+                        for label in labels:
+                            fq_items.append("label:\"{label}\"".format(label=label))
+                    if priority:
+                        operations.append((self.datastore.alert.UPDATE_SET, 'priority', priority))
+                        fq_items.append("priority:*")
+                    if status:
+                        operations.append((self.datastore.alert.UPDATE_SET, 'status', status))
+                        fq_items.append("(status:MALICIOUS OR status:NON-MALICIOUS OR status:ASSESS)")
+
+                    fq.append("NOT ({exclusion})".format(exclusion=" AND ".join(fq_items)))
+
+                    try:
+                        count = self.datastore.alert.update_by_query(workflow.query, operations, filters=fq)
+                        if self.apm_client:
+                            elasticapm.label(affected_alerts=count)
+
+                        if count:
+                            self.log.info("{count} Alert(s) were affected by this filter.".format(count=count))
+                            if workflow.workflow_id != "DEFAULT":
+                                operations = [
+                                    (self.datastore.alert.UPDATE_INC, 'hit_count', count),
+                                    (self.datastore.alert.UPDATE_SET, 'last_seen', now_as_iso()),
+                                ]
+                                self.datastore.workflow.update(workflow.id, operations)
+
+                    except SearchException:
+                        self.log.warning(f"Invalid query '{safe_str(workflow.query or '')}' in workflow "
+                                         f"'{workflow.name or 'unknown'}' by '{workflow.created_by or 'unknown'}'")
+
+                        # End of transaction
+                        if self.apm_client:
+                            self.apm_client.end_transaction(workflow.name, 'search_exception')
+
+                        continue
+
+                    # End of transaction
+                    if self.apm_client:
+                        self.apm_client.end_transaction(workflow.name, 'success')
 
                 # Marking all alerts for the time period as their workflow completed
                 # Start of transaction
