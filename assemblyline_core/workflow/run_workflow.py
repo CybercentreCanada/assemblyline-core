@@ -9,6 +9,7 @@ from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.str_utils import safe_str
 
 from assemblyline.datastore.exceptions import SearchException
+from assemblyline.odm.models.alert import Event
 from assemblyline.odm.models.workflow import Workflow
 
 
@@ -126,6 +127,7 @@ class WorkflowManager(ServerBase):
 
                     fq = ["reporting_ts:[{start_ts} TO {end_ts}]".format(start_ts=self.start_ts, end_ts=end_ts)]
 
+                    event_data = Event({'entity_type': 'workflow', 'entity_id': workflow.id})
                     operations = []
                     fq_items = []
                     if labels:
@@ -133,14 +135,19 @@ class WorkflowManager(ServerBase):
                                            for lbl in labels])
                         for label in labels:
                             fq_items.append("label:\"{label}\"".format(label=label))
+                        event_data.labels = labels
                     if priority:
                         operations.append((self.datastore.alert.UPDATE_SET, 'priority', priority))
                         fq_items.append("priority:*")
+                        event_data.priority = priority
                     if status:
                         operations.append((self.datastore.alert.UPDATE_SET, 'status', status))
                         fq_items.append("(status:MALICIOUS OR status:NON-MALICIOUS OR status:ASSESS)")
+                        event_data.status = status
 
                     fq.append("NOT ({exclusion})".format(exclusion=" AND ".join(fq_items)))
+                    # Add event to alert's audit history
+                    operations.append((self.datastore.alert.UPDATE_APPEND, 'events', event_data))
 
                     try:
                         count = self.datastore.alert.update_by_query(workflow.query, operations, filters=fq)
@@ -150,10 +157,14 @@ class WorkflowManager(ServerBase):
                         if count:
                             self.log.info("{count} Alert(s) were affected by this filter.".format(count=count))
                             if workflow.workflow_id != "DEFAULT":
+                                seen = now_as_iso()
                                 operations = [
                                     (self.datastore.alert.UPDATE_INC, 'hit_count', count),
-                                    (self.datastore.alert.UPDATE_SET, 'last_seen', now_as_iso()),
+                                    (self.datastore.alert.UPDATE_SET, 'last_seen', seen),
                                 ]
+                                if not workflow.first_seen:
+                                    # Set first seen for workflow if not set
+                                    operations.append((self.datastore.alert.UPDATE_SET, 'first_seen', seen))
                                 self.datastore.workflow.update(workflow.id, operations)
 
                     except SearchException:
