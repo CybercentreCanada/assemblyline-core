@@ -5,6 +5,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
+import typing
 from typing import Optional, Any, TYPE_CHECKING, Iterable
 import json
 import enum
@@ -20,6 +21,7 @@ from assemblyline.common.forge import get_service_queue, get_apm_client, get_cla
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.postprocess import ActionWorker
+from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.messages.changes import ServiceChange, Operation
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
@@ -101,16 +103,19 @@ class ResultSummary:
         self.key: str = key
         self.drop: bool = drop
         self.score: int = score
-        self.children: list[str, str] = children
+        self.children: list[tuple[str, str]] = children
 
 
 class SubmissionTask:
     """Dispatcher internal model for submissions"""
 
-    def __init__(self, submission, completed_queue, scheduler, datastore, results=None,
+    def __init__(self, submission, completed_queue, scheduler, datastore: AssemblylineDatastore, results=None,
                  file_infos=None, file_tree=None, errors: Optional[Iterable[str]] = None):
         self.submission: Submission = Submission(submission)
-        self.submitter: User = datastore.user.get(self.submission.params.submitter)
+        submitter: Optional[User] = datastore.user.get_if_exists(self.submission.params.submitter)
+        self.service_access_control: Optional[str] = None
+        if submitter:
+            self.service_access_control = submitter.classification.value
 
         self.completed_queue = None
         if completed_queue:
@@ -167,11 +172,13 @@ class SubmissionTask:
             for k, result in results.items():
                 sha256, service, _ = k.split('.', 2)
                 if service not in rescan:
-                    children = [r['sha256'] for r in result['response']['extracted']]
+                    extracted = result['response']['extracted']
+                    children: list[str] = [r['sha256'] for r in extracted]
                     self.register_children(sha256, children)
+                    children_detail: list[tuple[str, str]] = [(r['sha256'], r['parent_relation']) for r in extracted]
                     self.service_results[(sha256, service)] = ResultSummary(
                         key=k, drop=result['drop_file'], score=result['result']['score'],
-                        children=children)
+                        children=children_detail)
 
                 tags = Result(result).scored_tag_dict()
                 for key in tags.keys():
@@ -650,7 +657,7 @@ class Dispatcher(ThreadedCoreBase):
 
             task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
                                                                         file_depth, forbidden_services,
-                                                                        task.submitter.classification.value)
+                                                                        task.service_access_control)
 
         file_info = task.file_info[sha256]
         schedule: list = list(task.file_schedules[sha256])
@@ -1267,7 +1274,8 @@ class Dispatcher(ThreadedCoreBase):
 
         # Update children to include parent_relation, likely EXTRACTED
         if summary.children and isinstance(summary.children[0], str):
-            summary.children = [(c, 'EXTRACTED') for c in summary.children]
+            old_children = typing.cast(list[str], summary.children)
+            summary.children = [(c, 'EXTRACTED') for c in old_children]
 
         # Record the result as a summary
         task.service_results[(sha256, service_name)] = summary

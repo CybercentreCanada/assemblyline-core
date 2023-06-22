@@ -19,6 +19,7 @@ SKIP_SERVICE_SETUP = os.environ.get('SKIP_SERVICE_SETUP', 'false').lower() in ['
 
 Classification = get_classification()
 
+
 class Scheduler:
     """This object encapsulates building the schedule for a given file type for a submission."""
 
@@ -32,12 +33,15 @@ class Scheduler:
 
     def build_schedule(self, submission: Submission, file_type: str, file_depth: int = 0,
                        runtime_excluded: Optional[list[str]] = None,
-                       submitter_c12n: str = Classification.UNRESTRICTED) -> list[dict[str, Service]]:
+                       submitter_c12n: Optional[str] = Classification.UNRESTRICTED) -> list[dict[str, Service]]:
         # Get the set of all services currently enabled on the system
         all_services = dict(self.services)
 
         # Retrieve a list of services that the classfication group is allowed to submit to
-        accessible = self.get_accessible_services(submitter_c12n)
+        if submitter_c12n is None:
+            accessible = set(all_services.keys())
+        else:
+            accessible = self.get_accessible_services(submitter_c12n)
 
         # Load the selected and excluded services by category
         excluded = self.expand_categories(submission.params.services.excluded)
