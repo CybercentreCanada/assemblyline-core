@@ -1271,6 +1271,9 @@ class Dispatcher(ThreadedCoreBase):
         for key, value in (temporary_data or {}).items():
             if len(str(value)) <= self.config.submission.max_temp_data_length:
                 task.file_temporary_data[sha256][key] = value
+            elif key == 'ancestry':
+                task.file_temporary_data[sha256][key] = value
+                self.log.warn(f"[{sid} :: {sha256}] ancestry too large")
 
         # Update children to include parent_relation, likely EXTRACTED
         if summary.children and isinstance(summary.children[0], str):
@@ -1325,7 +1328,11 @@ class Dispatcher(ThreadedCoreBase):
 
                     dispatched += 1
                     task.active_files.add(extracted_sha256)
-                    parent_ancestry = parent_data['ancestry']
+                    try:
+                        parent_ancestry = parent_data['ancestry']
+                    except KeyError:
+                        self.log.warn(f"[{sid} :: {sha256}] missing ancestry data.")
+                        parent_ancestry = []
                     existing_ancestry = task.file_temporary_data.get(extracted_sha256, {}).get('ancestry', [])
                     file_info = self.get_fileinfo(task, extracted_sha256)
                     file_type = file_info.type if file_info else 'NOT_FOUND'
