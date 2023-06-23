@@ -1271,9 +1271,6 @@ class Dispatcher(ThreadedCoreBase):
         for key, value in (temporary_data or {}).items():
             if len(str(value)) <= self.config.submission.max_temp_data_length:
                 task.file_temporary_data[sha256][key] = value
-            elif key == 'ancestry':
-                task.file_temporary_data[sha256][key] = value
-                self.log.warn(f"[{sid} :: {sha256}] ancestry too large")
 
         # Update children to include parent_relation, likely EXTRACTED
         if summary.children and isinstance(summary.children[0], str):
