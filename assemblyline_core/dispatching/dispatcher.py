@@ -1325,7 +1325,11 @@ class Dispatcher(ThreadedCoreBase):
 
                     dispatched += 1
                     task.active_files.add(extracted_sha256)
-                    parent_ancestry = parent_data['ancestry']
+                    try:
+                        parent_ancestry = parent_data['ancestry']
+                    except KeyError:
+                        self.log.warn(f"[{sid} :: {sha256}] missing ancestry data.")
+                        parent_ancestry = []
                     existing_ancestry = task.file_temporary_data.get(extracted_sha256, {}).get('ancestry', [])
                     file_info = self.get_fileinfo(task, extracted_sha256)
                     file_type = file_info.type if file_info else 'NOT_FOUND'
