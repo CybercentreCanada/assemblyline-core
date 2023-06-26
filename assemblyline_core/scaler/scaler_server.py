@@ -15,8 +15,6 @@ import platform
 import concurrent.futures
 import copy
 from contextlib import contextmanager
-from assemblyline.common.dict_utils import get_recursive_sorted_tuples
-from assemblyline.common.uid import get_id_from_data
 
 import elasticapm
 import yaml
@@ -27,9 +25,12 @@ from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.events import EventWatcher, EventSender
 from assemblyline.odm.models.service import Service, DockerConfig, EnvironmentVariable
+from assemblyline.odm.models.config import Mount
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
 from assemblyline.odm.messages.scaler_status_heartbeat import Status
 from assemblyline.odm.messages.changes import ServiceChange, Operation
+from assemblyline.common.dict_utils import get_recursive_sorted_tuples
+from assemblyline.common.uid import get_id_from_data
 from assemblyline.common.forge import get_classification, get_service_queue, get_apm_client
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
@@ -49,11 +50,6 @@ SCALE_INTERVAL = 5
 METRIC_SYNC_INTERVAL = 0.5
 CONTAINER_EVENTS_LOG_INTERVAL = 2
 HEARTBEAT_INTERVAL = 5
-
-# How many times to let a service generate an error in this module before we disable it.
-# This is only for analysis services, core services we keep retrying forever
-MAXIMUM_SERVICE_ERRORS = 5
-ERROR_EXPIRY_TIME = 60*60  # how long we wait before we forgive an error. (seconds)
 
 # The maximum containers we ask to be created in a single scaling iteration
 # This is to give kubernetes a chance to update our view of resource usage before we ask for more containers
@@ -122,9 +118,10 @@ class ServiceProfile:
     """
 
     def __init__(self, name: str, container_config: DockerConfig, config_blob: str = '',
-                 min_instances: int = 0, max_instances: int = None, growth: float = 600,
-                 shrink: Optional[float] = None, backlog: int = 500, queue=None,
-                 shutdown_seconds: int = 30, dependency_blobs: dict[str, str] = None, privileged: bool = False):
+                 min_instances: int = 0, max_instances: Optional[int] = None, growth: float = 600,
+                 shrink: Optional[float] = None, backlog: int = 500, queue: Optional[PriorityQueue] = None,
+                 shutdown_seconds: int = 30, dependency_blobs: Optional[dict[str, str]] = None,
+                 privileged: bool = False):
         """
         :param name: Name of the service to manage
         :param container_config: Instructions on how to start this service
@@ -133,11 +130,11 @@ class ServiceProfile:
         :param growth: Delay before growing a service, unit-less, approximately seconds
         :param shrink: Delay before shrinking a service, unit-less, approximately seconds, defaults to -growth
         :param backlog: How long a queue backlog should be before it takes `growth` seconds to grow.
-        :param queue: Queue name for monitoring
+        :param queue: Queue object for monitoring
         :param privileged: Is this service able to interact with core directly?
         """
         self.name = name
-        self.queue: PriorityQueue = queue
+        self.queue: Optional[PriorityQueue] = queue
         self.container_config = container_config
         self.high_duty_cycle = 0.7
         self.low_duty_cycle = 0.5
@@ -257,8 +254,6 @@ class ScalerServer(ThreadedCoreBase):
                          redis=redis, redis_persist=redis_persist)
 
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
-        self.error_count_lock = threading.Lock()
-        self.error_count: dict[str, list[float]] = {}
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
         self.service_event_sender = EventSender('changes.services', host=self.redis)
         self.service_watcher_wakeup = threading.Event()
@@ -304,13 +299,13 @@ class ScalerServer(ThreadedCoreBase):
             # If we're passed an override for server-server and it's defining an HTTPS connection, then add a global
             # mount for the Root CA that needs to be mounted
             if INTERNAL_ENCRYPT:
-                self.config.core.scaler.service_defaults.mounts.append(dict(
+                self.config.core.scaler.service_defaults.mounts.append(Mount(dict(
                     name="root-ca",
                     path="/etc/assemblyline/ssl/al_root-ca.crt",
                     resource_type="secret",
                     resource_name=f"{RELEASE_NAME}.internal-generated-ca",
                     resource_key="tls.crt"
-                ))
+                )))
 
             # Add default mounts for (non-)privileged services
             for mount in self.config.core.scaler.service_defaults.mounts:
@@ -391,7 +386,6 @@ class ScalerServer(ThreadedCoreBase):
                 fn(*args, **kwargs)
             except ServiceControlError as error:
                 self.log.exception(f"Error while managing service: {error.service_name}")
-                self.handle_service_error(error.service_name)
             except Exception:
                 self.log.exception(f'Crash in scaler: {fn.__name__}')
         return with_logs
@@ -503,8 +497,8 @@ class ScalerServer(ThreadedCoreBase):
             # Check if service considered compatible to run on Assemblyline?
             system_spec = f'{FRAMEWORK_VERSION}.{SYSTEM_VERSION}'
             if not service.version.startswith(system_spec):
-                # If FW and SYS version don't prefix in the service version, we can't guarantee the service is compatible
-                # Disable and treat it as incompatible due to service version.
+                # If FW and SYS version don't prefix in the service version, we can't guarantee the
+                # service is compatible. Disable and treat it as incompatible due to service version.
                 self.log.warning("Disabling service with incompatible version. "
                                  f"[{service.version} != '{system_spec}.X.{service.update_channel}Y'].")
                 disable_incompatible_service()
@@ -639,7 +633,6 @@ class ScalerServer(ThreadedCoreBase):
                 self.controller.set_target(name, 0)
         except Exception:
             self.log.exception(f"Error applying service settings from: {service.name}")
-            self.handle_service_error(service.name)
 
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
     def stop_service(self, name: str, current_stage: ServiceStage):
@@ -683,9 +676,12 @@ class ScalerServer(ThreadedCoreBase):
                 with elasticapm.capture_span('read_profiles'):
                     with self.profiles_lock:
                         # We want to evaluate 'active' service profiles
-                        all_profiles: dict[str, ServiceProfile] = {_n: copy.deepcopy(_v)
-                                                                   for _n, _v in self.profiles.items()
-                                                                   if self.get_service_stage(_n) == ServiceStage.Running}
+                        all_profiles: dict[str, ServiceProfile] = {
+                            _n: copy.deepcopy(_v)
+                            for _n, _v in self.profiles.items()
+                            if self.get_service_stage(_n) == ServiceStage.Running
+                        }
+
                     raw_targets = self.controller.get_targets()
                     # This is the list of targets we will adjust
                     targets = {_p.name: raw_targets.get(_p.name, 0) for _p in all_profiles.values()}
@@ -776,37 +772,6 @@ class ScalerServer(ThreadedCoreBase):
                                 self.log.info(f"Scaling service {name}: {old} -> {value}")
                                 pool.call(self.controller.set_target, name, value)
 
-    @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
-    def handle_service_error(self, service_name: str):
-        """Handle an error occurring in the *analysis* service.
-
-        Errors for core systems should simply be logged, and a best effort to continue made.
-
-        For analysis services, ignore the error a few times, then disable the service.
-        """
-        with self.error_count_lock:
-            try:
-                self.error_count[service_name].append(time.time())
-            except KeyError:
-                self.error_count[service_name] = [time.time()]
-
-            self.error_count[service_name] = [
-                _t for _t in self.error_count[service_name]
-                if _t >= time.time() - ERROR_EXPIRY_TIME
-            ]
-
-            if len(self.error_count[service_name]) >= MAXIMUM_SERVICE_ERRORS:
-                self.log.warning(f"Scaler has encountered too many errors trying to load {service_name}. "
-                                 "The service will be permanently disabled...")
-                if self.datastore.service_delta.update(service_name, [(self.datastore.service_delta.UPDATE_SET,
-                                                                       'enabled', False)]):
-                    # Raise awareness to other components by sending an event for the service
-                    self.service_event_sender.send(service_name, {
-                        'operation': Operation.Modified,
-                        'name': service_name
-                    })
-                del self.error_count[service_name]
-
     def sync_metrics(self):
         """Check if there are any pub-sub messages we need."""
         while self.sleep(METRIC_SYNC_INTERVAL):
@@ -834,7 +799,7 @@ class ScalerServer(ThreadedCoreBase):
                 with self.profiles_lock:
                     queues = [profile.queue for profile in self.profiles.values() if profile.queue]
                     lengths_list = pq_length(*queues)
-                    lengths = {_q: _l for _q, _l in zip(queues, lengths_list)}
+                    lengths = dict(zip(queues, lengths_list))
 
                     for profile_name, profile in self.profiles.items():
                         queue_length = lengths.get(profile.queue, 0)
