@@ -127,7 +127,7 @@ class WorkflowManager(ServerBase):
 
                     fq = ["reporting_ts:[{start_ts} TO {end_ts}]".format(start_ts=self.start_ts, end_ts=end_ts)]
 
-                    event_data = Event({'entity_type': 'workflow', 'entity_id': workflow.id, 'entity_name': workflow.name})
+                    event_data = Event({'entity_type': 'workflow', 'entity_id': workflow.workflow_id, 'entity_name': workflow.name})
                     operations = []
                     fq_items = []
                     if labels:
@@ -165,7 +165,7 @@ class WorkflowManager(ServerBase):
                                 if not workflow.first_seen:
                                     # Set first seen for workflow if not set
                                     operations.append((self.datastore.workflow.UPDATE_SET, 'first_seen', seen))
-                                self.datastore.workflow.update(workflow.id, operations)
+                                self.datastore.workflow.update(workflow.workflow_id, operations)
 
                     except SearchException:
                         self.log.warning(f"Invalid query '{safe_str(workflow.query or '')}' in workflow "
