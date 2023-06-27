@@ -159,12 +159,12 @@ class WorkflowManager(ServerBase):
                             if workflow.workflow_id != "DEFAULT":
                                 seen = now_as_iso()
                                 operations = [
-                                    (self.datastore.alert.UPDATE_INC, 'hit_count', count),
-                                    (self.datastore.alert.UPDATE_SET, 'last_seen', seen),
+                                    (self.datastore.workflow.UPDATE_INC, 'hit_count', count),
+                                    (self.datastore.workflow.UPDATE_SET, 'last_seen', seen),
                                 ]
                                 if not workflow.first_seen:
                                     # Set first seen for workflow if not set
-                                    operations.append((self.datastore.alert.UPDATE_SET, 'first_seen', seen))
+                                    operations.append((self.datastore.workflow.UPDATE_SET, 'first_seen', seen))
                                 self.datastore.workflow.update(workflow.id, operations)
 
                     except SearchException:
