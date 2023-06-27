@@ -15,7 +15,7 @@ from time import sleep
 
 from kubernetes import client, config, watch
 from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec, V1DeploymentStrategy, \
-    V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
+    V1PodSpec, V1PodOS, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
     V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext, \
@@ -714,15 +714,27 @@ class KubernetesController(ControllerInterface):
                 volume_mounts=chown_mounts
             ))
 
+        pod_os = None
+        security_context = V1PodSecurityContext(fs_group=1000)
+        if docker_config.operating_system:
+            #  Allow Kubernetes to schedule the pod to a compatible node
+            pod_os = V1PodOS(name=docker_config.operating_system)
+
+        if docker_config.operating_system == 'windows':
+            security_context = None
+
+
         pod = V1PodSpec(
             init_containers=init_containers,
             volumes=all_volumes,
             containers=self._create_containers(service_name, deployment_name, docker_config,
                                                all_mounts, core_container=core_mounts),
+            os=pod_os,
             priority_class_name=self.dependency_priority if high_priority else self.priority,
             termination_grace_period_seconds=shutdown_seconds,
-            security_context=V1PodSecurityContext(fs_group=1000),
+            security_context=security_context,
             service_account_name=service_account,
+
         )
 
         if use_pull_secret:
