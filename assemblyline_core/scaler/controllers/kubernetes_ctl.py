@@ -11,6 +11,7 @@ import urllib3
 from collections import OrderedDict, defaultdict
 from typing import List, Optional, Tuple
 from time import sleep
+from assemblyline.odm.models.config import Selector
 
 
 from kubernetes import client, config, watch
@@ -164,7 +165,7 @@ def parse_cpu(string: str) -> float:
 
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace: str, prefix: str, priority: str, dependency_priority: str,
-                 cpu_reservation: float, labels=None, log_level="INFO", core_env={},
+                 cpu_reservation: float, linux_node_selector: Selector, labels=None, log_level="INFO", core_env={},
                  default_service_account=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
@@ -194,6 +195,7 @@ class KubernetesController(ControllerInterface):
         self.logger = logger
         self.log_level: str = log_level
         self._labels: dict[str, str] = labels or {}
+        self.linux_node_selector = linux_node_selector
         self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
         self.net_api = client.NetworkingV1Api()
@@ -338,8 +340,10 @@ class KubernetesController(ControllerInterface):
         self.node_count = 0
         watch = TypelessWatch()
         ready_nodes: dict[str, tuple[float, float]] = {}
+        selector = self.linux_node_selector
 
         for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT,
+                                  field_selector=selector.field, label_selector=selector.label,
                                   _request_timeout=WATCH_API_TIMEOUT):
             if not self.running:
                 break

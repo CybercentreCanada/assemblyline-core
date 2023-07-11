@@ -288,6 +288,7 @@ class ScalerServer(ThreadedCoreBase):
                                                    namespace=NAMESPACE, priority='al-service-priority',
                                                    dependency_priority='al-core-priority',
                                                    cpu_reservation=self.config.services.cpu_reservation,
+                                                   linux_node_selector=self.config.core.scaler.linux_node_selector,
                                                    log_level=self.config.logging.log_level,
                                                    core_env=core_env,
                                                    default_service_account=self.config.services.service_account)
