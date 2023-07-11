@@ -9,13 +9,13 @@ import weakref
 import urllib3
 
 from collections import OrderedDict, defaultdict
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from time import sleep
 
 
 from kubernetes import client, config, watch
 from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec, V1DeploymentStrategy, \
-    V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
+    V1PodSpec, V1PodOS, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
     V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext, \
@@ -219,22 +219,32 @@ class KubernetesController(ControllerInterface):
             if 'scaler' not in event.involved_object.name:
                 self.events_window[event.metadata.uid] = event.count
 
-        self._quota_cpu_limit: Optional[float] = None
-        self._quota_cpu_used: Optional[float] = None
-        self._quota_mem_limit: Optional[float] = None
-        self._quota_mem_used: Optional[float] = None
+        self.os_node_map: Dict[str, List[str]] = dict()
+
+        # Populate map with information about nodes currently running in cluster
+        for n in self.api.list_node(_request_timeout=API_TIMEOUT).items:
+            os_type = n.metadata.labels['kubernetes.io/os']
+            hostname = [a.address for a in n.status.addresses if a.type == "InternalIP"][0]
+            self.os_node_map.setdefault(os_type, []).append(hostname)
+
+        self.logger.info(f'Detected the following types of nodes in cluster: {list(self.os_node_map)}')
+
+        self._quota_cpu_limit: Optional[Dict[str, float]] = {os: None for os in self.os_node_map}
+        self._quota_cpu_used: Optional[Dict[str, float]] = {os: None for os in self.os_node_map}
+        self._quota_mem_limit: Optional[Dict[str, float]] = {os: None for os in self.os_node_map}
+        self._quota_mem_used: Optional[Dict[str, float]] = {os: None for os in self.os_node_map}
         quota_background = threading.Thread(target=self._loop_forever(self._monitor_quotas), daemon=True)
         quota_background.start()
 
-        self._node_pool_max_ram: float = 0
-        self._node_pool_max_cpu: float = 0
+        self._node_pool_max_ram: Dict[str, float] = {os: 0 for os in self.os_node_map}
+        self._node_pool_max_cpu: Dict[str, float] = {os: 0 for os in self.os_node_map}
         node_background = threading.Thread(target=self._loop_forever(self._monitor_node_pool), daemon=True)
         node_background.start()
 
-        self._pod_used_ram: float = 0
-        self._pod_used_cpu: float = 0
-        self._pod_used_namespace_ram: float = 0
-        self._pod_used_namespace_cpu: float = 0
+        self._pod_used_ram: Dict[str, float] = {os: 0 for os in self.os_node_map}
+        self._pod_used_cpu: Dict[str, float] = {os: 0 for os in self.os_node_map}
+        self._pod_used_namespace_ram: Dict[str, float] = {os: 0 for os in self.os_node_map}
+        self._pod_used_namespace_cpu: Dict[str, float] = {os: 0 for os in self.os_node_map}
         pod_background = threading.Thread(target=self._loop_forever(self._monitor_pods), daemon=True)
         pod_background.start()
 
@@ -333,18 +343,20 @@ class KubernetesController(ControllerInterface):
         return _function
 
     def _monitor_node_pool(self):
-        self._node_pool_max_cpu = 0
-        self._node_pool_max_ram = 0
+        self._node_pool_max_cpu = {}
+        self._node_pool_max_ram = {}
         self.node_count = 0
         watch = TypelessWatch()
-        ready_nodes: dict[str, tuple[float, float]] = {}
+        ready_nodes: Dict[str, Dict[str, Tuple[float, float]]] = {}
 
         for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT,
                                   _request_timeout=WATCH_API_TIMEOUT):
             if not self.running:
                 break
 
+            os_type: str = event['raw_object']['metadata']['labels']['kubernetes.io/os']
             name: str = event['raw_object']['metadata']['name']
+            ready_nodes.setdefault(os_type, {})
 
             if event['type'] in ["ADDED", "MODIFIED"]:
                 # Check for node ready condition
@@ -357,39 +369,40 @@ class KubernetesController(ControllerInterface):
                 if ready:
                     cpu = parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
                     ram = parse_memory(event['raw_object']['status']['allocatable']['memory'])
-                    ready_nodes[name] = (cpu, ram)
+                    ready_nodes[os_type][name] = (cpu, ram)
                 else:
-                    ready_nodes.pop(name, None)
+                    ready_nodes[os_type].pop(name, None)
 
             elif event['type'] == "DELETED":
                 # Remove deleted nodes
-                ready_nodes.pop(name, None)
+                ready_nodes[os_type].pop(name, None)
 
             # Update the totals
-            self.node_count = len(ready_nodes)
+            self.node_count += len(ready_nodes)
             max_cpu = 0
             max_ram = 0
-            for cpu, ram in ready_nodes.values():
+            for cpu, ram in ready_nodes[os_type].values():
                 max_cpu += cpu
                 max_ram += ram
-            self._node_pool_max_cpu = max_cpu
-            self._node_pool_max_ram = max_ram
+            self._node_pool_max_cpu[os_type] = max_cpu
+            self._node_pool_max_ram[os_type] = max_ram
 
     def _monitor_pods(self):
         watch = TypelessWatch()
         containers = {}
         log_cache = CacheDict(cache_len=8000)
         namespaced_containers = {}
-        self._pod_used_cpu = 0
-        self._pod_used_ram = 0
-        self._pod_used_namespace_cpu = 0
-        self._pod_used_namespace_ram = 0
+        self._pod_used_cpu = {}
+        self._pod_used_ram = {}
+        self._pod_used_namespace_cpu = {}
+        self._pod_used_namespace_ram = {}
 
         for event in watch.stream(func=self.api.list_pod_for_all_namespaces, timeout_seconds=WATCH_TIMEOUT,
                                   _request_timeout=WATCH_API_TIMEOUT):
             if not self.running:
                 break
 
+            os_type = [_os for _os, hosts in self.os_node_map.items() if event['raw_object']['status']['hostIP'] in hosts][0]
             pod_name = "Unknown Pod"
             try:
                 pod_name = event['raw_object']['metadata']['name']
@@ -431,8 +444,8 @@ class KubernetesController(ControllerInterface):
             memory_used = [mem for cpu, mem in containers.values() if mem is not None]
             cpu_used = [cpu for cpu, mem in containers.values() if cpu is not None]
 
-            self._pod_used_cpu = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
-            self._pod_used_ram = sum(memory_used) + memory_unrestricted * mean(memory_used)
+            self._pod_used_cpu[os_type] = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
+            self._pod_used_ram[os_type] = sum(memory_used) + memory_unrestricted * mean(memory_used)
 
             memory_unrestricted = sum(1 for cpu, mem in namespaced_containers.values() if mem is None)
             cpu_unrestricted = sum(1 for cpu, mem in namespaced_containers.values() if cpu is None)
@@ -440,8 +453,8 @@ class KubernetesController(ControllerInterface):
             memory_used = [mem for cpu, mem in namespaced_containers.values() if mem is not None]
             cpu_used = [cpu for cpu, mem in namespaced_containers.values() if cpu is not None]
 
-            self._pod_used_namespace_cpu = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
-            self._pod_used_namespace_ram = sum(memory_used) + memory_unrestricted * mean(memory_used)
+            self._pod_used_namespace_cpu[os_type] = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
+            self._pod_used_namespace_ram[os_type] = sum(memory_used) + memory_unrestricted * mean(memory_used)
 
     def _monitor_quotas(self):
         watch = TypelessWatch()
@@ -450,78 +463,80 @@ class KubernetesController(ControllerInterface):
         mem_limits = {}
         mem_used = {}
 
-        self._quota_cpu_limit = None
-        self._quota_cpu_used = None
-        self._quota_mem_limit = None
-        self._quota_mem_used = None
+        self._quota_cpu_limit = {os: None for os in self.os_node_map}
+        self._quota_cpu_used = {os: None for os in self.os_node_map}
+        self._quota_mem_limit = {os: None for os in self.os_node_map}
+        self._quota_mem_used = {os: None for os in self.os_node_map}
 
-        for event in watch.stream(func=self.api.list_namespaced_resource_quota, namespace=self.namespace,
-                                  timeout_seconds=WATCH_TIMEOUT, _request_timeout=WATCH_API_TIMEOUT):
-            if not self.running:
-                break
+        for os_type in self.os_node_map:
+            for event in watch.stream(func=self.api.list_namespaced_resource_quota, namespace=self.namespace,
+                                      timeout_seconds=WATCH_TIMEOUT, _request_timeout=WATCH_API_TIMEOUT,
+                                      label_selector=f"kubernetes.io/os={os_type}"):
+                if not self.running:
+                    break
 
-            name = event['raw_object']['metadata']['name']
-            if 'scope_selector' in event['raw_object']['spec'] or 'scopes' in event['raw_object']['spec']:
-                continue
+                name = event['raw_object']['metadata']['name']
+                if 'scope_selector' in event['raw_object']['spec'] or 'scopes' in event['raw_object']['spec']:
+                    continue
 
-            if event['type'] in ['ADDED', 'MODIFIED']:
-                status = event['raw_object']['status']
+                if event['type'] in ['ADDED', 'MODIFIED']:
+                    status = event['raw_object']['status']
 
-                if 'hard' in status:
-                    if 'cpu' in status['hard']:
-                        cpu_limits[name] = parse_cpu(status['hard']['cpu'])
-                    if 'requests.cpu' in status['hard']:
-                        cpu_limits[name] = parse_cpu(status['hard']['requests.cpu'])
-                    if 'limits.cpu' in status['hard']:
-                        cpu_limits[name] = parse_cpu(status['hard']['limits.cpu'])
-                    if 'memory' in status['hard']:
-                        mem_limits[name] = parse_memory(status['hard']['memory'])
-                    if 'requests.memory' in status['hard']:
-                        mem_limits[name] = parse_memory(status['hard']['requests.memory'])
-                    if 'limits.memory' in status['hard']:
-                        mem_limits[name] = parse_memory(status['hard']['limits.memory'])
+                    if 'hard' in status:
+                        if 'cpu' in status['hard']:
+                            cpu_limits[name] = parse_cpu(status['hard']['cpu'])
+                        if 'requests.cpu' in status['hard']:
+                            cpu_limits[name] = parse_cpu(status['hard']['requests.cpu'])
+                        if 'limits.cpu' in status['hard']:
+                            cpu_limits[name] = parse_cpu(status['hard']['limits.cpu'])
+                        if 'memory' in status['hard']:
+                            mem_limits[name] = parse_memory(status['hard']['memory'])
+                        if 'requests.memory' in status['hard']:
+                            mem_limits[name] = parse_memory(status['hard']['requests.memory'])
+                        if 'limits.memory' in status['hard']:
+                            mem_limits[name] = parse_memory(status['hard']['limits.memory'])
 
-                if 'used' in status:
-                    if 'cpu' in status['used']:
-                        cpu_used[name] = parse_cpu(status['used']['cpu'])
-                    if 'requests.cpu' in status['used']:
-                        cpu_used[name] = parse_cpu(status['used']['requests.cpu'])
-                    if 'limits.cpu' in status['used']:
-                        cpu_used[name] = parse_cpu(status['used']['limits.cpu'])
-                    if 'memory' in status['used']:
-                        mem_used[name] = parse_memory(status['used']['memory'])
-                    if 'requests.memory' in status['used']:
-                        mem_used[name] = parse_memory(status['used']['requests.memory'])
-                    if 'limits.memory' in status['used']:
-                        mem_used[name] = parse_memory(status['used']['limits.memory'])
+                    if 'used' in status:
+                        if 'cpu' in status['used']:
+                            cpu_used[name] = parse_cpu(status['used']['cpu'])
+                        if 'requests.cpu' in status['used']:
+                            cpu_used[name] = parse_cpu(status['used']['requests.cpu'])
+                        if 'limits.cpu' in status['used']:
+                            cpu_used[name] = parse_cpu(status['used']['limits.cpu'])
+                        if 'memory' in status['used']:
+                            mem_used[name] = parse_memory(status['used']['memory'])
+                        if 'requests.memory' in status['used']:
+                            mem_used[name] = parse_memory(status['used']['requests.memory'])
+                        if 'limits.memory' in status['used']:
+                            mem_used[name] = parse_memory(status['used']['limits.memory'])
 
-            elif event['type'] == 'DELETED':
-                cpu_limits.pop(name, None)
-                cpu_used.pop(name, None)
-                mem_limits.pop(name, None)
-                mem_used.pop(name, None)
-            else:
-                continue
+                elif event['type'] == 'DELETED':
+                    cpu_limits.pop(name, None)
+                    cpu_used.pop(name, None)
+                    mem_limits.pop(name, None)
+                    mem_used.pop(name, None)
+                else:
+                    continue
 
-            if cpu_limits:
-                self._quota_cpu_limit = min(cpu_limits.values())
-            else:
-                self._quota_cpu_limit = None
+                if cpu_limits:
+                    self._quota_cpu_limit[os_type] = min(cpu_limits.values())
+                else:
+                    self._quota_cpu_limit[os_type] = None
 
-            if cpu_used:
-                self._quota_cpu_used = max(cpu_used.values())
-            else:
-                self._quota_cpu_used = None
+                if cpu_used:
+                    self._quota_cpu_used[os_type] = max(cpu_used.values())
+                else:
+                    self._quota_cpu_used[os_type] = None
 
-            if mem_limits:
-                self._quota_mem_limit = min(mem_limits.values())
-            else:
-                self._quota_mem_limit = None
+                if mem_limits:
+                    self._quota_mem_limit[os_type] = min(mem_limits.values())
+                else:
+                    self._quota_mem_limit[os_type] = None
 
-            if mem_used:
-                self._quota_mem_used = max(mem_used.values())
-            else:
-                self._quota_mem_used = None
+                if mem_used:
+                    self._quota_mem_used[os_type] = max(mem_used.values())
+                else:
+                    self._quota_mem_used[os_type] = None
 
     def _monitor_deployments(self):
         watch = TypelessWatch()
@@ -544,18 +559,28 @@ class KubernetesController(ControllerInterface):
                 self._deployment_targets.pop(name, None)
 
     def cpu_info(self):
-        if self._quota_cpu_limit:
-            if self._quota_cpu_used:
-                return self._quota_cpu_limit - self._quota_cpu_used, self._quota_cpu_limit
-            return self._quota_cpu_limit - self._pod_used_namespace_cpu, self._quota_cpu_limit
-        return self._node_pool_max_cpu - self._pod_used_cpu, self._node_pool_max_cpu
+        cpu_info = {}
+        for os_type in self.os_node_map:
+            if self._quota_cpu_limit[os_type]:
+                if self._quota_cpu_used[os_type]:
+                    cpu_info[os_type] = self._quota_cpu_limit[os_type] - self._quota_cpu_used[os_type], self._quota_cpu_limit[os_type]
+                    continue
+                cpu_info[os_type] = self._quota_cpu_limit[os_type] - self._pod_used_namespace_cpu[os_type], self._quota_cpu_limit[os_type]
+                continue
+            cpu_info[os_type] = self._node_pool_max_cpu[os_type] - self._pod_used_cpu[os_type], self._node_pool_max_cpu[os_type]
+        return cpu_info
 
     def memory_info(self):
-        if self._quota_mem_limit:
-            if self._quota_mem_used:
-                return self._quota_mem_limit - self._quota_mem_used, self._quota_mem_limit
-            return self._quota_mem_limit - self._pod_used_namespace_ram, self._quota_mem_limit
-        return self._node_pool_max_ram - self._pod_used_ram, self._node_pool_max_ram
+        mem_info = {}
+        for os_type in self.os_node_map:
+            if self._quota_mem_limit[os_type]:
+                if self._quota_mem_used[os_type]:
+                    mem_info[os_type] = (self._quota_mem_limit[os_type] - self._quota_mem_used[os_type], self._quota_mem_limit[os_type])
+                    continue
+                mem_info[os_type] = (self._quota_mem_limit[os_type] - self._pod_used_namespace_ram[os_type], self._quota_mem_limit[os_type])
+                continue
+            mem_info[os_type] = (self._node_pool_max_ram[os_type] - self._pod_used_ram[os_type], self._node_pool_max_ram[os_type])
+        return mem_info
 
     def _create_containers(self, service_name: str, deployment_name: str, container_config, mounts,
                            core_container=False):
@@ -714,15 +739,26 @@ class KubernetesController(ControllerInterface):
                 volume_mounts=chown_mounts
             ))
 
+        pod_os = None
+        security_context = V1PodSecurityContext(fs_group=1000)
+        if docker_config.operating_system:
+            #  Allow Kubernetes to schedule the pod to a compatible node
+            pod_os = V1PodOS(name=docker_config.operating_system)
+
+        if docker_config.operating_system == 'windows':
+            security_context = None
+
         pod = V1PodSpec(
             init_containers=init_containers,
             volumes=all_volumes,
             containers=self._create_containers(service_name, deployment_name, docker_config,
                                                all_mounts, core_container=core_mounts),
+            os=pod_os,
             priority_class_name=self.dependency_priority if high_priority else self.priority,
             termination_grace_period_seconds=shutdown_seconds,
-            security_context=V1PodSecurityContext(fs_group=1000),
+            security_context=security_context,
             service_account_name=service_account,
+
         )
 
         if use_pull_secret:

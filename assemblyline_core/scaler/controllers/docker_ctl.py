@@ -47,7 +47,9 @@ class DockerController(ControllerInterface):
         self.core_env = core_env
         self._labels: dict[str, str] = labels or {}
         self._prefix: str = prefix
+        # Presumably this is only running on a single Linux node
         self.node_count = 1
+        self.os_node_map = {'linux': []}
 
         if self._prefix and not self._prefix.endswith("_"):
             self._prefix += "_"
@@ -105,7 +107,8 @@ class DockerController(ControllerInterface):
                     service_server_container = container
                     self.log.info(f'Found the service server at: {container.id} [{container.name}]')
                     break
-            if not service_server_container:
+            else:
+                self.log.warning("Haven't found service server container. Retrying..")
                 time.sleep(1)
         return service_server_container
 
@@ -304,7 +307,7 @@ class DockerController(ControllerInterface):
             if container.attrs['HostConfig']['CpuPeriod']:
                 cpu -= container.attrs['HostConfig']['CpuQuota']/container.attrs['HostConfig']['CpuPeriod']
         self.log.debug(f'Total CPU available {cpu}/{self._info["NCPU"]}')
-        return cpu, total_cpu
+        return {'linux': (cpu, total_cpu)}
 
     def memory_info(self):
         """Try to estimate how much RAM the docker host has unreserved.
@@ -316,7 +319,7 @@ class DockerController(ControllerInterface):
         for container in self.client.containers.list(ignore_removed=True):
             mem -= container.attrs['HostConfig']['Memory']/mega
         self.log.debug(f'Total Memory available {mem}/{self._info["MemTotal"]/mega}')
-        return mem, total_mem
+        return {'linux': (mem, total_mem)}
 
     def get_target(self, service_name: str) -> int:
         """Get how many instances of a service we expect to be running.

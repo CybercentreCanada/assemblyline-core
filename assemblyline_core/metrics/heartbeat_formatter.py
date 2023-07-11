@@ -227,10 +227,12 @@ class HeartbeatFormatter(object):
                 self.log.exception("An exception occurred while generating ArchiveMessage")
 
         elif m_type == "scaler":
+            os_type = m_name.split('_')[-1]
             try:
                 msg = {
                     "sender": self.sender,
                     "msg": {
+                        "operating_system": os_type,
                         "instances": instances,
                         "metrics": m_data,
                     }

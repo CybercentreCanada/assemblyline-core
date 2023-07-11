@@ -725,23 +725,26 @@ class ScalerServer(ThreadedCoreBase):
                 #
 
                 # Recalculate the amount of free resources expanding the total quantity by the overallocation
-                free_cpu, total_cpu = self.controller.cpu_info()
-                used_cpu = total_cpu - free_cpu
-                free_cpu = total_cpu * self.get_cpu_overallocation() - used_cpu
+                free_cpu = {}
+                free_memory = {}
+                for os_type in self.controller.os_node_map:
+                    _free_cpu, total_cpu = self.controller.cpu_info()[os_type]
+                    used_cpu = total_cpu - _free_cpu
+                    free_cpu[os_type] = total_cpu * self.get_cpu_overallocation() - used_cpu
 
-                free_memory, total_memory = self.controller.memory_info()
-                used_memory = total_memory - free_memory
-                free_memory = total_memory * self.get_memory_overallocation() - used_memory
+                    _free_memory, total_memory = self.controller.memory_info()[os_type]
+                    used_memory = total_memory - _free_memory
+                    free_memory[os_type] = total_memory * self.get_memory_overallocation() - used_memory
 
                 # Make adjustments to the targets until everything is satisified
                 # or we don't have the resouces to make more adjustments
                 def trim(prof: list[ServiceProfile]):
                     prof = [_p for _p in prof if _p.desired_instances > targets[_p.name]]
-                    drop = [_p for _p in prof if _p.cpu > free_cpu or _p.ram > free_memory]
+                    drop = [_p for _p in prof if _p.cpu > free_cpu[_p.container_config.operating_system] or _p.ram > free_memory[_p.container_config.operating_system]]
                     if drop:
                         summary = {_p.name: (_p.cpu, _p.ram) for _p in drop}
                         self.log.debug(f"Can't make more because not enough resources {summary}")
-                    prof = [_p for _p in prof if _p.cpu <= free_cpu and _p.ram <= free_memory]
+                    prof = [_p for _p in prof if _p.cpu <= free_cpu[_p.container_config.operating_system] and _p.ram <= free_memory[_p.container_config.operating_system]]
                     return prof
 
                 remaining_profiles: list[ServiceProfile] = trim(list(all_profiles.values()))
@@ -750,9 +753,10 @@ class ScalerServer(ThreadedCoreBase):
                     remaining_profiles.sort(key=lambda _p: targets[_p.name])
 
                     # Add one for the profile at the bottom
-                    free_memory -= remaining_profiles[0].container_config.ram_mb
-                    free_cpu -= remaining_profiles[0].container_config.cpu_cores
-                    targets[remaining_profiles[0].name] += 1
+                    profile = remaining_profiles[0]
+                    free_memory[profile.container_config.operating_system] -= profile.container_config.ram_mb
+                    free_cpu[profile.container_config.operating_system] -= profile.container_config.cpu_cores
+                    targets[profile.name] += 1
 
                     # Take out any services that should be happy now
                     remaining_profiles = trim(remaining_profiles)
@@ -876,16 +880,18 @@ class ScalerServer(ThreadedCoreBase):
                     export_metrics_once(service_name, Status, metrics, host=HOSTNAME,
                                         counter_type='scaler_status', config=self.config, redis=self.redis)
 
-                memory, memory_total = self.controller.memory_info()
-                cpu, cpu_total = self.controller.cpu_info()
-                metrics = {
-                    'memory_total': memory_total,
-                    'cpu_total': cpu_total,
-                    'memory_free': memory,
-                    'cpu_free': cpu
-                }
-                export_metrics_once('scaler', Metrics, metrics, host=HOSTNAME,
-                                    counter_type='scaler', config=self.config, redis=self.redis)
+                mem_info = self.controller.memory_info()
+                cpu_info = self.controller.cpu_info()
+
+                for os_type in self.controller.os_node_map:
+                    metrics = {
+                        'memory_total': mem_info[os_type][1],
+                        'cpu_total': cpu_info[os_type][1],
+                        'memory_free': mem_info[os_type][0],
+                        'cpu_free': cpu_info[os_type][0]
+                        }
+                    export_metrics_once(f'scaler_{os_type}', Metrics, metrics, host=HOSTNAME,
+                                        counter_type='scaler', config=self.config, redis=self.redis)
 
     def log_container_events(self):
         """The service status table may have references to containers that have crashed. Try to remove them all."""
