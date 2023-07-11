@@ -19,8 +19,9 @@ from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec,
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
-    V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext, \
-    V1Probe, V1ExecAction, V1SecurityContext
+    V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, \
+    V1ServiceSpec, V1ServicePort, V1PodSecurityContext, V1Probe, V1ExecAction, V1SecurityContext, \
+    V1Affinity, V1NodeAffinity, V1NodeSelector, V1NodeSelectorTerm, V1NodeSelectorRequirement
 from kubernetes.client.rest import ApiException
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig, PersistentVolume
 
@@ -94,6 +95,42 @@ def mean(values: list[float]) -> float:
     if len(values) == 0:
         return 0
     return sum(values)/len(values)
+
+
+def selector_to_list_filters(selector: Selector) -> Tuple[str, str]:
+    """Return the field and label selector strings described by selector."""
+    raise NotImplementedError()
+
+
+def selector_to_node_affinity(selector: Selector) -> V1Affinity:
+    """Return the selector as a kubernetes affinity."""
+
+    label_expressions = []
+    for label in selector.label:
+        label_expressions.append(V1NodeSelectorRequirement(
+            key=label.key,
+            operator=label.operator,
+            values=label.values,
+        ))
+
+    field_expressions = []
+    for field in selector.field:
+        field_expressions.append(V1NodeSelectorRequirement(
+            key=field.key,
+            operator='In' if field.equal else 'NotIn',
+            values=[field.value]
+        ))
+
+    return V1Affinity(
+        node_affinity=V1NodeAffinity(
+            required_during_scheduling_ignored_during_execution=V1NodeSelector(
+                node_selector_terms=[V1NodeSelectorTerm(
+                    match_expressions=label_expressions,
+                    match_fields=field_expressions,
+                )]
+            )
+        )
+    )
 
 
 def get_resources(container) -> Tuple[float, float]:
@@ -340,10 +377,10 @@ class KubernetesController(ControllerInterface):
         self.node_count = 0
         watch = TypelessWatch()
         ready_nodes: dict[str, tuple[float, float]] = {}
-        selector = self.linux_node_selector
+        field_selector, label_selector = selector_to_list_filters(self.linux_node_selector)
 
         for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT,
-                                  field_selector=selector.field, label_selector=selector.label,
+                                  field_selector=field_selector, label_selector=label_selector,
                                   _request_timeout=WATCH_API_TIMEOUT):
             if not self.running:
                 break
@@ -727,6 +764,7 @@ class KubernetesController(ControllerInterface):
             termination_grace_period_seconds=shutdown_seconds,
             security_context=V1PodSecurityContext(fs_group=1000),
             service_account_name=service_account,
+            affinity=selector_to_node_affinity(self.linux_node_selector),
         )
 
         if use_pull_secret:
