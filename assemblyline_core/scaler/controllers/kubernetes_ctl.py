@@ -99,7 +99,29 @@ def mean(values: list[float]) -> float:
 
 def selector_to_list_filters(selector: Selector) -> Tuple[str, str]:
     """Return the field and label selector strings described by selector."""
-    raise NotImplementedError()
+    # Field selector only supports equal and not equal
+    field_parts = []
+    for part in selector.field:
+        op = '==' if part.equal else '!='
+        field_parts.append(f"{part.key}{op}{part.value}")
+    field_selector = ','.join(field_parts)
+
+    # label selector is a bit more complicated
+    label_parts = []
+    for part in selector.label:
+        if part.operator == 'In':
+            label_parts.append(f"{part.key} in ({','.join(part.values)})")
+        elif part.operator == 'NotIn':
+            label_parts.append(f"{part.key} notin ({','.join(part.values)})")
+        elif part.operator == 'Exists':
+            label_parts.append(part.key)
+        elif part.operator == 'DoesNotExist':
+            label_parts.append(f"!{part.key}")
+        else:
+            raise ValueError("Unknown selector operator: " + part.operator)
+    label_selector = ','.join(label_parts)
+
+    return field_selector, label_selector
 
 
 def selector_to_node_affinity(selector: Selector) -> V1Affinity:
@@ -654,10 +676,12 @@ class KubernetesController(ControllerInterface):
         # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
+        selector = self.linux_node_selector
         lbls = sorted((labels or {}).items())
         svc_env = sorted(self._service_limited_env[service_name].items())
         change_key = str(f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
-                         f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}")
+                         f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}"
+                         f"nodes={''.join(selector_to_list_filters(selector))}")
         self.logger.debug(f"{deployment_name} actual change_key: {change_key}")
         change_key = str(hash(change_key))
 
