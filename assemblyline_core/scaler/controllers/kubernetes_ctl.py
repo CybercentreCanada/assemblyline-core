@@ -97,14 +97,16 @@ def mean(values: list[float]) -> float:
     return sum(values)/len(values)
 
 
-def selector_to_list_filters(selector: Selector) -> Tuple[str, str]:
+def selector_to_list_filters(selector: Selector) -> Tuple[Optional[str], Optional[str]]:
     """Return the field and label selector strings described by selector."""
     # Field selector only supports equal and not equal
     field_parts = []
     for part in selector.field:
         op = '==' if part.equal else '!='
         field_parts.append(f"{part.key}{op}{part.value}")
-    field_selector = ','.join(field_parts)
+    field_selector = None
+    if field_parts:
+        field_selector = ','.join(field_parts)
 
     # label selector is a bit more complicated
     label_parts = []
@@ -119,12 +121,14 @@ def selector_to_list_filters(selector: Selector) -> Tuple[str, str]:
             label_parts.append(f"!{part.key}")
         else:
             raise ValueError("Unknown selector operator: " + part.operator)
-    label_selector = ','.join(label_parts)
+    label_selector = None
+    if label_parts:
+        label_selector = ','.join(label_parts)
 
     return field_selector, label_selector
 
 
-def selector_to_node_affinity(selector: Selector) -> V1Affinity:
+def selector_to_node_affinity(selector: Selector) -> Optional[V1Affinity]:
     """Return the selector as a kubernetes affinity."""
 
     label_expressions = []
@@ -142,6 +146,9 @@ def selector_to_node_affinity(selector: Selector) -> V1Affinity:
             operator='In' if field.equal else 'NotIn',
             values=[field.value]
         ))
+
+    if not label_expressions and not field_expressions:
+        return None
 
     return V1Affinity(
         node_affinity=V1NodeAffinity(
@@ -676,12 +683,12 @@ class KubernetesController(ControllerInterface):
         # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
-        selector = self.linux_node_selector
+        field_selector, label_selector = selector_to_list_filters(self.linux_node_selector)
         lbls = sorted((labels or {}).items())
         svc_env = sorted(self._service_limited_env[service_name].items())
         change_key = str(f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
                          f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}"
-                         f"nodes={''.join(selector_to_list_filters(selector))}")
+                         f"nodes={field_selector or ''}{label_selector or ''}")
         self.logger.debug(f"{deployment_name} actual change_key: {change_key}")
         change_key = str(hash(change_key))
 
