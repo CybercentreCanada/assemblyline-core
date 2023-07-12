@@ -11,6 +11,7 @@ import urllib3
 from collections import OrderedDict, defaultdict
 from typing import List, Optional, Tuple
 from time import sleep
+from assemblyline.odm.models.config import Selector
 
 
 from kubernetes import client, config, watch
@@ -18,8 +19,9 @@ from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec,
     V1PodSpec, V1PodOS, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
-    V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext, \
-    V1Probe, V1ExecAction, V1SecurityContext
+    V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, \
+    V1ServiceSpec, V1ServicePort, V1PodSecurityContext, V1Probe, V1ExecAction, V1SecurityContext, \
+    V1Affinity, V1NodeAffinity, V1NodeSelector, V1NodeSelectorTerm, V1NodeSelectorRequirement
 from kubernetes.client.rest import ApiException
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig, PersistentVolume
 
@@ -95,6 +97,64 @@ def mean(values: list[float]) -> float:
     return sum(values)/len(values)
 
 
+def selector_to_list_filters(selector: Selector) -> Tuple[str, str]:
+    """Return the field and label selector strings described by selector."""
+    # Field selector only supports equal and not equal
+    field_parts = []
+    for part in selector.field:
+        op = '==' if part.equal else '!='
+        field_parts.append(f"{part.key}{op}{part.value}")
+    field_selector = ','.join(field_parts)
+
+    # label selector is a bit more complicated
+    label_parts = []
+    for part in selector.label:
+        if part.operator == 'In':
+            label_parts.append(f"{part.key} in ({','.join(part.values)})")
+        elif part.operator == 'NotIn':
+            label_parts.append(f"{part.key} notin ({','.join(part.values)})")
+        elif part.operator == 'Exists':
+            label_parts.append(part.key)
+        elif part.operator == 'DoesNotExist':
+            label_parts.append(f"!{part.key}")
+        else:
+            raise ValueError("Unknown selector operator: " + part.operator)
+    label_selector = ','.join(label_parts)
+
+    return field_selector, label_selector
+
+
+def selector_to_node_affinity(selector: Selector) -> V1Affinity:
+    """Return the selector as a kubernetes affinity."""
+
+    label_expressions = []
+    for label in selector.label:
+        label_expressions.append(V1NodeSelectorRequirement(
+            key=label.key,
+            operator=label.operator,
+            values=label.values,
+        ))
+
+    field_expressions = []
+    for field in selector.field:
+        field_expressions.append(V1NodeSelectorRequirement(
+            key=field.key,
+            operator='In' if field.equal else 'NotIn',
+            values=[field.value]
+        ))
+
+    return V1Affinity(
+        node_affinity=V1NodeAffinity(
+            required_during_scheduling_ignored_during_execution=V1NodeSelector(
+                node_selector_terms=[V1NodeSelectorTerm(
+                    match_expressions=label_expressions,
+                    match_fields=field_expressions,
+                )]
+            )
+        )
+    )
+
+
 def get_resources(container) -> Tuple[float, float]:
     requests = container['resources'].get('requests', {})
     limits = container['resources'].get('limits', {})
@@ -164,7 +224,7 @@ def parse_cpu(string: str) -> float:
 
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace: str, prefix: str, priority: str, dependency_priority: str,
-                 cpu_reservation: float, labels=None, log_level="INFO", core_env={},
+                 cpu_reservation: float, linux_node_selector: Selector, labels=None, log_level="INFO", core_env={},
                  default_service_account=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
@@ -194,6 +254,7 @@ class KubernetesController(ControllerInterface):
         self.logger = logger
         self.log_level: str = log_level
         self._labels: dict[str, str] = labels or {}
+        self.linux_node_selector = linux_node_selector
         self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
         self.net_api = client.NetworkingV1Api()
@@ -338,8 +399,10 @@ class KubernetesController(ControllerInterface):
         self.node_count = 0
         watch = TypelessWatch()
         ready_nodes: dict[str, tuple[float, float]] = {}
+        field_selector, label_selector = selector_to_list_filters(self.linux_node_selector)
 
         for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT,
+                                  field_selector=field_selector, label_selector=label_selector,
                                   _request_timeout=WATCH_API_TIMEOUT):
             if not self.running:
                 break
@@ -613,10 +676,12 @@ class KubernetesController(ControllerInterface):
         # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
+        selector = self.linux_node_selector
         lbls = sorted((labels or {}).items())
         svc_env = sorted(self._service_limited_env[service_name].items())
         change_key = str(f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
-                         f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}")
+                         f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}"
+                         f"nodes={''.join(selector_to_list_filters(selector))}")
         self.logger.debug(f"{deployment_name} actual change_key: {change_key}")
         change_key = str(hash(change_key))
 
@@ -734,7 +799,7 @@ class KubernetesController(ControllerInterface):
             termination_grace_period_seconds=shutdown_seconds,
             security_context=security_context,
             service_account_name=service_account,
-
+            affinity=selector_to_node_affinity(self.linux_node_selector),
         )
 
         if use_pull_secret:
