@@ -448,9 +448,9 @@ class KubernetesController(ControllerInterface):
 
     def _monitor_pods(self):
         watch = TypelessWatch()
-        containers = {}
         log_cache = CacheDict(cache_len=8000)
-        namespaced_containers = {}
+        per_node_containers: dict[str, dict[str, tuple[float, float]]] = defaultdict(dict)
+        per_node_namespaced_containers: dict[str, dict[str, tuple[float, float]]] = defaultdict(dict)
         self._pod_used_cpu = defaultdict(float)
         self._pod_used_ram = defaultdict(float)
         self._pod_used_namespace_cpu = defaultdict(float)
@@ -467,6 +467,8 @@ class KubernetesController(ControllerInterface):
                 uid = event['raw_object']['metadata']['uid']
                 namespace = event['raw_object']['metadata']['namespace']
                 node = event['raw_object']['spec']['nodeName']
+                containers = per_node_containers[node]
+                namespaced_containers = per_node_namespaced_containers[node]
 
                 if event['type'] in ['ADDED', 'MODIFIED']:
                     for container in event['raw_object']['spec']['containers']:
