@@ -100,6 +100,8 @@ class Alerter(ServerBase):
                 # End of process alert transaction (wait)
                 if self.apm_client:
                     self.apm_client.end_transaction('unknown', 'error')
+
+                return 'error'
             else:
                 self.log.info(f'{str(e)} Waiting {UPDATE_RETRY_SEC}s before retrying...')
 
@@ -111,6 +113,7 @@ class Alerter(ServerBase):
                 if self.apm_client:
                     self.apm_client.end_transaction('unknown', 'wait')
 
+                return 'wait'
         except SubmissionNotFinalized as error:
             self.counter.increment('wait')
             self.log.error(str(error))
@@ -122,6 +125,8 @@ class Alerter(ServerBase):
             # End of process alert transaction (wait)
             if self.apm_client:
                 self.apm_client.end_transaction('unknown', 'wait')
+
+            return 'wait'
         except Exception:  # pylint: disable=W0703
             retries = alert['alert_retries'] = alert.get('alert_retries', 0) + 1
             self.counter.increment('error')
@@ -134,6 +139,8 @@ class Alerter(ServerBase):
             # End of process alert transaction (failure)
             if self.apm_client:
                 self.apm_client.end_transaction('unknown', 'exception')
+
+            return 'exception'
 
     def try_run(self):
         while self.running:

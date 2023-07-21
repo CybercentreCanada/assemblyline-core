@@ -139,23 +139,27 @@ def test_update_single_alert(config, datastore, delete_original=False):
     child_ingest_msg.submission.time = ingest_msg.submission.time
     child_ingest_msg.ingest_id = ingest_msg.ingest_id
 
-    alert_type_assertion = 'update'
-
     if delete_original:
+        # Delete the original alert
         datastore.alert.delete(original_alert['alert_id'])
-        alert_type_assertion = 'create'
 
-    alert_queue.push(child_ingest_msg.as_primitives())
-    alert_type = alerter.run_once()
-    assert alert_type == alert_type_assertion
+        # If the original alert does not exist, we should wait for a retry
+        alert_queue.push(child_ingest_msg.as_primitives())
+        alert_type = alerter.run_once()
+        assert alert_type == 'wait'
+    else:
+        # If the original alert still exists if should be updated now
+        alert_queue.push(child_ingest_msg.as_primitives())
+        alert_type = alerter.run_once()
+        assert alert_type == 'update'
 
-    datastore.alert.commit()
+        datastore.alert.commit()
 
-    updated_alert = datastore.alert.get(datastore.alert.search(f"sid:{child_submission.sid}",
-                                                               fl="id", as_obj=False)['items'][0]['id'])
-    assert updated_alert is not None
+        updated_alert = datastore.alert.get(datastore.alert.search(f"sid:{child_submission.sid}",
+                                                                   fl="id", as_obj=False)['items'][0]['id'])
+        assert updated_alert is not None
 
-    assert updated_alert != original_alert
+        assert updated_alert != original_alert
 
 
 def test_update_expired_alert(config, datastore):
