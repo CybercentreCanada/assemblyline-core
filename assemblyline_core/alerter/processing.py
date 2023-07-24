@@ -107,7 +107,7 @@ def get_submission_record(counter, datastore, sid):
 
     if not srecord:
         counter.increment('error')
-        raise SubmissionNotFound("Couldn't find submission: %s" % sid)
+        raise SubmissionNotFound(f"Couldn't find submission: {sid}")
 
     submission_state = srecord.get('state', 'unknown')
     if submission_state != 'completed':
@@ -285,7 +285,8 @@ def perform_alert_update(datastore, logger, alert):
     while True:
         old_alert, version = datastore.alert.get_if_exists(alert_id, as_obj=False, version=True)
         if old_alert is None:
-            raise AlertMissingError(f"{alert_id} is missing from the alert collection.")
+            raise AlertMissingError(
+                f"Alert {alert_id} cannot be updated because it does not exist.")
 
         # Ensure alert keeps original timestamp
         alert['ts'] = old_alert['ts']
@@ -321,14 +322,10 @@ def save_alert(datastore, counter, logger, alert, psid):
         return msg_type, ret_val
 
     if psid:
-        try:
-            msg_type = "AlertUpdated"
-            perform_alert_update(datastore, logger, alert)
-            counter.increment('updated')
-            ret_val = 'update'
-        except AlertMissingError as e:
-            logger.info(f"{str(e)}. Creating a new alert [{alert['alert_id']}]...")
-            msg_type, ret_val = create_alert()
+        msg_type = "AlertUpdated"
+        perform_alert_update(datastore, logger, alert)
+        counter.increment('updated')
+        ret_val = 'update'
     else:
         msg_type, ret_val = create_alert()
 
@@ -381,6 +378,9 @@ def get_alert_update_parts(counter, datastore, alert_data, logger, user_classifi
             }
         }
         cache.add(alert_data['submission']['sid'], (alert_update_p1, alert_update_p2))
+    else:
+        if alert_data['extended_scan'] == 'skipped':
+            alert_update_p1['extended_scan'] = alert_data['extended_scan']
 
     alert_update_p1['reporting_ts'] = now_as_iso()
     alert_update_p1['file'] = {'name': alert_file['name']}
