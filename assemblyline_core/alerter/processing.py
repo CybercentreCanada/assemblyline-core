@@ -240,7 +240,7 @@ def parse_submission_record(counter, datastore, alert_data, logger, user_classif
     max_classification, summary, filtered, detailed = get_summary(datastore, srecord, user_classification)
 
     extended_scan = alert_data['extended_scan']
-    if psid:
+    if psid and extended_scan == 'skipped':
         try:
             # Get errors from parent submission and submission. Strip keys
             # to only sha256 and service name. If there are any keys that
@@ -322,10 +322,14 @@ def save_alert(datastore, counter, logger, alert, psid):
         return msg_type, ret_val
 
     if psid:
-        msg_type = "AlertUpdated"
-        perform_alert_update(datastore, logger, alert)
-        counter.increment('updated')
-        ret_val = 'update'
+        try:
+            msg_type = "AlertUpdated"
+            perform_alert_update(datastore, logger, alert)
+            counter.increment('updated')
+            ret_val = 'update'
+        except AlertMissingError as e:
+            logger.info(f"{str(e)}. Creating a new alert [{alert['alert_id']}]...")
+            msg_type, ret_val = create_alert()
     else:
         msg_type, ret_val = create_alert()
 
@@ -378,9 +382,6 @@ def get_alert_update_parts(counter, datastore, alert_data, logger, user_classifi
             }
         }
         cache.add(alert_data['submission']['sid'], (alert_update_p1, alert_update_p2))
-    else:
-        if alert_data['extended_scan'] == 'skipped':
-            alert_update_p1['extended_scan'] = alert_data['extended_scan']
 
     alert_update_p1['reporting_ts'] = now_as_iso()
     alert_update_p1['file'] = {'name': alert_file['name']}

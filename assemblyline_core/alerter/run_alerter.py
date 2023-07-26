@@ -9,13 +9,12 @@ from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.odm.messages.alerter_heartbeat import Metrics
 
-from assemblyline_core.alerter.processing import AlertMissingError, SubmissionNotFinalized
+from assemblyline_core.alerter.processing import SubmissionNotFinalized
 from assemblyline_core.server_base import ServerBase
 
 ALERT_QUEUE_NAME = 'm-alert'
 ALERT_RETRY_QUEUE_NAME = 'm-alert-retry'
 MAX_RETRIES = 10
-UPDATE_RETRY_SEC = 5
 SUBMISSION_RETRY_SEC = 15
 
 
@@ -91,29 +90,6 @@ class Alerter(ServerBase):
                 self.apm_client.end_transaction(alert_type, 'success')
 
             return alert_type
-        except AlertMissingError as e:
-            retries = alert['alert_retries'] = alert.get('alert_retries', 0) + 1
-            self.counter.increment('wait')
-            if retries > MAX_RETRIES:
-                self.log.error(f'{str(e)} [Max retries exceeded: {alert}]')
-
-                # End of process alert transaction (wait)
-                if self.apm_client:
-                    self.apm_client.end_transaction('unknown', 'error')
-
-                return 'error'
-            else:
-                self.log.info(f'{str(e)} Waiting {UPDATE_RETRY_SEC}s before retrying...')
-
-                # Wait a bit for the offending alert to be created
-                alert['wait_until'] = now(UPDATE_RETRY_SEC)
-                self.alert_retry_queue.push(alert)
-
-                # End of process alert transaction (wait)
-                if self.apm_client:
-                    self.apm_client.end_transaction('unknown', 'wait')
-
-                return 'wait'
         except SubmissionNotFinalized as error:
             self.counter.increment('wait')
             self.log.error(str(error))
