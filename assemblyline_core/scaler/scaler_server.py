@@ -584,14 +584,14 @@ class ScalerServer(ThreadedCoreBase):
 
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:
+                    min_instances = default_settings.min_instances
+                    if service.min_instances is not None:
+                        # Use service-specific value if present
+                        min_instances = service.min_instances
                     if name not in self.profiles:
                         self.log.info(f"Adding "
                                       f"{f'privileged {service.name}' if service.privileged else service.name}"
                                       " to scaling")
-                        min_instances = default_settings.min_instances
-                        if service.min_instances is not None:
-                            # Use service-specific value if present
-                            min_instances = service.min_instances
                         self.add_service(ServiceProfile(
                             name=name,
                             min_instances=min_instances,
@@ -613,6 +613,7 @@ class ScalerServer(ThreadedCoreBase):
                         profile = self.profiles[name]
                         profile.max_instances = service.licence_count
                         profile.privileged = service.privileged
+                        profile.min_instances = min_instances
 
                         for dependency_name, dependency_blob in dependency_blobs.items():
                             if profile.dependency_blobs[dependency_name] != dependency_blob:
