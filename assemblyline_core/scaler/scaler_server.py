@@ -588,9 +588,13 @@ class ScalerServer(ThreadedCoreBase):
                         self.log.info(f"Adding "
                                       f"{f'privileged {service.name}' if service.privileged else service.name}"
                                       " to scaling")
+                        min_instances = default_settings.min_instances
+                        if service.min_instances is not None:
+                            # Use service-specific value if present
+                            min_instances = service.min_instances
                         self.add_service(ServiceProfile(
                             name=name,
-                            min_instances=default_settings.min_instances,
+                            min_instances=min_instances,
                             growth=default_settings.growth,
                             shrink=default_settings.shrink,
                             config_blob=config_blob,
