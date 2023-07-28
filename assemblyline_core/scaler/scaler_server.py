@@ -144,8 +144,7 @@ class ServiceProfile:
         self.privileged = privileged
 
         # How many instances we want, and can have
-        self.min_instances: int = max(0, int(min_instances))
-        self._min_instances: int = self.min_instances
+        self._min_instances: int = max(0, int(min_instances))
         self._max_instances: int = max(0, int(max_instances or 0))
         self.desired_instances: int = 0
         self.target_instances: int = 0
@@ -183,9 +182,17 @@ class ServiceProfile:
             return self.target_instances + MAX_CONTAINER_ALLOCATION
         return min(self._max_instances, self.target_instances + MAX_CONTAINER_ALLOCATION)
 
+    @property
+    def min_instances(self) -> int:
+        return self._min_instances
+
     @max_instances.setter
     def max_instances(self, value: int):
         self._max_instances = max(0, value)
+
+    @min_instances.setter
+    def min_instances(self, value: int):
+        self._min_instances = max(0, value)
 
     def update(self, delta: float, instances: int, backlog: int, duty_cycle: float):
         self.last_update = time.time()
@@ -611,9 +618,9 @@ class ScalerServer(ThreadedCoreBase):
                     # Update RAM, CPU, licence requirements for running services
                     else:
                         profile = self.profiles[name]
+                        profile.min_instances = min_instances
                         profile.max_instances = service.licence_count
                         profile.privileged = service.privileged
-                        profile.min_instances = min_instances
 
                         for dependency_name, dependency_blob in dependency_blobs.items():
                             if profile.dependency_blobs[dependency_name] != dependency_blob:
