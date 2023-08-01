@@ -125,7 +125,7 @@ class WorkflowManager(ServerBase):
                             self.apm_client.end_transaction(workflow.name, 'no_action')
                         continue
 
-                    fq = [f"reporting_ts:[{self.start_ts} TO {end_ts}]"]
+                    fq = [f"reporting_ts:[{self.start_ts} TO {end_ts}]", "NOT extended_scan:submitted"]
 
                     event_data = Event({'entity_type': 'workflow',
                                         'entity_id': workflow.workflow_id,
