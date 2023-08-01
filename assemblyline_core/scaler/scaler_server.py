@@ -144,8 +144,7 @@ class ServiceProfile:
         self.privileged = privileged
 
         # How many instances we want, and can have
-        self.min_instances: int = max(0, int(min_instances))
-        self._min_instances: int = self.min_instances
+        self._min_instances: int = max(0, int(min_instances))
         self._max_instances: int = max(0, int(max_instances or 0))
         self.desired_instances: int = 0
         self.target_instances: int = 0
@@ -183,9 +182,17 @@ class ServiceProfile:
             return self.target_instances + MAX_CONTAINER_ALLOCATION
         return min(self._max_instances, self.target_instances + MAX_CONTAINER_ALLOCATION)
 
+    @property
+    def min_instances(self) -> int:
+        return self._min_instances
+
     @max_instances.setter
     def max_instances(self, value: int):
         self._max_instances = max(0, value)
+
+    @min_instances.setter
+    def min_instances(self, value: int):
+        self._min_instances = max(0, value)
 
     def update(self, delta: float, instances: int, backlog: int, duty_cycle: float):
         self.last_update = time.time()
@@ -584,13 +591,17 @@ class ScalerServer(ThreadedCoreBase):
 
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:
+                    min_instances = default_settings.min_instances
+                    if service.min_instances is not None:
+                        # Use service-specific value if present
+                        min_instances = service.min_instances
                     if name not in self.profiles:
                         self.log.info(f"Adding "
                                       f"{f'privileged {service.name}' if service.privileged else service.name}"
                                       " to scaling")
                         self.add_service(ServiceProfile(
                             name=name,
-                            min_instances=default_settings.min_instances,
+                            min_instances=min_instances,
                             growth=default_settings.growth,
                             shrink=default_settings.shrink,
                             config_blob=config_blob,
@@ -607,6 +618,7 @@ class ScalerServer(ThreadedCoreBase):
                     # Update RAM, CPU, licence requirements for running services
                     else:
                         profile = self.profiles[name]
+                        profile.min_instances = min_instances
                         profile.max_instances = service.licence_count
                         profile.privileged = service.privileged
 
