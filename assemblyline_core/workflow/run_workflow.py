@@ -38,7 +38,7 @@ class WorkflowManager(ServerBase):
         if self.apm_client:
             self.apm_client.begin_transaction("Get last reporting timestamp")
 
-        self.log.info("Finding reporting timestamp for the last alert since {start_ts}...".format(start_ts=p_start_ts))
+        self.log.info(f"Finding reporting timestamp for the last alert since {p_start_ts}...")
         result = None
         while result is None:
             try:
@@ -125,16 +125,18 @@ class WorkflowManager(ServerBase):
                             self.apm_client.end_transaction(workflow.name, 'no_action')
                         continue
 
-                    fq = ["reporting_ts:[{start_ts} TO {end_ts}]".format(start_ts=self.start_ts, end_ts=end_ts)]
+                    fq = [f"reporting_ts:[{self.start_ts} TO {end_ts}]", "NOT extended_scan:submitted"]
 
-                    event_data = Event({'entity_type': 'workflow', 'entity_id': workflow.workflow_id, 'entity_name': workflow.name})
+                    event_data = Event({'entity_type': 'workflow',
+                                        'entity_id': workflow.workflow_id,
+                                        'entity_name': workflow.name})
                     operations = []
                     fq_items = []
                     if labels:
                         operations.extend([(self.datastore.alert.UPDATE_APPEND_IF_MISSING, 'label', lbl)
                                            for lbl in labels])
                         for label in labels:
-                            fq_items.append("label:\"{label}\"".format(label=label))
+                            fq_items.append(f'label:"{label}"')
                         event_data.labels = labels
                     if priority:
                         operations.append((self.datastore.alert.UPDATE_SET, 'priority', priority))
@@ -145,7 +147,7 @@ class WorkflowManager(ServerBase):
                         fq_items.append("(status:MALICIOUS OR status:NON-MALICIOUS OR status:ASSESS)")
                         event_data.status = status
 
-                    fq.append("NOT ({exclusion})".format(exclusion=" AND ".join(fq_items)))
+                    fq.append(f"NOT ({' AND '.join(fq_items)})")
                     # Add event to alert's audit history
                     operations.append((self.datastore.alert.UPDATE_APPEND, 'events', event_data))
 
@@ -155,7 +157,7 @@ class WorkflowManager(ServerBase):
                             elasticapm.label(affected_alerts=count)
 
                         if count:
-                            self.log.info("{count} Alert(s) were affected by this filter.".format(count=count))
+                            self.log.info(f"{count} Alert(s) were affected by this filter.")
                             if workflow.workflow_id != "DEFAULT":
                                 seen = now_as_iso()
                                 operations = [
@@ -187,7 +189,7 @@ class WorkflowManager(ServerBase):
                     self.apm_client.begin_transaction("Mark alerts complete")
 
                 self.log.info(f'Marking all alerts between {self.start_ts} and {end_ts} as workflow completed...')
-                wc_query = "reporting_ts:[{start_ts} TO {end_ts}]".format(start_ts=self.start_ts, end_ts=end_ts)
+                wc_query = f"reporting_ts:[{self.start_ts} TO {end_ts}]"
                 wc_operations = [(self.datastore.alert.UPDATE_SET, 'workflows_completed', True)]
                 try:
                     wc_count = self.datastore.alert.update_by_query(wc_query, wc_operations)
@@ -195,7 +197,7 @@ class WorkflowManager(ServerBase):
                         elasticapm.label(affected_alerts=wc_count)
 
                     if wc_count:
-                        self.log.info("{count} Alert(s) workflows marked as completed.".format(count=count))
+                        self.log.info(f"{count} Alert(s) workflows marked as completed.")
 
                     # End of transaction
                     if self.apm_client:
