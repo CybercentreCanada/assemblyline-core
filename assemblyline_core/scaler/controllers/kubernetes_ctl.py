@@ -988,17 +988,23 @@ class KubernetesController(ControllerInterface):
             List[V1Volume],
             List[V1VolumeMount]]:
         volumes, mounts = [], []
-        if container_name == 'updates' and os.path.exists(AL_ROOT_CA):
-            # Specifically for service updaters when internal encryption is enabled on the cluster
-            update_cert_dir = "/etc/assemblyline/ssl/al_updates"
-            volumes.append(V1Volume(name='updates-cert', secret=V1SecretVolumeSource(secret_name='updates-cert')))
-            mounts.append(V1VolumeMount(name="updates-cert", mount_path=update_cert_dir, read_only=True))
-
-            # Pass gunicorn settings via env
-            spec.container.environment.append({'name': 'CERTFILE', 'value': os.path.join(update_cert_dir, 'tls.crt')})
-            spec.container.environment.append({'name': 'KEYFILE', 'value': os.path.join(update_cert_dir, 'tls.key')})
-
         deployment_strategy = V1DeploymentStrategy()  # Default strategy should be RollingUpdate
+        if container_name == 'updates':
+            # Since we reserved containers named 'updates' to be service updaters,
+            # they will always 'Recreate' when storage is attached
+            deployment_strategy = V1DeploymentStrategy(type='Recreate')
+
+            if os.path.exists(AL_ROOT_CA):
+                # Specifically for service updaters when internal encryption is enabled on the cluster
+                update_cert_dir = "/etc/assemblyline/ssl/al_updates"
+                volumes.append(V1Volume(name='updates-cert', secret=V1SecretVolumeSource(secret_name='updates-cert')))
+                mounts.append(V1VolumeMount(name="updates-cert", mount_path=update_cert_dir, read_only=True))
+
+                # Pass gunicorn settings via env
+                spec.container.environment.append({'name': 'CERTFILE', 'value': os.path.join(update_cert_dir, 'tls.crt')})
+                spec.container.environment.append({'name': 'KEYFILE', 'value': os.path.join(update_cert_dir, 'tls.key')})
+
+
         for volume_name, volume_spec in spec.volumes.items():
             mount_name = f'{deployment_name}-{volume_name}'
 
