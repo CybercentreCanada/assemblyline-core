@@ -990,8 +990,7 @@ class KubernetesController(ControllerInterface):
         volumes, mounts = [], []
         deployment_strategy = V1DeploymentStrategy()  # Default strategy should be RollingUpdate
         if container_name == 'updates':
-            # Since we reserved containers named 'updates' to be service updaters,
-            # they will always 'Recreate' when storage is attached
+            # Since we reserved containers named 'updates' to be service updaters, they will always 'Recreate'
             deployment_strategy = V1DeploymentStrategy(type='Recreate')
 
             if os.path.exists(AL_ROOT_CA):
@@ -1003,7 +1002,6 @@ class KubernetesController(ControllerInterface):
                 # Pass gunicorn settings via env
                 spec.container.environment.append({'name': 'CERTFILE', 'value': os.path.join(update_cert_dir, 'tls.crt')})
                 spec.container.environment.append({'name': 'KEYFILE', 'value': os.path.join(update_cert_dir, 'tls.key')})
-
 
         for volume_name, volume_spec in spec.volumes.items():
             mount_name = f'{deployment_name}-{volume_name}'
