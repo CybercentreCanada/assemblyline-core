@@ -615,7 +615,7 @@ class KubernetesController(ControllerInterface):
                 name = event['raw_object']['metadata']['labels'].get('component', None)
                 if name is not None:
                     self._deployment_targets[name] = event['raw_object']['spec']['replicas']
-                    self._deployment_unavailable[name] = event['raw_object']['spec']['unavailable_replicas'] or 0
+                    self._deployment_unavailable[name] = event['raw_object']['status']['unavailable_replicas'] or 0
             elif event['type'] == 'DELETED':
                 name = event['raw_object']['metadata']['labels'].get('component', None)
                 self._deployment_targets.pop(name, None)
