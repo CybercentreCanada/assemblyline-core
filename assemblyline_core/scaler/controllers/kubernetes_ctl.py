@@ -308,6 +308,7 @@ class KubernetesController(ControllerInterface):
         pod_background.start()
 
         self._deployment_targets: dict[str, int] = {}
+        self._deployment_unavailable: dict[str, int] = {}
         deployment_background = threading.Thread(target=self._loop_forever(self._monitor_deployments), daemon=True)
         deployment_background.start()
 
@@ -601,6 +602,7 @@ class KubernetesController(ControllerInterface):
         watch = TypelessWatch()
 
         self._deployment_targets = {}
+        self._deployment_unavailable = {}
         label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items() if _n != 'privilege')
 
         for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
@@ -613,9 +615,11 @@ class KubernetesController(ControllerInterface):
                 name = event['raw_object']['metadata']['labels'].get('component', None)
                 if name is not None:
                     self._deployment_targets[name] = event['raw_object']['spec']['replicas']
+                    self._deployment_unavailable[name] = event['raw_object']['spec']['unavailable_replicas'] or 0
             elif event['type'] == 'DELETED':
                 name = event['raw_object']['metadata']['labels'].get('component', None)
                 self._deployment_targets.pop(name, None)
+                self._deployment_unavailable.pop(name, None)
 
     def _get_pod_used_namespace_cpu(self) -> float:
         count = 0.0
@@ -874,6 +878,10 @@ class KubernetesController(ControllerInterface):
     def get_targets(self) -> dict[str, int]:
         """Get the target for running instances of all services."""
         return self._deployment_targets
+
+    def get_unavailable(self) -> dict[str, int]:
+        """Get the number of containers the orchestration layer could not start."""
+        return self._deployment_unavailable
 
     def set_target(self, service_name: str, target: int):
         """Set the target for running instances of a service."""
