@@ -795,7 +795,7 @@ class ScalerServer(ThreadedCoreBase):
             if not profile or not pending:
                 continue
 
-            free_cpu = max(0, free_cpu - profile.container_config.cpu_cores * pending)
+            free_cpu = free_cpu - profile.container_config.cpu_cores * pending
 
         return (free_cpu, total_cpu)
 
@@ -814,7 +814,7 @@ class ScalerServer(ThreadedCoreBase):
             if not profile or not pending:
                 continue
 
-            free_memory = max(0, free_memory - profile.container_config.ram_mb * pending)
+            free_memory = free_memory - profile.container_config.ram_mb * pending
 
         return (free_memory, total_memory)
 
