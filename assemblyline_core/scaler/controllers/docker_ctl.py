@@ -341,6 +341,10 @@ class DockerController(ControllerInterface):
         names = list(self._profiles.keys())
         return {name: self.get_target(name) for name in names}
 
+    def get_unavailable(self) -> dict[str, int]:
+        """Get the number of containers the orchestration layer could not start."""
+        return {}
+
     def set_target(self, service_name, target):
         """Change how many instances of a service docker is trying to keep up.
 
