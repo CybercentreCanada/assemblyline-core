@@ -85,7 +85,7 @@ class SubmissionClient:
 
     @elasticapm.capture_span(span_type='submission_client')
     def rescan(self, submission: Submission, results: Dict[str, Result], file_infos: Dict[str, FileInfo],
-               file_tree, errors: List[str],  rescan_services: List[str]):
+               file_tree, errors: List[str], rescan_services: List[str]):
         """
         Rescan a submission started on another system.
         """
@@ -237,6 +237,8 @@ class SubmissionClient:
             self.datastore.save_or_freshen_file(fileinfo['sha256'], fileinfo, expiry,
                                                 al_meta['classification'])
             self.filestore.upload(local_path, fileinfo['sha256'])
+            if fileinfo["type"].startswith("uri/") and "uri_info" in fileinfo and "uri" in fileinfo["uri_info"]:
+                al_meta["name"] = fileinfo["uri_info"]["uri"]
             return fileinfo['sha256'], fileinfo['size'], al_meta
 
         finally:
