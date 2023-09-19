@@ -279,7 +279,7 @@ class KubernetesController(ControllerInterface):
         # A record of previously reported events so that we don't report the same message repeatedly, fill it with
         # existing messages so we don't have a huge dump of duplicates on restart
         self.events_window = {}
-        response = self.api.list_namespaced_event(namespace='al', pretty='false',
+        response = self.api.list_namespaced_event(namespace=self.namespace, pretty='false',
                                                   field_selector='type=Warning', watch=False,
                                                   _request_timeout=API_TIMEOUT)
         for event in response.items:
@@ -926,7 +926,7 @@ class KubernetesController(ControllerInterface):
         return [pod.metadata.name for pod in pods.items]
 
     def new_events(self):
-        response = self.api.list_namespaced_event(namespace='al', pretty='false',
+        response = self.api.list_namespaced_event(namespace=self.namespace, pretty='false',
                                                   field_selector='type=Warning', watch=False,
                                                   _request_timeout=API_TIMEOUT)
 
