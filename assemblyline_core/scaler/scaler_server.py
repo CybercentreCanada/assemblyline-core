@@ -298,6 +298,7 @@ class ScalerServer(ThreadedCoreBase):
                                                    linux_node_selector=self.config.core.scaler.linux_node_selector,
                                                    log_level=self.config.logging.log_level,
                                                    core_env=core_env,
+                                                   cluster_pod_list=self.config.core.scaler.cluster_pod_list,
                                                    default_service_account=self.config.services.service_account)
 
             # Add global configuration for privileged services

@@ -232,7 +232,7 @@ def parse_cpu(string: str) -> float:
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace: str, prefix: str, priority: str, dependency_priority: str,
                  cpu_reservation: float, linux_node_selector: Selector, labels=None, log_level="INFO", core_env={},
-                 default_service_account=None):
+                 default_service_account=None, cluster_pod_list=True):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
         try:
@@ -275,6 +275,7 @@ class KubernetesController(ControllerInterface):
         self._external_profiles = weakref.WeakValueDictionary()
         self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
         self.default_service_account: Optional[str] = default_service_account
+        self.cluster_pod_list = cluster_pod_list
 
         # A record of previously reported events so that we don't report the same message repeatedly, fill it with
         # existing messages so we don't have a huge dump of duplicates on restart
@@ -456,8 +457,15 @@ class KubernetesController(ControllerInterface):
         self._pod_used_namespace_cpu = defaultdict(float)
         self._pod_used_namespace_ram = defaultdict(float)
 
-        for event in watch.stream(func=self.api.list_pod_for_all_namespaces, timeout_seconds=WATCH_TIMEOUT,
-                                  _request_timeout=WATCH_API_TIMEOUT):
+        if self.cluster_pod_list:
+            list_pods = self.api.list_pod_for_all_namespaces
+            kwargs = dict()
+        else:
+            list_pods = self.api.list_namespaced_pod
+            kwargs = dict(namespace=self.namespace)
+
+        for event in watch.stream(func=list_pods, timeout_seconds=WATCH_TIMEOUT,
+                                  _request_timeout=WATCH_API_TIMEOUT, **kwargs):
             if not self.running:
                 break
 
