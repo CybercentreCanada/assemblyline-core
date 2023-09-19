@@ -164,6 +164,9 @@ class DispatchClient:
             dispatcher_id = queue.pop(timeout=5)
             listed_dispatchers.discard(dispatcher_id)
 
+    def queued_submissions(self) -> list[dict]:
+        return self.submission_queue.content()
+
     def outstanding_services(self, sid) -> Optional[dict[str, int]]:
         """
         List outstanding services for a given submission and the number of file each
