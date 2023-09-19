@@ -275,6 +275,10 @@ class Dispatcher(ThreadedCoreBase):
         return Hash(DISPATCH_TASK_ASSIGNMENT + instance_id, host=persistent_redis).length()
 
     @staticmethod
+    def instance_assignment(persistent_redis, instance_id) -> list[str]:
+        return Hash(DISPATCH_TASK_ASSIGNMENT + instance_id, host=persistent_redis).keys()
+
+    @staticmethod
     def all_queue_lengths(redis, instance_id):
         return {
             'start': NamedQueue(DISPATCH_START_EVENTS + instance_id, host=redis).length(),
