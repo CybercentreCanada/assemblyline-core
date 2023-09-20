@@ -527,13 +527,13 @@ class Ingester(ThreadedCoreBase):
                 # Check if its already complete in the database
                 from_db = self.datastore.submission.get_if_exists(sid)
                 if from_db and from_db.state == "completed":
-                    self.log.warning("Completing a hanging finished submission [{}]", sid)
+                    self.log.warning(f"Completing a hanging finished submission [{sid}]")
                     self.completed(from_db)
 
                 # Check for items that have been in an unknown state since the last round
                 # and put it back in processing
                 elif sid in last_round:
-                    self.log.warning("Recovering a submission dispatcher hasn't processed [{}]", sid)
+                    self.log.warning(f"Recovering a submission dispatcher hasn't processed [{sid}]")
                     self.submit(task)
 
                 # Otherwise defer looking at this until next iteration
