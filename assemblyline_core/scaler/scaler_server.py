@@ -737,14 +737,9 @@ class ScalerServer(ThreadedCoreBase):
                 #       it is one big one, and let the orchestration layer sort out the details.
                 #
 
-                # Recalculate the amount of free resources expanding the total quantity by the overallocation
-                free_cpu, total_cpu = self.controller.cpu_info()
-                used_cpu = total_cpu - free_cpu
-                free_cpu = total_cpu * self.get_cpu_overallocation() - used_cpu
-
-                free_memory, total_memory = self.controller.memory_info()
-                used_memory = total_memory - free_memory
-                free_memory = total_memory * self.get_memory_overallocation() - used_memory
+                # Get the processed resource numbers
+                free_cpu, _ = self.get_cpu_info(overallocation=True)
+                free_memory, _ = self.get_memory_info(overallocation=True)
 
                 # Make adjustments to the targets until everything is satisified
                 # or we don't have the resouces to make more adjustments
@@ -784,6 +779,44 @@ class ScalerServer(ThreadedCoreBase):
                             if value != old:
                                 self.log.info(f"Scaling service {name}: {old} -> {value}")
                                 pool.call(self.controller.set_target, name, value)
+
+    def get_cpu_info(self, overallocation: bool) -> tuple[float, float]:
+        # Get the raw used resource numbers
+        free_cpu, total_cpu = self.controller.cpu_info()
+
+        # Recalculate the amount of free resources expanding the total quantity by the overallocation
+        if overallocation:
+            used_cpu = total_cpu - free_cpu
+            free_cpu = total_cpu * self.get_cpu_overallocation() - used_cpu
+
+        # Include the service containers not counted in the raw numbers because they are pending
+        for name, pending in self.controller.get_unavailable().items():
+            profile = self.profiles.get(name)
+            if not profile or not pending:
+                continue
+
+            free_cpu = free_cpu - profile.container_config.cpu_cores * pending
+
+        return (free_cpu, total_cpu)
+
+    def get_memory_info(self, overallocation: bool) -> tuple[float, float]:
+        # Get the raw used resource numbers
+        free_memory, total_memory = self.controller.memory_info()
+
+        # Recalculate the amount of free resources expanding the total quantity by the overallocation
+        if overallocation:
+            used_memory = total_memory - free_memory
+            free_memory = total_memory * self.get_memory_overallocation() - used_memory
+
+        # Include the service containers not counted in the raw numbers because they are pending
+        for name, pending in self.controller.get_unavailable().items():
+            profile = self.profiles.get(name)
+            if not profile or not pending:
+                continue
+
+            free_memory = free_memory - profile.container_config.ram_mb * pending
+
+        return (free_memory, total_memory)
 
     def sync_metrics(self):
         """Check if there are any pub-sub messages we need."""
@@ -889,8 +922,8 @@ class ScalerServer(ThreadedCoreBase):
                     export_metrics_once(service_name, Status, metrics, host=HOSTNAME,
                                         counter_type='scaler_status', config=self.config, redis=self.redis)
 
-                memory, memory_total = self.controller.memory_info()
-                cpu, cpu_total = self.controller.cpu_info()
+                memory, memory_total = self.get_memory_info(overallocation=False)
+                cpu, cpu_total = self.get_cpu_info(overallocation=False)
                 metrics = {
                     'memory_total': memory_total,
                     'cpu_total': cpu_total,
