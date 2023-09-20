@@ -272,7 +272,13 @@ class ScalerServer(ThreadedCoreBase):
         # function properly.
         for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']:
             env_name = secret.strip("${}")
-            core_env[env_name] = os.environ[env_name]
+            try:
+                core_env[env_name] = os.environ[env_name]
+            except KeyError:
+                # Don't pass through variables that scaler doesn't have
+                # they are likely specific to other components and shouldn't
+                # be shared with privileged services.
+                pass
 
         labels = {
             'app': 'assemblyline',
