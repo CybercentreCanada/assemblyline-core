@@ -227,6 +227,7 @@ def get_summary(datastore, srecord, user_classification, logger):
                         ['sha256'], 'thumb': x['thumb']['sha256'], } for x in submission_summary['screenshots']]
     except Exception:
         logger.warning(f"Cannot parse the submission summary screenshot section. ({submission_summary['screenshots']})")
+        screenshots = []
 
     return max_classification, summary, submission_summary['filtered'], detailed, screenshots
 
