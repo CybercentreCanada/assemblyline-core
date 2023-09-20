@@ -57,6 +57,7 @@ def test_create_single_alert(config, datastore):
     alerter = Alerter()
     # Swap our alerter onto a private queue so our test doesn't get intercepted
     alerter.alert_queue = alert_queue = NamedQueue(uuid.uuid4().hex, persistent_redis)
+    alert_queue.delete()
 
     # Get a random submission
     submission = random.choice(all_submissions)
@@ -90,6 +91,7 @@ def test_update_single_alert(config, datastore, delete_original=False):
     alerter = Alerter()
     # Swap our alerter onto a private queue so our test doesn't get intercepted
     alerter.alert_queue = alert_queue = NamedQueue(uuid.uuid4().hex, persistent_redis)
+    alert_queue.delete()
 
     # Get a random submission
     submission = random.choice(all_submissions)
