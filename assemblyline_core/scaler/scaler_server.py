@@ -26,16 +26,18 @@ from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.events import EventWatcher, EventSender
 from assemblyline.odm.models.service import Service, DockerConfig, EnvironmentVariable
 from assemblyline.odm.models.config import Mount
+from assemblyline.odm.models.error import Error
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
 from assemblyline.odm.messages.scaler_status_heartbeat import Status
 from assemblyline.odm.messages.changes import ServiceChange, Operation
 from assemblyline.common.dict_utils import get_recursive_sorted_tuples
-from assemblyline.common.uid import get_id_from_data
+from assemblyline.common.uid import get_id_from_data, get_random_id
 from assemblyline.common.forge import get_classification, get_service_queue, get_apm_client
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
+from assemblyline.common.isotime import now_as_iso
 from assemblyline_core.scaler.controllers import KubernetesController
-from assemblyline_core.scaler.controllers.interface import ServiceControlError
+from assemblyline_core.scaler.controllers.interface import ContainerEvent, ServiceControlError
 from assemblyline_core.server_base import ServiceStage, ThreadedCoreBase
 
 from .controllers import DockerController
@@ -50,6 +52,7 @@ SCALE_INTERVAL = 5
 METRIC_SYNC_INTERVAL = 0.5
 CONTAINER_EVENTS_LOG_INTERVAL = 2
 HEARTBEAT_INTERVAL = 5
+SIXTY_DAYS = 60 * 60 * 24 * 60
 
 # The maximum containers we ask to be created in a single scaling iteration
 # This is to give kubernetes a chance to update our view of resource usage before we ask for more containers
@@ -70,6 +73,7 @@ DOCKER_CONFIGURATION_VOLUME = os.getenv('DOCKER_CONFIGURATION_VOLUME', None)
 SERVICE_API_HOST = os.getenv('SERVICE_API_HOST', None)
 UI_SERVER = os.getenv('UI_SERVER', None)
 INTERNAL_ENCRYPT = bool(SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'))
+SERVICE_PREFIX = 'alsvc-'
 
 
 @contextmanager
@@ -297,7 +301,7 @@ class ScalerServer(ThreadedCoreBase):
 
         if KUBERNETES_AL_CONFIG:
             self.log.info(f"Loading Kubernetes cluster interface on namespace: {NAMESPACE}")
-            self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
+            self.controller = KubernetesController(logger=self.log, prefix=SERVICE_PREFIX, labels=labels,
                                                    namespace=NAMESPACE, priority='al-service-priority',
                                                    dependency_priority='al-core-priority',
                                                    cpu_reservation=self.config.services.cpu_reservation,
@@ -942,7 +946,34 @@ class ScalerServer(ThreadedCoreBase):
 
     def log_container_events(self):
         """The service status table may have references to containers that have crashed. Try to remove them all."""
+        pool = concurrent.futures.ThreadPoolExecutor(20)
         while self.sleep(CONTAINER_EVENTS_LOG_INTERVAL):
             with apm_span(self.apm_client, 'log_container_events'):
-                for message in self.controller.new_events():
-                    self.log.warning("Container Event :: " + message)
+                for event in self.controller.new_events():
+                    if event.service_name:
+                        pool.submit(self._process_service_event, event)
+                        continue
+                    self.log.warning("Container Event :: " + event.object_name + ": " + event.message)
+
+    def _process_service_event(self, event: ContainerEvent):
+        """Record the container event in the service event table."""
+        try:
+            message = f"Event for service {'updater' if event.updater else ''} container " + \
+                      f"[{event.object_name}] for service: \n" + event.message
+
+            error = Error({
+                'expiry_ts': now_as_iso(SIXTY_DAYS),
+                'response': {
+                    'message': message,
+                    'service_name': event.service_name,
+                    'service_version': 'UNKNOWN',
+                    'status': 'FAIL_NONRECOVERABLE'
+                },
+                'sha256': '0' * 64,
+                'type': 'UNKNOWN'
+            })
+            error_key = error.build_key(service_tool_version=get_random_id())
+            self.datastore.error.save(error_key, error)
+
+        except Exception:
+            self.log.exception("Error reporting service container event")
