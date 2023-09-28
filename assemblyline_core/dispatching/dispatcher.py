@@ -624,6 +624,7 @@ class Dispatcher(ThreadedCoreBase):
                 sha256=filestore_info.sha256,
                 size=filestore_info.size,
                 type=filestore_info.type,
+                uri_info=filestore_info.uri_info
             ))
         return file_info
 
