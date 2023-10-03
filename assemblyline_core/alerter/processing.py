@@ -116,13 +116,15 @@ def get_submission_record(counter, datastore, sid):
     return srecord
 
 
-def get_summary(datastore, srecord, user_classification):
+def get_summary(datastore, srecord, user_classification, logger):
     max_classification = srecord['classification']
 
     detailed = {v: {} for v in SUMMARY_TYPE_MAP.values()}
 
-    submission_summary = datastore.get_summary_from_keys(srecord.get('results', []), cl_engine=Classification,
-                                                         user_classification=user_classification)
+    submission_summary = datastore.get_summary_from_keys(
+        srecord.get('results', []),
+        cl_engine=Classification, user_classification=user_classification,
+        screenshot_sha256=srecord['files'][0]['sha256'])
     max_classification = Classification.max_classification(max_classification, submission_summary['classification'])
 
     # Process Att&cks
@@ -220,7 +222,14 @@ def get_summary(datastore, srecord, user_classification):
     detailed['domain'] = domains
     detailed['uri'] = uris
 
-    return max_classification, summary, submission_summary['filtered'], detailed
+    try:
+        screenshots = [{'name': x['img']['name'], 'description': x['img']['description'], 'img': x['img']
+                        ['sha256'], 'thumb': x['thumb']['sha256'], } for x in submission_summary['screenshots']]
+    except Exception:
+        logger.warning(f"Cannot parse the submission summary screenshot section. ({submission_summary['screenshots']})")
+        screenshots = []
+
+    return max_classification, summary, submission_summary['filtered'], detailed, screenshots
 
 
 def generate_alert_id(logger, alert_data):
@@ -237,7 +246,8 @@ def parse_submission_record(counter, datastore, alert_data, logger, user_classif
     psid = alert_data['submission']['params']['psid']
     srecord = get_submission_record(counter, datastore, sid)
 
-    max_classification, summary, filtered, detailed = get_summary(datastore, srecord, user_classification)
+    max_classification, summary, filtered, detailed, screenshots = get_summary(
+        datastore, srecord, user_classification, logger)
 
     extended_scan = alert_data['extended_scan']
     if psid and extended_scan == 'skipped':
@@ -259,7 +269,8 @@ def parse_submission_record(counter, datastore, alert_data, logger, user_classif
         'srecord': srecord,
         'max_classification': max_classification,
         'filtered': filtered,
-        'detailed': detailed
+        'detailed': detailed,
+        'screenshots': screenshots
     }
 
 
@@ -374,7 +385,8 @@ def get_alert_update_parts(counter, datastore, alert_data, logger, user_classifi
                 'sha1': file_record['sha1'],
                 'sha256': file_record['sha256'],
                 'size': file_record['size'],
-                'type': file_record['type']
+                'type': file_record['type'],
+                'screenshots': parsed_record['screenshots']
             },
             'verdict': {
                 "malicious": parsed_record['srecord']['verdict']['malicious'],
