@@ -268,6 +268,7 @@ class FileProcessor(threading.Thread):
 
         # Remove UI specific params
         settings.pop('default_zip_password', None)
+        settings.pop('demo', None)
         settings.pop('download_encoding', None)
         settings.pop('expand_min_score', None)
         settings.pop('submission_view', None)
