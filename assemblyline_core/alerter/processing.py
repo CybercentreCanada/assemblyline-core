@@ -1,4 +1,5 @@
 from __future__ import annotations
+from copy import deepcopy
 from typing import Optional
 from assemblyline.common import forge
 from assemblyline.common.caching import TimeExpiredCache
@@ -288,6 +289,23 @@ AL_FIELDS = [
 ]
 
 
+def check_constant_fields(old, new):
+    for checked_field in config.core.alerter.constant_alert_fields:
+        old_field = deepcopy(old.get(checked_field, None))
+        new_field = deepcopy(new.get(checked_field, None))
+
+        if isinstance(old_field, dict):
+            for ignored_key in config.core.alerter.constant_ignore_keys:
+                old_field.pop(ignored_key, None)
+
+        if isinstance(new_field, dict):
+            for ignored_key in config.core.alerter.constant_ignore_keys:
+                new_field.pop(ignored_key, None)
+
+        if old_field != new_field:
+            raise ValueError(f"Constant alert field {checked_field} changed. {str(old_field)} !=  {str(new_field)}")
+
+
 def perform_alert_update(datastore, logger, alert):
     alert_id = alert.get('alert_id', None)
     if not alert_id:
@@ -308,8 +326,7 @@ def perform_alert_update(datastore, logger, alert):
         }
 
         # Sanity check.
-        if not all([old_alert.get(x, None) == alert.get(x, None) for x in config.core.alerter.constant_alert_fields]):
-            raise ValueError(f"Constant alert field changed. ({str(old_alert)}, {str(alert)})")
+        check_constant_fields(old_alert, alert)
 
         old_alert = recursive_update(old_alert, alert)
         old_alert['al'] = recursive_update(old_alert['al'], merged)
