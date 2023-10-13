@@ -438,7 +438,7 @@ class FileProcessor(threading.Thread):
             if not fileinfo:
                 if not os.path.exists(working_file):
                     logger.debug(f"Source file not found: {source_file} meta: {meta_path}")
-                    return False
+                    return True
 
                 # Calculate file digest
                 with self.timed('identify'):
