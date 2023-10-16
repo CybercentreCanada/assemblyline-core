@@ -18,11 +18,14 @@ from assemblyline.odm.models.service import Service
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.server_base import CoreBase, ServiceStage
 
+DAY = 60 * 60 * 24
+TASK_DELETE_CHUNK = 10000
+
 
 class Plumber(CoreBase):
     def __init__(self, logger=None, shutdown_timeout: Optional[float] = None, config=None,
                  redis=None, redis_persist=None, datastore=None, delay=60):
-        super().__init__('plumber', logger, shutdown_timeout, config=config, redis=redis,
+        super().__init__('assemblyline.plumber', logger, shutdown_timeout, config=config, redis=redis,
                          redis_persist=redis_persist, datastore=datastore)
         self.delay = float(delay)
         self.dispatch_client = DispatchClient(datastore=self.datastore, redis=self.redis,
@@ -38,6 +41,10 @@ class Plumber(CoreBase):
         super().stop()
 
     def try_run(self):
+        # Start a task cleanup thread
+        tc_thread = threading.Thread(target=self.cleanup_old_tasks, daemon=True, name="datastore_task_cleanup")
+        tc_thread.start()
+
         # Get an initial list of all the service queues
         service_queues: dict[str, Optional[Service]]
         service_queues = {queue.decode('utf-8').lstrip('service-queue-'): None
@@ -64,7 +71,7 @@ class Plumber(CoreBase):
                         error = Error(dict(
                             archive_ts=None,
                             created='NOW',
-                            expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60) if task.ttl else None,
+                            expiry_ts=now_as_iso(task.ttl * DAY) if task.ttl else None,
                             response=dict(
                                 message='The service was disabled while processing this task.',
                                 service_name=task.service_name,
@@ -90,14 +97,27 @@ class Plumber(CoreBase):
                     thread = self.flush_threads.get(service_name)
                     if not thread or not thread.is_alive():
                         self.stop_signals[service_name] = threading.Event()
-                        thread = threading.Thread(target=self.watch_service, args=[service_name], daemon=True)
+                        thread = threading.Thread(
+                            target=self.watch_service, args=[service_name],
+                            daemon=True, name=service_name)
                         self.flush_threads[service_name] = thread
                         thread.start()
 
             # Wait a while before checking status of all services again
             self.sleep_with_heartbeat(self.delay)
 
+    def cleanup_old_tasks(self):
+        self.log.info("Cleaning up task index for old completed tasks...")
+        while self.running:
+            deleted = self.datastore.task_cleanup(deleteable_task_age=DAY, max_tasks=TASK_DELETE_CHUNK)
+            if not deleted:
+                self.sleep(self.delay)
+            else:
+                self.log.info(f"Cleaned up {deleted} tasks that were already completed.")
+        self.log.info("Done cleaning up task index.")
+
     def watch_service(self, service_name):
+        self.log.info(f"Watching {service_name} service queue...")
         service_queue = get_service_queue(service_name, self.redis)
         while self.running and not self.stop_signals[service_name].is_set():
             while service_queue.length() > self.service_limit[service_name]:
@@ -123,6 +143,7 @@ class Plumber(CoreBase):
                 error_key = error.build_key(task=task)
                 self.dispatch_client.service_failed(task.sid, error_key, error)
             self.sleep(2)
+        self.log.info(f"Done watching {service_name} service queue")
 
 
 if __name__ == '__main__':
