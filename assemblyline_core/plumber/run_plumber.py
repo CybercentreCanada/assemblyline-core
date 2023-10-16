@@ -38,6 +38,10 @@ class Plumber(CoreBase):
         super().stop()
 
     def try_run(self):
+        # Start a task cleanup thread
+        tc_thread = threading.Thread(target=self.cleanup_old_tasks, daemon=True, name="datastore_task_cleanup")
+        tc_thread.start()
+
         # Get an initial list of all the service queues
         service_queues: dict[str, Optional[Service]]
         service_queues = {queue.decode('utf-8').lstrip('service-queue-'): None
@@ -90,12 +94,20 @@ class Plumber(CoreBase):
                     thread = self.flush_threads.get(service_name)
                     if not thread or not thread.is_alive():
                         self.stop_signals[service_name] = threading.Event()
-                        thread = threading.Thread(target=self.watch_service, args=[service_name], daemon=True)
+                        thread = threading.Thread(
+                            target=self.watch_service, args=[service_name],
+                            daemon=True, name=service_name)
                         self.flush_threads[service_name] = thread
                         thread.start()
 
             # Wait a while before checking status of all services again
             self.sleep_with_heartbeat(self.delay)
+
+    def cleanup_old_tasks(self):
+        while True:
+            deleted = self.datastore.task_cleanup(max_tasks=10000)
+            if not deleted:
+                self.sleep(self.delay)
 
     def watch_service(self, service_name):
         service_queue = get_service_queue(service_name, self.redis)
