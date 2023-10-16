@@ -18,6 +18,9 @@ from assemblyline.odm.models.service import Service
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.server_base import CoreBase, ServiceStage
 
+DAY = 60 * 60 * 24
+TASK_DELETE_CHUNK = 10000
+
 
 class Plumber(CoreBase):
     def __init__(self, logger=None, shutdown_timeout: Optional[float] = None, config=None,
@@ -68,7 +71,7 @@ class Plumber(CoreBase):
                         error = Error(dict(
                             archive_ts=None,
                             created='NOW',
-                            expiry_ts=now_as_iso(task.ttl * 24 * 60 * 60) if task.ttl else None,
+                            expiry_ts=now_as_iso(task.ttl * DAY) if task.ttl else None,
                             response=dict(
                                 message='The service was disabled while processing this task.',
                                 service_name=task.service_name,
@@ -106,7 +109,7 @@ class Plumber(CoreBase):
     def cleanup_old_tasks(self):
         self.log.info("Cleaning up task index for old completed tasks...")
         while self.running:
-            deleted = self.datastore.task_cleanup(max_tasks=10000)
+            deleted = self.datastore.task_cleanup(deleteable_task_age=DAY, max_tasks=TASK_DELETE_CHUNK)
             if not deleted:
                 self.sleep(self.delay)
             else:
