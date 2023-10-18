@@ -14,6 +14,8 @@ from assemblyline.odm.models.error import Error
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.constants import service_queue_name
 from assemblyline.odm.models.service import Service
+from assemblyline.remote.datatypes import get_client, retry_call
+from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.server_base import CoreBase, ServiceStage
@@ -44,6 +46,11 @@ class Plumber(CoreBase):
         # Start a task cleanup thread
         tc_thread = threading.Thread(target=self.cleanup_old_tasks, daemon=True, name="datastore_task_cleanup")
         tc_thread.start()
+
+        # Start a notification queue cleanup thread
+        nq_thread = threading.Thread(target=self.cleanup_notification_queues, daemon=True,
+                                     name="redis_notification_queue_cleanup")
+        nq_thread.start()
 
         # Get an initial list of all the service queues
         service_queues: dict[str, Optional[Service]]
@@ -105,6 +112,40 @@ class Plumber(CoreBase):
 
             # Wait a while before checking status of all services again
             self.sleep_with_heartbeat(self.delay)
+
+    def cleanup_notification_queues(self):
+        self.log.info("Cleaning up notification queues for old messages...")
+        redis_client = get_client(self.config.core.redis.persistent.host,
+                                  self.config.core.redis.persistent.port, False)
+        while self.running:
+            # Finding all possible notification queues
+            keys = [k.decode() for k in retry_call(redis_client.keys, "nq-*")]
+            if not keys:
+                self.log.info('There are no queues right now in the system')
+            for k in keys:
+                self.log.info(f'Checking for old message in queue: {k}')
+                # Peek the first message of the queue
+                q = NamedQueue(k)
+                msg = q.peek_next()
+                if msg:
+                    current_time = now_as_iso(-1 * self.config.core.plumber.notification_queue_max_age)
+                    task_time = msg.get('notify_time', None) or msg.get('ingest_time', None)
+
+                    # If the message too old, cleanup
+                    if task_time is None or task_time <= current_time:
+                        self.log.warning(
+                            f"Messages on queue {k} by "
+                            f"{msg.get('submission', {}).get('params', {}).get('submitter', 'unknown')}"
+                            f" are older then the maximum queue age ({task_time}), removing queue")
+                        q.delete()
+                    else:
+                        self.log.info('All messages are recent enough')
+                else:
+                    self.log.info('There are no messages in the queue')
+
+            # wait for next run
+            self.sleep(self.config.core.plumber.notification_queue_interval)
+        self.log.info("Done cleaning up task index.")
 
     def cleanup_old_tasks(self):
         self.log.info("Cleaning up task index for old completed tasks...")
