@@ -104,9 +104,10 @@ class IngestTask(odm.Model):
     # Fields added after a submission is complete for notification/bookkeeping processes
     failure = odm.Text(default='')  # If the ingestion has failed for some reason, what is it?
     score = odm.Optional(odm.Integer())  # Score from previous processing of this file
-    extended_scan = odm.Enum(EXTENDED_SCAN_VALUES, default="skipped")
-    ingest_id = odm.UUID()
-    ingest_time = odm.Date(default="NOW")
+    extended_scan = odm.Enum(EXTENDED_SCAN_VALUES, default="skipped")  # Status of the extended scan
+    ingest_id = odm.UUID()  # Ingestion Identifier
+    ingest_time = odm.Date(default="NOW")  # Time at which the file was ingested
+    notify_time = odm.Optional(odm.Date())  # Time at which the user is notify the submission is finished
 
 
 class Ingester(ThreadedCoreBase):
@@ -797,6 +798,10 @@ class Ingester(ThreadedCoreBase):
         q = self.notification_queues.get(note_queue, None)
         if not q:
             self.notification_queues[note_queue] = q = NamedQueue(note_queue, self.redis_persist)
+
+        # Mark at which time an item was queued
+        task.notify_time = now_as_iso()
+
         q.push(task.as_primitives())
 
     def expired(self, delta: float, errors) -> bool:
