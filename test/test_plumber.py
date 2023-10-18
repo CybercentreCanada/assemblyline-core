@@ -32,7 +32,7 @@ def test_expire_missing_service():
     plumber.dispatch_client.request_work.side_effect = [task, None, None]
 
     plumber.running = TrueCountTimes(count=1)
-    plumber.try_run()
+    plumber.service_queue_plumbing()
 
     assert plumber.dispatch_client.service_failed.call_count == 1
     args = plumber.dispatch_client.service_failed.call_args
@@ -60,14 +60,14 @@ def test_flush_paused_queues():
     plumber.dispatch_client.request_work.side_effect = [task, None, None]
 
     plumber.running = TrueCountTimes(count=1)
-    plumber.try_run()
+    plumber.service_queue_plumbing()
 
     assert plumber.dispatch_client.service_failed.call_count == 0
 
     plumber.get_service_stage = mock.MagicMock(return_value=ServiceStage.Paused)
 
     plumber.running = TrueCountTimes(count=1)
-    plumber.try_run()
+    plumber.service_queue_plumbing()
 
     assert plumber.dispatch_client.service_failed.call_count == 1
     args = plumber.dispatch_client.service_failed.call_args

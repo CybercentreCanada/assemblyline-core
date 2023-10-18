@@ -14,7 +14,7 @@ from assemblyline.odm.models.error import Error
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.constants import service_queue_name
 from assemblyline.odm.models.service import Service
-from assemblyline.remote.datatypes import get_client, retry_call
+from assemblyline.remote.datatypes import retry_call
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from assemblyline_core.dispatching.client import DispatchClient
@@ -52,6 +52,9 @@ class Plumber(CoreBase):
                                      name="redis_notification_queue_cleanup")
         nq_thread.start()
 
+        self.service_queue_plumbing()
+
+    def service_queue_plumbing(self):
         # Get an initial list of all the service queues
         service_queues: dict[str, Optional[Service]]
         service_queues = {queue.decode('utf-8').lstrip('service-queue-'): None
@@ -115,11 +118,9 @@ class Plumber(CoreBase):
 
     def cleanup_notification_queues(self):
         self.log.info("Cleaning up notification queues for old messages...")
-        redis_client = get_client(self.config.core.redis.persistent.host,
-                                  self.config.core.redis.persistent.port, False)
         while self.running:
             # Finding all possible notification queues
-            keys = [k.decode() for k in retry_call(redis_client.keys, "nq-*")]
+            keys = [k.decode() for k in retry_call(self.redis_persist.keys, "nq-*")]
             if not keys:
                 self.log.info('There are no queues right now in the system')
             for k in keys:
@@ -145,7 +146,7 @@ class Plumber(CoreBase):
 
             # wait for next run
             self.sleep(self.config.core.plumber.notification_queue_interval)
-        self.log.info("Done cleaning up task index.")
+        self.log.info("Done cleaning up notification queues")
 
     def cleanup_old_tasks(self):
         self.log.info("Cleaning up task index for old completed tasks...")
@@ -154,8 +155,8 @@ class Plumber(CoreBase):
             if not deleted:
                 self.sleep(self.delay)
             else:
-                self.log.info(f"Cleaned up {deleted} tasks that were already completed.")
-        self.log.info("Done cleaning up task index.")
+                self.log.info(f"Cleaned up {deleted} tasks that were already completed")
+        self.log.info("Done cleaning up task index")
 
     def watch_service(self, service_name):
         self.log.info(f"Watching {service_name} service queue...")
