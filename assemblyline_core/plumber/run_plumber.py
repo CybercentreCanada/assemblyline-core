@@ -126,7 +126,7 @@ class Plumber(CoreBase):
             for k in keys:
                 self.log.info(f'Checking for old message in queue: {k}')
                 # Peek the first message of the queue
-                q = NamedQueue(k)
+                q = NamedQueue(k, self.redis_persist)
                 msg = q.peek_next()
                 if msg:
                     current_time = now_as_iso(-1 * self.config.core.plumber.notification_queue_max_age)
