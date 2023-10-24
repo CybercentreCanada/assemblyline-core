@@ -37,6 +37,8 @@ DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() == 'true'
 CONTAINER_RESTART_THRESHOLD = int(os.environ.get('CONTAINER_RESTART_THRESHOLD', 1))
 SERVICE_LIVENESS_PERIOD = int(os.environ.get('SERVICE_LIVENESS_PERIOD', 300))
 SERVICE_LIVENESS_TIMEOUT = int(os.environ.get('SERVICE_LIVENESS_TIMEOUT', 60))
+UNPRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('UNPRIVILEGED_SERVICE_ACCOUNT_NAME', None)
+PRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('PRIVILEGED_SERVICE_ACCOUNT_NAME', None)
 
 AL_ROOT_CA = os.environ.get('AL_ROOT_CA', '/etc/assemblyline/ssl/al_root-ca.crt')
 
@@ -805,7 +807,8 @@ class KubernetesController(ControllerInterface):
         metadata = V1ObjectMeta(name=deployment_name, labels=all_labels, annotations={CHANGE_KEY_NAME: change_key})
 
         # Figure out which (if any) service account to use
-        service_account = self.default_service_account
+        service_account = self.default_service_account or \
+            (PRIVILEGED_SERVICE_ACCOUNT_NAME if core_mounts else UNPRIVILEGED_SERVICE_ACCOUNT_NAME)
         if docker_config.service_account:
             service_account = docker_config.service_account
 

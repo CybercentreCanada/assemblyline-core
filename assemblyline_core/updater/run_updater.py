@@ -25,7 +25,7 @@ from assemblyline.odm.models.config import Mount, Selector
 from assemblyline.odm.models.service import DockerConfig, Service
 from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config, selector_to_node_affinity
+from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config, selector_to_node_affinity, PRIVILEGED_SERVICE_ACCOUNT_NAME
 from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline_core.updater.helper import get_latest_tag_for_service
 
@@ -260,11 +260,6 @@ class KubernetesUpdateInterface:
             if mount.config_map:
                 # Deprecated configuration for mounting ConfigMap
                 # TODO: Deprecate code on next major change
-                self.log.warning(
-                    "DEPRECATED: Migrate default service mounts using ConfigMaps to use: "
-                    f"resource_type='configmap', resource_name={mount.config_map}, resource_key={mount.key or ''}. "
-                    "Continuing deprecated mounting.."
-                )
                 vol_kwargs.update(dict(config_map=V1ConfigMapVolumeSource(name=mount.config_map, optional=False)))
                 vol_mount_kwargs.update(dict(sub_path=mount.key))
 
@@ -339,7 +334,7 @@ class KubernetesUpdateInterface:
             restart_policy='Never',
             containers=[container],
             priority_class_name=self.priority_class,
-            service_account_name=docker_config.service_account or self.default_service_account,
+            service_account_name=docker_config.service_account or self.default_service_account or PRIVILEGED_SERVICE_ACCOUNT_NAME,
             affinity=selector_to_node_affinity(self.linux_node_selector),
         )
 
