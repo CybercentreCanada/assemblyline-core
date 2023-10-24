@@ -329,11 +329,6 @@ class ScalerServer(ThreadedCoreBase):
                     self.controller.add_config_mount(mount.name, config_map=mount.config_map, key=mount.key,
                                                      target_path=mount.path, read_only=mount.read_only,
                                                      core=mount.privileged_only)
-                    self.log.warning(
-                        "DEPRECATED: Migrate default service mounts using ConfigMaps to use: "
-                        f"resource_type='configmap', resource_name={mount.config_map}, resource_key={mount.key or ''}. "
-                        "Continuing deprecated mounting.."
-                    )
                     continue
 
                 if mount.resource_type == 'configmap':
