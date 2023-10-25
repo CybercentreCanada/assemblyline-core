@@ -1,3 +1,4 @@
+import hashlib
 import logging
 
 from assemblyline.common import forge
@@ -17,21 +18,10 @@ class BadlistClient:
     def exists(self, qhash):
         return self.datastore.badlist.get_if_exists(qhash, as_obj=False)
 
-    def get_badlisted_tags(self, tag_types):
-        output = {}
-        if isinstance(tag_types, str):
-            tag_types = tag_types.split(',')
+    def exists_tags(self, tag_map):
+        lookup_keys = []
+        for tag_type, tag_values in tag_map.items():
+            for tag_value in tag_values:
+                lookup_keys.append(hashlib.sha256(f"{tag_type}: {tag_value}".encode('utf8')).hexdigest())
 
-        if tag_types:
-            for tag in tag_types:
-                for sl in self.datastore.badlist.stream_search(
-                        f"type:tag AND enabled:true AND tag.type:{tag}", as_obj=False):
-                    output.setdefault(sl['tag']['type'], [])
-                    output[sl['tag']['type']].append(sl['tag']['value'])
-
-        else:
-            for sl in self.datastore.badlist.stream_search("type:tag AND enabled:true", as_obj=False):
-                output.setdefault(sl['tag']['type'], [])
-                output[sl['tag']['type']].append(sl['tag']['value'])
-
-        return output
+        return self.datastore.badlist.search("*", as_obj=False, key_space=lookup_keys)['items']
