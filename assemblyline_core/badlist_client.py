@@ -24,4 +24,6 @@ class BadlistClient:
             for tag_value in tag_values:
                 lookup_keys.append(hashlib.sha256(f"{tag_type}: {tag_value}".encode('utf8')).hexdigest())
 
-        return self.datastore.badlist.search("*", as_obj=False, key_space=lookup_keys)['items']
+        return self.datastore.badlist.search(
+            "*", fl="*", rows=len(lookup_keys),
+            as_obj=False, key_space=lookup_keys)['items']
