@@ -86,9 +86,9 @@ class Archiver(ServerBase):
                                                      index_type=Index.HOT)
 
                 # Gather list of files and archives them
-                files = {f.sha256 for f in submission.files}
-                files.update(self.datastore.get_file_list_from_keys(submission.results, supplementary=True))
-                for sha256 in files:
+                files = {(f.sha256, False) for f in submission.files}
+                files.update(self.datastore.get_file_list_from_keys(submission.results))
+                for sha256, supplementary in files:
                     self.counter.increment('file')
 
                     # Get the tags for this file
@@ -111,7 +111,7 @@ class Archiver(ServerBase):
                     operations += [(self.datastore.file.UPDATE_APPEND_IF_MISSING, 'labels', x) for x in techniques]
                     operations += [(self.datastore.file.UPDATE_APPEND_IF_MISSING, 'labels', x) for x in infos]
 
-                    # create type specific labels
+                    # Create type specific labels
                     operations += [
                         (self.datastore.file.UPDATE_APPEND_IF_MISSING, 'label_categories.attribution', x)
                         for x in attributions]
@@ -121,6 +121,9 @@ class Archiver(ServerBase):
                     operations += [
                         (self.datastore.file.UPDATE_APPEND_IF_MISSING, 'label_categories.info', x)
                         for x in infos]
+
+                    # Set the is_supplementary property
+                    operations += [(self.datastore.file.UPDATE_SET, 'is_supplementary', supplementary)]
 
                     # Apply auto-created labels
                     self.datastore.file.update(sha256, operations=operations, index_type=Index.ARCHIVE)
