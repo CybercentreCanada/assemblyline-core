@@ -12,16 +12,13 @@ from typing import Optional
 
 from assemblyline.common.constants import service_queue_name
 from assemblyline.common.forge import get_service_queue
-from assemblyline.common.isotime import now, now_as_iso
-from assemblyline.common.security import generate_random_secret
-from assemblyline.datastore.store import TRANSPORT_TIMEOUT
+from assemblyline.common.isotime import now_as_iso
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.service import Service
 from assemblyline.remote.datatypes import retry_call
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.server_base import CoreBase, ServiceStage
-from elasticsearch import Elasticsearch
 
 DAY = 60 * 60 * 24
 TASK_DELETE_CHUNK = 10000
@@ -33,37 +30,13 @@ class Plumber(CoreBase):
         super().__init__('assemblyline.plumber', logger, shutdown_timeout, config=config, redis=redis,
                          redis_persist=redis_persist, datastore=datastore)
         self.delay = float(delay)
+        self.datastore.ds.switch_user("plumber")
         self.dispatch_client = DispatchClient(datastore=self.datastore, redis=self.redis,
                                               redis_persist=self.redis_persist, logger=self.log)
 
         self.flush_threads: dict[str, threading.Thread] = {}
         self.stop_signals: dict[str, threading.Event] = {}
         self.service_limit: dict[str, int] = {}
-
-        # Ensure roles for "plumber" user are created
-        self.datastore.ds.with_retries(
-            self.datastore.ds.client.security.put_role,
-            name="manage_tasks",
-            indices=[{"names": [".tasks"], "privileges": ["all"], "allow_restricted_indices": True}])
-
-        # Initialize/update 'plumber' user in Elasticsearch to perform cleanup
-        password = generate_random_secret()
-        self.datastore.ds.with_retries(
-            self.datastore.ds.client.security.put_user,
-            username="plumber",
-            password=password,
-            roles=["manage_tasks", "superuser"]
-        )
-
-        # Close existing connection and re-connect to the datastore as "plumber" user
-        self.datastore.ds.client.close()
-        self.datastore.ds.client = Elasticsearch(hosts=self.datastore.ds.get_hosts(),
-                                                 basic_auth=("plumber", password),
-                                                 max_retries=0,
-                                                 request_timeout=TRANSPORT_TIMEOUT,
-                                                 ca_certs=self.datastore.ds.ca_certs)
-        if not self.datastore.ds.ping():
-            raise Exception("Unable to connect to datastore as 'plumber'")
 
     def stop(self):
         for sig in self.stop_signals.values():
@@ -179,21 +152,7 @@ class Plumber(CoreBase):
     def cleanup_old_tasks(self):
         self.log.info("Cleaning up task index for old completed tasks...")
         while self.running:
-            # Create a new task to delete expired tasks
-            # NOTE: This will delete up to 10000 completed tasks older then a day
-            q = f"completed:true AND task.start_time_in_millis:<{now(-1 * DAY) * 1000}"
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                task = self.datastore.ds.with_retries(self.datastore.ds.client.delete_by_query, index='.tasks',
-                                                      q=q, wait_for_completion=False, conflicts='proceed',
-                                                      max_docs=TASK_DELETE_CHUNK)
-
-            # Wait until the tasks deletion task is over
-            res = self.datastore.ds._get_task_results(task)
-
-            # Get the number of deleted items
-            deleted = res['deleted']
-
+            deleted = self.datastore.task_cleanup(deleteable_task_age=DAY, max_tasks=TASK_DELETE_CHUNK)
             if not deleted:
                 self.sleep(self.delay)
             else:
