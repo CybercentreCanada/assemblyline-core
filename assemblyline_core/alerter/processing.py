@@ -306,19 +306,32 @@ def check_constant_fields(old, new):
             raise ValueError(f"Constant alert field {checked_field} changed. {str(old_field)} !=  {str(new_field)}")
 
 
-def perform_alert_update(datastore, logger, alert):
+def create_or_update_alert(datastore, logger, alert, counter):
     alert_id = alert.get('alert_id', None)
     if not alert_id:
         raise ValueError(f"We could not find the alert ID in the alert: {str(alert)}")
+    logger.info(f"{alert_id} => {alert['extended_scan']}")
 
     while True:
         old_alert, version = datastore.alert.get_if_exists(alert_id, as_obj=False, version=True)
         if old_alert is None:
-            raise AlertMissingError(
-                f"Alert {alert_id} cannot be updated because it does not exist.")
+            try:
+                datastore.alert.save(alert_id, alert, version=version)
+                logger.info(f"Alert {alert_id} has been created.")
+                counter.increment('created')
+                return "AlertCreated", "create"
+            except VersionConflictException as vce:
+                logger.info(f"Retrying update alert due to version conflict: {str(vce)}")
+                continue
 
         # Ensure alert keeps original timestamp
         alert['ts'] = old_alert['ts']
+
+        # TODO:
+        # Properly merge both alerts together so it doesn't matter if messages are out of order
+        # Ensure best possible extended scan value
+        if alert['extended_scan'] == 'submitted':
+            alert['extended_scan'] = old_alert['ts']
 
         # Merge fields...
         merged = {
@@ -330,36 +343,21 @@ def perform_alert_update(datastore, logger, alert):
 
         old_alert = recursive_update(old_alert, alert)
         old_alert['al'] = recursive_update(old_alert['al'], merged)
+        # END OF TODO
+
         old_alert['workflows_completed'] = False
 
         try:
             datastore.alert.save(alert_id, old_alert, version=version)
             logger.info(f"Alert {alert_id} has been updated.")
-            return
+            counter.increment('updated')
+            return "AlertUpdated", 'update'
         except VersionConflictException as vce:
             logger.info(f"Retrying update alert due to version conflict: {str(vce)}")
 
 
-def save_alert(datastore, counter, logger, alert, psid):
-    def create_alert():
-        msg_type = "AlertCreated"
-        datastore.alert.save(alert['alert_id'], alert)
-        logger.info(f"Alert {alert['alert_id']} has been created.")
-        counter.increment('created')
-        ret_val = 'create'
-        return msg_type, ret_val
-
-    if psid:
-        try:
-            msg_type = "AlertUpdated"
-            perform_alert_update(datastore, logger, alert)
-            counter.increment('updated')
-            ret_val = 'update'
-        except AlertMissingError as e:
-            logger.info(f"{str(e)}. Creating a new alert [{alert['alert_id']}]...")
-            msg_type, ret_val = create_alert()
-    else:
-        msg_type, ret_val = create_alert()
+def save_alert(datastore, counter, logger, alert):
+    msg_type, ret_val = create_or_update_alert(datastore, logger, alert, counter)
 
     msg = AlertMessage({
         "msg": alert,
@@ -468,4 +466,4 @@ def process_alert_message(counter, datastore, logger, alert_data):
     # Update alert with computed values
     alert = recursive_update(alert, alert_update_p2)
 
-    return save_alert(datastore, counter, logger, alert, alert_data['submission']['params']['psid'])
+    return save_alert(datastore, counter, logger, alert)
