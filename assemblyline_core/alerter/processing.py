@@ -291,30 +291,9 @@ AL_FIELDS = [
 ]
 
 
-def check_constant_fields(old, new):
-    for checked_field in config.core.alerter.constant_alert_fields:
-        old_field = deepcopy(old.get(checked_field, None))
-        new_field = deepcopy(new.get(checked_field, None))
-
-        if isinstance(old_field, dict):
-            for ignored_key in config.core.alerter.constant_ignore_keys:
-                old_field.pop(ignored_key, None)
-
-        if isinstance(new_field, dict):
-            for ignored_key in config.core.alerter.constant_ignore_keys:
-                new_field.pop(ignored_key, None)
-
-        if old_field != new_field:
-            raise ValueError(f"Constant alert field {checked_field} changed. {str(old_field)} !=  {str(new_field)}")
-
-
 def create_or_update_alert(datastore: AssemblylineDatastore, logger, alert, counter):
     alert = Alert(alert)
-
-    alert_id = alert.get('alert_id', None)
-    if not alert_id:
-        raise ValueError(f"We could not find the alert ID in the alert: {str(alert)}")
-    logger.info(f"{alert_id} => {alert['extended_scan']}")
+    alert_id = alert.alert_id
 
     while True:
         old_alert: Optional[Alert]
