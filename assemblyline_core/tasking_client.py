@@ -398,8 +398,6 @@ class TaskingClient:
         with elasticapm.capture_span(name="handle_task_result.process_tags",
                                      span_type="tasking_client"):
             for section in result['result']['sections']:
-                # TODO: Perform tag badlisting?
-
                 # Perform tag safelisting
                 tags, safelisted_tags = self.tag_safelister.get_validated_tag_map(section['tags'])
                 section['tags'] = unflatten(tags)
