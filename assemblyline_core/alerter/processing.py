@@ -7,7 +7,9 @@ from assemblyline.common.dict_utils import recursive_update
 from assemblyline.common.str_utils import safe_str
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.exceptions import VersionConflictException
+from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.messages.alert import AlertMessage
+from assemblyline.odm.models.alert import Alert
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
 CACHE_LEN = 60 * 60 * 24
@@ -306,14 +308,17 @@ def check_constant_fields(old, new):
             raise ValueError(f"Constant alert field {checked_field} changed. {str(old_field)} !=  {str(new_field)}")
 
 
-def create_or_update_alert(datastore, logger, alert, counter):
+def create_or_update_alert(datastore: AssemblylineDatastore, logger, alert, counter):
+    alert = Alert(alert)
+
     alert_id = alert.get('alert_id', None)
     if not alert_id:
         raise ValueError(f"We could not find the alert ID in the alert: {str(alert)}")
     logger.info(f"{alert_id} => {alert['extended_scan']}")
 
     while True:
-        old_alert, version = datastore.alert.get_if_exists(alert_id, as_obj=False, version=True)
+        old_alert: Optional[Alert]
+        old_alert, version = datastore.alert.get_if_exists(alert_id, version=True)
         if old_alert is None:
             try:
                 datastore.alert.save(alert_id, alert, version=version)
@@ -325,27 +330,13 @@ def create_or_update_alert(datastore, logger, alert, counter):
                 continue
 
         # Ensure alert keeps original timestamp
-        alert['ts'] = old_alert['ts']
+        alert.ts = old_alert.ts
 
-        # TODO:
-        # Properly merge both alerts together so it doesn't matter if messages are out of order
-        # Ensure best possible extended scan value
-        if alert['extended_scan'] == 'submitted':
-            alert['extended_scan'] = old_alert['ts']
+        # merge both alerts together so it doesn't matter if messages are out of order
+        old_alert.update(alert)
 
-        # Merge fields...
-        merged = {
-            x: list(set(old_alert.get('al', {}).get(x, [])).union(set(alert['al'].get(x, [])))) for x in AL_FIELDS
-        }
-
-        # Sanity check.
-        check_constant_fields(old_alert, alert)
-
-        old_alert = recursive_update(old_alert, alert)
-        old_alert['al'] = recursive_update(old_alert['al'], merged)
-        # END OF TODO
-
-        old_alert['workflows_completed'] = False
+        # Make sure workflows are re-triggered
+        old_alert.workflows_completed = False
 
         try:
             datastore.alert.save(alert_id, old_alert, version=version)
