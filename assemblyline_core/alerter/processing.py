@@ -291,7 +291,7 @@ AL_FIELDS = [
 ]
 
 
-def create_or_update_alert(datastore: AssemblylineDatastore, logger, alert, counter, psid: str | None):
+def create_or_update_alert(datastore: AssemblylineDatastore, logger, alert, counter):
     alert = Alert(alert)
     alert_id = alert.alert_id
 
@@ -308,11 +308,8 @@ def create_or_update_alert(datastore: AssemblylineDatastore, logger, alert, coun
                 logger.info(f"Retrying update alert due to version conflict: {str(vce)}")
                 continue
 
-        # Ensure alert keeps original timestamp
-        alert.ts = old_alert.ts
-
         # merge both alerts together so it doesn't matter if messages are out of order
-        old_alert.update(alert, psid)
+        old_alert.update(alert)
 
         # Make sure workflows are re-triggered
         old_alert.workflows_completed = False
@@ -326,8 +323,8 @@ def create_or_update_alert(datastore: AssemblylineDatastore, logger, alert, coun
             logger.info(f"Retrying update alert due to version conflict: {str(vce)}")
 
 
-def save_alert(datastore, counter, logger, alert, psid: str | None):
-    msg_type, ret_val = create_or_update_alert(datastore, logger, alert, counter, psid)
+def save_alert(datastore, counter, logger, alert):
+    msg_type, ret_val = create_or_update_alert(datastore, logger, alert, counter)
 
     msg = AlertMessage({
         "msg": alert,
@@ -412,6 +409,10 @@ def process_alert_message(counter, datastore, logger, alert_data):
         'alert_id': generate_alert_id(logger, alert_data),
         'archive_ts': None,
         'metadata': {safe_str(key): value for key, value in alert_data['submission']['metadata'].items()},
+        'submission_relations': [{
+            'child': alert_data['submission']['sid'],
+            'parent': alert_data['submission']['params']['psid']
+        }],
         'sid': alert_data['submission']['sid'],
         'ts': a_ts or alert_data['submission']['time'],
         'type': a_type or alert_data['submission']['params']['type']
@@ -436,4 +437,4 @@ def process_alert_message(counter, datastore, logger, alert_data):
     # Update alert with computed values
     alert = recursive_update(alert, alert_update_p2)
 
-    return save_alert(datastore, counter, logger, alert, alert_data['submission']['params']['psid'])
+    return save_alert(datastore, counter, logger, alert)
