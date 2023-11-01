@@ -27,3 +27,14 @@ class BadlistClient:
         return self.datastore.badlist.search(
             "*", fl="*", rows=len(lookup_keys),
             as_obj=False, key_space=lookup_keys)['items']
+
+    def find_similar_tlsh(self, tlsh):
+        return self.datastore.badlist.search(f"hashes.tlsh:{tlsh}", fl="*", as_obj=False)['items']
+
+    def find_similar_ssdeep(self, ssdeep):
+        try:
+            _, long, _ = ssdeep.replace('/', '\\/').split(":")
+            return self.datastore.badlist.search(f"hashes.ssdeep:{long}~", fl="*", as_obj=False)['items']
+        except ValueError:
+            self.log.warning(f'This is not a valid SSDeep hash: {ssdeep}')
+            return []
