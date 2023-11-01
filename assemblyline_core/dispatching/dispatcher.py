@@ -1,57 +1,69 @@
 from __future__ import annotations
-import uuid
+
+import dataclasses
+import enum
+import json
 import os
 import threading
 import time
+import typing
+import uuid
 from collections import defaultdict
 from contextlib import contextmanager
-import typing
-from typing import Optional, Any, TYPE_CHECKING, Iterable
-import json
-import enum
-from queue import PriorityQueue, Empty, Queue
-import dataclasses
+from queue import Empty, PriorityQueue, Queue
+from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 import elasticapm
+from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
+from assemblyline_core.server_base import ThreadedCoreBase
 
 from assemblyline.common import isotime
-from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
-    DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.forge import get_service_queue, get_apm_client, get_classification
+from assemblyline.common.constants import (
+    DISPATCH_RUNNING_TASK_HASH,
+    DISPATCH_TASK_HASH,
+    SCALER_TIMEOUT_QUEUE,
+    SUBMISSION_QUEUE,
+    make_watcher_list_name,
+)
+from assemblyline.common.forge import get_apm_client, get_classification, get_service_queue
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.postprocess import ActionWorker
 from assemblyline.datastore.helper import AssemblylineDatastore
-from assemblyline.odm.messages.changes import ServiceChange, Operation
+from assemblyline.odm.messages.changes import Operation, ServiceChange
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
+from assemblyline.odm.messages.dispatching import (
+    CREATE_WATCH,
+    LIST_OUTSTANDING,
+    UPDATE_BAD_SID,
+    CreateWatch,
+    DispatcherCommandMessage,
+    ListOutstanding,
+    WatchQueueMessage,
+)
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
-from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch, DispatcherCommandMessage, \
-    CREATE_WATCH, LIST_OUTSTANDING, UPDATE_BAD_SID, ListOutstanding
 from assemblyline.odm.messages.submission import SubmissionMessage, from_datastore_submission
-from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
+from assemblyline.odm.messages.task import FileInfo
+from assemblyline.odm.messages.task import Task as ServiceTask
 from assemblyline.odm.models.error import Error
-from assemblyline.odm.models.result import Result
+from assemblyline.odm.models.result import PARENT_RELATION, Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.user import User
-from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.events import EventWatcher
+from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet, Set
 from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
-from assemblyline_core.server_base import ThreadedCoreBase
-from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
-
 
 if TYPE_CHECKING:
     from assemblyline.odm.models.file import File
 
-
+from ..ingester.constants import COMPLETE_QUEUE_NAME
 from .schedules import Scheduler
 from .timeout import TimeoutTable
-from ..ingester.constants import COMPLETE_QUEUE_NAME
 
 APM_SPAN_TYPE = 'handle_message'
 
@@ -578,7 +590,9 @@ class Dispatcher(ThreadedCoreBase):
         # Initialize ancestry chain by identifying the root file
         file_info = self.get_fileinfo(task, sha256)
         file_type = file_info.type if file_info else 'NOT_FOUND'
-        task.file_temporary_data[sha256]['ancestry'] = [[dict(type=file_type, parent_relation="ROOT", sha256=sha256)]]
+        task.file_temporary_data[sha256]['ancestry'] = [[
+            dict(type=file_type, parent_relation=PARENT_RELATION.ROOT, sha256=sha256)
+        ]]
 
         # Start the file dispatching
         task.active_files.add(sha256)
@@ -1280,7 +1294,7 @@ class Dispatcher(ThreadedCoreBase):
         # Update children to include parent_relation, likely EXTRACTED
         if summary.children and isinstance(summary.children[0], str):
             old_children = typing.cast(list[str], summary.children)
-            summary.children = [(c, 'EXTRACTED') for c in old_children]
+            summary.children = [(c, PARENT_RELATION.EXTRACTED) for c in old_children]
 
         # Record the result as a summary
         task.service_results[(sha256, service_name)] = summary

@@ -1,19 +1,9 @@
+import json
 import logging
 import time
 from unittest import mock
 
-import json
 import pytest
-
-from assemblyline.common.forge import get_service_queue, get_classification
-from assemblyline.odm.models.error import Error
-from assemblyline.odm.models.file import File
-from assemblyline.odm.models.result import Result
-from assemblyline.odm.models.user import User
-from assemblyline.odm.randomizer import random_model_obj, random_minimal_obj, get_random_hash
-from assemblyline.odm import models
-from assemblyline.common.metrics import MetricsFactory
-
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.dispatching.dispatcher import Dispatcher, Submission
 from assemblyline_core.dispatching.schedules import Scheduler as RealScheduler
@@ -23,6 +13,14 @@ from assemblyline_core.dispatching.timeout import TimeoutTable
 from mocking import ToggleTrue
 from test_scheduler import dummy_service
 
+from assemblyline.common.forge import get_classification, get_service_queue
+from assemblyline.common.metrics import MetricsFactory
+from assemblyline.odm import models
+from assemblyline.odm.models.error import Error
+from assemblyline.odm.models.file import File
+from assemblyline.odm.models.result import PARENT_RELATION, Result
+from assemblyline.odm.models.user import User
+from assemblyline.odm.randomizer import get_random_hash, random_minimal_obj, random_model_obj
 
 logger = logging.getLogger('assemblyline.test')
 
@@ -166,7 +164,11 @@ def test_simple(clean_redis, clean_datastore):
     job = client.request_work('0', 'extract', '0')
     assert job.temporary_submission_data == [
         {'name': 'cats', 'value': 'big'},
-        {"name": "ancestry", "value": [[{"type": "unknown", "parent_relation": "ROOT", "sha256": file.sha256}]]}
+        {
+            "name": "ancestry", "value": [[
+                {"type": "unknown", "parent_relation": PARENT_RELATION.ROOT, "sha256": file.sha256}
+            ]]
+        }
     ]
     client.service_failed(sid, 'abc123', make_error(file_hash, 'extract'))
     # Deliberately do in the wrong order to make sure that works
