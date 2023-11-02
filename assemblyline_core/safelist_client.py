@@ -4,7 +4,6 @@ import yaml
 
 from assemblyline.common import forge
 from assemblyline.datastore.helper import AssemblylineDatastore
-from assemblyline.filestore import FileStore
 
 
 # Tasking class
