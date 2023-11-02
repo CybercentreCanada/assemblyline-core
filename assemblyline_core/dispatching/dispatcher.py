@@ -625,7 +625,8 @@ class Dispatcher(ThreadedCoreBase):
                 size=filestore_info.size,
                 ssdeep=filestore_info.ssdeep,
                 type=filestore_info.type,
-                tlsh=filestore_info.tlsh
+                tlsh=filestore_info.tlsh,
+                uri_info=filestore_info.uri_info
             ))
         return file_info
 

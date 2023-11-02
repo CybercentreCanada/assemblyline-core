@@ -7,16 +7,16 @@ disabled or deleted for which a service queue exists, the dispatcher will be inf
 had an error.
 """
 import threading
+import warnings
 from typing import Optional
-from assemblyline.common.forge import get_service_queue
 
-from assemblyline.odm.models.error import Error
-from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.constants import service_queue_name
+from assemblyline.common.forge import get_service_queue
+from assemblyline.common.isotime import now_as_iso
+from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.service import Service
 from assemblyline.remote.datatypes import retry_call
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.server_base import CoreBase, ServiceStage
 
@@ -30,6 +30,7 @@ class Plumber(CoreBase):
         super().__init__('assemblyline.plumber', logger, shutdown_timeout, config=config, redis=redis,
                          redis_persist=redis_persist, datastore=datastore)
         self.delay = float(delay)
+        self.datastore.ds.switch_user("plumber")
         self.dispatch_client = DispatchClient(datastore=self.datastore, redis=self.redis,
                                               redis_persist=self.redis_persist, logger=self.log)
 
