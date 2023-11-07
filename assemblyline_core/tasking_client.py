@@ -263,7 +263,12 @@ class TaskingClient:
 
             if not cache_found:
                 # Checking for previous empty results for this key
-                result = self.datastore.emptyresult.get_if_exists(f"{result_key}.e")
+                try:
+                    result = self.datastore.emptyresult.get_if_exists(f"{result_key}.e")
+                except ValueError:
+                    self.log.warning(f"Got poisoned empty result cache record for key {result_key}.e, cleaning up...")
+                    self.datastore.emptyresult.delete(f"{result_key}.e")
+
                 if result:
                     metric_factory.increment('cache_hit')
                     metric_factory.increment('not_scored')

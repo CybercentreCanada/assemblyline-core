@@ -27,7 +27,7 @@ from typing import List, Optional, Tuple, Dict
 from assemblyline.common import forge
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
-from assemblyline.common.isotime import epoch_to_iso, now, now_as_iso
+from assemblyline.common.isotime import epoch_to_iso, now
 from assemblyline.common.str_utils import safe_str
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.filestore import FileStore
@@ -135,14 +135,15 @@ class SubmissionClient:
 
         # Figure out the expiry for the submission if none was provided
         if expiry is None:
+            # Enforce maximum DTL
+            if self.config.submission.max_dtl > 0:
+                if int(submission_obj.params.ttl):
+                    submission_obj.params.ttl = min(int(submission_obj.params.ttl), self.config.submission.max_dtl)
+                else:
+                    submission_obj.params.ttl = self.config.submission.max_dtl
+
             if submission_obj.params.ttl:
                 expiry = epoch_to_iso(submission_obj.time.timestamp() + submission_obj.params.ttl * SECONDS_PER_DAY)
-
-        # Enforce the max_dtl
-        if self.config.submission.max_dtl > 0:
-            max_expiry = now_as_iso(self.config.submission.max_dtl * SECONDS_PER_DAY)
-            if not expiry or expiry > max_expiry:
-                expiry = max_expiry
 
         max_size = self.config.submission.max_file_size
 
