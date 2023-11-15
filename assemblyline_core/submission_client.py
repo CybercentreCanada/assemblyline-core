@@ -27,7 +27,7 @@ from typing import List, Optional, Tuple, Dict
 from assemblyline.common import forge
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
-from assemblyline.common.isotime import epoch_to_iso, now, now_as_iso
+from assemblyline.common.isotime import epoch_to_iso, now
 from assemblyline.common.str_utils import safe_str
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.filestore import FileStore
@@ -85,7 +85,7 @@ class SubmissionClient:
 
     @elasticapm.capture_span(span_type='submission_client')
     def rescan(self, submission: Submission, results: Dict[str, Result], file_infos: Dict[str, FileInfo],
-               file_tree, errors: List[str],  rescan_services: List[str]):
+               file_tree, errors: List[str], rescan_services: List[str]):
         """
         Rescan a submission started on another system.
         """
@@ -121,7 +121,8 @@ class SubmissionClient:
 
     @elasticapm.capture_span(span_type='submission_client')
     def submit(self, submission_obj: SubmissionObject, local_files: Optional[List] = None,
-               completed_queue: Optional[str] = None, expiry: Optional[str] = None):
+               completed_queue: Optional[str] = None, expiry: Optional[str] = None,
+               allow_description_overwrite: bool = False):
         """Submit several files in a single submission.
 
         After this method runs, there should be no local copies of the file left.
@@ -134,14 +135,15 @@ class SubmissionClient:
 
         # Figure out the expiry for the submission if none was provided
         if expiry is None:
+            # Enforce maximum DTL
+            if self.config.submission.max_dtl > 0:
+                if int(submission_obj.params.ttl):
+                    submission_obj.params.ttl = min(int(submission_obj.params.ttl), self.config.submission.max_dtl)
+                else:
+                    submission_obj.params.ttl = self.config.submission.max_dtl
+
             if submission_obj.params.ttl:
                 expiry = epoch_to_iso(submission_obj.time.timestamp() + submission_obj.params.ttl * SECONDS_PER_DAY)
-
-        # Enforce the max_dtl
-        if self.config.submission.max_dtl > 0:
-            max_expiry = now_as_iso(self.config.submission.max_dtl * SECONDS_PER_DAY)
-            if not expiry or expiry > max_expiry:
-                expiry = max_expiry
 
         max_size = self.config.submission.max_file_size
 
@@ -155,6 +157,9 @@ class SubmissionClient:
             original_classification = str(submission_obj.params.classification)
             file_hash, size, new_metadata = self._ready_file(local_file, expiry, original_classification)
             new_name = new_metadata.pop('name', fname)
+            new_description = new_metadata.pop("description", None)
+            if allow_description_overwrite and new_description is not None:
+                submission_obj.params.description = new_description
             meta_classification = new_metadata.pop('classification', original_classification)
             if meta_classification != original_classification:
                 try:
@@ -237,6 +242,9 @@ class SubmissionClient:
             self.datastore.save_or_freshen_file(fileinfo['sha256'], fileinfo, expiry,
                                                 al_meta['classification'])
             self.filestore.upload(local_path, fileinfo['sha256'])
+            if fileinfo["type"].startswith("uri/") and "uri_info" in fileinfo and "uri" in fileinfo["uri_info"]:
+                al_meta["name"] = fileinfo["uri_info"]["uri"]
+                al_meta["description"] = f"Inspection of URL: {fileinfo['uri_info']['uri']}"
             return fileinfo['sha256'], fileinfo['size'], al_meta
 
         finally:

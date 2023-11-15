@@ -15,8 +15,6 @@ import platform
 import concurrent.futures
 import copy
 from contextlib import contextmanager
-from assemblyline.common.dict_utils import get_recursive_sorted_tuples
-from assemblyline.common.uid import get_id_from_data
 
 import elasticapm
 import yaml
@@ -27,9 +25,12 @@ from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.events import EventWatcher, EventSender
 from assemblyline.odm.models.service import Service, DockerConfig, EnvironmentVariable
+from assemblyline.odm.models.config import Mount
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
 from assemblyline.odm.messages.scaler_status_heartbeat import Status
 from assemblyline.odm.messages.changes import ServiceChange, Operation
+from assemblyline.common.dict_utils import get_recursive_sorted_tuples
+from assemblyline.common.uid import get_id_from_data
 from assemblyline.common.forge import get_classification, get_service_queue, get_apm_client
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
@@ -49,11 +50,6 @@ SCALE_INTERVAL = 5
 METRIC_SYNC_INTERVAL = 0.5
 CONTAINER_EVENTS_LOG_INTERVAL = 2
 HEARTBEAT_INTERVAL = 5
-
-# How many times to let a service generate an error in this module before we disable it.
-# This is only for analysis services, core services we keep retrying forever
-MAXIMUM_SERVICE_ERRORS = 5
-ERROR_EXPIRY_TIME = 60*60  # how long we wait before we forgive an error. (seconds)
 
 # The maximum containers we ask to be created in a single scaling iteration
 # This is to give kubernetes a chance to update our view of resource usage before we ask for more containers
@@ -122,9 +118,10 @@ class ServiceProfile:
     """
 
     def __init__(self, name: str, container_config: DockerConfig, config_blob: str = '',
-                 min_instances: int = 0, max_instances: int = None, growth: float = 600,
-                 shrink: Optional[float] = None, backlog: int = 500, queue=None,
-                 shutdown_seconds: int = 30, dependency_blobs: dict[str, str] = None, privileged: bool = False):
+                 min_instances: int = 0, max_instances: Optional[int] = None, growth: float = 600,
+                 shrink: Optional[float] = None, backlog: int = 500, queue: Optional[PriorityQueue] = None,
+                 shutdown_seconds: int = 30, dependency_blobs: Optional[dict[str, str]] = None,
+                 privileged: bool = False):
         """
         :param name: Name of the service to manage
         :param container_config: Instructions on how to start this service
@@ -133,11 +130,11 @@ class ServiceProfile:
         :param growth: Delay before growing a service, unit-less, approximately seconds
         :param shrink: Delay before shrinking a service, unit-less, approximately seconds, defaults to -growth
         :param backlog: How long a queue backlog should be before it takes `growth` seconds to grow.
-        :param queue: Queue name for monitoring
+        :param queue: Queue object for monitoring
         :param privileged: Is this service able to interact with core directly?
         """
         self.name = name
-        self.queue: PriorityQueue = queue
+        self.queue: Optional[PriorityQueue] = queue
         self.container_config = container_config
         self.high_duty_cycle = 0.7
         self.low_duty_cycle = 0.5
@@ -147,8 +144,7 @@ class ServiceProfile:
         self.privileged = privileged
 
         # How many instances we want, and can have
-        self.min_instances: int = max(0, int(min_instances))
-        self._min_instances: int = self.min_instances
+        self._min_instances: int = max(0, int(min_instances))
         self._max_instances: int = max(0, int(max_instances or 0))
         self.desired_instances: int = 0
         self.target_instances: int = 0
@@ -186,9 +182,17 @@ class ServiceProfile:
             return self.target_instances + MAX_CONTAINER_ALLOCATION
         return min(self._max_instances, self.target_instances + MAX_CONTAINER_ALLOCATION)
 
+    @property
+    def min_instances(self) -> int:
+        return self._min_instances
+
     @max_instances.setter
     def max_instances(self, value: int):
         self._max_instances = max(0, value)
+
+    @min_instances.setter
+    def min_instances(self, value: int):
+        self._min_instances = max(0, value)
 
     def update(self, delta: float, instances: int, backlog: int, duty_cycle: float):
         self.last_update = time.time()
@@ -257,10 +261,9 @@ class ScalerServer(ThreadedCoreBase):
                          redis=redis, redis_persist=redis_persist)
 
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
-        self.error_count_lock = threading.Lock()
-        self.error_count: dict[str, list[float]] = {}
         self.status_table = ExpiringHash(SERVICE_STATE_HASH, host=self.redis, ttl=30*60)
         self.service_event_sender = EventSender('changes.services', host=self.redis)
+        self.service_watcher_wakeup = threading.Event()
         self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
 
@@ -269,7 +272,13 @@ class ScalerServer(ThreadedCoreBase):
         # function properly.
         for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']:
             env_name = secret.strip("${}")
-            core_env[env_name] = os.environ[env_name]
+            try:
+                core_env[env_name] = os.environ[env_name]
+            except KeyError:
+                # Don't pass through variables that scaler doesn't have
+                # they are likely specific to other components and shouldn't
+                # be shared with privileged services.
+                pass
 
         labels = {
             'app': 'assemblyline',
@@ -292,8 +301,10 @@ class ScalerServer(ThreadedCoreBase):
                                                    namespace=NAMESPACE, priority='al-service-priority',
                                                    dependency_priority='al-core-priority',
                                                    cpu_reservation=self.config.services.cpu_reservation,
+                                                   linux_node_selector=self.config.core.scaler.linux_node_selector,
                                                    log_level=self.config.logging.log_level,
                                                    core_env=core_env,
+                                                   cluster_pod_list=self.config.core.scaler.cluster_pod_list,
                                                    default_service_account=self.config.services.service_account)
 
             # Add global configuration for privileged services
@@ -303,13 +314,13 @@ class ScalerServer(ThreadedCoreBase):
             # If we're passed an override for server-server and it's defining an HTTPS connection, then add a global
             # mount for the Root CA that needs to be mounted
             if INTERNAL_ENCRYPT:
-                self.config.core.scaler.service_defaults.mounts.append(dict(
+                self.config.core.scaler.service_defaults.mounts.append(Mount(dict(
                     name="root-ca",
                     path="/etc/assemblyline/ssl/al_root-ca.crt",
                     resource_type="secret",
                     resource_name=f"{RELEASE_NAME}.internal-generated-ca",
                     resource_key="tls.crt"
-                ))
+                )))
 
             # Add default mounts for (non-)privileged services
             for mount in self.config.core.scaler.service_defaults.mounts:
@@ -319,11 +330,6 @@ class ScalerServer(ThreadedCoreBase):
                     self.controller.add_config_mount(mount.name, config_map=mount.config_map, key=mount.key,
                                                      target_path=mount.path, read_only=mount.read_only,
                                                      core=mount.privileged_only)
-                    self.log.warning(
-                        "DEPRECATED: Migrate default service mounts using ConfigMaps to use: "
-                        f"resource_type='configmap', resource_name={mount.config_map}, resource_key={mount.key or ''}. "
-                        "Continuing deprecated mounting.."
-                    )
                     continue
 
                 if mount.resource_type == 'configmap':
@@ -390,7 +396,6 @@ class ScalerServer(ThreadedCoreBase):
                 fn(*args, **kwargs)
             except ServiceControlError as error:
                 self.log.exception(f"Error while managing service: {error.service_name}")
-                self.handle_service_error(error.service_name)
             except Exception:
                 self.log.exception(f'Crash in scaler: {fn.__name__}')
         return with_logs
@@ -423,25 +428,30 @@ class ScalerServer(ThreadedCoreBase):
     def stop(self):
         super().stop()
         self.service_change_watcher.stop()
+        self.service_watcher_wakeup.set()
         self.controller.stop()
 
-    def _handle_service_change_event(self, data: ServiceChange):
-        if data.operation == Operation.Removed:
-            self.log.info(f'Service appears to be deleted, removing {data.name}')
-            stage = self.get_service_stage(data.name)
-            self.stop_service(data.name, stage)
-        elif data.operation == Operation.Incompatible:
-            return
+    def _handle_service_change_event(self, data: Optional[ServiceChange]):
+        if data is None:
+            self.service_watcher_wakeup.set()
         else:
-            service = self.datastore.get_service_with_delta(data.name)
-            if not service:
-                self.log.warning(f'Received change event for non-existent service: {data.name}. Ignoring..')
+            if data.operation == Operation.Removed:
+                self.log.info(f'Service appears to be deleted, removing {data.name}')
+                stage = self.get_service_stage(data.name)
+                self.stop_service(data.name, stage)
+            elif data.operation == Operation.Incompatible:
                 return
-            self._sync_service(service)
+            else:
+                service = self.datastore.get_service_with_delta(data.name)
+                if not service:
+                    self.log.warning(f'Received change event for non-existent service: {data.name}. Ignoring..')
+                    return
+                self._sync_service(service)
 
     def sync_services(self):
         while self.running:
             with apm_span(self.apm_client, 'sync_services'):
+                self.log.info('Synchronizing service configuration')
                 with self.profiles_lock:
                     current_services = set(self.profiles.keys())
                 discovered_services: list[str] = []
@@ -456,10 +466,18 @@ class ScalerServer(ThreadedCoreBase):
                     self.log.info(f'Service appears to be deleted, removing stray {stray_service}')
                     stage = self.get_service_stage(stray_service)
                     self.stop_service(stray_service, stage)
+                self.log.info('Finish synchronizing service configuration')
 
-            self.sleep(SERVICE_SYNC_INTERVAL)
+            # Wait for the interval or until someone wakes us up
+            self.service_watcher_wakeup.wait(timeout=SERVICE_SYNC_INTERVAL)
+            self.service_watcher_wakeup.clear()
 
     def _sync_service(self, service: Service):
+        """
+        Synchronize the state of the service in the database with the orchestration environment.
+
+        :param service: Service data from the database.
+        """
         name = service.name
         stage = self.get_service_stage(service.name)
         default_settings = self.config.core.scaler.service_defaults
@@ -489,8 +507,8 @@ class ScalerServer(ThreadedCoreBase):
             # Check if service considered compatible to run on Assemblyline?
             system_spec = f'{FRAMEWORK_VERSION}.{SYSTEM_VERSION}'
             if not service.version.startswith(system_spec):
-                # If FW and SYS version don't prefix in the service version, we can't guarantee the service is compatible
-                # Disable and treat it as incompatible due to service version.
+                # If FW and SYS version don't prefix in the service version, we can't guarantee the
+                # service is compatible. Disable and treat it as incompatible due to service version.
                 self.log.warning("Disabling service with incompatible version. "
                                  f"[{service.version} != '{system_spec}.X.{service.update_channel}Y'].")
                 disable_incompatible_service()
@@ -531,20 +549,22 @@ class ScalerServer(ThreadedCoreBase):
                 self._service_stage_hash.set(name, ServiceStage.Running)
                 stage = ServiceStage.Running
 
+            self.log.info(f'Preparing environment for {service.name}')
+
+            # Configure the necessary network policies for the service and it's dependencies, if applicable
+            dependency_internet = [(name, dependency.container.allow_internet_access)
+                                   for name, dependency in dependency_config.items()]
+
+            self.controller.prepare_network(service.name, service.docker_config.allow_internet_access,
+                                            dependency_internet)
+
             # If dependency container(s) are missing, start the setup process
             if set(dependency_keys.keys()) != set(dependency_config.keys()):
-                self.log.info(f'Preparing environment for {service.name}')
                 # Services that don't need to wait for an update can be declared ready
                 if service.update_config and not service.update_config.wait_for_update:
                     self._service_stage_hash.set(name, ServiceStage.Running)
                     stage = ServiceStage.Running
 
-                # Enable this service's dependencies before trying to launch the service containers
-                dependency_internet = [(name, dependency.container.allow_internet_access)
-                                       for name, dependency in dependency_config.items()]
-
-                self.controller.prepare_network(service.name, service.docker_config.allow_internet_access,
-                                                dependency_internet)
                 for _n, dependency in dependency_config.items():
                     if dependency_keys.get(_n):
                         # Dependency already exists, skip
@@ -573,13 +593,17 @@ class ScalerServer(ThreadedCoreBase):
 
                 # Add the service to the list of services being scaled
                 with self.profiles_lock:
+                    min_instances = default_settings.min_instances
+                    if service.min_instances is not None:
+                        # Use service-specific value if present
+                        min_instances = service.min_instances
                     if name not in self.profiles:
                         self.log.info(f"Adding "
                                       f"{f'privileged {service.name}' if service.privileged else service.name}"
                                       " to scaling")
                         self.add_service(ServiceProfile(
                             name=name,
-                            min_instances=default_settings.min_instances,
+                            min_instances=min_instances,
                             growth=default_settings.growth,
                             shrink=default_settings.shrink,
                             config_blob=config_blob,
@@ -596,6 +620,7 @@ class ScalerServer(ThreadedCoreBase):
                     # Update RAM, CPU, licence requirements for running services
                     else:
                         profile = self.profiles[name]
+                        profile.min_instances = min_instances
                         profile.max_instances = service.licence_count
                         profile.privileged = service.privileged
 
@@ -623,7 +648,6 @@ class ScalerServer(ThreadedCoreBase):
                 self.controller.set_target(name, 0)
         except Exception:
             self.log.exception(f"Error applying service settings from: {service.name}")
-            self.handle_service_error(service.name)
 
     @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
     def stop_service(self, name: str, current_stage: ServiceStage):
@@ -667,9 +691,12 @@ class ScalerServer(ThreadedCoreBase):
                 with elasticapm.capture_span('read_profiles'):
                     with self.profiles_lock:
                         # We want to evaluate 'active' service profiles
-                        all_profiles: dict[str, ServiceProfile] = {_n: copy.deepcopy(_v)
-                                                                   for _n, _v in self.profiles.items()
-                                                                   if self.get_service_stage(_n) == ServiceStage.Running}
+                        all_profiles: dict[str, ServiceProfile] = {
+                            _n: copy.deepcopy(_v)
+                            for _n, _v in self.profiles.items()
+                            if self.get_service_stage(_n) == ServiceStage.Running
+                        }
+
                     raw_targets = self.controller.get_targets()
                     # This is the list of targets we will adjust
                     targets = {_p.name: raw_targets.get(_p.name, 0) for _p in all_profiles.values()}
@@ -712,14 +739,9 @@ class ScalerServer(ThreadedCoreBase):
                 #       it is one big one, and let the orchestration layer sort out the details.
                 #
 
-                # Recalculate the amount of free resources expanding the total quantity by the overallocation
-                free_cpu, total_cpu = self.controller.cpu_info()
-                used_cpu = total_cpu - free_cpu
-                free_cpu = total_cpu * self.get_cpu_overallocation() - used_cpu
-
-                free_memory, total_memory = self.controller.memory_info()
-                used_memory = total_memory - free_memory
-                free_memory = total_memory * self.get_memory_overallocation() - used_memory
+                # Get the processed resource numbers
+                free_cpu, _ = self.get_cpu_info(overallocation=True)
+                free_memory, _ = self.get_memory_info(overallocation=True)
 
                 # Make adjustments to the targets until everything is satisified
                 # or we don't have the resouces to make more adjustments
@@ -760,36 +782,43 @@ class ScalerServer(ThreadedCoreBase):
                                 self.log.info(f"Scaling service {name}: {old} -> {value}")
                                 pool.call(self.controller.set_target, name, value)
 
-    @elasticapm.capture_span(span_type=APM_SPAN_TYPE)
-    def handle_service_error(self, service_name: str):
-        """Handle an error occurring in the *analysis* service.
+    def get_cpu_info(self, overallocation: bool) -> tuple[float, float]:
+        # Get the raw used resource numbers
+        free_cpu, total_cpu = self.controller.cpu_info()
 
-        Errors for core systems should simply be logged, and a best effort to continue made.
+        # Recalculate the amount of free resources expanding the total quantity by the overallocation
+        if overallocation:
+            used_cpu = total_cpu - free_cpu
+            free_cpu = total_cpu * self.get_cpu_overallocation() - used_cpu
 
-        For analysis services, ignore the error a few times, then disable the service.
-        """
-        with self.error_count_lock:
-            try:
-                self.error_count[service_name].append(time.time())
-            except KeyError:
-                self.error_count[service_name] = [time.time()]
+        # Include the service containers not counted in the raw numbers because they are pending
+        for name, pending in self.controller.get_unavailable().items():
+            profile = self.profiles.get(name)
+            if not profile or not pending:
+                continue
 
-            self.error_count[service_name] = [
-                _t for _t in self.error_count[service_name]
-                if _t >= time.time() - ERROR_EXPIRY_TIME
-            ]
+            free_cpu = free_cpu - profile.container_config.cpu_cores * pending
 
-            if len(self.error_count[service_name]) >= MAXIMUM_SERVICE_ERRORS:
-                self.log.warning(f"Scaler has encountered too many errors trying to load {service_name}. "
-                                 "The service will be permanently disabled...")
-                if self.datastore.service_delta.update(service_name, [(self.datastore.service_delta.UPDATE_SET,
-                                                                       'enabled', False)]):
-                    # Raise awareness to other components by sending an event for the service
-                    self.service_event_sender.send(service_name, {
-                        'operation': Operation.Modified,
-                        'name': service_name
-                    })
-                del self.error_count[service_name]
+        return (free_cpu, total_cpu)
+
+    def get_memory_info(self, overallocation: bool) -> tuple[float, float]:
+        # Get the raw used resource numbers
+        free_memory, total_memory = self.controller.memory_info()
+
+        # Recalculate the amount of free resources expanding the total quantity by the overallocation
+        if overallocation:
+            used_memory = total_memory - free_memory
+            free_memory = total_memory * self.get_memory_overallocation() - used_memory
+
+        # Include the service containers not counted in the raw numbers because they are pending
+        for name, pending in self.controller.get_unavailable().items():
+            profile = self.profiles.get(name)
+            if not profile or not pending:
+                continue
+
+            free_memory = free_memory - profile.container_config.ram_mb * pending
+
+        return (free_memory, total_memory)
 
     def sync_metrics(self):
         """Check if there are any pub-sub messages we need."""
@@ -818,7 +847,7 @@ class ScalerServer(ThreadedCoreBase):
                 with self.profiles_lock:
                     queues = [profile.queue for profile in self.profiles.values() if profile.queue]
                     lengths_list = pq_length(*queues)
-                    lengths = {_q: _l for _q, _l in zip(queues, lengths_list)}
+                    lengths = dict(zip(queues, lengths_list))
 
                     for profile_name, profile in self.profiles.items():
                         queue_length = lengths.get(profile.queue, 0)
@@ -895,8 +924,8 @@ class ScalerServer(ThreadedCoreBase):
                     export_metrics_once(service_name, Status, metrics, host=HOSTNAME,
                                         counter_type='scaler_status', config=self.config, redis=self.redis)
 
-                memory, memory_total = self.controller.memory_info()
-                cpu, cpu_total = self.controller.cpu_info()
+                memory, memory_total = self.get_memory_info(overallocation=False)
+                cpu, cpu_total = self.get_cpu_info(overallocation=False)
                 metrics = {
                     'memory_total': memory_total,
                     'cpu_total': cpu_total,

@@ -9,7 +9,7 @@ import time
 import uuid
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, List
+from typing import Any, List, Optional
 
 import docker
 
@@ -21,11 +21,11 @@ from kubernetes.client.rest import ApiException
 
 from assemblyline.common import isotime
 from assemblyline.odm.messages.changes import Operation, ServiceChange
-from assemblyline.odm.models.config import Mount
+from assemblyline.odm.models.config import Mount, Selector
 from assemblyline.odm.models.service import DockerConfig, Service
 from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config
+from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config, selector_to_node_affinity, PRIVILEGED_SERVICE_ACCOUNT_NAME
 from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline_core.updater.helper import get_latest_tag_for_service
 
@@ -148,8 +148,8 @@ class DockerUpdateInterface:
 
 
 class KubernetesUpdateInterface:
-    def __init__(self, logger, prefix, namespace, priority_class, extra_labels, log_level="INFO",
-                 default_service_account=None):
+    def __init__(self, logger, prefix, namespace, priority_class, extra_labels, linux_node_selector: Selector,
+                 log_level="INFO", default_service_account=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -181,6 +181,7 @@ class KubernetesUpdateInterface:
         self.log_level = log_level
         self.default_service_account = default_service_account
         self.secret_env = []
+        self.linux_node_selector = linux_node_selector
 
         # Get the deployment of this process. Use that information to fill out the secret info
         deployment = self.apps_api.read_namespaced_deployment(name='updater', namespace=self.namespace)
@@ -259,11 +260,6 @@ class KubernetesUpdateInterface:
             if mount.config_map:
                 # Deprecated configuration for mounting ConfigMap
                 # TODO: Deprecate code on next major change
-                self.log.warning(
-                    "DEPRECATED: Migrate default service mounts using ConfigMaps to use: "
-                    f"resource_type='configmap', resource_name={mount.config_map}, resource_key={mount.key or ''}. "
-                    "Continuing deprecated mounting.."
-                )
                 vol_kwargs.update(dict(config_map=V1ConfigMapVolumeSource(name=mount.config_map, optional=False)))
                 vol_mount_kwargs.update(dict(sub_path=mount.key))
 
@@ -338,7 +334,8 @@ class KubernetesUpdateInterface:
             restart_policy='Never',
             containers=[container],
             priority_class_name=self.priority_class,
-            service_account_name=docker_config.service_account or self.default_service_account
+            service_account_name=docker_config.service_account or self.default_service_account or PRIVILEGED_SERVICE_ACCOUNT_NAME,
+            affinity=selector_to_node_affinity(self.linux_node_selector),
         )
 
         if use_pull_secret:
@@ -448,15 +445,17 @@ class ServiceUpdater(ThreadedCoreBase):
                                                         priority_class='al-core-priority',
                                                         extra_labels=extra_labels,
                                                         log_level=self.config.logging.log_level,
-                                                        default_service_account=self.config.services.service_account)
+                                                        default_service_account=self.config.services.service_account,
+                                                        linux_node_selector=self.config.core.scaler.linux_node_selector)
             # Add all additional mounts to privileged services
             self.mounts = self.config.core.scaler.service_defaults.mounts
         else:
             self.controller = DockerUpdateInterface(logger=self.log, log_level=self.config.logging.log_level)
 
-    def _handle_service_change_event(self, data: ServiceChange):
-        if data.operation == Operation.Incompatible:
-            self.incompatible_services.add(data.name)
+    def _handle_service_change_event(self, data: Optional[ServiceChange]):
+        if data is not None:
+            if data.operation == Operation.Incompatible:
+                self.incompatible_services.add(data.name)
 
     def container_installs(self):
         """Go through the list of services and check what are the latest tags for it"""

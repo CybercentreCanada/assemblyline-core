@@ -15,6 +15,7 @@ from assemblyline.odm.messages.dispatcher_heartbeat import DispatcherMessage
 from assemblyline.odm.messages.expiry_heartbeat import ExpiryMessage
 from assemblyline.odm.messages.ingest_heartbeat import IngestMessage
 from assemblyline.odm.messages.service_heartbeat import ServiceMessage
+from assemblyline.odm.messages.vacuum_heartbeat import VacuumMessage
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
@@ -274,6 +275,19 @@ class HeartbeatFormatter(object):
                 self.log.info(f"Sent service heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating ServiceMessage")
+
+        elif m_type == "vacuum":
+            try:
+                msg = {
+                    "sender": self.sender,
+                    "msg": {
+                        "metrics": m_data,
+                    }
+                }
+                self.status_queue.publish(VacuumMessage(msg).as_primitives())
+                self.log.info(f"Sent vacuum heartbeat: {msg['msg']}")
+            except Exception:
+                self.log.exception("An exception occurred while generating VacuumMessage")
 
         else:
             self.log.warning(f"Skipping unknown counter: {m_name} [{m_type}] ==> {m_data}")

@@ -17,8 +17,8 @@ from random import random
 from typing import Any, Iterable, List, Optional, Tuple
 
 import elasticapm
-from assemblyline.common.postprocess import ActionWorker
 
+from assemblyline.common.postprocess import ActionWorker
 from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.str_utils import dotdump, safe_str
@@ -41,6 +41,7 @@ from assemblyline.odm.models.submission import SubmissionParams, Submission as D
 from assemblyline.odm.models.alert import EXTENDED_SCAN_VALUES
 from assemblyline.odm.messages.submission import Submission as MessageSubmission, SubmissionMessage
 
+from assemblyline_core.dispatching.dispatcher import Dispatcher
 from assemblyline_core.submission_client import SubmissionClient
 from .constants import INGEST_QUEUE_NAME, drop_chance, COMPLETE_QUEUE_NAME
 
@@ -103,9 +104,10 @@ class IngestTask(odm.Model):
     # Fields added after a submission is complete for notification/bookkeeping processes
     failure = odm.Text(default='')  # If the ingestion has failed for some reason, what is it?
     score = odm.Optional(odm.Integer())  # Score from previous processing of this file
-    extended_scan = odm.Enum(EXTENDED_SCAN_VALUES, default="skipped")
-    ingest_id = odm.UUID()
-    ingest_time = odm.Date(default="NOW")
+    extended_scan = odm.Enum(EXTENDED_SCAN_VALUES, default="skipped")  # Status of the extended scan
+    ingest_id = odm.UUID()  # Ingestion Identifier
+    ingest_time = odm.Date(default="NOW")  # Time at which the file was ingested
+    notify_time = odm.Optional(odm.Date())  # Time at which the user is notify the submission is finished
 
 
 class Ingester(ThreadedCoreBase):
@@ -189,7 +191,8 @@ class Ingester(ThreadedCoreBase):
     def try_run(self):
         threads_to_maintain = {
             'Retries': self.handle_retries,
-            'Timeouts': self.handle_timeouts
+            'Timeouts': self.handle_timeouts,
+            'Missing': self.handle_missing,
         }
         threads_to_maintain.update({f'Complete_{n}': self.handle_complete for n in range(COMPLETE_THREADS)})
         threads_to_maintain.update({f'Ingest_{n}': self.handle_ingest for n in range(INGEST_THREADS)})
@@ -483,6 +486,64 @@ class Ingester(ThreadedCoreBase):
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
 
+    def handle_missing(self) -> None:
+        """
+        Messages get dropped or only partially processed when ingester and dispatcher containers scale up and down.
+
+        This loop checks for submissions that are in two invalid states:
+         - finished but still listed as being scanned by ingester (message probably dropped by ingester)
+         - listed by ingester but unknown by dispatcher (message could have been dropped on either end)
+
+        Loading all the info needed to do these checks is a bit slow, but doing them every 5 or 15 minutes
+        per ingester shouldn't be noteworthy. While these missing messages are bound to happen from time to time
+        they should be rare. With that in mind, a warning is raised whenever this worker processes something
+        so that if a constant stream of items are falling through and getting processed here it might stand out.
+        """
+        last_round: set[str] = set()
+
+        while self.sleep(300 if last_round else 900):
+            # Get the current set of outstanding tasks
+            outstanding: dict[str, dict] = self.scanning.items()
+
+            # Get jobs being processed by dispatcher or in dispatcher queue
+            assignment: dict[str, str] = {}
+            for data in self.submit_client.dispatcher.queued_submissions():
+                assignment[data['submission']['sid']] = ''
+            for dis in Dispatcher.all_instances(self.redis_persist):
+                for key in Dispatcher.instance_assignment(self.redis_persist, dis):
+                    assignment[key] = dis
+
+            # Filter out outstanding tasks currently assigned or in queue
+            outstanding = {
+                key: doc
+                for key, doc in outstanding.items()
+                if doc["submission"]["sid"] not in assignment
+            }
+
+            unprocessed = []
+            for key, data in outstanding.items():
+                task = IngestTask(data)
+                sid = task.submission.sid
+
+                # Check if its already complete in the database
+                from_db = self.datastore.submission.get_if_exists(sid)
+                if from_db and from_db.state == "completed":
+                    self.log.warning(f"Completing a hanging finished submission [{sid}]")
+                    self.completed(from_db)
+
+                # Check for items that have been in an unknown state since the last round
+                # and put it back in processing
+                elif sid in last_round:
+                    self.log.warning(f"Recovering a submission dispatcher hasn't processed [{sid}]")
+                    self.submit(task)
+
+                # Otherwise defer looking at this until next iteration
+                else:
+                    unprocessed.append(sid)
+
+            # store items for next round
+            last_round = set(unprocessed)
+
     def get_groups_from_user(self, username: str) -> List[str]:
         # Reset the group cache at the top of each hour
         if time.time()//HOUR_IN_SECONDS > self._user_groups_reset:
@@ -530,7 +591,8 @@ class Ingester(ThreadedCoreBase):
 
         # Set the groups from the user, if they aren't already set
         if not task.params.groups:
-            task.params.groups = self.get_groups_from_user(task.params.submitter)
+            task.params.groups = [g for g in self.get_groups_from_user(
+                task.params.submitter) if g in str(task.params.classification)]
 
         # Check if this file is already being processed
         self.stamp_filescore_key(task)
@@ -736,6 +798,10 @@ class Ingester(ThreadedCoreBase):
         q = self.notification_queues.get(note_queue, None)
         if not q:
             self.notification_queues[note_queue] = q = NamedQueue(note_queue, self.redis_persist)
+
+        # Mark at which time an item was queued
+        task.notify_time = now_as_iso()
+
         q.push(task.as_primitives())
 
     def expired(self, delta: float, errors) -> bool:

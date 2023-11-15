@@ -5,6 +5,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
+import typing
 from typing import Optional, Any, TYPE_CHECKING, Iterable
 import json
 import enum
@@ -16,10 +17,12 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.forge import get_service_queue, get_apm_client
+from assemblyline.common.forge import get_service_queue, get_apm_client, get_classification
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.postprocess import ActionWorker
+from assemblyline.datastore.helper import AssemblylineDatastore
+from assemblyline.odm.messages.changes import ServiceChange, Operation
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch, DispatcherCommandMessage, \
@@ -27,15 +30,16 @@ from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch
 from assemblyline.odm.messages.submission import SubmissionMessage, from_datastore_submission
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.error import Error
+from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
-from assemblyline.odm.models.result import Result
+from assemblyline.odm.models.user import User
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
+from assemblyline.remote.datatypes.events import EventWatcher
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline.remote.datatypes.set import Set
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.remote.datatypes.set import ExpiringSet
+from assemblyline.remote.datatypes.set import ExpiringSet, Set
 from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
 from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
@@ -99,15 +103,19 @@ class ResultSummary:
         self.key: str = key
         self.drop: bool = drop
         self.score: int = score
-        self.children: list[str, str] = children
+        self.children: list[tuple[str, str]] = children
 
 
 class SubmissionTask:
     """Dispatcher internal model for submissions"""
 
-    def __init__(self, submission, completed_queue, scheduler, results=None,
+    def __init__(self, submission, completed_queue, scheduler, datastore: AssemblylineDatastore, results=None,
                  file_infos=None, file_tree=None, errors: Optional[Iterable[str]] = None):
         self.submission: Submission = Submission(submission)
+        submitter: Optional[User] = datastore.user.get_if_exists(self.submission.params.submitter)
+        self.service_access_control: Optional[str] = None
+        if submitter:
+            self.service_access_control = submitter.classification.value
 
         self.completed_queue = None
         if completed_queue:
@@ -164,11 +172,13 @@ class SubmissionTask:
             for k, result in results.items():
                 sha256, service, _ = k.split('.', 2)
                 if service not in rescan:
-                    children = [r['sha256'] for r in result['response']['extracted']]
+                    extracted = result['response']['extracted']
+                    children: list[str] = [r['sha256'] for r in extracted]
                     self.register_children(sha256, children)
+                    children_detail: list[tuple[str, str]] = [(r['sha256'], r['parent_relation']) for r in extracted]
                     self.service_results[(sha256, service)] = ResultSummary(
                         key=k, drop=result['drop_file'], score=result['result']['score'],
-                        children=children)
+                        children=children_detail)
 
                 tags = Result(result).scored_tag_dict()
                 for key in tags.keys():
@@ -184,7 +194,7 @@ class SubmissionTask:
                 self.service_errors[(sha256, service)] = e
 
     @property
-    def sid(self):
+    def sid(self) -> str:
         return self.submission.sid
 
     def forbid_for_children(self, sha256: str, service_name: str):
@@ -265,6 +275,10 @@ class Dispatcher(ThreadedCoreBase):
         return Hash(DISPATCH_TASK_ASSIGNMENT + instance_id, host=persistent_redis).length()
 
     @staticmethod
+    def instance_assignment(persistent_redis, instance_id) -> list[str]:
+        return Hash(DISPATCH_TASK_ASSIGNMENT + instance_id, host=persistent_redis).keys()
+
+    @staticmethod
     def all_queue_lengths(redis, instance_id):
         return {
             'start': NamedQueue(DISPATCH_START_EVENTS + instance_id, host=redis).length(),
@@ -289,8 +303,8 @@ class Dispatcher(ThreadedCoreBase):
         self.running_tasks = Hash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
 
-        # self.classification_engine = forge.get_classification()
-        #
+        self.classification_engine = get_classification()
+
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
         self.traffic_queue = CommsQueue('submissions', self.redis)
         self.quota_tracker = UserQuotaTracker('submissions', timeout=60 * 60, host=self.redis_persist)
@@ -348,8 +362,13 @@ class Dispatcher(ThreadedCoreBase):
         self.redis_bad_sids = Set(BAD_SID_HASH, host=self.redis_persist)
         self.bad_sids: set[str] = set(self.redis_bad_sids.members())
 
+        # Event Watchers
+        self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
+        self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
+
     def stop(self):
         super().stop()
+        self.service_change_watcher.stop()
         self.postprocess_worker.stop()
 
     def interrupt_handler(self, signum, stack_frame):
@@ -358,6 +377,32 @@ class Dispatcher(ThreadedCoreBase):
         self._shutdown_timeout = AL_SHUTDOWN_QUIT
         self.finalizing.set()
         self.dispatchers_directory_finalize.set(self.instance_id, int(time.time()))
+
+    def _handle_status_change(self, status: Optional[bool]):
+        super()._handle_status_change(status)
+
+        # If we may have lost redis connection check all of our submissions
+        if status is None:
+            for sid in self.tasks.keys():
+                _q = self.find_process_queue(sid)
+                _q.put(DispatchAction(kind=Action.check_submission, sid=sid))
+
+    def _handle_service_change_event(self, data: ServiceChange):
+        if data.operation == Operation.Removed:
+            # Remove all current instances of service from scheduler cache
+            [service_set.remove(data.name) for service_set in self.scheduler.c12n_services.values()
+             if data.name in service_set]
+        else:
+            # If Added/Modifed, pull the service information and modify cache
+            service: Service = self.datastore.get_service_with_delta(data.name)
+            for c12n, service_set in self.scheduler.c12n_services.items():
+                if self.classification_engine.is_accessible(c12n, service.classification):
+                    # Classification group is allowed to use this service
+                    service_set.add(service.name)
+                else:
+                    # Classification group isn't allowed to use this service
+                    if service.name in service_set:
+                        service_set.remove(service.name)
 
     def process_queue_index(self, key: str) -> int:
         return sum(ord(_x) for _x in key) % RESULT_THREADS
@@ -372,6 +417,7 @@ class Dispatcher(ThreadedCoreBase):
 
     def try_run(self):
         self.log.info(f'Using dispatcher id {self.instance_id}')
+        self.service_change_watcher.start()
         threads = {
             # Pull in new submissions
             'Pull Submissions': self.pull_submissions,
@@ -459,7 +505,7 @@ class Dispatcher(ThreadedCoreBase):
                 # Start of process dispatcher transaction
                 with apm_span(self.apm_client, 'submission_message'):
                     # This is probably a complete task
-                    task = SubmissionTask(scheduler=self.scheduler, **message)
+                    task = SubmissionTask(scheduler=self.scheduler, datastore=self.datastore, **message)
 
                     # Check the sid table
                     if task.sid in self.bad_sids:
@@ -528,13 +574,59 @@ class Dispatcher(ThreadedCoreBase):
 
         task.file_depth[sha256] = 0
         task.file_names[sha256] = submission.files[0].name or sha256
+
         # Initialize ancestry chain by identifying the root file
-        task.file_temporary_data[sha256]['ancestry'] = [[dict(type=self.datastore.file.get(sha256).type,
-                                                              parent_relation="ROOT",
-                                                              sha256=sha256)]]
+        file_info = self.get_fileinfo(task, sha256)
+        file_type = file_info.type if file_info else 'NOT_FOUND'
+        task.file_temporary_data[sha256]['ancestry'] = [[dict(type=file_type, parent_relation="ROOT", sha256=sha256)]]
+
+        # Start the file dispatching
         task.active_files.add(sha256)
         action = DispatchAction(kind=Action.dispatch_file, sid=sid, sha=sha256)
         self.find_process_queue(sid).put(action)
+
+    @elasticapm.capture_span(span_type='dispatcher')
+    def get_fileinfo(self, task: SubmissionTask, sha256: str) -> Optional[FileInfo]:
+        # First try to get the info from local cache
+        file_info = task.file_info.get(sha256, None)
+        if file_info:
+            return file_info
+
+        # get the info from datastore
+        filestore_info: Optional[File] = self.datastore.file.get(sha256)
+
+        if filestore_info is None:
+            # Store an error and mark this file as unprocessable
+            task.dropped_files.add(sha256)
+            self._dispatching_error(task, Error({
+                'archive_ts': None,
+                'expiry_ts': task.submission.expiry_ts,
+                'response': {
+                    'message': f"Couldn't find file info for {sha256} in submission {task.sid}",
+                    'service_name': 'Dispatcher',
+                    'service_tool_version': '4.0',
+                    'service_version': '4.0',
+                    'status': 'FAIL_NONRECOVERABLE'
+                },
+                'sha256': sha256,
+                'type': 'UNKNOWN'
+            }))
+            task.file_info[sha256] = None
+            task.file_schedules[sha256] = []
+            return None
+        else:
+            # Translate the file info format
+            file_info = task.file_info[sha256] = FileInfo(dict(
+                magic=filestore_info.magic,
+                md5=filestore_info.md5,
+                mime=filestore_info.mime,
+                sha1=filestore_info.sha1,
+                sha256=filestore_info.sha256,
+                size=filestore_info.size,
+                type=filestore_info.type,
+                uri_info=filestore_info.uri_info
+            ))
+        return file_info
 
     @elasticapm.capture_span(span_type='dispatcher')
     def dispatch_file(self, task: SubmissionTask, sha256: str) -> bool:
@@ -555,49 +647,22 @@ class Dispatcher(ThreadedCoreBase):
         file_depth: int = task.file_depth[sha256]
         # If its the first time we've seen this file, we won't have a schedule for it
         if sha256 not in task.file_schedules:
-            with elasticapm.capture_span('build_schedule'):
-                # We are processing this file, load the file info, and build the schedule
-                filestore_info: Optional[File] = self.datastore.file.get(sha256)
+            # We are processing this file, load the file info, and build the schedule
+            file_info = self.get_fileinfo(task, sha256)
+            if file_info is None:
+                return False
 
-                if filestore_info is None:
-                    task.dropped_files.add(sha256)
-                    self._dispatching_error(task, Error({
-                        'archive_ts': None,
-                        'expiry_ts': task.submission.expiry_ts,
-                        'response': {
-                            'message': f"Couldn't find file info for {sha256} in submission {sid}",
-                            'service_name': 'Dispatcher',
-                            'service_tool_version': '4.0',
-                            'service_version': '4.0',
-                            'status': 'FAIL_NONRECOVERABLE'
-                        },
-                        'sha256': sha256,
-                        'type': 'UNKNOWN'
-                    }))
-                    task.file_info[sha256] = None
-                    task.file_schedules[sha256] = []
-                    return False
-                else:
-                    file_info = task.file_info[sha256] = FileInfo(dict(
-                        magic=filestore_info.magic,
-                        md5=filestore_info.md5,
-                        mime=filestore_info.mime,
-                        sha1=filestore_info.sha1,
-                        sha256=filestore_info.sha256,
-                        size=filestore_info.size,
-                        type=filestore_info.type,
-                    ))
+            forbidden_services = None
 
-                    forbidden_services = None
+            # If Dynamic Recursion Prevention is in effect and the file is not part of the bypass list,
+            # Find the list of services this file is forbidden from being sent to.
+            ignore_drp = submission.params.ignore_dynamic_recursion_prevention
+            if not ignore_drp and sha256 not in task.dynamic_recursion_bypass:
+                forbidden_services = task.find_recursion_excluded_services(sha256)
 
-                    # If Dynamic Recursion Prevention is in effect and the file is not part of the bypass list,
-                    # Find the list of services this file is forbidden from being sent to.
-                    ignore_drp = submission.params.ignore_dynamic_recursion_prevention
-                    if not ignore_drp and sha256 not in task.dynamic_recursion_bypass:
-                        forbidden_services = task.find_recursion_excluded_services(sha256)
-
-                    task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
-                                                                                file_depth, forbidden_services)
+            task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
+                                                                        file_depth, forbidden_services,
+                                                                        task.service_access_control)
 
         file_info = task.file_info[sha256]
         schedule: list = list(task.file_schedules[sha256])
@@ -1214,7 +1279,8 @@ class Dispatcher(ThreadedCoreBase):
 
         # Update children to include parent_relation, likely EXTRACTED
         if summary.children and isinstance(summary.children[0], str):
-            summary.children = [(c, 'EXTRACTED') for c in summary.children]
+            old_children = typing.cast(list[str], summary.children)
+            summary.children = [(c, 'EXTRACTED') for c in old_children]
 
         # Record the result as a summary
         task.service_results[(sha256, service_name)] = summary
@@ -1264,10 +1330,16 @@ class Dispatcher(ThreadedCoreBase):
 
                     dispatched += 1
                     task.active_files.add(extracted_sha256)
-                    parent_ancestry = parent_data['ancestry']
+                    try:
+                        parent_ancestry = parent_data['ancestry']
+                    except KeyError:
+                        self.log.warn(f"[{sid} :: {sha256}] missing ancestry data.")
+                        parent_ancestry = []
                     existing_ancestry = task.file_temporary_data.get(extracted_sha256, {}).get('ancestry', [])
-                    current_ancestry_node = dict(type=self.datastore.file.get(extracted_sha256).type,
-                                                 parent_relation=parent_relation, sha256=extracted_sha256)
+                    file_info = self.get_fileinfo(task, extracted_sha256)
+                    file_type = file_info.type if file_info else 'NOT_FOUND'
+                    current_ancestry_node = dict(type=file_type, parent_relation=parent_relation,
+                                                 sha256=extracted_sha256)
 
                     task.file_temporary_data[extracted_sha256] = dict(parent_data)
                     task.file_temporary_data[extracted_sha256]['ancestry'] = existing_ancestry

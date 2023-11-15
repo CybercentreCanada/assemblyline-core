@@ -15,6 +15,7 @@ from assemblyline_core.server_base import ServerBase
 ALERT_QUEUE_NAME = 'm-alert'
 ALERT_RETRY_QUEUE_NAME = 'm-alert-retry'
 MAX_RETRIES = 10
+SUBMISSION_RETRY_SEC = 15
 
 
 class Alerter(ServerBase):
@@ -93,13 +94,15 @@ class Alerter(ServerBase):
             self.counter.increment('wait')
             self.log.error(str(error))
 
-            # Wait another 15 secs for the submission to complete
-            alert['wait_until'] = now(15)
+            # Wait a bit for the submission to complete
+            alert['wait_until'] = now(SUBMISSION_RETRY_SEC)
             self.alert_retry_queue.push(alert)
 
             # End of process alert transaction (wait)
             if self.apm_client:
                 self.apm_client.end_transaction('unknown', 'wait')
+
+            return 'wait'
         except Exception:  # pylint: disable=W0703
             retries = alert['alert_retries'] = alert.get('alert_retries', 0) + 1
             self.counter.increment('error')
@@ -112,6 +115,8 @@ class Alerter(ServerBase):
             # End of process alert transaction (failure)
             if self.apm_client:
                 self.apm_client.end_transaction('unknown', 'exception')
+
+            return 'exception'
 
     def try_run(self):
         while self.running:

@@ -11,6 +11,7 @@ import urllib3
 from collections import OrderedDict, defaultdict
 from typing import List, Optional, Tuple
 from time import sleep
+from assemblyline.odm.models.config import Selector
 
 
 from kubernetes import client, config, watch
@@ -18,8 +19,9 @@ from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec,
     V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
-    V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext, \
-    V1Probe, V1ExecAction, V1SecurityContext
+    V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, \
+    V1ServiceSpec, V1ServicePort, V1PodSecurityContext, V1Probe, V1ExecAction, V1SecurityContext, \
+    V1Affinity, V1NodeAffinity, V1NodeSelector, V1NodeSelectorTerm, V1NodeSelectorRequirement
 from kubernetes.client.rest import ApiException
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig, PersistentVolume
 
@@ -35,6 +37,8 @@ DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() == 'true'
 CONTAINER_RESTART_THRESHOLD = int(os.environ.get('CONTAINER_RESTART_THRESHOLD', 1))
 SERVICE_LIVENESS_PERIOD = int(os.environ.get('SERVICE_LIVENESS_PERIOD', 300))
 SERVICE_LIVENESS_TIMEOUT = int(os.environ.get('SERVICE_LIVENESS_TIMEOUT', 60))
+UNPRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('UNPRIVILEGED_SERVICE_ACCOUNT_NAME', None)
+PRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('PRIVILEGED_SERVICE_ACCOUNT_NAME', None)
 
 AL_ROOT_CA = os.environ.get('AL_ROOT_CA', '/etc/assemblyline/ssl/al_root-ca.crt')
 
@@ -93,6 +97,71 @@ def mean(values: list[float]) -> float:
     if len(values) == 0:
         return 0
     return sum(values)/len(values)
+
+
+def selector_to_list_filters(selector: Selector) -> Tuple[Optional[str], Optional[str]]:
+    """Return the field and label selector strings described by selector."""
+    # Field selector only supports equal and not equal
+    field_parts = []
+    for part in selector.field:
+        op = '==' if part.equal else '!='
+        field_parts.append(f"{part.key}{op}{part.value}")
+    field_selector = None
+    if field_parts:
+        field_selector = ','.join(field_parts)
+
+    # label selector is a bit more complicated
+    label_parts = []
+    for part in selector.label:
+        if part.operator == 'In':
+            label_parts.append(f"{part.key} in ({','.join(part.values)})")
+        elif part.operator == 'NotIn':
+            label_parts.append(f"{part.key} notin ({','.join(part.values)})")
+        elif part.operator == 'Exists':
+            label_parts.append(part.key)
+        elif part.operator == 'DoesNotExist':
+            label_parts.append(f"!{part.key}")
+        else:
+            raise ValueError("Unknown selector operator: " + part.operator)
+    label_selector = None
+    if label_parts:
+        label_selector = ','.join(label_parts)
+
+    return field_selector, label_selector
+
+
+def selector_to_node_affinity(selector: Selector) -> Optional[V1Affinity]:
+    """Return the selector as a kubernetes affinity."""
+
+    label_expressions = []
+    for label in selector.label:
+        label_expressions.append(V1NodeSelectorRequirement(
+            key=label.key,
+            operator=label.operator,
+            values=label.values,
+        ))
+
+    field_expressions = []
+    for field in selector.field:
+        field_expressions.append(V1NodeSelectorRequirement(
+            key=field.key,
+            operator='In' if field.equal else 'NotIn',
+            values=[field.value]
+        ))
+
+    if not label_expressions and not field_expressions:
+        return None
+
+    return V1Affinity(
+        node_affinity=V1NodeAffinity(
+            required_during_scheduling_ignored_during_execution=V1NodeSelector(
+                node_selector_terms=[V1NodeSelectorTerm(
+                    match_expressions=label_expressions,
+                    match_fields=field_expressions,
+                )]
+            )
+        )
+    )
 
 
 def get_resources(container) -> Tuple[float, float]:
@@ -164,8 +233,8 @@ def parse_cpu(string: str) -> float:
 
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace: str, prefix: str, priority: str, dependency_priority: str,
-                 cpu_reservation: float, labels=None, log_level="INFO", core_env={},
-                 default_service_account=None):
+                 cpu_reservation: float, linux_node_selector: Selector, labels=None, log_level="INFO", core_env={},
+                 default_service_account=None, cluster_pod_list=True):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
         try:
@@ -194,6 +263,7 @@ class KubernetesController(ControllerInterface):
         self.logger = logger
         self.log_level: str = log_level
         self._labels: dict[str, str] = labels or {}
+        self.linux_node_selector = linux_node_selector
         self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
         self.net_api = client.NetworkingV1Api()
@@ -207,11 +277,12 @@ class KubernetesController(ControllerInterface):
         self._external_profiles = weakref.WeakValueDictionary()
         self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
         self.default_service_account: Optional[str] = default_service_account
+        self.cluster_pod_list = cluster_pod_list
 
         # A record of previously reported events so that we don't report the same message repeatedly, fill it with
         # existing messages so we don't have a huge dump of duplicates on restart
         self.events_window = {}
-        response = self.api.list_namespaced_event(namespace='al', pretty='false',
+        response = self.api.list_namespaced_event(namespace=self.namespace, pretty='false',
                                                   field_selector='type=Warning', watch=False,
                                                   _request_timeout=API_TIMEOUT)
         for event in response.items:
@@ -226,19 +297,21 @@ class KubernetesController(ControllerInterface):
         quota_background = threading.Thread(target=self._loop_forever(self._monitor_quotas), daemon=True)
         quota_background.start()
 
+        self.ready_nodes: dict[str, tuple[float, float]] = {}
         self._node_pool_max_ram: float = 0
         self._node_pool_max_cpu: float = 0
         node_background = threading.Thread(target=self._loop_forever(self._monitor_node_pool), daemon=True)
         node_background.start()
 
-        self._pod_used_ram: float = 0
-        self._pod_used_cpu: float = 0
-        self._pod_used_namespace_ram: float = 0
-        self._pod_used_namespace_cpu: float = 0
+        self._pod_used_ram: dict[str, float] = defaultdict(float)
+        self._pod_used_cpu: dict[str, float] = defaultdict(float)
+        self._pod_used_namespace_ram: dict[str, float] = defaultdict(float)
+        self._pod_used_namespace_cpu: dict[str, float] = defaultdict(float)
         pod_background = threading.Thread(target=self._loop_forever(self._monitor_pods), daemon=True)
         pod_background.start()
 
         self._deployment_targets: dict[str, int] = {}
+        self._deployment_unavailable: dict[str, int] = {}
         deployment_background = threading.Thread(target=self._loop_forever(self._monitor_deployments), daemon=True)
         deployment_background.start()
 
@@ -337,33 +410,65 @@ class KubernetesController(ControllerInterface):
         self._node_pool_max_ram = 0
         self.node_count = 0
         watch = TypelessWatch()
+        self.ready_nodes: dict[str, tuple[float, float]] = {}
+        field_selector, label_selector = selector_to_list_filters(self.linux_node_selector)
 
         for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT,
+                                  field_selector=field_selector, label_selector=label_selector,
                                   _request_timeout=WATCH_API_TIMEOUT):
             if not self.running:
                 break
 
-            if event['type'] == "ADDED":
-                self._node_pool_max_cpu += parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
-                self._node_pool_max_ram += parse_memory(event['raw_object']['status']['allocatable']['memory'])
-                self.node_count += 1
+            name: str = event['raw_object']['metadata']['name']
+
+            if event['type'] in ["ADDED", "MODIFIED"]:
+                # Check for node ready condition
+                ready = False
+                for condition in event['raw_object']['status']['conditions']:
+                    if condition['type'] == 'Ready':
+                        ready = condition['status'] == 'True'
+                        break
+
+                if ready:
+                    cpu = parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
+                    ram = parse_memory(event['raw_object']['status']['allocatable']['memory'])
+                    self.ready_nodes[name] = (cpu, ram)
+                else:
+                    self.ready_nodes.pop(name, None)
+
             elif event['type'] == "DELETED":
-                self._node_pool_max_cpu -= parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
-                self._node_pool_max_ram -= parse_memory(event['raw_object']['status']['allocatable']['memory'])
-                self.node_count -= 1
+                # Remove deleted nodes
+                self.ready_nodes.pop(name, None)
+
+            # Update the totals
+            self.node_count = len(self.ready_nodes)
+            max_cpu = 0
+            max_ram = 0
+            for cpu, ram in self.ready_nodes.values():
+                max_cpu += cpu
+                max_ram += ram
+            self._node_pool_max_cpu = max_cpu
+            self._node_pool_max_ram = max_ram
 
     def _monitor_pods(self):
         watch = TypelessWatch()
-        containers = {}
         log_cache = CacheDict(cache_len=8000)
-        namespaced_containers = {}
-        self._pod_used_cpu = 0
-        self._pod_used_ram = 0
-        self._pod_used_namespace_cpu = 0
-        self._pod_used_namespace_ram = 0
+        per_node_containers: dict[str, dict[str, tuple[float, float]]] = defaultdict(dict)
+        per_node_namespaced_containers: dict[str, dict[str, tuple[float, float]]] = defaultdict(dict)
+        self._pod_used_cpu = defaultdict(float)
+        self._pod_used_ram = defaultdict(float)
+        self._pod_used_namespace_cpu = defaultdict(float)
+        self._pod_used_namespace_ram = defaultdict(float)
 
-        for event in watch.stream(func=self.api.list_pod_for_all_namespaces, timeout_seconds=WATCH_TIMEOUT,
-                                  _request_timeout=WATCH_API_TIMEOUT):
+        if self.cluster_pod_list:
+            list_pods = self.api.list_pod_for_all_namespaces
+            kwargs = dict()
+        else:
+            list_pods = self.api.list_namespaced_pod
+            kwargs = dict(namespace=self.namespace)
+
+        for event in watch.stream(func=list_pods, timeout_seconds=WATCH_TIMEOUT,
+                                  _request_timeout=WATCH_API_TIMEOUT, **kwargs):
             if not self.running:
                 break
 
@@ -372,6 +477,9 @@ class KubernetesController(ControllerInterface):
                 pod_name = event['raw_object']['metadata']['name']
                 uid = event['raw_object']['metadata']['uid']
                 namespace = event['raw_object']['metadata']['namespace']
+                node = event['raw_object']['spec']['nodeName']
+                containers = per_node_containers[node]
+                namespaced_containers = per_node_namespaced_containers[node]
 
                 if event['type'] in ['ADDED', 'MODIFIED']:
                     for container in event['raw_object']['spec']['containers']:
@@ -402,23 +510,23 @@ class KubernetesController(ControllerInterface):
                 self.logger.exception(f"Couldn't parse container information for {pod_name}: {e}")
                 continue
 
-            memory_unrestricted = sum(1 for cpu, mem in containers.values() if mem is None)
-            cpu_unrestricted = sum(1 for cpu, mem in containers.values() if cpu is None)
+            memory_unrestricted = sum(1 for _, mem in containers.values() if mem is None)
+            cpu_unrestricted = sum(1 for cpu, _ in containers.values() if cpu is None)
 
-            memory_used = [mem for cpu, mem in containers.values() if mem is not None]
-            cpu_used = [cpu for cpu, mem in containers.values() if cpu is not None]
+            memory_used = [mem for _, mem in containers.values() if mem is not None]
+            cpu_used = [cpu for cpu, _ in containers.values() if cpu is not None]
 
-            self._pod_used_cpu = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
-            self._pod_used_ram = sum(memory_used) + memory_unrestricted * mean(memory_used)
+            self._pod_used_cpu[node] = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
+            self._pod_used_ram[node] = sum(memory_used) + memory_unrestricted * mean(memory_used)
 
-            memory_unrestricted = sum(1 for cpu, mem in namespaced_containers.values() if mem is None)
-            cpu_unrestricted = sum(1 for cpu, mem in namespaced_containers.values() if cpu is None)
+            memory_unrestricted = sum(1 for _, mem in namespaced_containers.values() if mem is None)
+            cpu_unrestricted = sum(1 for cpu, _ in namespaced_containers.values() if cpu is None)
 
-            memory_used = [mem for cpu, mem in namespaced_containers.values() if mem is not None]
-            cpu_used = [cpu for cpu, mem in namespaced_containers.values() if cpu is not None]
+            memory_used = [mem for _, mem in namespaced_containers.values() if mem is not None]
+            cpu_used = [cpu for cpu, _ in namespaced_containers.values() if cpu is not None]
 
-            self._pod_used_namespace_cpu = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
-            self._pod_used_namespace_ram = sum(memory_used) + memory_unrestricted * mean(memory_used)
+            self._pod_used_namespace_cpu[node] = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
+            self._pod_used_namespace_ram[node] = sum(memory_used) + memory_unrestricted * mean(memory_used)
 
     def _monitor_quotas(self):
         watch = TypelessWatch()
@@ -504,6 +612,7 @@ class KubernetesController(ControllerInterface):
         watch = TypelessWatch()
 
         self._deployment_targets = {}
+        self._deployment_unavailable = {}
         label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items() if _n != 'privilege')
 
         for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
@@ -516,23 +625,49 @@ class KubernetesController(ControllerInterface):
                 name = event['raw_object']['metadata']['labels'].get('component', None)
                 if name is not None:
                     self._deployment_targets[name] = event['raw_object']['spec']['replicas']
+                    self._deployment_unavailable[name] = event['raw_object']['status'].get('unavailableReplicas', 0)
             elif event['type'] == 'DELETED':
                 name = event['raw_object']['metadata']['labels'].get('component', None)
                 self._deployment_targets.pop(name, None)
+                self._deployment_unavailable.pop(name, None)
+
+    def _get_pod_used_namespace_cpu(self) -> float:
+        count = 0.0
+        for name in self.ready_nodes.keys():
+            count += self._pod_used_namespace_cpu[name]
+        return count
+
+    def _get_pod_used_cpu(self) -> float:
+        count = 0.0
+        for name in self.ready_nodes.keys():
+            count += self._pod_used_cpu[name]
+        return count
 
     def cpu_info(self):
         if self._quota_cpu_limit:
             if self._quota_cpu_used:
                 return self._quota_cpu_limit - self._quota_cpu_used, self._quota_cpu_limit
-            return self._quota_cpu_limit - self._pod_used_namespace_cpu, self._quota_cpu_limit
-        return self._node_pool_max_cpu - self._pod_used_cpu, self._node_pool_max_cpu
+            return self._quota_cpu_limit - self._get_pod_used_namespace_cpu(), self._quota_cpu_limit
+        return self._node_pool_max_cpu - self._get_pod_used_cpu(), self._node_pool_max_cpu
+
+    def _get_pod_used_namespace_ram(self) -> float:
+        count = 0.0
+        for name in self.ready_nodes.keys():
+            count += self._pod_used_namespace_ram[name]
+        return count
+
+    def _get_pod_used_ram(self) -> float:
+        count = 0.0
+        for name in self.ready_nodes.keys():
+            count += self._pod_used_ram[name]
+        return count
 
     def memory_info(self):
         if self._quota_mem_limit:
             if self._quota_mem_used:
                 return self._quota_mem_limit - self._quota_mem_used, self._quota_mem_limit
-            return self._quota_mem_limit - self._pod_used_namespace_ram, self._quota_mem_limit
-        return self._node_pool_max_ram - self._pod_used_ram, self._node_pool_max_ram
+            return self._quota_mem_limit - self._get_pod_used_namespace_ram(), self._quota_mem_limit
+        return self._node_pool_max_ram - self._get_pod_used_ram(), self._node_pool_max_ram
 
     def _create_containers(self, service_name: str, deployment_name: str, container_config, mounts,
                            core_container=False):
@@ -590,10 +725,12 @@ class KubernetesController(ControllerInterface):
         # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
+        field_selector, label_selector = selector_to_list_filters(self.linux_node_selector)
         lbls = sorted((labels or {}).items())
         svc_env = sorted(self._service_limited_env[service_name].items())
         change_key = str(f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
-                         f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}")
+                         f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}"
+                         f"nodes={field_selector or ''}{label_selector or ''}")
         self.logger.debug(f"{deployment_name} actual change_key: {change_key}")
         change_key = str(hash(change_key))
 
@@ -670,7 +807,8 @@ class KubernetesController(ControllerInterface):
         metadata = V1ObjectMeta(name=deployment_name, labels=all_labels, annotations={CHANGE_KEY_NAME: change_key})
 
         # Figure out which (if any) service account to use
-        service_account = self.default_service_account
+        service_account = self.default_service_account or \
+            (PRIVILEGED_SERVICE_ACCOUNT_NAME if core_mounts else UNPRIVILEGED_SERVICE_ACCOUNT_NAME)
         if docker_config.service_account:
             service_account = docker_config.service_account
 
@@ -700,6 +838,7 @@ class KubernetesController(ControllerInterface):
             termination_grace_period_seconds=shutdown_seconds,
             security_context=V1PodSecurityContext(fs_group=1000),
             service_account_name=service_account,
+            affinity=selector_to_node_affinity(self.linux_node_selector),
         )
 
         if use_pull_secret:
@@ -750,6 +889,10 @@ class KubernetesController(ControllerInterface):
     def get_targets(self) -> dict[str, int]:
         """Get the target for running instances of all services."""
         return self._deployment_targets
+
+    def get_unavailable(self) -> dict[str, int]:
+        """Get the number of containers the orchestration layer could not start."""
+        return self._deployment_unavailable
 
     def set_target(self, service_name: str, target: int):
         """Set the target for running instances of a service."""
@@ -802,7 +945,7 @@ class KubernetesController(ControllerInterface):
         return [pod.metadata.name for pod in pods.items]
 
     def new_events(self):
-        response = self.api.list_namespaced_event(namespace='al', pretty='false',
+        response = self.api.list_namespaced_event(namespace=self.namespace, pretty='false',
                                                   field_selector='type=Warning', watch=False,
                                                   _request_timeout=API_TIMEOUT)
 
@@ -864,17 +1007,21 @@ class KubernetesController(ControllerInterface):
             List[V1Volume],
             List[V1VolumeMount]]:
         volumes, mounts = [], []
-        if container_name == 'updates' and os.path.exists(AL_ROOT_CA):
-            # Specifically for service updaters when internal encryption is enabled on the cluster
-            update_cert_dir = "/etc/assemblyline/ssl/al_updates"
-            volumes.append(V1Volume(name='updates-cert', secret=V1SecretVolumeSource(secret_name='updates-cert')))
-            mounts.append(V1VolumeMount(name="updates-cert", mount_path=update_cert_dir, read_only=True))
-
-            # Pass gunicorn settings via env
-            spec.container.environment.append({'name': 'CERTFILE', 'value': os.path.join(update_cert_dir, 'tls.crt')})
-            spec.container.environment.append({'name': 'KEYFILE', 'value': os.path.join(update_cert_dir, 'tls.key')})
-
         deployment_strategy = V1DeploymentStrategy()  # Default strategy should be RollingUpdate
+        if container_name == 'updates':
+            # Since we reserved containers named 'updates' to be service updaters, they will always 'Recreate'
+            deployment_strategy = V1DeploymentStrategy(type='Recreate')
+
+            if os.path.exists(AL_ROOT_CA):
+                # Specifically for service updaters when internal encryption is enabled on the cluster
+                update_cert_dir = "/etc/assemblyline/ssl/al_updates"
+                volumes.append(V1Volume(name='updates-cert', secret=V1SecretVolumeSource(secret_name='updates-cert')))
+                mounts.append(V1VolumeMount(name="updates-cert", mount_path=update_cert_dir, read_only=True))
+
+                # Pass gunicorn settings via env
+                spec.container.environment.append({'name': 'CERTFILE', 'value': os.path.join(update_cert_dir, 'tls.crt')})
+                spec.container.environment.append({'name': 'KEYFILE', 'value': os.path.join(update_cert_dir, 'tls.key')})
+
         for volume_name, volume_spec in spec.volumes.items():
             mount_name = f'{deployment_name}-{volume_name}'
 

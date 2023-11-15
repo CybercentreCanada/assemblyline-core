@@ -1,7 +1,7 @@
 import concurrent.futures
 import logging
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import elasticapm
 
@@ -69,8 +69,11 @@ class TaskingClient:
             self.event_listener.register('changes.heuristics', self.reload_heuristics)
             self.event_listener.start()
 
-    def reload_heuristics(self, data: dict):
-        service_name = data.get('service_name')
+    def reload_heuristics(self, data: Optional[dict]):
+        service_name = None
+        if data is not None:
+            service_name = data.get('service_name')
+
         if service_name:
             self.heuristics.update({h.heur_id: h for h in self.datastore.list_service_heuristics(service_name)})
         else:
@@ -260,7 +263,12 @@ class TaskingClient:
 
             if not cache_found:
                 # Checking for previous empty results for this key
-                result = self.datastore.emptyresult.get_if_exists(f"{result_key}.e")
+                try:
+                    result = self.datastore.emptyresult.get_if_exists(f"{result_key}.e")
+                except ValueError:
+                    self.log.warning(f"Got poisoned empty result cache record for key {result_key}.e, cleaning up...")
+                    self.datastore.emptyresult.delete(f"{result_key}.e")
+
                 if result:
                     metric_factory.increment('cache_hit')
                     metric_factory.increment('not_scored')
