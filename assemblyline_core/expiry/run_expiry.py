@@ -75,6 +75,7 @@ class ExpiryManager(ServerBase):
         self.counter = MetricsFactory('expiry', Metrics)
         self.file_delete_worker = ProcessPoolExecutor(self.config.core.expiry.delete_workers)
         self.same_storage = self.config.filestore.storage == self.config.filestore.archive
+        self.current_submission_cleanup = set()
 
         self.redis_persist = redis_persist or get_client(
             host=self.config.core.redis.persistent.host,
@@ -164,13 +165,18 @@ class ExpiryManager(ServerBase):
         self.log.info(f"    Deleted {number_to_delete} items from the datastore...")
 
     def _cleanup_canceled_submission(self, sid):
+        # Allowing us at minimum 5 minutes to cleanup the submission
         self.heartbeat(int(time.time() + 5 * 60))
         if self.apm_client:
             self.apm_client.begin_transaction("Delete canceled submissions")
 
+        # Cleaning up the submission
         self.log.info(f"Deleting incomplete submission {sid}...")
         self.datastore.delete_submission_tree_bulk(sid, self.classification, transport=self.filestore)
         self.redis_bad_sids.remove(sid)
+
+        # We're done cleaning up the sid, mark it as done
+        self.current_submission_cleanup.remove(sid)
 
         if self.apm_client:
             self.apm_client.end_transaction("canceled_submissions", 'deleted')
@@ -180,8 +186,12 @@ class ExpiryManager(ServerBase):
         reached_max = False
 
         # Delete canceled submissions
-        for submission in self.datastore.submission.stream_search("to_be_deleted:true", fl="sid"):
-            pool.submit(self.log_errors(self._cleanup_canceled_submission), submission.sid)
+        # Make sure we're not dedicating more then a quarter of the pool to this operation because it is costly
+        for submission in self.datastore.submission.search(
+                "to_be_deleted:true", fl="sid", rows=max(1, int(self.config.core.expiry.workers / 4)))['items']:
+            if submission.sid not in self.current_submission_cleanup:
+                self.current_submission_cleanup.add(submission.sid)
+                pool.submit(self.log_errors(self._cleanup_canceled_submission), submission.sid)
 
         # Expire data
         for collection in self.expirable_collections:
