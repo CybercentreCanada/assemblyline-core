@@ -1314,7 +1314,7 @@ class Dispatcher(ThreadedCoreBase):
         task.service_logs.pop((sha256, service_name), None)
 
         if summary.partial:
-            self.log.info("[%s/%s] %s returned partial results %s", sid, sha256, service_name)
+            self.log.info("[%s/%s] %s returned partial results", sid, sha256, service_name)
             task.partial_result(sha256, service_name)
         else:
             task.clear_monitoring_entry(sha256, service_name)
