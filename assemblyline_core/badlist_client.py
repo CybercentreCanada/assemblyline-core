@@ -2,10 +2,12 @@ import hashlib
 import logging
 
 from assemblyline.common import forge
+from assemblyline.common.chunk import chunk
 from assemblyline.datastore.helper import AssemblylineDatastore
 
+CHUNK_SIZE = 1000
 
-# Tasking class
+
 class BadlistClient:
     """A helper class to simplify badlisting for privileged services and service-server."""
 
@@ -25,20 +27,11 @@ class BadlistClient:
                 lookup_keys.append(hashlib.sha256(f"{tag_type}: {tag_value}".encode('utf8')).hexdigest())
 
         # Elasticsearch's result window can't be more than 10000 rows
-        rows = min(len(lookup_keys), 10000)
+        # we will query for matches in chunks
         results = []
-        deep_paging_id = "*"
-        while True:
-            # Execute search with deep paging
-            search_result = self.datastore.badlist.search("*", fl="*", rows=rows, as_obj=False, key_space=lookup_keys, deep_paging_id=deep_paging_id)
-            # Store resulting items in list
-            results += search_result['items']
-            if search_result.get('next_deep_paging_id'):
-                # We haven't finished looping over all the results
-                deep_paging_id = search_result['next_deep_paging_id']
-            else:
-                # We're done paging, break and return results
-                break
+        for key_chunk in chunk(lookup_keys, CHUNK_SIZE):
+            results += self.datastore.badlist.search("*", fl="*", rows=CHUNK_SIZE,
+                                                     as_obj=False, key_space=key_chunk)['items']
 
         return results
 
