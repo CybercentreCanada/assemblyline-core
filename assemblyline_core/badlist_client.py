@@ -2,10 +2,12 @@ import hashlib
 import logging
 
 from assemblyline.common import forge
+from assemblyline.common.chunk import chunk
 from assemblyline.datastore.helper import AssemblylineDatastore
 
+CHUNK_SIZE = 1000
 
-# Tasking class
+
 class BadlistClient:
     """A helper class to simplify badlisting for privileged services and service-server."""
 
@@ -24,9 +26,14 @@ class BadlistClient:
             for tag_value in tag_values:
                 lookup_keys.append(hashlib.sha256(f"{tag_type}: {tag_value}".encode('utf8')).hexdigest())
 
-        return self.datastore.badlist.search(
-            "*", fl="*", rows=len(lookup_keys),
-            as_obj=False, key_space=lookup_keys)['items']
+        # Elasticsearch's result window can't be more than 10000 rows
+        # we will query for matches in chunks
+        results = []
+        for key_chunk in chunk(lookup_keys, CHUNK_SIZE):
+            results += self.datastore.badlist.search("*", fl="*", rows=CHUNK_SIZE,
+                                                     as_obj=False, key_space=key_chunk)['items']
+
+        return results
 
     def find_similar_tlsh(self, tlsh):
         return self.datastore.badlist.search(f"hashes.tlsh:{tlsh}", fl="*", as_obj=False)['items']
