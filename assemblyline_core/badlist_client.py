@@ -24,9 +24,23 @@ class BadlistClient:
             for tag_value in tag_values:
                 lookup_keys.append(hashlib.sha256(f"{tag_type}: {tag_value}".encode('utf8')).hexdigest())
 
-        return self.datastore.badlist.search(
-            "*", fl="*", rows=len(lookup_keys),
-            as_obj=False, key_space=lookup_keys)['items']
+        # Elasticsearch's result window can't be more than 10000 rows
+        rows = min(len(lookup_keys), 10000)
+        results = []
+        deep_paging_id = "*"
+        while True:
+            # Execute search with deep paging
+            search_result = self.datastore.badlist.search("*", fl="*", rows=rows, as_obj=False, key_space=lookup_keys, deep_paging_id=deep_paging_id)
+            # Store resulting items in list
+            results += search_result['items']
+            if search_result.get('next_deep_paging_id'):
+                # We haven't finished looping over all the results
+                deep_paging_id = search_result['next_deep_paging_id']
+            else:
+                # We're done paging, break and return results
+                break
+
+        return results
 
     def find_similar_tlsh(self, tlsh):
         return self.datastore.badlist.search(f"hashes.tlsh:{tlsh}", fl="*", as_obj=False)['items']
