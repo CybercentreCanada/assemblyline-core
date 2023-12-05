@@ -9,7 +9,7 @@ import weakref
 import urllib3
 
 from collections import OrderedDict, defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 from time import sleep
 from assemblyline.odm.models.config import Selector
 
@@ -1154,7 +1154,7 @@ class KubernetesController(ControllerInterface):
                                                                        namespace=self.namespace,
                                                                        _request_timeout=API_TIMEOUT)
 
-    def prepare_network(self, service_name: str, internet: bool, dependency_internet: Dict[str, bool]):
+    def prepare_network(self, service_name: str, internet: bool, dependency_internet: Tuple[str, bool]):
         safe_name = service_name.lower().replace('_', '-')
         service_labels = {
             'app': 'assemblyline',
@@ -1185,47 +1185,46 @@ class KubernetesController(ControllerInterface):
                 else:
                     raise
 
-        network_policies = []
-
-        # Allow access to containers with dependency_for
-        # service → depedencies
-        network_policies.append(V1NetworkPolicy(
-            metadata=V1ObjectMeta(name=f'allow-{safe_name}-to-dep'),
-            spec=V1NetworkPolicySpec(
-                pod_selector=V1LabelSelector(match_labels={
-                    'app': 'assemblyline',
-                    'section': 'service',
-                    'component': service_name,
-                }),
-                egress=[V1NetworkPolicyEgressRule(
-                    to=[V1NetworkPolicyPeer(
-                        pod_selector=V1LabelSelector(match_labels={
-                            'app': 'assemblyline',
-                            'dependency_for': service_name,
-                        })
-                    )]
-                )],
+        # Create a list of network policies that must exist for this service
+        # By default, we allow services to be able to interact with their dependencies and vice-versa
+        network_policies = [
+            V1NetworkPolicy(
+                metadata=V1ObjectMeta(name=f'allow-{safe_name}-to-dep'),
+                spec=V1NetworkPolicySpec(
+                    pod_selector=V1LabelSelector(match_labels={
+                        'app': 'assemblyline',
+                        'section': 'service',
+                        'component': service_name,
+                    }),
+                    egress=[V1NetworkPolicyEgressRule(
+                        to=[V1NetworkPolicyPeer(
+                            pod_selector=V1LabelSelector(match_labels={
+                                'app': 'assemblyline',
+                                'dependency_for': service_name,
+                            })
+                        )]
+                    )],
+                )
+            ),
+            V1NetworkPolicy(
+                metadata=V1ObjectMeta(name=f'allow-dep-from-{safe_name}'),
+                spec=V1NetworkPolicySpec(
+                    pod_selector=V1LabelSelector(match_labels={
+                        'app': 'assemblyline',
+                        'dependency_for': service_name,
+                    }),
+                    ingress=[V1NetworkPolicyIngressRule(
+                        _from=[V1NetworkPolicyPeer(
+                            pod_selector=V1LabelSelector(match_labels={
+                                'app': 'assemblyline',
+                                'section': 'service',
+                                'component': service_name,
+                            })
+                        )]
+                    )],
+                )
             )
-        ))
-        # dependencies → service
-        network_policies.append(V1NetworkPolicy(
-            metadata=V1ObjectMeta(name=f'allow-dep-from-{safe_name}'),
-            spec=V1NetworkPolicySpec(
-                pod_selector=V1LabelSelector(match_labels={
-                    'app': 'assemblyline',
-                    'dependency_for': service_name,
-                }),
-                ingress=[V1NetworkPolicyIngressRule(
-                    _from=[V1NetworkPolicyPeer(
-                        pod_selector=V1LabelSelector(match_labels={
-                            'app': 'assemblyline',
-                            'section': 'service',
-                            'component': service_name,
-                        })
-                    )]
-                )],
-            )
-        ))
+        ]
 
         # service → anywhere
         if internet:
