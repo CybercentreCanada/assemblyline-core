@@ -25,6 +25,7 @@ NON_AGGREGATED = ['scaler', 'scaler_status']
 NON_AGGREGATED_COUNTERS = {'dispatcher': {'save_queue', 'error_queue'}}
 
 METRICSTORE_ROOT_CA_PATH = environ.get('METRICSTORE_ROOT_CA_PATH', '/etc/assemblyline/ssl/al_root-ca.crt')
+METRICSTORE_VERIFY_CERTS = environ.get('METRICSTORE_VERIFY_CERTS', 'true').lower() == "true"
 
 
 def cleanup_metrics(input_dict):
@@ -153,7 +154,8 @@ class MetricsServer(ServerBase):
                 ca_certs_file.write(self.config.core.metrics.elasticsearch.host_certificates.encode())
 
         self.metrics_queue = CommsQueue(METRICS_QUEUE)
-        self.es = elasticsearch.Elasticsearch(hosts=self.elastic_hosts, ca_certs=ca_certs)
+        self.es = elasticsearch.Elasticsearch(hosts=self.elastic_hosts, ca_certs=ca_certs,
+                                              verify_certs=METRICSTORE_VERIFY_CERTS)
         # Determine if ES will support data streams (>= 7.9)
         self.is_datastream = version.parse(self.es.info()['version']['number']) >= version.parse("7.9")
 
