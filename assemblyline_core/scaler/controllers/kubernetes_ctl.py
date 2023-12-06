@@ -1234,10 +1234,7 @@ class KubernetesController(ControllerInterface):
         def create_or_patch_network_policy(netpol_body: V1NetworkPolicy):
             netpol_body.metadata.labels = service_labels
             try:
-                # Check to see if a network policy with the same name exists
-                self.net_api.read_namespaced_network_policy(name=netpol_body.metadata.name, namespace=self.namespace,
-                                                            _request_timeout=API_TIMEOUT)
-                # Network policy with the same name exists, patch the policy
+                # Patch the network policy, if it exists
                 self.net_api.patch_namespaced_network_policy(name=netpol_body.metadata.name, namespace=self.namespace,
                                                              body=netpol_body, _request_timeout=API_TIMEOUT)
             except ApiException as error:
