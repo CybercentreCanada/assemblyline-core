@@ -420,6 +420,7 @@ class ServiceUpdater(ThreadedCoreBase):
         self.incompatible_services = set()
         self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
+        self.default_service_env = {e.name: e.value for e in self.config.core.scaler.service_defaults.environment}
         self.mounts = []
 
         # We only want changes with value, we also don't want to override the image
@@ -489,15 +490,21 @@ class ServiceUpdater(ThreadedCoreBase):
 
                     self.log.info(f"[CI] Service {service_name} is being installed to version {tag_name}...")
 
+                    # Service installation will run in privileged mode
+                    env = {
+                        "SERVICE_TAG": tag_name,
+                        "REGISTER_ONLY": 'true',
+                        "PRIVILEGED": 'true',
+                    }
+
+                    # Update environment with service defaults
+                    env.update(self.default_service_env)
+
                     self.controller.launch(
                         name=service_name,
                         docker_config=DockerConfig(docker_config),
                         mounts=self.mounts,
-                        env={
-                            "SERVICE_TAG": tag_name,
-                            "REGISTER_ONLY": 'true',
-                            "PRIVILEGED": 'true',
-                        },
+                        env=env,
                         blocking=True
                     )
 
@@ -570,16 +577,23 @@ class ServiceUpdater(ThreadedCoreBase):
 
                 latest_tag = update_data['latest_tag'].replace('stable', '')
                 service_key = f"{service_name}_{latest_tag}"
+
+                # Service updates will run in privileged mode
+                env = {
+                    "SERVICE_TAG": update_data['latest_tag'],
+                    "REGISTER_ONLY": 'true',
+                    "PRIVILEGED": 'true',
+                }
+
+                # Update environment with service defaults
+                env.update(self.default_service_env)
+
                 try:
                     self.controller.launch(
                         name=service_name,
                         docker_config=DockerConfig(docker_config),
                         mounts=self.mounts,
-                        env={
-                            "SERVICE_TAG": update_data['latest_tag'],
-                            "REGISTER_ONLY": 'true',
-                            "PRIVILEGED": 'true',
-                        },
+                        env=env,
                         blocking=True
                     )
                 except Exception as e:
