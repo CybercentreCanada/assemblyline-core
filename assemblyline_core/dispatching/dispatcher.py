@@ -42,7 +42,6 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet, Set
 from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
 from assemblyline_core.server_base import ThreadedCoreBase
-from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
 
 from .schedules import Scheduler
 from .timeout import TimeoutTable
@@ -62,6 +61,12 @@ RESULT_BATCH_SIZE = int(os.environ.get('DISPATCHER_RESULT_BATCH_SIZE', '50'))
 ERROR_BATCH_SIZE = int(os.environ.get('DISPATCHER_ERROR_BATCH_SIZE', '50'))
 DYNAMIC_ANALYSIS_CATEGORY = 'Dynamic Analysis'
 DAY_IN_SECONDS = 24 * 60 * 60
+
+
+class KeyType(enum.Enum):
+    OVERWRITE = 'overwrite'
+    UNION = 'union'
+    IGNORE = 'ignore'
 
 
 class Action(enum.IntEnum):
@@ -120,6 +125,148 @@ class ResultSummary:
         self.children: list[tuple[str, str]] = children
 
 
+class TemporaryFileData:
+    def __init__(self, sha256: str) -> None:
+        self.sha256 = sha256
+        self.parents: list[TemporaryFileData] = []
+        self.children: list[TemporaryFileData] = []
+        self.parent_cache: dict[str, Any] = {}
+        self.local_values: dict[str, Any] = {}
+
+    def add_parent(self, parent_temp: TemporaryFileData):
+        """Add a parent to this node."""
+        self.parents.append(parent_temp)
+        parent_temp.children.append(self)
+
+    def new_child(self, child: str) -> TemporaryFileData:
+        """Create a linked entry for a new child."""
+        temp = TemporaryFileData(child)
+        temp.parents.append(self)
+        self.children.append(temp)
+        temp.build_parent_cache()
+        return temp
+
+    def build_parent_cache(self):
+        """Rebuild the cache of data from parent files."""
+        self.parent_cache.clear()
+        for parent in self.parents:
+            self.parent_cache.update(parent.read())
+
+    def read(self) -> dict[str, Any]:
+        """Get a copy of the current data"""
+        # Start with a shallow copy ofthe parent cache
+        data = dict(self.parent_cache)
+
+        # update, this overwrites any common keys (we want this)
+        data.update(self.local_values)
+        return data
+
+    def read_key(self, key: str) -> Any:
+        """Get a copy of the current data"""
+        try:
+            return self.local_values[key]
+        except KeyError:
+            return self.parent_cache.get(key)
+
+    def set_value(self, key: str, value: str) -> set[str]:
+        """Using a SET operation update the value on this node and all children.
+        
+        Returns a list of the sha of all files who's temporary data has been modified.
+        """
+        # Check if the local value doesn't change then we won't have any effect on children
+        old = self.local_values.get(key)
+        if type(old) is type(value) and old == value:
+            return set()
+
+        # Update the local value and recurse into children
+        self.local_values[key] = value
+        changed = [self.sha256]
+        for child in self.children:
+            changed.extend(child.set_value_from_ancestor(key, value))
+        return set(changed)
+
+    def set_value_from_ancestor(self, key: str, value: str) -> set[str]:
+        """Given that an ancestor has changed, test if this file's temporary data will change also."""
+        # If this child has already set this key, the parent values don't matter
+        if key in self.local_values:
+            return set()
+        
+        # If the parent value was already set to this nothing has changed
+        old = self.parent_cache.get(key)
+        if type(old) is type(value) and old == value:
+            return set()
+
+        # Update the parent cache and recurse into children
+        self.parent_cache[key] = value
+        changed = [self.sha256]
+        for child in self.children:
+            changed.extend(child.set_value_from_ancestor(key, value))
+        return set(changed)
+
+    def union_value(self, key: str, value: set[str]) -> set[str]:
+        """Using a MERGE operation update the value on this node and all children.
+        
+        Returns a list of the sha of all files who's temporary data has been modified.
+        """
+        if not value:
+            return set()
+
+        # Check if the local value doesn't change then we won't have any effect on children
+        new_value = merge_in_values(self.local_values.get(key), value)
+        if new_value is None:
+            return set()
+
+        # Update the local value and recurse into children
+        self.local_values[key] = new_value
+        changed = [self.sha256]
+        for child in self.children:
+            changed.extend(child.union_value_from_ancestor(key, value))
+        return set(changed)
+
+    def union_value_from_ancestor(self, key: str, value: set[str]) -> set[str]:
+        """Given that an ancestor has changed, test if this file's temporary data will change also.
+        
+        For values updated by union the parent and local values are the same.
+        """        
+        # Merge in data to parent cache, we won't be reading from it, but we still want to keep it
+        # up to date and use it to check if changes are needed
+        new_value = merge_in_values(self.parent_cache.get(key), value)
+        if new_value is None:
+            return set()
+        self.parent_cache[key] = new_value
+
+        # Update the local values as well if we need to
+        new_value = merge_in_values(self.local_values.get(key), value)
+        if new_value is None:
+            return set()
+        self.local_values[key] = new_value
+
+        # Since we did change the local value, pass the new set down to children 
+        changed = [self.sha256]
+        for child in self.children:
+            changed.extend(child.union_value_from_ancestor(key, value))
+        return set(changed)
+
+
+def merge_in_values(old_values: Any, new_values: set[str]) -> Optional[list[str]]:
+    """Merge in new values into a json list.
+    
+    If there is no new values return None.
+    """
+    # Read out the old value set
+    if isinstance(old_values, (list, set)):
+        old_values = set(old_values)
+    else:
+        old_values = set()
+
+    # If we have no new values to merge in
+    if new_values <= old_values:
+        return None
+    
+    # We have new values, build a new set
+    return list(new_values | old_values)
+
+
 class SubmissionTask:
     """Dispatcher internal model for submissions"""
 
@@ -140,7 +287,7 @@ class SubmissionTask:
         self.file_schedules: dict[str, list[dict[str, Service]]] = {}
         self.file_tags: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         self.file_depth: dict[str, int] = {}
-        self.file_temporary_data: dict[str, dict[str, str]] = defaultdict(dict)
+        self.temporary_data: dict[str, TemporaryFileData] = {}
         self.extra_errors: list[str] = []
         self.active_files: set[str] = set()
         self.dropped_files: set[str] = set()
@@ -222,10 +369,16 @@ class SubmissionTask:
 
     def register_children(self, parent: str, children: list[str]):
         """
-        Note for the purposes of dynamic recursion prevention which
-        files extracted other files.
+        Note which files extracted other files.
+        _parent_map is for dynamic recursion prevention
+        temporary_data is for cascading the temp data to children
         """
+        parent_temp = self.temporary_data[parent]
         for child in children:
+            try:
+                self.temporary_data[child].add_parent(parent_temp)
+            except KeyError:
+                self.temporary_data[child] = parent_temp.new_child(child)
             try:
                 self._parent_map[child].add(parent)
             except KeyError:
@@ -270,7 +423,7 @@ class SubmissionTask:
             entry = self.monitoring[(sha256, service_name)]
         except KeyError:
             return
-        
+
         if entry.dispatch_needed:
             self.redispatch_service(sha256, service_name)
 
@@ -278,21 +431,24 @@ class SubmissionTask:
         """A service has completed normally. If the service is monitoring clear out the record."""
         self.monitoring.pop((sha256, service_name), None)
 
-    def file_temporary_data_changed(self, sha256: str, key: str, value: str) -> bool:
+    def file_temporary_data_changed(self, changed_sha256: set[str], key: str) -> list[str]:
         """Check all of the monitored tasks on that key for changes. Redispatch as needed."""
-        force_redispatch = False
-        for (sha, service), entry in self.monitoring.items():
-            if sha != sha256:
+        changed = []
+        for (sha256, service), entry in self.monitoring.items():
+            if sha256 not in changed_sha256:
                 continue
-            old_value = entry.values.get(key)
-            if old_value is None or old_value != value:
+
+            value = self.temporary_data[sha256].read_key(key)
+            dispatched_value = entry.values.get(key)
+
+            if type(value) is not type(dispatched_value) or value != dispatched_value:
                 result = self.service_results.get((sha256, service))
                 if not result:
                     entry.dispatch_needed = True
                 else:
                     self.redispatch_service(sha256, service)
-                    force_redispatch = True
-        return force_redispatch
+                    changed.append(sha256)
+        return changed
 
     def redispatch_service(self, sha256, service_name):
         # Clear the result if its partial or an error
@@ -364,8 +520,7 @@ class Dispatcher(ThreadedCoreBase):
         self.finalizing = threading.Event()
         self.finalizing_start = 0.0
 
-        #
-        # # Build some utility classes
+        # Build some utility classes
         self.scheduler = Scheduler(self.datastore, self.config, self.redis)
         self.running_tasks = Hash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
@@ -394,9 +549,6 @@ class Dispatcher(ThreadedCoreBase):
             NamedQueue(DISPATCH_RESULT_QUEUE+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
         self.command_queue: NamedQueue[dict] =\
             NamedQueue(DISPATCH_COMMAND_QUEUE+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
-
-        # Submissions that should have alerts generated
-        self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.redis_persist)
 
         # Publish counters to the metrics sink.
         self.counter = MetricsFactory(metrics_type='dispatcher', schema=Metrics, name=counter_name,
@@ -633,9 +785,10 @@ class Dispatcher(ThreadedCoreBase):
             self.log.info(f"[{sid}] Submission counts towards {submission.params.submitter.upper()} quota")
 
         # Apply initial data parameter
+        temporary_data = task.temporary_data[sha256] = TemporaryFileData(sha256)
         if submission.params.initial_data:
             try:
-                task.file_temporary_data[sha256] = {
+                temporary_data.local_values = {
                     key: value
                     for key, value in dict(json.loads(submission.params.initial_data)).items()
                     if len(str(value)) <= self.config.submission.max_temp_data_length
@@ -653,7 +806,7 @@ class Dispatcher(ThreadedCoreBase):
         # Initialize ancestry chain by identifying the root file
         file_info = self.get_fileinfo(task, sha256)
         file_type = file_info.type if file_info else 'NOT_FOUND'
-        task.file_temporary_data[sha256]['ancestry'] = [[dict(type=file_type, parent_relation="ROOT", sha256=sha256)]]
+        temporary_data.local_values['ancestry'] = [[dict(type=file_type, parent_relation="ROOT", sha256=sha256)]]
 
         # Start the file dispatching
         task.active_files.add(sha256)
@@ -662,6 +815,7 @@ class Dispatcher(ThreadedCoreBase):
 
     @elasticapm.capture_span(span_type='dispatcher')
     def get_fileinfo(self, task: SubmissionTask, sha256: str) -> Optional[FileInfo]:
+        """Read information about a file from the database, caching it locally."""
         # First try to get the info from local cache
         file_info = task.file_info.get(sha256, None)
         if file_info:
@@ -815,7 +969,7 @@ class Dispatcher(ThreadedCoreBase):
                     # Load the temp submission data we will pass
                     temp_data: dict[str, str] = {}
                     if service.uses_temp_submission_data:
-                        temp_data = task.file_temporary_data[sha256]
+                        temp_data = task.temporary_data[sha256].read()
                         if service.monitored_keys:
                             values = {key: temp_data.get(key) for key in service.monitored_keys}
                             task.set_monitoring_entry(sha256, service.name, values)
@@ -1356,13 +1510,6 @@ class Dispatcher(ThreadedCoreBase):
             else:
                 task.file_tags[sha256][key] = value
 
-        # Update the temporary data table for this file
-        force_redispatch = False
-        for key, value in (temporary_data or {}).items():
-            if len(str(value)) <= self.config.submission.max_temp_data_length:
-                task.file_temporary_data[sha256][key] = value
-                force_redispatch |= task.file_temporary_data_changed(sha256, key, value)
-
         # Update children to include parent_relation, likely EXTRACTED
         if summary.children and isinstance(summary.children[0], str):
             old_children = typing.cast(list[str], summary.children)
@@ -1371,6 +1518,19 @@ class Dispatcher(ThreadedCoreBase):
         # Record the result as a summary
         task.service_results[(sha256, service_name)] = summary
         task.register_children(sha256, [c for c, _ in summary.children])
+
+        # Update the temporary data table for this file
+        force_redispatch = set()
+        update_operations = self.config.submission.temporary_keys
+        for key, value in (temporary_data or {}).items():
+            if len(str(value)) <= self.config.submission.max_temp_data_length:
+                if update_operations.get(key) == KeyType.UNION:
+                    changed_files = task.temporary_data[sha256].union_value(key, value)
+                elif update_operations.get(key) == KeyType.IGNORE:
+                    changed_files = set()
+                else:
+                    changed_files = task.temporary_data[sha256].set_value(key, value)
+                force_redispatch |= set(task.file_temporary_data_changed(changed_files, key))
 
         # Set the depth of all extracted files, even if we won't be processing them
         depth_limit = self.config.submission.max_extraction_depth
@@ -1387,7 +1547,7 @@ class Dispatcher(ThreadedCoreBase):
             if new_depth < depth_limit:
                 # Prepare the temporary data from the parent to build the temporary data table for
                 # these newly extract files
-                parent_data = task.file_temporary_data[sha256]
+                parent_data = task.temporary_data[sha256]
 
                 for extracted_sha256, parent_relation in summary.children:
 
@@ -1416,21 +1576,20 @@ class Dispatcher(ThreadedCoreBase):
 
                     dispatched += 1
                     task.active_files.add(extracted_sha256)
-                    try:
-                        parent_ancestry = parent_data['ancestry']
-                    except KeyError:
-                        self.log.warn(f"[{sid} :: {sha256}] missing ancestry data.")
-                        parent_ancestry = []
-                    existing_ancestry = task.file_temporary_data.get(extracted_sha256, {}).get('ancestry', [])
+
+                    # Get the new ancestory data
                     file_info = self.get_fileinfo(task, extracted_sha256)
                     file_type = file_info.type if file_info else 'NOT_FOUND'
                     current_ancestry_node = dict(type=file_type, parent_relation=parent_relation,
                                                  sha256=extracted_sha256)
 
-                    local_temp = task.file_temporary_data[extracted_sha256] = dict(parent_data)
-                    local_temp['ancestry'] = existing_ancestry
+                    # Update ancestory data
+                    parent_ancestry = parent_data.read_key('ancestry') or []
+                    existing_ancestry = task.temporary_data[extracted_sha256].local_values.setdefault('ancestry', [])
                     for ancestry in parent_ancestry:
-                        local_temp['ancestry'].append(ancestry + [current_ancestry_node])
+                        existing_ancestry.append(ancestry + [current_ancestry_node])
+
+                    # Trigger the processing of the extracted file
                     self.find_process_queue(sid).put(DispatchAction(kind=Action.dispatch_file, sid=sid,
                                                                     sha=extracted_sha256))
             else:
@@ -1451,16 +1610,17 @@ class Dispatcher(ThreadedCoreBase):
                         'type': 'MAX DEPTH REACHED'
                     }))
 
-        if not force_redispatch:
-            # Check if its worth trying to run the next stage
-            # Not worth running if we know we are waiting for another service
-            if any(_s == sha256 for _s, _ in task.running_services):
-                return
-            # Not worth running if we know we have services in queue
-            if any(_s == sha256 for _s, _ in task.queue_keys.keys()):
-                return
+        # Check if its worth trying to run the next stage
+        # Not worth running if we know we are waiting for another service
+        if not any(_s == sha256 for _s, _ in task.running_services):
+            force_redispatch.add(sha256)
+        # Not worth running if we know we have services in queue
+        if not any(_s == sha256 for _s, _ in task.queue_keys.keys()):
+            force_redispatch.add(sha256)
+        
         # Try to run the next stage
-        self.dispatch_file(task, sha256)
+        for sha256 in force_redispatch:
+            self.dispatch_file(task, sha256)
 
     @elasticapm.capture_span(span_type='dispatcher')
     def _dispatching_error(self, task: SubmissionTask, error):

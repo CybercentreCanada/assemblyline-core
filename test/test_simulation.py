@@ -1261,3 +1261,73 @@ def test_temp_data_monitoring(core, metrics):
         if result.partial:
             partial_results += 1
     assert partial_results == 0, 'partial_results'
+
+
+def test_complex_extracted(core, metrics):
+    # stages to this processing when everything goes well
+    # 1. extract a file that will process to produce a partial result
+    # 2. hold a few seconds on the second stage of the root file to let child start
+    # 3. on the last stage of the root file produce the password
+
+    child_sha, _ = ready_body(core, {
+        'pre': {'partial': {'passwords': 'test_temp_data_monitoring'}},
+    })
+
+    sha, size = ready_body(core, {
+        'pre': {
+            'response': {
+                'extracted': [{
+                    'name': child_sha,
+                    'sha256': child_sha,
+                    'description': 'abc',
+                    'classification': 'U'
+                }]
+            }
+        },
+        'core-a': {'lock': 1},
+        'finish': {'temporary_data': {'passwords': json.dumps(['test_temp_data_monitoring'])}},
+    })
+
+    core.ingest_queue.push(SubmissionInput(dict(
+        metadata={},
+        params=dict(
+            description="file abc123",
+            services=dict(selected=''),
+            submitter='user',
+            groups=['user'],
+            max_extracted=10000
+        ),
+        notification=dict(
+            queue='complex-extracted-file',
+            threshold=0
+        ),
+        files=[dict(
+            sha256=sha,
+            size=size,
+            name='abc123'
+        )]
+    )).as_primitives())
+
+    notification_queue = NamedQueue('nq-complex-extracted-file', core.redis)
+    dropped_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
+    assert dropped_task
+    dropped_task = IngestTask(dropped_task)
+    sub: Submission = core.ds.submission.get(dropped_task.submission.sid)
+    assert len(sub.errors) == 0
+    assert len(sub.results) == 8, 'results'
+    assert core.pre_service.hits[sha] == 1, 'pre_service.hits[root]'
+    assert core.pre_service.hits[child_sha] == 2, 'pre_service.hits[child]'
+
+    # Wait until we get feedback from the metrics channel
+    metrics.expect('ingester', 'submissions_ingested', 1)
+    metrics.expect('ingester', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'files_completed', 2)
+
+    partial_results = 0
+    for res in sub.results:
+        result = core.ds.get_single_result(res, as_obj=True)
+        assert result is not None, res
+        if result.partial:
+            partial_results += 1
+    assert partial_results == 0, 'partial_results'
