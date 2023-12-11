@@ -124,6 +124,9 @@ class MockService(ServerBase):
                         partial = True
                         break
 
+            if partial:
+                print(self.service_name, "will produce partial results")
+
             result_data = {
                 'archive_ts': None,
                 'classification': 'U',
