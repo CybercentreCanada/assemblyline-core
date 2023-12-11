@@ -1268,6 +1268,8 @@ def test_complex_extracted(core, metrics):
     # 1. extract a file that will process to produce a partial result
     # 2. hold a few seconds on the second stage of the root file to let child start
     # 3. on the last stage of the root file produce the password
+    global _global_semaphore
+    dispatcher.TIMEOUT_EXTRA_TIME = 10
 
     child_sha, _ = ready_body(core, {
         'pre': {'partial': {'passwords': 'test_temp_data_monitoring'}},
@@ -1284,7 +1286,7 @@ def test_complex_extracted(core, metrics):
                 }]
             }
         },
-        'core-a': {'lock': 1},
+        'core-a': {'lock': 5},
         'finish': {'temporary_data': {'passwords': json.dumps(['test_temp_data_monitoring'])}},
     })
 
@@ -1308,6 +1310,11 @@ def test_complex_extracted(core, metrics):
         )]
     )).as_primitives())
 
+    # Wait for the extract file to finish
+    metrics.expect('dispatcher', 'files_completed', 1)
+    _global_semaphore.release()
+
+    # Wait for the entire submission to finish
     notification_queue = NamedQueue('nq-complex-extracted-file', core.redis)
     dropped_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
     assert dropped_task
