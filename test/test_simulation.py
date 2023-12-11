@@ -1267,7 +1267,7 @@ def test_temp_data_monitoring(core: CoreSession, metrics):
     assert partial_results == 0, 'partial_results'
 
 
-def test_complex_extracted(core, metrics):
+def test_complex_extracted(core: CoreSession, metrics):
     # stages to this processing when everything goes well
     # 1. extract a file that will process to produce a partial result
     # 2. hold a few seconds on the second stage of the root file to let child start

@@ -429,7 +429,12 @@ class SubmissionTask:
 
     def clear_monitoring_entry(self, sha256, service_name):
         """A service has completed normally. If the service is monitoring clear out the record."""
+        # We have an incoming non-partial result, flush out any partial monitoring
         self.monitoring.pop((sha256, service_name), None)
+        # If there is a partial result for this service flush that as well so we accept this new result
+        result = self.service_results.get((sha256, service_name))
+        if result and result.partial:
+            self.service_results.pop((sha256, service_name), None)
 
     def file_temporary_data_changed(self, changed_sha256: set[str], key: str) -> list[str]:
         """Check all of the monitored tasks on that key for changes. Redispatch as needed."""
@@ -453,11 +458,11 @@ class SubmissionTask:
     def redispatch_service(self, sha256, service_name):
         # Clear the result if its partial or an error
         result = self.service_results.get((sha256, service_name))
-        if result:
-            if not result.partial:
-                return
+        if result and not result.partial:
+            return
         self.service_results.pop((sha256, service_name), None)
         self.service_errors.pop((sha256, service_name), None)
+        self.service_attempts[(sha256, service_name)] = 1
 
         # Try to get the service to run again by reseting the schedule for that service
         self.file_schedules.pop(sha256, None)
