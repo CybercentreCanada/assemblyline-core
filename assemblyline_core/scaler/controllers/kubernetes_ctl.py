@@ -1154,69 +1154,78 @@ class KubernetesController(ControllerInterface):
                                                                        namespace=self.namespace,
                                                                        _request_timeout=API_TIMEOUT)
 
-    def prepare_network(self, service_name, internet, dependency_internet):
+    def prepare_network(self, service_name: str, internet: bool, dependency_internet: Tuple[str, bool]):
         safe_name = service_name.lower().replace('_', '-')
+        service_labels = {
+            'app': 'assemblyline',
+            'section': 'service',
+            'component': service_name,
+        }
+        # Gather all existing network policies pertaining to the service
+        existing_netpol = {netpol.metadata.name for netpol in
+                           self.net_api.list_namespaced_network_policy(namespace=self.namespace,
+                                                                       label_selector=','.join([f"{k}={v}"
+                                                                                                for k, v in service_labels.items()])
+                                                                       ).items}
 
-        # Allow access to containers with dependency_for
-        try:
-            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-to-dep',
-                                                          _request_timeout=API_TIMEOUT)
-        except ApiException as error:
-            if error.status != 404:
-                raise
-        self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
-            metadata=V1ObjectMeta(name=f'allow-{safe_name}-to-dep'),
-            spec=V1NetworkPolicySpec(
-                pod_selector=V1LabelSelector(match_labels={
-                    'app': 'assemblyline',
-                    'section': 'service',
-                    'component': service_name,
-                }),
-                egress=[V1NetworkPolicyEgressRule(
-                    to=[V1NetworkPolicyPeer(
-                        pod_selector=V1LabelSelector(match_labels={
-                            'app': 'assemblyline',
-                            'dependency_for': service_name,
-                        })
-                    )]
-                )],
+        def create_or_patch_network_policy(netpol_body: V1NetworkPolicy):
+            netpol_body.metadata.labels = service_labels
+            try:
+                # Patch the network policy, if it exists
+                self.net_api.patch_namespaced_network_policy(name=netpol_body.metadata.name, namespace=self.namespace,
+                                                             body=netpol_body, _request_timeout=API_TIMEOUT)
+            except ApiException as error:
+                if error.status == 404:
+                    # Object doesn't exist, therefore create it
+                    self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=netpol_body,
+                                                                  _request_timeout=API_TIMEOUT)
+                else:
+                    raise
+
+        # Create a list of network policies that must exist for this service
+        # By default, we allow services to be able to interact with their dependencies and vice-versa
+        network_policies = [
+            V1NetworkPolicy(
+                metadata=V1ObjectMeta(name=f'allow-{safe_name}-to-dep'),
+                spec=V1NetworkPolicySpec(
+                    pod_selector=V1LabelSelector(match_labels={
+                        'app': 'assemblyline',
+                        'section': 'service',
+                        'component': service_name,
+                    }),
+                    egress=[V1NetworkPolicyEgressRule(
+                        to=[V1NetworkPolicyPeer(
+                            pod_selector=V1LabelSelector(match_labels={
+                                'app': 'assemblyline',
+                                'dependency_for': service_name,
+                            })
+                        )]
+                    )],
+                )
+            ),
+            V1NetworkPolicy(
+                metadata=V1ObjectMeta(name=f'allow-dep-from-{safe_name}'),
+                spec=V1NetworkPolicySpec(
+                    pod_selector=V1LabelSelector(match_labels={
+                        'app': 'assemblyline',
+                        'dependency_for': service_name,
+                    }),
+                    ingress=[V1NetworkPolicyIngressRule(
+                        _from=[V1NetworkPolicyPeer(
+                            pod_selector=V1LabelSelector(match_labels={
+                                'app': 'assemblyline',
+                                'section': 'service',
+                                'component': service_name,
+                            })
+                        )]
+                    )],
+                )
             )
-        ), _request_timeout=API_TIMEOUT)
+        ]
 
-        try:
-            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-dep-from-{safe_name}',
-                                                          _request_timeout=API_TIMEOUT)
-        except ApiException as error:
-            if error.status != 404:
-                raise
-        self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
-            metadata=V1ObjectMeta(name=f'allow-dep-from-{safe_name}'),
-            spec=V1NetworkPolicySpec(
-                pod_selector=V1LabelSelector(match_labels={
-                    'app': 'assemblyline',
-                    'dependency_for': service_name,
-                }),
-                ingress=[V1NetworkPolicyIngressRule(
-                    _from=[V1NetworkPolicyPeer(
-                        pod_selector=V1LabelSelector(match_labels={
-                            'app': 'assemblyline',
-                            'section': 'service',
-                            'component': service_name,
-                        })
-                    )]
-                )],
-            )
-        ), _request_timeout=API_TIMEOUT)
-
-        # Allow outgoing
-        try:
-            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-outgoing',
-                                                          _request_timeout=API_TIMEOUT)
-        except ApiException as error:
-            if error.status != 404:
-                raise
+        # service → anywhere
         if internet:
-            self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
+            network_policies.append(V1NetworkPolicy(
                 metadata=V1ObjectMeta(name=f'allow-{safe_name}-outgoing'),
                 spec=V1NetworkPolicySpec(
                     pod_selector=V1LabelSelector(match_labels={
@@ -1226,19 +1235,13 @@ class KubernetesController(ControllerInterface):
                     }),
                     egress=[V1NetworkPolicyEgressRule(to=[])],
                 )
-            ), _request_timeout=API_TIMEOUT)
+            ))
 
+        # dependencies → anywhere
         for dep_name, dep_internet in dependency_internet:
             safe_dep_name = dep_name.lower().replace('_', '-')
-            try:
-                self.net_api.delete_namespaced_network_policy(namespace=self.namespace,
-                                                              name=f'allow-{safe_dep_name}-{safe_name}-outgoing',
-                                                              _request_timeout=API_TIMEOUT)
-            except ApiException as error:
-                if error.status != 404:
-                    raise
             if dep_internet:
-                self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
+                network_policies.append(V1NetworkPolicy(
                     metadata=V1ObjectMeta(name=f'allow-{safe_dep_name}-{safe_name}-outgoing'),
                     spec=V1NetworkPolicySpec(
                         pod_selector=V1LabelSelector(match_labels={
@@ -1249,4 +1252,12 @@ class KubernetesController(ControllerInterface):
                         }),
                         egress=[V1NetworkPolicyEgressRule(to=[])],
                     )
-                ), _request_timeout=API_TIMEOUT)
+                ))
+
+        # Create or patch the network policies based on what's required for the service
+        [create_or_patch_network_policy(netpol) for netpol in network_policies]
+
+        # Cleanup any network policies that aren't in-use
+        for np in (existing_netpol - {np.metadata.name for np in network_policies}):
+            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=np,
+                                                          _request_timeout=API_TIMEOUT)
