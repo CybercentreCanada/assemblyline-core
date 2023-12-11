@@ -1212,11 +1212,12 @@ def test_partial(core: CoreSession, metrics):
     assert partial_results == 1, 'partial_results'
 
 
-def test_temp_data_monitoring(core, metrics):
+def test_temp_data_monitoring(core: CoreSession, metrics):
     # Have pre produce a partial result, then have core-a update a monitored key
     sha, size = ready_body(core, {
         'pre': {'partial': {'passwords': 'test_temp_data_monitoring'}},
-        'core-a': {'temporary_data': {'passwords': json.dumps(['test_temp_data_monitoring'])}},
+        'core-a': {'temporary_data': {'passwords': ['test_temp_data_monitoring']}},
+        'final': {'temporary_data': {'passwords': ['some other password']}},
     })
 
     core.ingest_queue.push(SubmissionInput(dict(
@@ -1268,7 +1269,6 @@ def test_complex_extracted(core, metrics):
     # 1. extract a file that will process to produce a partial result
     # 2. hold a few seconds on the second stage of the root file to let child start
     # 3. on the last stage of the root file produce the password
-    global _global_semaphore
     dispatcher.TIMEOUT_EXTRA_TIME = 10
 
     child_sha, _ = ready_body(core, {
@@ -1287,7 +1287,7 @@ def test_complex_extracted(core, metrics):
             }
         },
         'core-a': {'lock': 5},
-        'finish': {'temporary_data': {'passwords': json.dumps(['test_temp_data_monitoring'])}},
+        'finish': {'temporary_data': {'passwords': ['test_temp_data_monitoring']}},
     })
 
     core.ingest_queue.push(SubmissionInput(dict(
