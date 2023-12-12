@@ -117,7 +117,7 @@ def apm_span(client, span_name: str):
 
 
 class ResultSummary:
-    def __init__(self, key, drop, score, children, partial) -> None:
+    def __init__(self, key, drop, score, children, partial=False) -> None:
         self.key: str = key
         self.drop: bool = drop
         self.partial: bool = partial
