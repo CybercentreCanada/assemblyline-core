@@ -258,6 +258,23 @@ class TaskingClient:
                 if task.ttl:
                     result.expiry_ts = now_as_iso(task.ttl * 24 * 60 * 60)
 
+                # Create a list of files to freshen
+                freshen_hashes = [task.fileinfo.sha256]
+
+                # Test each extracted and supplementary files
+                for file_item in result.response.extracted + result.response.supplementary:
+                    freshen_hashes.append(file_item.sha256)
+
+                    # Bail out if file does not exists
+                    if not self.filestore.exists(file_item.sha256):
+                        self.log.info("We have a cache hit with some related files missing, ignoring it...")
+                        metric_factory.increment('cache_miss')
+                        return task.as_primitives(), False
+
+                # Freshen the files
+                for sha256 in freshen_hashes:
+                    self.datastore.save_or_freshen_file(sha256, {}, result.expiry_ts, result.classification)
+
                 self.dispatch_client.service_finished(task.sid, result_key, result)
                 cache_found = True
 
