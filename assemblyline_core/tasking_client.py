@@ -263,6 +263,10 @@ class TaskingClient:
 
                 # Test each extracted and supplementary files
                 for file_item in result.response.extracted + result.response.supplementary:
+                    if file_item.sha256 in freshen_hashes:
+                        # We've already decided to freshen this file, moving on..
+                        continue
+
                     freshen_hashes.append(file_item.sha256)
 
                     # Bail out if file does not exists
