@@ -1,4 +1,3 @@
-import concurrent.futures
 import logging
 import time
 from typing import Any, Dict, Optional
@@ -10,6 +9,7 @@ from assemblyline.common.constants import SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.dict_utils import flatten, unflatten
 from assemblyline.common.heuristics import HeuristicHandler, InvalidHeuristicException
 from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.threading import APMAwareThreadPoolExecutor
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.filestore import FileStore
 from assemblyline.odm import construct_safe
@@ -368,7 +368,7 @@ class TaskingClient:
 
             with elasticapm.capture_span(name="handle_task_result.freshen_files",
                                          span_type="tasking_client"):
-                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                with APMAwareThreadPoolExecutor(max_workers=5) as executor:
                     res = {
                         f['sha256']: executor.submit(freshen_file, file_infos, f)
                         for f in result['response']['extracted'] + result['response']['supplementary']}
