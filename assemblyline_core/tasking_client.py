@@ -1,6 +1,7 @@
 import concurrent.futures
 import logging
 import time
+from threading import Lock
 from typing import Any, Dict, Optional
 
 import elasticapm
@@ -23,7 +24,6 @@ from assemblyline.odm.models.tagging import Tagging
 from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline_core.dispatching.client import DispatchClient
-
 
 class TaskingClientException(Exception):
     pass
@@ -333,10 +333,17 @@ class TaskingClient:
     @elasticapm.capture_span(span_type='tasking_client')
     def _handle_task_result(self, exec_time: int, task: ServiceTask, result: Dict[str, Any], client_id, service_name,
                             freshen: bool, metric_factory):
+        # In the event of a result with duplicate files, let's cache file existence checks with the filestore
+        file_existence_cache, file_existence_lock = {}, Lock()
 
         def freshen_file(file_info_list, item):
             file_info = file_info_list.get(item['sha256'], None)
-            if file_info is None or not self.filestore.exists(item['sha256']):
+            if item['sha256'] not in file_existence_cache:
+                # Cache whether or not this file has been seen per task result
+                with file_existence_lock:
+                    file_existence_cache[item['sha256']] = self.filestore.exists(item['sha256'])
+
+            if file_info is None or not file_existence_cache[item['sha256']]:
                 return True
             else:
                 file_info['archive_ts'] = None
