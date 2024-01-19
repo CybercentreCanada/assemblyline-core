@@ -1,7 +1,6 @@
 import concurrent.futures
 import logging
 import time
-from threading import Lock
 from typing import Any, Dict, Optional
 
 import elasticapm
@@ -338,16 +337,11 @@ class TaskingClient:
     def _handle_task_result(self, exec_time: int, task: ServiceTask, result: Dict[str, Any], client_id, service_name,
                             freshen: bool, metric_factory):
         # In the event of a result with duplicate files, let's cache file existence checks with the filestore
-        file_existence_cache, file_existence_lock = {}, Lock()
+        file_exists_check = {}
 
         def freshen_file(file_info_list, item):
             file_info = file_info_list.get(item['sha256'], None)
-            if item['sha256'] not in file_existence_cache:
-                # Cache whether or not this file has been seen per task result
-                with file_existence_lock:
-                    file_existence_cache[item['sha256']] = self.filestore.exists(item['sha256'])
-
-            if file_info is None or not file_existence_cache[item['sha256']]:
+            if file_info is None or not file_exists_check[item['sha256']]:
                 return True
             else:
                 file_info['archive_ts'] = None
@@ -368,6 +362,8 @@ class TaskingClient:
             missing_files = []
             hashes = list(set([f['sha256']
                                for f in result['response']['extracted'] + result['response']['supplementary']]))
+            # Pre-compute file existence checks before freshening files
+            file_exists_check = {h: self.filestore.exists(h) for h in hashes}
             file_infos = self.datastore.file.multiget(hashes, as_obj=False, error_on_missing=False)
 
             with elasticapm.capture_span(name="handle_task_result.freshen_files",
