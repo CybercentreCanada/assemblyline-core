@@ -54,6 +54,14 @@ class BadlistClient:
 
     @staticmethod
     def _merge_hashes(new, old):
+        # Account for the possibility of merging with null types
+        if not (new or old):
+            # Both are null
+            raise ValueError("New and old are both null")
+        elif not (new and old):
+            # Only one is null, in which case return the other
+            return new or old
+
         try:
             # Check if hash types match
             if new['type'] != old['type']:

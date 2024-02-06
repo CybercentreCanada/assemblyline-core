@@ -411,19 +411,22 @@ class DirectClient(ClientBase):
                 # Let's see if there's an existing document with the same ID in the collection
                 obj = es_collection.get_if_exists(id, as_obj=False)
 
-                # If there has been any edits by another user, then preserve the enabled state
-                # Otherwise, the workflow will be synchronized with the origin system
-                if obj and obj['edited_by'] != data['edited_by']:
-                    data['enabled'] = obj["enabled"]
-
                 if collection == "workflow":
+                    # If there has been any edits by another user, then preserve the enabled state
+                    # Otherwise, the workflow will be synchronized with the origin system
+                    if obj and obj['edited_by'] != data['edited_by']:
+                        data['enabled'] = obj["enabled"]
                     es_collection.save(id, data)
                 elif collection == "badlist":
-                    data['enabled'] = obj["enabled"]
-                    es_collection.save(id, BadlistClient._merge_hashes(d, obj))
+                    if obj:
+                        # Preserve the system's enabled state of the item
+                        data['enabled'] = obj["enabled"]
+                    es_collection.save(id, BadlistClient._merge_hashes(data, obj))
                 elif collection == "safelist":
-                    data['enabled'] = obj["enabled"]
-                    es_collection.save(id, SafelistClient._merge_hashes(d, obj))
+                    if obj:
+                        # Preserve the system's enabled state of the item
+                        data['enabled'] = obj["enabled"]
+                    es_collection.save(id, SafelistClient._merge_hashes(data, obj))
                 es_collection.commit()
 
     def set_single_object_complete(self, collection, id):

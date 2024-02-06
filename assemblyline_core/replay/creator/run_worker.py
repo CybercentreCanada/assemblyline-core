@@ -151,7 +151,7 @@ class ReplayCreatorWorker(ReplayBase):
     def process_safelist(self, once=False):
         self._process_json_exports("safelist", "id", "updated", once)
 
-    def process_workflows(self, once=False):
+    def process_workflow(self, once=False):
         self._process_json_exports("workflow", "id", "last_edit", once)
 
     def try_run(self):
@@ -174,7 +174,7 @@ class ReplayCreatorWorker(ReplayBase):
 
         if self.replay_config.creator.workflow_input.enabled:
             for ii in range(self.replay_config.creator.workflow_input.threads):
-                threads[f'Workflow process thread #{ii}'] = self.process_workflows
+                threads[f'Workflow process thread #{ii}'] = self.process_workflow
 
         if threads:
             self.maintain_threads(threads)

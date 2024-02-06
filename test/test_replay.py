@@ -6,9 +6,6 @@ import random
 import pytest
 
 from assemblyline.common import forge
-from assemblyline.odm.models.badlist import Badlist
-from assemblyline.odm.models.safelist import Safelist
-from assemblyline.odm.models.workflow import Workflow
 from assemblyline.odm.random_data import create_alerts, wipe_alerts, wipe_submissions, create_submission, create_badlists, create_safelists, create_workflows, wipe_badlist, wipe_safelist, wipe_workflows
 from assemblyline_core.replay.creator.run import ReplayCreator
 from assemblyline_core.replay.creator.run_worker import ReplayCreatorWorker
@@ -22,10 +19,10 @@ NUM_SUBMISSIONS = 1
 NUM_WORKFLOWS = 1
 
 all_alerts = []
-all_badlists = []
-all_safelists = []
 all_submissions = []
-all_workflows = []
+
+data_collections = collections.defaultdict(list)
+DATA_COLLECTION_NAMES = ["badlist", "safelist", "workflow"]
 
 
 @pytest.fixture(scope='module')
@@ -62,12 +59,10 @@ def datastore(request, datastore_connection, fs):
     create_workflows(datastore_connection, count=NUM_WORKFLOWS)
     for alert in datastore_connection.alert.stream_search("id:*", fl="*"):
         all_alerts.append(alert)
-    for bl_i in datastore_connection.badlist.stream_search("id:*", fl="id,*"):
-        all_badlists.append(bl_i)
-    for sl_i in datastore_connection.safelist.stream_search("id:*", fl="id,*"):
-        all_safelists.append(sl_i)
-    for wf in datastore_connection.workflow.stream_search("id:*", fl="*"):
-        all_workflows.append(wf)
+
+    for collection in DATA_COLLECTION_NAMES:
+        for i in getattr(datastore_connection, collection).stream_search("id:*", fl="id,*"):
+            data_collections[collection].append(i)
 
     try:
         yield datastore_connection
@@ -84,7 +79,9 @@ def creator():
     # Initialize Replay Creator
     replay_creator = ReplayCreator()
     replay_creator.running = True
-    replay_creator.client.queues['alert'].delete()
+    # Clear all queues
+    for q in replay_creator.client.queues.values():
+        q.delete()
     output_dir = replay_creator.replay_config.creator.output_filestore.replace('file://', '')
     if os.path.exists(output_dir):
         for f in os.listdir(output_dir):
@@ -225,30 +222,29 @@ def test_replay_single_submission(config, datastore, creator, creator_worker, lo
     assert 'replay' not in loaded_submission['metadata']
 
 
-def test_replay_single_workflow(config, datastore, creator, creator_worker, loader, loader_worker):
+@pytest.mark.parametrize("collection", ["badlist", "safelist", "workflow"])
+def test_replay_single_data_collection(datastore, creator, creator_worker, loader, loader_worker, collection):
     output_dir = creator.replay_config.creator.output_filestore.replace('file://', '')
     input_dir = loader.replay_config.loader.input_directory
 
-    # Make sure the workflow gets picked up by the creator
-    workflow: Workflow = random.choice(all_workflows)
+    # Make sure the item gets picked up by the creator
+    item = random.choice(data_collections[collection])
 
     # Test replay creator
-    creator.client.setup_workflow_input_queue(once=True)
-    assert creator.client.queues['workflow'].length() == 1
-    assert creator.client.queues['workflow'].peek_next(
-    )['workflow_id'] == workflow['workflow_id']
-
+    getattr(creator.client, f'setup_{collection}_input_queue')(once=True)
+    assert creator.client.queues[collection].length() == 1
+    assert creator.client.queues[collection].peek_next()['id'] == item.id
     # Test replay creator worker
-    creator_worker.process_workflows(once=True)
-    assert creator_worker.client.queues['workflow'].length() == 0
+    getattr(creator_worker, f'process_{collection}')(once=True)
+    assert creator_worker.client.queues[collection].length() == 0
     filename = os.path.join(output_dir,
                             ([f for f in os.listdir(output_dir) if f.startswith(
-                                'workflow') and f.endswith('.al_json')] + ["not_found"])[0])
+                                collection) and f.endswith('.al_json')] + ["not_found"])[0])
     assert os.path.exists(filename)
 
-    # Delete the workflow to test the loading process
-    datastore.submission.delete(workflow.workflow_id)
-    datastore.submission.commit()
+    # Delete the item to test the loading process
+    getattr(datastore, collection).delete(item.id)
+    getattr(datastore, collection).commit()
 
     # In case the replay.yaml config creator output is not the same as loader input
     new_filename = filename.replace(output_dir, input_dir)
@@ -266,23 +262,24 @@ def test_replay_single_workflow(config, datastore, creator, creator_worker, load
     assert loader_worker.client.queues['file'].length() == 0
     assert not os.path.exists(filename)
 
-    loaded_workflow = datastore.workflow.get_if_exists(workflow.workflow_id)
-    assert loaded_workflow == workflow
+    loaded_item = getattr(datastore, collection).get_if_exists(item.id)
+    assert loaded_item == item
 
-    # Test updating the workflow but by a different author (reverse the author's name) and change the enabled state
-    workflow.edited_by = workflow.edited_by[::-1]
-    workflow.enabled = not workflow.enabled
+    if collection == "workflow":
+        # Test updating the workflow but by a different author (reverse the author's name) and change the enabled state
+        item.edited_by = item.edited_by[::-1]
+        item.enabled = not item.enabled
 
-    new_workflow_fn = os.path.join(input_dir, "workflow_blah.al_json")
-    with open(new_workflow_fn, 'w') as fp:
-        json_blob = {"id": workflow.id}
-        json_blob.update(workflow.as_primitives())
-        json.dump([json_blob], fp)
+        new_workflow_fn = os.path.join(input_dir, "workflow_blah.al_json")
+        with open(new_workflow_fn, 'w') as fp:
+            json_blob = {"id": item.id}
+            json_blob.update(item.as_primitives())
+            json.dump([json_blob], fp)
 
-    # Load file to be processed
-    loader.load_files(once=True)
-    loader_worker.process_file(once=True)
+        # Load file to be processed
+        loader.load_files(once=True)
+        loader_worker.process_file(once=True)
 
-    # If the workflow was edited by someone else, they shouldn't have control over the enabled state
-    loaded_workflow = datastore.workflow.get(workflow.workflow_id)
-    assert loaded_workflow.enabled != workflow.enabled and loaded_workflow.edited_by == workflow.edited_by
+        # If the workflow was edited by someone else, they shouldn't have control over the enabled state
+        loaded_workflow = datastore.workflow.get(item.workflow_id)
+        assert loaded_workflow.enabled != item.enabled and loaded_workflow.edited_by == item.edited_by
