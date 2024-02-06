@@ -94,7 +94,7 @@ class Archiver(ServerBase):
                     # Get the tags for this file
                     tags = self.datastore.get_tag_list_from_keys(
                         [r for r in submission.results if r.startswith(sha256)])
-                    attributions = {x['type'].rsplit('.', 1)[1] for x in tags if x['type'].startswith('attribution.')}
+                    attributions = {x['value'] for x in tags if x['type'].startswith('attribution.')}
                     techniques = {x['type'].rsplit('.', 1)[1] for x in tags if x['type'].startswith('technique.')}
                     infos = {'ioc' for x in tags if x['type'] in self.config.submission.tag_types.ioc}
                     infos = infos.union({'password' for x in tags if x['type'] == 'info.password'})
