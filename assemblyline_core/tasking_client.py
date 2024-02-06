@@ -91,7 +91,7 @@ class TaskingClient:
             self.event_listener.stop()
 
     @elasticapm.capture_span(span_type='tasking_client')
-    def upload_file(self, file_path, classification, ttl, is_section_image, expected_sha256=None):
+    def upload_file(self, file_path, classification, ttl, is_section_image, is_supplementary, expected_sha256=None):
         # Identify the file info of the uploaded file
         file_info = self.identify.fileinfo(file_path)
 
@@ -105,8 +105,12 @@ class TaskingClient:
                 file_info['expiry_ts'] = None
 
             # Update the datastore with the uploaded file
-            self.datastore.save_or_freshen_file(file_info['sha256'], file_info, file_info['expiry_ts'],
-                                                file_info['classification'], is_section_image=is_section_image)
+            self.datastore.save_or_freshen_file(
+                file_info['sha256'],
+                file_info, file_info['expiry_ts'],
+                file_info['classification'],
+                is_section_image=is_section_image,
+                is_supplementary=is_supplementary)
 
             # Upload file to the filestore (upload already checks if the file exists)
             self.filestore.upload(file_path, file_info['sha256'])
@@ -349,7 +353,8 @@ class TaskingClient:
                 file_info['classification'] = item['classification']
                 self.datastore.save_or_freshen_file(item['sha256'], file_info,
                                                     file_info['expiry_ts'], file_info['classification'],
-                                                    is_section_image=item.get('is_section_image', False))
+                                                    is_section_image=item.get('is_section_image', False),
+                                                    is_supplementary=item.get('is_supplementary', False))
             return False
 
         if task.ttl:
