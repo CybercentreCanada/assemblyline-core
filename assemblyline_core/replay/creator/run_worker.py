@@ -126,8 +126,6 @@ class ReplayCreatorWorker(ReplayBase):
             if obj:
                 obj_id = obj[id_field]
                 self.log.info(f"Processing {collection}: {obj_id}")
-                # Create an identifier that the loader process can use for pushing updates
-                obj["_replay_id"] = obj_id
                 batch.append(obj)
 
                 if len(batch) == REPLAY_BATCH_SIZE:
@@ -154,7 +152,7 @@ class ReplayCreatorWorker(ReplayBase):
         self._process_json_exports("safelist", "id", "updated", once)
 
     def process_workflows(self, once=False):
-        self._process_json_exports("workflow", "workflow_id", "last_edit", once)
+        self._process_json_exports("workflow", "id", "last_edit", once)
 
     def try_run(self):
         threads = {}

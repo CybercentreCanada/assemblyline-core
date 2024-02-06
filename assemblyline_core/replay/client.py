@@ -186,7 +186,8 @@ class ClientBase(object):
         # Run
         while self.running:
             # Find objects of the collection that haven't been replayed
-            for obj in self._stream_objects(collection, f"{date_field}:[{checkpoint} TO now]", filter_queries=fqs):
+            for obj in self._stream_objects(
+                    collection, f"{date_field}:[{checkpoint} TO now]", fl="*,id", filter_queries=fqs):
                 self.log.info(f"Replaying {collection}: {obj[id_field]}")
                 # Submit name queue to be tasked to worker(s) for replay
                 self.put_message(collection, obj)
@@ -296,11 +297,11 @@ class APIClient(ClientBase):
         # We're assuming all JSON that loaded has an "enabled" field
         collection = os.path.basename(file_path).split('_', 1)[0]
         with open(file_path) as fp:
-            data = json.load(fp)
+            data_blob = json.load(fp)
 
-        if isinstance(data, list):
-            for d in data:
-                id = d.pop("_replay_id")
+        if isinstance(data_blob, list):
+            for data in data_blob:
+                id = data.pop("id")
                 try:
                     # Let's see if there's an existing document with the same ID in the collection
                     obj = getattr(self.al_client, collection)(id)
@@ -400,12 +401,12 @@ class DirectClient(ClientBase):
         # We're assuming all JSON that loaded has an "enabled" field
         collection = os.path.basename(file_path).split('_', 1)[0]
         with open(file_path) as fp:
-            data = json.load(fp)
+            data_blob = json.load(fp)
 
-        if isinstance(data, list):
+        if isinstance(data_blob, list):
             es_collection = getattr(self.datastore, collection)
-            for d in data:
-                id = d.pop("_replay_id")
+            for data in data_blob:
+                id = data.pop("id")
 
                 # Let's see if there's an existing document with the same ID in the collection
                 obj = es_collection.get_if_exists(id, as_obj=False)
