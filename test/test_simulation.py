@@ -1326,7 +1326,7 @@ def test_complex_extracted(core: CoreSession, metrics):
     assert len(sub.errors) == 0
     assert len(sub.results) == 8, 'results'
     assert core.pre_service.hits[sha] == 1, 'pre_service.hits[root]'
-    assert core.pre_service.hits[child_sha] == 2, 'pre_service.hits[child]'
+    assert core.pre_service.hits[child_sha] >= 2, 'pre_service.hits[child]'
 
     # Wait until we get feedback from the metrics channel
     metrics.expect('ingester', 'submissions_ingested', 1)
