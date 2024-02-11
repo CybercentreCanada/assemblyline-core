@@ -521,33 +521,46 @@ class ServiceUpdater(ThreadedCoreBase):
                 for service_name, install_data in self.container_install.items().items():
                     install_threads.append(service_installs_exec.submit(install_service, service_name, install_data))
 
-            # Once all threads are completed, check the status of the installs
-            for thread in install_threads:
-                service_key = thread.result()
-                service_name, latest_tag = service_key.split("_")
-
-                if self.datastore.service.get_if_exists(service_key):
-                    operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
-
-                    # Check if a service was previously disabled and re-enable it
-                    if service_name in self.incompatible_services:
-                        self.incompatible_services.remove(service_name)
-                        operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
-
-                    if self.datastore.service_delta.update(service_name, operations):
-                        # Update completed, cleanup
-                        self.service_events.send(service_name, {
-                            'operation': Operation.Added,
-                            'name': service_name
-                        })
-                        self.log.info(f"[CI] Service {service_name}_{latest_tag} install successful!")
+            # Check the status of the container installs
+            while install_threads:
+                # Delay each check by 5 seconds to give the container adequate time to perform version registration
+                time.sleep(5)
+                pending_threads = []
+                for thread in install_threads:
+                    if not thread.done():
+                        # Add thead to the list of still pending jobs
+                        pending_threads.append(thread)
                     else:
-                        self.log.error(f"[CI] Service {service_name} has failed to install because it cannot set "
-                                       f"{latest_tag} as the new version. Install procedure cancelled...")
-                else:
-                    self.log.error(f"[CI] Service {service_name} has failed to install because resulting "
-                                   f"service key ({service_key}) does not exist. Install procedure cancelled...")
-                self.container_install.pop(service_name)
+                        service_key = thread.result()
+                        service_name, latest_tag = service_key.split("_")
+
+                        if self.datastore.service.get_if_exists(service_key):
+                            operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
+
+                            # Check if a service was previously disabled and re-enable it
+                            if service_name in self.incompatible_services:
+                                self.incompatible_services.remove(service_name)
+                                operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
+
+                            if self.datastore.service_delta.update(service_name, operations):
+                                # Update completed, cleanup
+                                self.service_events.send(service_name, {
+                                    'operation': Operation.Added,
+                                    'name': service_name
+                                })
+                                self.log.info(f"[CI] Service {service_name}_{latest_tag} install successful!")
+                            else:
+                                self.log.error(
+                                    f"[CI] Service {service_name} has failed to install because it cannot set "
+                                    f"{latest_tag} as the new version. Install procedure cancelled...")
+                        else:
+                            self.log.error(
+                                f"[CI] Service {service_name} has failed to install because resulting "
+                                f"service key ({service_key}) does not exist. Install procedure cancelled...")
+                        self.container_install.pop(service_name)
+
+                # Update with still pending and loop until all are completed/failed
+                install_threads = pending_threads
 
             # Clear out any old dead containers
             self.controller.cleanup_stale()
@@ -607,33 +620,46 @@ class ServiceUpdater(ThreadedCoreBase):
                 for service_name, update_data in self.container_update.items().items():
                     update_threads.append(service_updates_exec.submit(update_service, service_name, update_data))
 
-            # Once all threads are completed, check the status of the updates
-            for thread in update_threads:
-                service_key = thread.result()
-                service_name, latest_tag = service_key.split("_")
-
-                if self.datastore.service.get_if_exists(service_key):
-                    operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
-
-                    # Check if a service waas previously disabled and re-enable it
-                    if service_name in self.incompatible_services:
-                        self.incompatible_services.remove(service_name)
-                        operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
-
-                    if self.datastore.service_delta.update(service_name, operations):
-                        # Update completed, cleanup
-                        self.service_events.send(service_name, {
-                            'operation': Operation.Modified,
-                            'name': service_name
-                        })
-                        self.log.info(f"[CU] Service {service_name} update successful!")
+            # Check the status of the container updates
+            while update_threads:
+                # Delay each check by 5 seconds to give the container adequate time to perform version registration
+                time.sleep(5)
+                pending_threads = []
+                for thread in update_threads:
+                    if not thread.done():
+                        # Add thead to the list of still pending jobs
+                        pending_threads.append(thread)
                     else:
-                        self.log.error(f"[CU] Service {service_name} has failed to update because it cannot set "
-                                       f"{latest_tag} as the new version. Update procedure cancelled...")
-                else:
-                    self.log.error(f"[CU] Service {service_name} has failed to update because resulting "
-                                   f"service key ({service_key}) does not exist. Update procedure cancelled...")
-                self.container_update.pop(service_name)
+                        # Update the version of the service
+                        service_key = thread.result()
+                        service_name, latest_tag = service_key.split("_")
+
+                        if self.datastore.service.get_if_exists(service_key):
+                            operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
+
+                            # Check if a service waas previously disabled and re-enable it
+                            if service_name in self.incompatible_services:
+                                self.incompatible_services.remove(service_name)
+                                operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
+
+                            if self.datastore.service_delta.update(service_name, operations):
+                                # Update completed, cleanup
+                                self.service_events.send(service_name, {
+                                    'operation': Operation.Modified,
+                                    'name': service_name
+                                })
+                                self.log.info(f"[CU] Service {service_name} update successful!")
+                            else:
+                                self.log.error(
+                                    f"[CU] Service {service_name} has failed to update because it cannot set "
+                                    f"{latest_tag} as the new version. Update procedure cancelled...")
+                        else:
+                            self.log.error(f"[CU] Service {service_name} has failed to update because resulting "
+                                           f"service key ({service_key}) does not exist. Update procedure cancelled...")
+                        self.container_update.pop(service_name)
+
+                # Update with still pending and loop until all are completed/failed
+                update_threads = pending_threads
 
             # Clear out any old dead containers
             self.controller.cleanup_stale()
