@@ -43,6 +43,7 @@ SERVICE_LIVENESS_PERIOD = int(os.environ.get('SERVICE_LIVENESS_PERIOD', 300))
 SERVICE_LIVENESS_TIMEOUT = int(os.environ.get('SERVICE_LIVENESS_TIMEOUT', 60))
 UNPRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('UNPRIVILEGED_SERVICE_ACCOUNT_NAME', None)
 PRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('PRIVILEGED_SERVICE_ACCOUNT_NAME', None)
+CERTIFICATE_VALIDITY_PERIOD = int(os.environ.get('CERTIFICATE_VALIDITY_PERIOD', '36500'))
 
 AL_ROOT_CA = os.environ.get('AL_ROOT_CA', '/etc/assemblyline/ssl/al_root-ca.crt')
 AL_ROOT_CA_PK = os.environ.get('AL_ROOT_CA_PK', '/etc/assemblyline/ssl/al_root-ca.key')
@@ -1023,31 +1024,36 @@ class KubernetesController(ControllerInterface):
 
             cert_secret_name = f"{deployment_name}-cert"
             try:
-                self.api.read_namespaced_secret(
+                # Ensure that the certificate isn't close to expiring within a week, if it exists
+                cert_secret: V1Secret = self.api.read_namespaced_secret(
                     name=cert_secret_name, namespace=self.namespace, _request_timeout=API_TIMEOUT)
-            except ApiException as error:
-                if error.status != 404:
+                expiration_date = cert_secret.metadata.creation_timestamp + timedelta(days=CERTIFICATE_VALIDITY_PERIOD)
+                if expiration_date >= datetime.now() + timedelta(days=-7):
+                    # If this certificate is set to expire within a week, rotate it
+                    raise ValueError(
+                        f"Certificate '{cert_secret_name}' is set to expire within a week. Beginning rotation..")
+            except (ApiException, ValueError) as error:
+                if isinstance(error, ApiException) and error.status != 404:
                     raise
+                elif isinstance(error, ValueError):
+                    self.logger.warning(error)
 
-                # Certificate pair doesn't exist for this dependency, create it
+                # Certificate pair doesn't exist or is invalid for this dependency, create it
                 with open(AL_ROOT_CA, 'rb') as root_ca:
                     rootca_cert = x509.load_pem_x509_certificate(root_ca.read())
                 with open(AL_ROOT_CA_PK, 'rb') as root_ca_pk:
                     rootca_pk = serialization.load_pem_private_key(root_ca_pk.read(), None)
 
                 cert_key = rsa.generate_private_key(65537, 2048)
-                cert = x509.CertificateBuilder(issuer_name=rootca_cert.issuer,
-                                               subject_name=x509.Name([
-                                                   x509.NameAttribute(x509.OID_COMMON_NAME, deployment_name)
-                                               ]),
-                                               not_valid_before=(datetime.utcnow() - timedelta(days=1)),
-                                               not_valid_after=(datetime.utcnow() + timedelta(days=36500)),
-                                               public_key=cert_key.public_key(),
-                                               serial_number=x509.random_serial_number(),
-                                               ).add_extension(
-                                                   x509.SubjectAlternativeName([x509.DNSName(deployment_name)]),
-                                                   critical=False
-                ).sign(rootca_pk, hashes.SHA256())
+                cert = x509.CertificateBuilder(
+                    issuer_name=rootca_cert.issuer,
+                    subject_name=x509.Name([x509.NameAttribute(x509.OID_COMMON_NAME, deployment_name)]),
+                    not_valid_before=(datetime.utcnow() - timedelta(days=1)),
+                    not_valid_after=(datetime.utcnow() + timedelta(days=CERTIFICATE_VALIDITY_PERIOD)),
+                    public_key=cert_key.public_key(),
+                    serial_number=x509.random_serial_number()).add_extension(
+                        x509.SubjectAlternativeName([x509.DNSName(deployment_name)]),
+                    critical=False).sign(rootca_pk, hashes.SHA256())
 
                 # Push the key pair into namespace as a secret
                 self.api.create_namespaced_secret(namespace=self.namespace,
@@ -1219,11 +1225,9 @@ class KubernetesController(ControllerInterface):
             'component': service_name,
         }
         # Gather all existing network policies pertaining to the service
-        existing_netpol = {netpol.metadata.name for netpol in
-                           self.net_api.list_namespaced_network_policy(namespace=self.namespace,
-                                                                       label_selector=','.join([f"{k}={v}"
-                                                                                                for k, v in service_labels.items()])
-                                                                       ).items}
+        existing_netpol = {netpol.metadata.name for netpol in self.net_api.list_namespaced_network_policy(
+            namespace=self.namespace,
+            label_selector=','.join([f"{k}={v}" for k, v in service_labels.items()])).items}
 
         def create_or_patch_network_policy(netpol_body: V1NetworkPolicy):
             netpol_body.metadata.labels = service_labels
