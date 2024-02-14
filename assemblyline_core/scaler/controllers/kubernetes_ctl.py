@@ -1022,23 +1022,9 @@ class KubernetesController(ControllerInterface):
         if os.path.exists(AL_ROOT_CA):
             # Specifically for service updaters when internal encryption is enabled on the cluster
             dep_cert_dir = f"/etc/assemblyline/ssl/al_{container_name}"
-
             cert_secret_name = f"{deployment_name}-cert"
-            try:
-                # Ensure that the certificate isn't close to expiring within a week, if it exists
-                cert_secret: V1Secret = self.api.read_namespaced_secret(
-                    name=cert_secret_name, namespace=self.namespace, _request_timeout=API_TIMEOUT)
-                expiration_date = cert_secret.metadata.creation_timestamp + timedelta(days=CERTIFICATE_VALIDITY_PERIOD)
-                if expiration_date >= datetime.now(tzlocal()) + timedelta(days=-7):
-                    # If this certificate is set to expire within a week, rotate it
-                    raise ValueError(
-                        f"Certificate '{cert_secret_name}' is set to expire within a week. Beginning rotation..")
-            except (ApiException, ValueError) as error:
-                if isinstance(error, ApiException) and error.status != 404:
-                    raise
-                elif isinstance(error, ValueError):
-                    self.logger.warning(error)
 
+            def generate_certificate_secret() -> V1Secret:
                 # Certificate pair doesn't exist or is invalid for this dependency, create it
                 with open(AL_ROOT_CA, 'rb') as root_ca:
                     rootca_cert = x509.load_pem_x509_certificate(root_ca.read())
@@ -1056,26 +1042,34 @@ class KubernetesController(ControllerInterface):
                         x509.SubjectAlternativeName([x509.DNSName(deployment_name)]),
                     critical=False).sign(rootca_pk, hashes.SHA256())
 
-                # Push the key pair into namespace as a secret
+                return V1Secret(metadata=V1ObjectMeta(name=cert_secret_name, namespace=self.namespace),
+                                type='kubernetes.io/tls',
+                                data={
+                                    'tls.crt': b64encode(cert.public_bytes(serialization.Encoding.PEM)).decode(),
+                                    'tls.key': b64encode(cert_key.private_bytes(
+                                        encoding=serialization.Encoding.PEM,
+                                        format=serialization.PrivateFormat.PKCS8,
+                                        encryption_algorithm=serialization.NoEncryption())).decode()})
+
+            try:
+                # Ensure that the certificate isn't close to expiring within a week, if it exists
+                cert_secret: V1Secret = self.api.read_namespaced_secret(
+                    name=cert_secret_name, namespace=self.namespace, _request_timeout=API_TIMEOUT)
+                expiration_date = cert_secret.metadata.creation_timestamp + timedelta(days=CERTIFICATE_VALIDITY_PERIOD)
+                current_date = datetime.now(tzlocal())
+                if current_date - timedelta(days=7) < expiration_date < current_date:
+                    # If this certificate is set to expire within a week, rotate it
+                    self.log.warning(
+                        f"Certificate '{cert_secret_name}' is set to expire within a week. Beginning rotation..")
+                    self.api.patch_namespaced_secret(cert_secret_name, namespace=self.namespace,
+                                                     body=generate_certificate_secret())
+
+            except (ApiException, ValueError) as error:
+                if isinstance(error, ApiException) and error.status != 404:
+                    raise
+
                 self.api.create_namespaced_secret(namespace=self.namespace,
-                                                  _request_timeout=API_TIMEOUT,
-                                                  body=V1Secret(
-                                                      metadata=V1ObjectMeta(name=cert_secret_name,
-                                                                            namespace=self.namespace),
-                                                      type='kubernetes.io/tls',
-                                                      data={
-                                                          'tls.crt': b64encode(
-                                                              cert.public_bytes(serialization.Encoding.PEM)
-                                                          ).decode(),
-                                                          'tls.key': b64encode(
-                                                              cert_key.private_bytes(
-                                                                  encoding=serialization.Encoding.PEM,
-                                                                  format=serialization.PrivateFormat.PKCS8,
-                                                                  encryption_algorithm=serialization.NoEncryption()
-                                                              )
-                                                          ).decode()
-                                                      }
-                                                  ))
+                                                  body=generate_certificate_secret())
 
             finally:
                 volumes.append(V1Volume(name=cert_secret_name,
