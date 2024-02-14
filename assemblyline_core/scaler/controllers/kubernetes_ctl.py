@@ -1118,21 +1118,24 @@ class KubernetesController(ControllerInterface):
                 # Ensure that the certificate isn't close to expiring within a week, if it exists
                 cert_secret: V1Secret = self.api.read_namespaced_secret(
                     name=cert_secret_name, namespace=self.namespace, _request_timeout=API_TIMEOUT)
-                expiration_date = cert_secret.metadata.creation_timestamp + timedelta(days=CERTIFICATE_VALIDITY_PERIOD)
+                expiration_date = cert_secret.metadata.managed_fields[0].time + timedelta(
+                    days=CERTIFICATE_VALIDITY_PERIOD)
                 current_date = datetime.now(tzlocal())
                 if current_date - timedelta(days=7) < expiration_date < current_date:
                     # If this certificate is set to expire within a week, rotate it
-                    self.log.warning(
+                    self.logger.warning(
                         f"Certificate '{cert_secret_name}' is set to expire within a week. Beginning rotation..")
                     self.api.patch_namespaced_secret(cert_secret_name, namespace=self.namespace,
-                                                     body=generate_certificate_secret())
+                                                     body=generate_certificate_secret(),
+                                                     _request_timeout=API_TIMEOUT)
 
             except (ApiException, ValueError) as error:
                 if isinstance(error, ApiException) and error.status != 404:
                     raise
 
                 self.api.create_namespaced_secret(namespace=self.namespace,
-                                                  body=generate_certificate_secret())
+                                                  body=generate_certificate_secret(),
+                                                  _request_timeout=API_TIMEOUT)
 
             finally:
                 volumes.append(V1Volume(name=cert_secret_name,
