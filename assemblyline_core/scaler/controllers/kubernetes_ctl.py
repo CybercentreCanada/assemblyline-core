@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization, hashes
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timedelta
+from dateutil.tz import tzlocal
 from typing import List, Optional, Tuple
 from time import sleep
 from assemblyline.odm.models.config import Selector
@@ -1091,7 +1092,7 @@ class KubernetesController(ControllerInterface):
                 cert_secret: V1Secret = self.api.read_namespaced_secret(
                     name=cert_secret_name, namespace=self.namespace, _request_timeout=API_TIMEOUT)
                 expiration_date = cert_secret.metadata.creation_timestamp + timedelta(days=CERTIFICATE_VALIDITY_PERIOD)
-                if expiration_date >= datetime.now() + timedelta(days=-7):
+                if expiration_date >= datetime.now(tzlocal()) + timedelta(days=-7):
                     # If this certificate is set to expire within a week, rotate it
                     raise ValueError(
                         f"Certificate '{cert_secret_name}' is set to expire within a week. Beginning rotation..")
