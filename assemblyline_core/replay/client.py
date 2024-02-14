@@ -7,7 +7,6 @@ from assemblyline.common.bundling import create_bundle, import_bundle
 from assemblyline.odm import Model
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline_client import ClientError
 from assemblyline_core.badlist_client import BadlistClient
 from assemblyline_core.safelist_client import SafelistClient
 
@@ -295,6 +294,8 @@ class APIClient(ClientBase):
                                             exist_ok=exist_ok)
 
     def load_json(self, file_path):
+        from assemblyline_client import ClientError
+
         # We're assuming all JSON that loaded has an "enabled" field
         collection = os.path.basename(file_path).split('_', 1)[0]
         with open(file_path) as fp:
