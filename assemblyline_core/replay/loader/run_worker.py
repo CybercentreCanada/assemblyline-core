@@ -27,9 +27,13 @@ class ReplayLoaderWorker(ReplayBase):
             if file_path:
                 self.log.info(f"Processing file: {file_path}")
                 try:
-                    self.client.load_bundle(file_path,
-                                            min_classification=self.replay_config.loader.min_classification,
-                                            rescan_services=self.replay_config.loader.rescan)
+                    if file_path.endswith(".al_bundle"):
+                        self.client.load_bundle(file_path,
+                                                min_classification=self.replay_config.loader.min_classification,
+                                                rescan_services=self.replay_config.loader.rescan)
+                    elif file_path.endswith(".al_json"):
+                        self.client.load_json(file_path)
+
                     if os.path.exists(file_path):
                         os.unlink(file_path)
                 except OSError as e:

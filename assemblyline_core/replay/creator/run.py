@@ -18,7 +18,10 @@ class ReplayCreator(ReplayBase):
         # Load client
         client_config = dict(lookback_time=self.replay_config.creator.lookback_time,
                              alert_fqs=self.replay_config.creator.alert_input.filter_queries,
-                             submission_fqs=self.replay_config.creator.submission_input.filter_queries)
+                             badlist_fqs=self.replay_config.creator.badlist_input.filter_queries,
+                             safelist_fqs=self.replay_config.creator.safelist_input.filter_queries,
+                             submission_fqs=self.replay_config.creator.submission_input.filter_queries,
+                             workflow_fqs=self.replay_config.creator.workflow_input.filter_queries)
 
         if self.replay_config.creator.client.type == 'direct':
             self.log.info("Using direct database access client")
@@ -36,8 +39,17 @@ class ReplayCreator(ReplayBase):
         if self.replay_config.creator.alert_input.enabled:
             threads['Load Alerts'] = self.client.setup_alert_input_queue
 
+        if self.replay_config.creator.badlist_input.enabled:
+            threads['Load Badlist Items'] = self.client.setup_badlist_input_queue
+
+        if self.replay_config.creator.safelist_input.enabled:
+            threads['Load Safelist Items'] = self.client.setup_safelist_input_queue
+
         if self.replay_config.creator.submission_input.enabled:
             threads['Load Submissions'] = self.client.setup_submission_input_queue
+
+        if self.replay_config.creator.workflow_input.enabled:
+            threads['Load Workflows'] = self.client.setup_workflow_input_queue
 
         if threads:
             self.maintain_threads(threads)
