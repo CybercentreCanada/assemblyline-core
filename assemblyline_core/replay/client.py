@@ -5,10 +5,9 @@ import time
 from assemblyline.common import forge
 from assemblyline.common.bundling import create_bundle, import_bundle
 from assemblyline.odm import Model
-from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline_client import get_client as get_AL_client, ClientError
+from assemblyline_client import ClientError
 from assemblyline_core.badlist_client import BadlistClient
 from assemblyline_core.safelist_client import SafelistClient
 
@@ -264,8 +263,10 @@ class ClientBase(object):
 
 class APIClient(ClientBase):
     def __init__(self, log, host, user, apikey, verify, **kwargs):
+        from assemblyline_client import get_client
+
         # Setup AL client
-        self.al_client = get_AL_client(host, apikey=(user, apikey), verify=verify)
+        self.al_client = get_client(host, apikey=(user, apikey), verify=verify)
 
         super().__init__(log, **kwargs)
 
@@ -350,6 +351,8 @@ class APIClient(ClientBase):
 
 class DirectClient(ClientBase):
     def __init__(self, log, **kwargs):
+        from assemblyline.remote.datatypes import get_client
+
         # Setup datastore
         config = forge.get_config()
         redis = get_client(config.core.redis.nonpersistent.host, config.core.redis.nonpersistent.port, False)
