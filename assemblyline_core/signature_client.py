@@ -1,38 +1,14 @@
-import hashlib
 import logging
-import yaml
 
 from assemblyline.common import forge
 from assemblyline.common.isotime import iso_to_epoch
+from assemblyline.common.memory_zip import InMemoryZip
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.messages.changes import Operation
-from assemblyline.odm.models.user import ROLES
-from assemblyline.remote.datatypes.lock import Lock
-
-from assemblyline_ui.config import SERVICE_LIST
 from assemblyline.odm.models.service import SIGNATURE_DELIMITERS
-from assemblyline.common.memory_zip import InMemoryZip
-
-
-def _get_signature_delimiters():
-    signature_delimiters = {}
-    for service in SERVICE_LIST:
-        if service.get("update_config", {}).get("generates_signatures", False):
-            signature_delimiters[service['name'].lower()] = _get_signature_delimiter(service['update_config'])
-    return signature_delimiters
-
-
-def _get_signature_delimiter(update_config):
-    delimiter_type = update_config['signature_delimiter']
-    if delimiter_type == 'custom':
-        delimiter = update_config['custom_delimiter'].encode().decode('unicode-escape')
-    else:
-        delimiter = SIGNATURE_DELIMITERS.get(delimiter_type, '\n\n')
-    return {'type': delimiter_type, 'delimiter': delimiter}
 
 
 DEFAULT_DELIMITER = "\n\n"
-DELIMITERS = forge.CachedObject(_get_signature_delimiters)
 CLASSIFICATION = forge.get_classification()
 
 
@@ -44,6 +20,23 @@ class SignatureClient:
         self.log = logging.getLogger('assemblyline.signature_client')
         self.config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
+        self.service_list = forge.CachedObject(self.datastore.list_all_services, kwargs=dict(as_obj=False, full=True))
+        self.delimiters = forge.CachedObject(self._get_signature_delimiters)
+
+    def _get_signature_delimiters(self):
+        signature_delimiters = {}
+        for service in self.service_list:
+            if service.get("update_config", {}).get("generates_signatures", False):
+                signature_delimiters[service['name'].lower()] = self._get_signature_delimiter(service['update_config'])
+        return signature_delimiters
+
+    def _get_signature_delimiter(self, update_config):
+        delimiter_type = update_config['signature_delimiter']
+        if delimiter_type == 'custom':
+            delimiter = update_config['custom_delimiter'].encode().decode('unicode-escape')
+        else:
+            delimiter = SIGNATURE_DELIMITERS.get(delimiter_type, '\n\n')
+        return {'type': delimiter_type, 'delimiter': delimiter}
 
     def add_update(self, data, dedup_name=True):
         if data.get('type', None) is None or data['name'] is None or data['data'] is None:
