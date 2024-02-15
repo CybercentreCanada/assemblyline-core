@@ -15,7 +15,7 @@ class InvalidSafehash(Exception):
     pass
 
 
-# Tasking class
+# Safelist class
 class SafelistClient:
     """A helper class to simplify safelisting for privileged services and service-server."""
 

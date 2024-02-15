@@ -17,6 +17,7 @@ class InvalidBadhash(Exception):
     pass
 
 
+# Badlist class
 class BadlistClient:
     """A helper class to simplify badlisting for privileged services and service-server."""
 
