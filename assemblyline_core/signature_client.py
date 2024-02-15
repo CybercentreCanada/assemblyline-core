@@ -147,14 +147,14 @@ class SignatureClient:
 
         for sig in signature_list:
             out_fname = f"{sig['type']}/{sig['source']}"
-            if DELIMITERS.get(sig['type'], {}).get('type', None) == 'file':
+            if self.delimiters.get(sig['type'], {}).get('type', None) == 'file':
                 out_fname = f"{out_fname}/{sig['signature_id']}"
             output_files.setdefault(out_fname, [])
             output_files[out_fname].append(sig['data'])
 
         output_zip = InMemoryZip()
         for fname, data in output_files.items():
-            separator = DELIMITERS.get(fname.split('/')[0], {}).get('delimiter', DEFAULT_DELIMITER)
+            separator = self.delimiters.get(fname.split('/')[0], {}).get('delimiter', DEFAULT_DELIMITER)
             output_zip.append(fname, separator.join(data))
 
         return output_zip.read()
