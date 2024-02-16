@@ -1,11 +1,12 @@
 import logging
 
 from assemblyline.common import forge
-from assemblyline.common.isotime import iso_to_epoch
+from assemblyline.common.isotime import iso_to_epoch, now_as_iso
 from assemblyline.common.memory_zip import InMemoryZip
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.messages.changes import Operation
 from assemblyline.odm.models.service import SIGNATURE_DELIMITERS
+from assemblyline.odm.models.signature import DEPLOYED_STATUSES, STALE_STATUSES, DRAFT_STATUSES
 
 
 DEFAULT_DELIMITER = "\n\n"
@@ -132,6 +133,48 @@ class SignatureClient:
             return {"success": len(res['items']), "errors": res['errors'], "skipped": skip_list}
 
         return {"success": 0, "errors": [], "skipped": skip_list}
+
+    def change_status(self, signature_id, status, user={}):
+        possible_statuses = DEPLOYED_STATUSES + DRAFT_STATUSES
+        if status not in possible_statuses:
+            raise ValueError(f"You cannot apply the status {status} on yara rules.")
+
+        data = self.datastore.signature.get(signature_id, as_obj=False)
+        if data:
+            if user and not CLASSIFICATION.is_accessible(user['classification'],
+                                                         data.get('classification', CLASSIFICATION.UNRESTRICTED)):
+                raise PermissionError("You are not allowed change status on this signature")
+
+            if data['status'] in STALE_STATUSES and status not in DRAFT_STATUSES:
+                raise ValueError(f"Only action available while signature in {data['status']} "
+                                 f"status is to change signature to a DRAFT status. ({', '.join(DRAFT_STATUSES)})")
+
+            if data['status'] in DEPLOYED_STATUSES and status in DRAFT_STATUSES:
+                raise ValueError(f"You cannot change the status of signature {signature_id} from "
+                                 f"{data['status']} to {status}.")
+
+            today = now_as_iso()
+            uname = user.get('uname')
+
+            if status not in ['DISABLED', 'INVALID', 'TESTING']:
+                query = f"status:{status} AND signature_id:{data['signature_id']} AND NOT id:{signature_id}"
+                others_operations = [
+                    ('SET', 'last_modified', today),
+                    ('SET', 'state_change_date', today),
+                    ('SET', 'state_change_user', uname),
+                    ('SET', 'status', 'DISABLED')
+                ]
+                self.datastore.signature.update_by_query(query, others_operations)
+
+            operations = [
+                ('SET', 'last_modified', today),
+                ('SET', 'state_change_date', today),
+                ('SET', 'state_change_user', uname),
+                ('SET', 'status', status)
+            ]
+
+            return self.datastore.signature.update(signature_id, operations), data
+        raise FileNotFoundError(f"Signature not found. ({signature_id})")
 
     def download(self, query=None, access=None) -> bytes:
         if not query:
