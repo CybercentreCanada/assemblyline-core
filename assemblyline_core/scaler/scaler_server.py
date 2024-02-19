@@ -68,7 +68,6 @@ DOCKER_CONFIGURATION_PATH = os.getenv('DOCKER_CONFIGURATION_PATH', None)
 DOCKER_CONFIGURATION_VOLUME = os.getenv('DOCKER_CONFIGURATION_VOLUME', None)
 
 SERVICE_API_HOST = os.getenv('SERVICE_API_HOST', None)
-UI_SERVER = os.getenv('UI_SERVER', None)
 INTERNAL_ENCRYPT = bool(SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'))
 
 
@@ -270,7 +269,7 @@ class ScalerServer(ThreadedCoreBase):
         core_env: dict[str, str] = {}
         # If we have privileged services, we must be able to pass the necessary environment variables for them to
         # function properly.
-        for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']:
+        for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()):
             env_name = secret.strip("${}")
             try:
                 core_env[env_name] = os.environ[env_name]

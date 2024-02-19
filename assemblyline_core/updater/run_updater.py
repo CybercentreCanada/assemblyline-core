@@ -39,14 +39,13 @@ NAMESPACE = os.getenv('NAMESPACE', None)
 INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] + \
     [
     secret.strip("${}")
-    for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']]
+    for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read())]
 
 CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'core')
 
 SERVICE_API_HOST = os.getenv('SERVICE_API_HOST')
-UI_SERVER = os.getenv('UI_SERVER')
 RELEASE_NAME = os.getenv('RELEASE_NAME')
 
 
