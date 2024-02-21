@@ -215,7 +215,7 @@ class ClientBase(object):
         raise NotImplementedError()
 
     def query_alerts(self, query="*", track_total_hits=False):
-        self._query("alert", query, track_total_hits)
+        self._query("alert", query=query, track_total_hits=track_total_hits)
 
     def get_next_message(self, message_type):
         raise NotImplementedError()
