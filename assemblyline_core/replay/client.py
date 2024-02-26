@@ -175,6 +175,8 @@ class ClientBase(object):
 
             if once:
                 break
+                
+            self.last_submission_time = self.last_submission_time or "*" 
 
     def _setup_checkpoint_based_input_queue(self, collection: str, id_field: str, date_field: str, once=False):
         # At bootstrap, get the last checkpoint
