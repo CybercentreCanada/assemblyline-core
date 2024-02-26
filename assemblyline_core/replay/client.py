@@ -110,13 +110,13 @@ class ClientBase(object):
         # Run
         while self.running:
             # Find alerts
-            alert_input_query = f"reporting_ts:[{self.last_alert_time} TO now]"
+            alert_input_query = f"reporting_ts:{{{self.last_alert_time} TO now]"
             alerts = self._get_next_alert_ids(alert_input_query, processing_fqs)
 
             # Set their pending state
             if alerts['items']:
                 last_time = alerts['items'][-1]['reporting_ts']
-                bulk_query = f"reporting_ts:[{self.last_alert_time} TO {last_time}]"
+                bulk_query = f"reporting_ts:{{{self.last_alert_time} TO {last_time}]"
                 count = len(alerts['items'])
                 self._set_bulk_alert_pending(bulk_query, processing_fqs, count)
                 self.last_alert_time = last_time
@@ -175,8 +175,6 @@ class ClientBase(object):
 
             if once:
                 break
-                
-            self.last_submission_time = self.last_submission_time or self.lookback_time or "*" 
 
     def _setup_checkpoint_based_input_queue(self, collection: str, id_field: str, date_field: str, once=False):
         # At bootstrap, get the last checkpoint
@@ -373,7 +371,7 @@ class DirectClient(ClientBase):
 
     def _query(self, collection, query, filter_queries=[], rows=None, track_total_hits=False):
         return getattr(self.datastore, collection).search(
-            query, filters=filter_queries, rows=rows, track_total_hits=track_total_hits
+            query, filters=filter_queries, rows=rows, track_total_hits=track_total_hits, as_obj=False
         )
 
     def _put_checkpoint(self, collection, checkpoint):
@@ -383,7 +381,7 @@ class DirectClient(ClientBase):
         return self.checkpoint_hash.get(collection) or "*"
 
     def _get_next_object_ids(self, collection, query, filter_queries, fl, sort):
-        return getattr(self.datastore, collection).search(query, fl=fl, sort=sort, rows=100, filters=filter_queries)
+        return getattr(self.datastore, collection).search(query, fl=fl, sort=sort, rows=100, filters=filter_queries, as_obj=False)
 
     def _set_bulk_object_pending(self, collection, query, filter_queries, max_docs):
         ds_collection = getattr(self.datastore, collection)
