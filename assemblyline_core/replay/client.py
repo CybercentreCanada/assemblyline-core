@@ -110,13 +110,13 @@ class ClientBase(object):
         # Run
         while self.running:
             # Find alerts
-            alert_input_query = f"reporting_ts:{{{self.last_alert_time} TO now]"
+            alert_input_query = f"reporting_ts:[{self.last_alert_time} TO now]"
             alerts = self._get_next_alert_ids(alert_input_query, processing_fqs)
 
             # Set their pending state
             if alerts['items']:
                 last_time = alerts['items'][-1]['reporting_ts']
-                bulk_query = f"reporting_ts:{{{self.last_alert_time} TO {last_time}]"
+                bulk_query = f"reporting_ts:[{self.last_alert_time} TO {last_time}]"
                 count = len(alerts['items'])
                 self._set_bulk_alert_pending(bulk_query, processing_fqs, count)
                 self.last_alert_time = last_time
