@@ -371,7 +371,7 @@ class DirectClient(ClientBase):
 
     def _query(self, collection, query, filter_queries=[], rows=None, track_total_hits=False):
         return getattr(self.datastore, collection).search(
-            query, filters=filter_queries, rows=rows, track_total_hits=track_total_hits
+            query, filters=filter_queries, rows=rows, track_total_hits=track_total_hits, as_obj=False
         )
 
     def _put_checkpoint(self, collection, checkpoint):
@@ -381,7 +381,7 @@ class DirectClient(ClientBase):
         return self.checkpoint_hash.get(collection) or "*"
 
     def _get_next_object_ids(self, collection, query, filter_queries, fl, sort):
-        return getattr(self.datastore, collection).search(query, fl=fl, sort=sort, rows=100, filters=filter_queries)
+        return getattr(self.datastore, collection).search(query, fl=fl, sort=sort, rows=100, filters=filter_queries, as_obj=False)
 
     def _set_bulk_object_pending(self, collection, query, filter_queries, max_docs):
         ds_collection = getattr(self.datastore, collection)
