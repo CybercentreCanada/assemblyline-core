@@ -21,7 +21,7 @@ from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
 from assemblyline.common.log import init_logging
 from assemblyline.common.metrics import MetricsFactory
-from assemblyline.datastore.helper import AssemblylineDatastore
+from assemblyline.datastore.helper import AssemblylineDatastore, MetadataValidator
 from assemblyline.common import identify
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.uid import get_random_id
@@ -164,6 +164,7 @@ class FileProcessor(threading.Thread):
         # Anything that can't be copied easily should be initialized in 'run'.
         self.config: Config = config
         self.datastore = datastore
+        self.metadata_check = MetadataValidator(datastore)
         self.counter = counter
         self.minimum_classification = self.config.core.vacuum.minimum_classification
         logger.info("Connect to work queue")
@@ -494,7 +495,7 @@ class FileProcessor(threading.Thread):
                 # Extract email body strings or similar password settings
                 password_strings = metadata.pop("email_strings", [])
                 if not isinstance(password_strings, list):
-                    logger.warning("Unsupported password list format: " + str(password_strings))
+                    logger.warning("Unsupported password list format: %s", password_strings)
                     password_strings = []
 
                 if password_strings:
@@ -503,6 +504,16 @@ class FileProcessor(threading.Thread):
 
                 # Set description if it does not exists
                 s_params['description'] = f"[{s_params['type']}] Inspection of file: {file_sha256}"
+
+                # Validate the metadata
+                while metadata:
+                    metadata_error = self.metadata_check.check_metadata(metadata)
+                    if metadata_error:
+                        logger.error("Could not accept metadata %s on %s: %s", metadata_error[0],
+                                     file_sha256, metadata_error[1])
+                        metadata.pop(metadata_error[0], None)
+                    else:
+                        break
 
                 # Create submission object
                 try:
