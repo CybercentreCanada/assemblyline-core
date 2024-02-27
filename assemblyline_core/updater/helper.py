@@ -169,12 +169,16 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
                 break
 
     if service_config.docker_config.registry_username and service_config.docker_config.registry_password:
+        # We're authenticating using Basic Auth
         auth_config = {
             'username': service_config.docker_config.registry_username,
             'password': service_config.docker_config.registry_password
         }
         upass = f"{service_config.docker_config.registry_username}:{service_config.docker_config.registry_password}"
         auth = f"Basic {b64encode(upass.encode()).decode()}"
+    elif service_config.docker_config.registry_password:
+        # We're assuming that if only a password is given, then this is a token
+        auth = f"Bearer {service_config.docker_config.registry_password}"
 
     proxies = None
     for reg_conf in system_config.core.updater.registry_configs:
