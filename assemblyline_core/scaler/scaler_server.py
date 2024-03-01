@@ -185,13 +185,13 @@ class ServiceProfile:
             return self.target_instances + MAX_CONTAINER_ALLOCATION
         return min(self._max_instances, self.target_instances + MAX_CONTAINER_ALLOCATION)
 
-    @property
-    def min_instances(self) -> int:
-        return self._min_instances
-
     @max_instances.setter
     def max_instances(self, value: int):
         self._max_instances = max(0, value)
+
+    @property
+    def min_instances(self) -> int:
+        return self._min_instances
 
     @min_instances.setter
     def min_instances(self, value: int):
@@ -601,9 +601,8 @@ class ScalerServer(ThreadedCoreBase):
                         # Use service-specific value if present
                         min_instances = service.min_instances
                     if name not in self.profiles:
-                        self.log.info(f"Adding "
-                                      f"{f'privileged {service.name}' if service.privileged else service.name}"
-                                      " to scaling")
+                        self.log.info("Adding %s%s to scaling",
+                                      'privileged ' if service.privileged else '', service.name)
                         self.add_service(ServiceProfile(
                             name=name,
                             min_instances=min_instances,
