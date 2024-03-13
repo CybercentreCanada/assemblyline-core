@@ -733,10 +733,12 @@ class KubernetesController(ControllerInterface):
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
         field_selector, label_selector = selector_to_list_filters(self.linux_node_selector)
-        lbls = sorted((labels or {}).items())
+        key_labels = sorted((labels or {}).items())
         svc_env = sorted(self._service_limited_env[service_name].items())
+        deployment_labels = {_v.name: _v.value for _v in docker_config.labels}
+        key_labels += sorted(deployment_labels.items())
         change_key = str(f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
-                         f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}"
+                         f"l={key_labels}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}"
                          f"nodes={field_selector or ''}{label_selector or ''}")
         self.logger.debug(f"{deployment_name} actual change_key: {change_key}")
         change_key = str(hash(change_key))
@@ -792,7 +794,8 @@ class KubernetesController(ControllerInterface):
         elif current_pull_secret:
             self.api.delete_namespaced_secret(pull_secret_name, self.namespace, _request_timeout=API_TIMEOUT)
 
-        all_labels = dict(self._labels)
+        all_labels = deployment_labels
+        all_labels.update(self._labels)
         all_labels['component'] = service_name
         if core_mounts:
             all_labels['privilege'] = 'core'
@@ -996,6 +999,7 @@ class KubernetesController(ControllerInterface):
         # Generate the expected change key
         senv = sorted(self._service_limited_env[service_name].items())
         labels = [('container', container_name), ('dependency_for', service_name)]
+        labels += sorted([(_v.name, _v.value) for _v in spec.container.labels])
         temp_spec = DependencyConfig(spec.as_primitives())
         volumes, mounts, _ = self._get_volumes_mounts_strategy(deployment_name, container_name, temp_spec)
         temp_spec.container.environment.append(dict(name='AL_INSTANCE_KEY', value=container_key))
