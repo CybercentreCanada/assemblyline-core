@@ -4,10 +4,14 @@ import tempfile
 import sys
 import time
 from collections import Counter
-from threading import Lock
+from threading import Lock, Thread
+from os import environ, path
+from urllib.parse import urlparse
 
 import elasticapm
 import elasticsearch
+import requests
+from packaging import version
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from assemblyline_core.metrics.heartbeat_formatter import HeartbeatFormatter
@@ -16,9 +20,6 @@ from assemblyline_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common import forge
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
-from os import environ, path
-from packaging import version
-from urllib.parse import urlparse
 
 METRICS_QUEUE = "assemblyline_metrics"
 NON_AGGREGATED = ['scaler', 'scaler_status']
