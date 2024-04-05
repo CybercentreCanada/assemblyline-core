@@ -33,10 +33,10 @@ class DockerRegistry(ContainerRegistry):
             headers["Authorization"] = auth
         else:
             # Retrieve token for authentication: https://distribution.github.io/distribution/spec/auth/token/
-            if not token_server:
-                # Assume the token server is the same as the container image registry host
-                token_base_url = f"https://{token_server}/token"
-            token_url = f"{token_base_url}?scope=repository:{image_name}:pull"
+
+            # Assume the token server is the same as the container image registry host if not explicitly set
+            token_server = token_server if token_server else server
+            token_url = f"https://{token_server}/token?scope=repository:{image_name}:pull"
             token = requests.get(token_url).json().get('token')
             headers["Authorization"] = f"Bearer {token}"
 
@@ -69,10 +69,10 @@ class HarborRegistry(ContainerRegistry):
             headers["Authorization"] = auth
         else:
             # Retrieve token for authentication: https://github.com/goharbor/harbor/wiki/Harbor-FAQs#api
-            if not token_server:
-                # Assume the token server is the same as the container image registry host
-                token_base_url = f"https://{server}/service/token"
-            token_url = f"{token_base_url}?scope=repository:{image_name}:pull"
+
+            # Assume the token server is the same as the container image registry host if not explicitly set
+            token_server = token_server if token_server else server
+            token_url = f"https://{server}/service/token?scope=repository:{image_name}:pull"
             token = requests.get(token_url).json().get('token')
             headers["Authorization"] = f"Bearer {token}"
         resp = None
