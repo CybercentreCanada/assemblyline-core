@@ -48,7 +48,7 @@ class ContainerRegistry():
     def get_image_os(self, image_name, image_tag) -> str:
         raise NotImplementedError()
 
-
+        
 class DockerHub(ContainerRegistry):
     def __init__(self, update_channel, proxies: Dict[str, str] = None, *args, **kwargs):
         super().__init__(DEFAULT_DOCKER_REGISTRY, None, True, proxies)
@@ -69,6 +69,19 @@ class DockerHub(ContainerRegistry):
 
 # Ref: https://docs.docker.com/registry/spec/api/#detail
 class DockerRegistry(ContainerRegistry):
+    def __init__(self, server, headers: Dict[str, str] = None, verify: bool = True,
+                 proxies: Dict[str, str] = None, token_server: str = None, *args, **kwargs):
+        super().__init__(server, headers, verify, proxies, *args, **kwargs)
+        
+        if not self.session.headers.get('Authorization'):
+            # Retrieve token for authentication: https://distribution.github.io/distribution/spec/auth/token/
+            
+            # Assume the token server is the same as the container image registry host if not explicitly set
+            token_server = token_server if token_server else server
+            token_url = f"https://{token_server}/token?scope=repository:{image_name}:pull"
+            token = requests.get(token_url).json().get('token')
+            self.session.headers["Authorization"] = f"Bearer {token}"          
+        
     def get_image_tags(self, image_name) -> List[str]:
         # Find latest tag for each types
         resp = self._make_request(f"/v2/{image_name}/tags/list")
@@ -88,6 +101,19 @@ class DockerRegistry(ContainerRegistry):
 
 # Ref: https://github.com/goharbor/harbor/blob/main/api/v2.0/swagger.yaml
 class HarborRegistry(ContainerRegistry):
+    def __init__(self, server, headers: Dict[str, str] = None, verify: bool = True,
+                 proxies: Dict[str, str] = None, token_server: str = None, *args, **kwargs):
+        super().__init__(server, headers, verify, proxies, *args, **kwargs)
+        
+        if not self.session.headers.get('Authorization'):
+            # Retrieve token for authentication: https://github.com/goharbor/harbor/wiki/Harbor-FAQs#api
+
+            # Assume the token server is the same as the container image registry host if not explicitly set
+            token_server = token_server if token_server else server
+            token_url = f"https://{server}/service/token?scope=repository:{image_name}:pull"
+            token = requests.get(token_url).json().get('token')
+            headers["Authorization"] = f"Bearer {token}"
+      
     def _get_project_repo_ids(self, image_name) -> Tuple[str, str]:
         # Determine project/repo IDs from image name
         project_id, repo_id = image_name.split('/', 1)
@@ -180,10 +206,12 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
         # We're assuming that if only a password is given, then this is a token
         auth = f"Bearer {service_config.docker_config.registry_password}"
 
+    token_server = None
     proxies = None
     for reg_conf in system_config.core.updater.registry_configs:
         if reg_conf.name == server:
             proxies = reg_conf.proxies or None
+            token_server = reg_conf.token_server or None
             break
 
     registry_type = 'dockerhub' if server == DEFAULT_DOCKER_REGISTRY else service_config.docker_config.registry_type
@@ -192,7 +220,8 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
         'headers': {'Authorization': auth},
         'verify': not system_config.services.allow_insecure_registry,
         'proxies': proxies,
-        'update_channel': update_channel
+        'update_channel': update_channel,
+        'token_server': token_server
     }
 
     registry: ContainerRegistry = REGISTRY_TYPE_MAPPING[registry_type](**registry_args)
