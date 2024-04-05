@@ -431,7 +431,7 @@ class DirectClient(ClientBase):
                         # Preserve the system's enabled state of the item
                         data['enabled'] = obj["enabled"]
                     es_collection.save(id, SafelistClient._merge_hashes(data, obj))
-                es_collection.commit()
+            es_collection.commit()
 
     def set_single_object_complete(self, collection, id):
         ds_collection = getattr(self.datastore, collection)
