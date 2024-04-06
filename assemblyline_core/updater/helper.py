@@ -50,7 +50,7 @@ class ContainerRegistry():
 
     def get_token(self, image_name) -> None: ...
 
-        
+
 class DockerHub(ContainerRegistry):
     def __init__(self, update_channel, proxies: Dict[str, str] = None, *args, **kwargs):
         super().__init__(DEFAULT_DOCKER_REGISTRY, None, True, proxies)
@@ -74,18 +74,18 @@ class DockerRegistry(ContainerRegistry):
     def __init__(self, server, headers: Dict[str, str] = None, verify: bool = True,
                  proxies: Dict[str, str] = None, token_server: str = None, *args, **kwargs):
         super().__init__(server, headers, verify, proxies, *args, **kwargs)
-        self.token_server = token_server      
+        self.token_server = token_server
 
     def get_token(self, image_name) -> None:
         if not self.session.headers.get('Authorization'):
             # Retrieve token for authentication: https://distribution.github.io/distribution/spec/auth/token/
-            
+
             # Assume the token server is the same as the container image registry host if not explicitly set
             token_server = self.token_server if self.token_server else self.server
             token_url = f"https://{token_server}/token?scope=repository:{image_name}:pull"
             token = requests.get(token_url).json().get('token')
-            self.session.headers["Authorization"] = f"Bearer {token}"         
-    
+            self.session.headers["Authorization"] = f"Bearer {token}"
+
     def get_image_tags(self, image_name) -> List[str]:
         # Find latest tag for each types
         resp = self._make_request(f"/v2/{image_name}/tags/list")
@@ -97,7 +97,8 @@ class DockerRegistry(ContainerRegistry):
         resp = self._make_request(f"/v2/{image_name}/manifests/{image_tag}")
         if resp:
             # Retrieve OS compatibilty from historical record
-            return json.loads(resp['history'][0]['v1Compatibility'])['os']
+            if resp['schemaVersion'] == 1:
+                return json.loads(resp['history'][0]['v1Compatibility'])['os']
 
         # Unable to determine the OS compatibility
         return None
@@ -109,7 +110,7 @@ class HarborRegistry(ContainerRegistry):
                  proxies: Dict[str, str] = None, token_server: str = None, *args, **kwargs):
         super().__init__(server, headers, verify, proxies, *args, **kwargs)
         self.token_server = token_server
-                     
+
     def get_token(self, image_name) -> None:
         if not self.session.headers.get('Authorization'):
             # Retrieve token for authentication: https://github.com/goharbor/harbor/wiki/Harbor-FAQs#api
@@ -118,8 +119,8 @@ class HarborRegistry(ContainerRegistry):
             token_server = self.token_server if self.token_server else self.server
             token_url = f"https://{server}/service/token?scope=repository:{image_name}:pull"
             token = requests.get(token_url).json().get('token')
-            headers["Authorization"] = f"Bearer {token}"
-      
+            self.headers["Authorization"] = f"Bearer {token}"
+
     def _get_project_repo_ids(self, image_name) -> Tuple[str, str]:
         # Determine project/repo IDs from image name
         project_id, repo_id = image_name.split('/', 1)
