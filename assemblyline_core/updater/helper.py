@@ -108,6 +108,7 @@ class HarborRegistry(ContainerRegistry):
     def __init__(self, server, headers: Dict[str, str] = None, verify: bool = True,
                  proxies: Dict[str, str] = None, token_server: str = None, *args, **kwargs):
         super().__init__(server, headers, verify, proxies, *args, **kwargs)
+        self.token_server = token_server
                      
     def get_token(self, image_name) -> None:
         if not self.session.headers.get('Authorization'):
