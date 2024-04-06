@@ -48,6 +48,8 @@ class ContainerRegistry():
     def get_image_os(self, image_name, image_tag) -> str:
         raise NotImplementedError()
 
+    def get_token(self, image_name) -> None: ...
+
         
 class DockerHub(ContainerRegistry):
     def __init__(self, update_channel, proxies: Dict[str, str] = None, *args, **kwargs):
@@ -72,16 +74,18 @@ class DockerRegistry(ContainerRegistry):
     def __init__(self, server, headers: Dict[str, str] = None, verify: bool = True,
                  proxies: Dict[str, str] = None, token_server: str = None, *args, **kwargs):
         super().__init__(server, headers, verify, proxies, *args, **kwargs)
-        
+        self.token_server = token_server      
+
+    def get_token(self, image_name) -> None:
         if not self.session.headers.get('Authorization'):
             # Retrieve token for authentication: https://distribution.github.io/distribution/spec/auth/token/
             
             # Assume the token server is the same as the container image registry host if not explicitly set
-            token_server = token_server if token_server else server
+            token_server = self.token_server if self.token_server else self.server
             token_url = f"https://{token_server}/token?scope=repository:{image_name}:pull"
             token = requests.get(token_url).json().get('token')
-            self.session.headers["Authorization"] = f"Bearer {token}"          
-        
+            self.session.headers["Authorization"] = f"Bearer {token}"         
+    
     def get_image_tags(self, image_name) -> List[str]:
         # Find latest tag for each types
         resp = self._make_request(f"/v2/{image_name}/tags/list")
@@ -104,12 +108,13 @@ class HarborRegistry(ContainerRegistry):
     def __init__(self, server, headers: Dict[str, str] = None, verify: bool = True,
                  proxies: Dict[str, str] = None, token_server: str = None, *args, **kwargs):
         super().__init__(server, headers, verify, proxies, *args, **kwargs)
-        
+                     
+    def get_token(self, image_name) -> None:
         if not self.session.headers.get('Authorization'):
             # Retrieve token for authentication: https://github.com/goharbor/harbor/wiki/Harbor-FAQs#api
 
             # Assume the token server is the same as the container image registry host if not explicitly set
-            token_server = token_server if token_server else server
+            token_server = self.token_server if self.token_server else self.server
             token_url = f"https://{server}/service/token?scope=repository:{image_name}:pull"
             token = requests.get(token_url).json().get('token')
             headers["Authorization"] = f"Bearer {token}"
@@ -225,6 +230,7 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
     }
 
     registry: ContainerRegistry = REGISTRY_TYPE_MAPPING[registry_type](**registry_args)
+    registry.get_token(image_name)
     tags = registry.get_image_tags(image_name)
 
     tag_name = None
