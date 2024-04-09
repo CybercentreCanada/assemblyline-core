@@ -8,18 +8,25 @@ import threading
 import weakref
 import urllib3
 
+from base64 import b64encode
+from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization, hashes
 from collections import OrderedDict, defaultdict
+from datetime import datetime, timedelta
+from dateutil.tz import tzlocal
 from typing import List, Optional, Tuple
 from time import sleep
-
+from assemblyline.odm.models.config import Selector
 
 from kubernetes import client, config, watch
 from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec, V1DeploymentStrategy, \
-    V1PodSpec, V1PodOS, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
+    V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
-    V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, V1ServiceSpec, V1ServicePort, V1PodSecurityContext, \
-    V1Probe, V1ExecAction, V1SecurityContext
+    V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, \
+    V1ServiceSpec, V1ServicePort, V1PodSecurityContext, V1Probe, V1ExecAction, V1SecurityContext, \
+    V1Affinity, V1NodeAffinity, V1NodeSelector, V1NodeSelectorTerm, V1NodeSelectorRequirement
 from kubernetes.client.rest import ApiException
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig, PersistentVolume
 
@@ -35,8 +42,12 @@ DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() == 'true'
 CONTAINER_RESTART_THRESHOLD = int(os.environ.get('CONTAINER_RESTART_THRESHOLD', 1))
 SERVICE_LIVENESS_PERIOD = int(os.environ.get('SERVICE_LIVENESS_PERIOD', 300))
 SERVICE_LIVENESS_TIMEOUT = int(os.environ.get('SERVICE_LIVENESS_TIMEOUT', 60))
+UNPRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('UNPRIVILEGED_SERVICE_ACCOUNT_NAME', None)
+PRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('PRIVILEGED_SERVICE_ACCOUNT_NAME', None)
+CERTIFICATE_VALIDITY_PERIOD = int(os.environ.get('CERTIFICATE_VALIDITY_PERIOD', '36500'))
 
 AL_ROOT_CA = os.environ.get('AL_ROOT_CA', '/etc/assemblyline/ssl/al_root-ca.crt')
+AL_ROOT_CA_PK = os.environ.get('AL_ROOT_CA_PK', '/etc/assemblyline/ssl/al_root-ca.key')
 
 _exponents = {
     'ki': 2**10,
@@ -93,6 +104,71 @@ def mean(values: list[float]) -> float:
     if len(values) == 0:
         return 0
     return sum(values)/len(values)
+
+
+def selector_to_list_filters(selector: Selector) -> Tuple[Optional[str], Optional[str]]:
+    """Return the field and label selector strings described by selector."""
+    # Field selector only supports equal and not equal
+    field_parts = []
+    for part in selector.field:
+        op = '==' if part.equal else '!='
+        field_parts.append(f"{part.key}{op}{part.value}")
+    field_selector = None
+    if field_parts:
+        field_selector = ','.join(field_parts)
+
+    # label selector is a bit more complicated
+    label_parts = []
+    for part in selector.label:
+        if part.operator == 'In':
+            label_parts.append(f"{part.key} in ({','.join(part.values)})")
+        elif part.operator == 'NotIn':
+            label_parts.append(f"{part.key} notin ({','.join(part.values)})")
+        elif part.operator == 'Exists':
+            label_parts.append(part.key)
+        elif part.operator == 'DoesNotExist':
+            label_parts.append(f"!{part.key}")
+        else:
+            raise ValueError("Unknown selector operator: " + part.operator)
+    label_selector = None
+    if label_parts:
+        label_selector = ','.join(label_parts)
+
+    return field_selector, label_selector
+
+
+def selector_to_node_affinity(selector: Selector) -> Optional[V1Affinity]:
+    """Return the selector as a kubernetes affinity."""
+
+    label_expressions = []
+    for label in selector.label:
+        label_expressions.append(V1NodeSelectorRequirement(
+            key=label.key,
+            operator=label.operator,
+            values=label.values,
+        ))
+
+    field_expressions = []
+    for field in selector.field:
+        field_expressions.append(V1NodeSelectorRequirement(
+            key=field.key,
+            operator='In' if field.equal else 'NotIn',
+            values=[field.value]
+        ))
+
+    if not label_expressions and not field_expressions:
+        return None
+
+    return V1Affinity(
+        node_affinity=V1NodeAffinity(
+            required_during_scheduling_ignored_during_execution=V1NodeSelector(
+                node_selector_terms=[V1NodeSelectorTerm(
+                    match_expressions=label_expressions,
+                    match_fields=field_expressions,
+                )]
+            )
+        )
+    )
 
 
 def get_resources(container) -> Tuple[float, float]:
@@ -164,8 +240,8 @@ def parse_cpu(string: str) -> float:
 
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace: str, prefix: str, priority: str, dependency_priority: str,
-                 cpu_reservation: float, labels=None, log_level="INFO", core_env={},
-                 default_service_account=None):
+                 cpu_reservation: float, linux_node_selector: Selector, labels=None, log_level="INFO", core_env={},
+                 default_service_account=None, cluster_pod_list=True):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
         try:
@@ -194,6 +270,7 @@ class KubernetesController(ControllerInterface):
         self.logger = logger
         self.log_level: str = log_level
         self._labels: dict[str, str] = labels or {}
+        self.linux_node_selector = linux_node_selector
         self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
         self.net_api = client.NetworkingV1Api()
@@ -207,11 +284,12 @@ class KubernetesController(ControllerInterface):
         self._external_profiles = weakref.WeakValueDictionary()
         self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
         self.default_service_account: Optional[str] = default_service_account
+        self.cluster_pod_list = cluster_pod_list
 
         # A record of previously reported events so that we don't report the same message repeatedly, fill it with
         # existing messages so we don't have a huge dump of duplicates on restart
         self.events_window = {}
-        response = self.api.list_namespaced_event(namespace='al', pretty='false',
+        response = self.api.list_namespaced_event(namespace=self.namespace, pretty='false',
                                                   field_selector='type=Warning', watch=False,
                                                   _request_timeout=API_TIMEOUT)
         for event in response.items:
@@ -226,19 +304,21 @@ class KubernetesController(ControllerInterface):
         quota_background = threading.Thread(target=self._loop_forever(self._monitor_quotas), daemon=True)
         quota_background.start()
 
+        self.ready_nodes: dict[str, tuple[float, float]] = {}
         self._node_pool_max_ram: float = 0
         self._node_pool_max_cpu: float = 0
         node_background = threading.Thread(target=self._loop_forever(self._monitor_node_pool), daemon=True)
         node_background.start()
 
-        self._pod_used_ram: float = 0
-        self._pod_used_cpu: float = 0
-        self._pod_used_namespace_ram: float = 0
-        self._pod_used_namespace_cpu: float = 0
+        self._pod_used_ram: dict[str, float] = defaultdict(float)
+        self._pod_used_cpu: dict[str, float] = defaultdict(float)
+        self._pod_used_namespace_ram: dict[str, float] = defaultdict(float)
+        self._pod_used_namespace_cpu: dict[str, float] = defaultdict(float)
         pod_background = threading.Thread(target=self._loop_forever(self._monitor_pods), daemon=True)
         pod_background.start()
 
         self._deployment_targets: dict[str, int] = {}
+        self._deployment_unavailable: dict[str, int] = {}
         deployment_background = threading.Thread(target=self._loop_forever(self._monitor_deployments), daemon=True)
         deployment_background.start()
 
@@ -337,9 +417,11 @@ class KubernetesController(ControllerInterface):
         self._node_pool_max_ram = 0
         self.node_count = 0
         watch = TypelessWatch()
-        ready_nodes: dict[str, tuple[float, float]] = {}
+        self.ready_nodes: dict[str, tuple[float, float]] = {}
+        field_selector, label_selector = selector_to_list_filters(self.linux_node_selector)
 
         for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT,
+                                  field_selector=field_selector, label_selector=label_selector,
                                   _request_timeout=WATCH_API_TIMEOUT):
             if not self.running:
                 break
@@ -357,19 +439,19 @@ class KubernetesController(ControllerInterface):
                 if ready:
                     cpu = parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
                     ram = parse_memory(event['raw_object']['status']['allocatable']['memory'])
-                    ready_nodes[name] = (cpu, ram)
+                    self.ready_nodes[name] = (cpu, ram)
                 else:
-                    ready_nodes.pop(name, None)
+                    self.ready_nodes.pop(name, None)
 
             elif event['type'] == "DELETED":
                 # Remove deleted nodes
-                ready_nodes.pop(name, None)
+                self.ready_nodes.pop(name, None)
 
             # Update the totals
-            self.node_count = len(ready_nodes)
+            self.node_count = len(self.ready_nodes)
             max_cpu = 0
             max_ram = 0
-            for cpu, ram in ready_nodes.values():
+            for cpu, ram in self.ready_nodes.values():
                 max_cpu += cpu
                 max_ram += ram
             self._node_pool_max_cpu = max_cpu
@@ -377,16 +459,23 @@ class KubernetesController(ControllerInterface):
 
     def _monitor_pods(self):
         watch = TypelessWatch()
-        containers = {}
         log_cache = CacheDict(cache_len=8000)
-        namespaced_containers = {}
-        self._pod_used_cpu = 0
-        self._pod_used_ram = 0
-        self._pod_used_namespace_cpu = 0
-        self._pod_used_namespace_ram = 0
+        per_node_containers: dict[str, dict[str, tuple[float, float]]] = defaultdict(dict)
+        per_node_namespaced_containers: dict[str, dict[str, tuple[float, float]]] = defaultdict(dict)
+        self._pod_used_cpu = defaultdict(float)
+        self._pod_used_ram = defaultdict(float)
+        self._pod_used_namespace_cpu = defaultdict(float)
+        self._pod_used_namespace_ram = defaultdict(float)
 
-        for event in watch.stream(func=self.api.list_pod_for_all_namespaces, timeout_seconds=WATCH_TIMEOUT,
-                                  _request_timeout=WATCH_API_TIMEOUT):
+        if self.cluster_pod_list:
+            list_pods = self.api.list_pod_for_all_namespaces
+            kwargs = dict()
+        else:
+            list_pods = self.api.list_namespaced_pod
+            kwargs = dict(namespace=self.namespace)
+
+        for event in watch.stream(func=list_pods, timeout_seconds=WATCH_TIMEOUT,
+                                  _request_timeout=WATCH_API_TIMEOUT, **kwargs):
             if not self.running:
                 break
 
@@ -395,6 +484,9 @@ class KubernetesController(ControllerInterface):
                 pod_name = event['raw_object']['metadata']['name']
                 uid = event['raw_object']['metadata']['uid']
                 namespace = event['raw_object']['metadata']['namespace']
+                node = event['raw_object']['spec']['nodeName']
+                containers = per_node_containers[node]
+                namespaced_containers = per_node_namespaced_containers[node]
 
                 if event['type'] in ['ADDED', 'MODIFIED']:
                     for container in event['raw_object']['spec']['containers']:
@@ -425,23 +517,23 @@ class KubernetesController(ControllerInterface):
                 self.logger.exception(f"Couldn't parse container information for {pod_name}: {e}")
                 continue
 
-            memory_unrestricted = sum(1 for cpu, mem in containers.values() if mem is None)
-            cpu_unrestricted = sum(1 for cpu, mem in containers.values() if cpu is None)
+            memory_unrestricted = sum(1 for _, mem in containers.values() if mem is None)
+            cpu_unrestricted = sum(1 for cpu, _ in containers.values() if cpu is None)
 
-            memory_used = [mem for cpu, mem in containers.values() if mem is not None]
-            cpu_used = [cpu for cpu, mem in containers.values() if cpu is not None]
+            memory_used = [mem for _, mem in containers.values() if mem is not None]
+            cpu_used = [cpu for cpu, _ in containers.values() if cpu is not None]
 
-            self._pod_used_cpu = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
-            self._pod_used_ram = sum(memory_used) + memory_unrestricted * mean(memory_used)
+            self._pod_used_cpu[node] = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
+            self._pod_used_ram[node] = sum(memory_used) + memory_unrestricted * mean(memory_used)
 
-            memory_unrestricted = sum(1 for cpu, mem in namespaced_containers.values() if mem is None)
-            cpu_unrestricted = sum(1 for cpu, mem in namespaced_containers.values() if cpu is None)
+            memory_unrestricted = sum(1 for _, mem in namespaced_containers.values() if mem is None)
+            cpu_unrestricted = sum(1 for cpu, _ in namespaced_containers.values() if cpu is None)
 
-            memory_used = [mem for cpu, mem in namespaced_containers.values() if mem is not None]
-            cpu_used = [cpu for cpu, mem in namespaced_containers.values() if cpu is not None]
+            memory_used = [mem for _, mem in namespaced_containers.values() if mem is not None]
+            cpu_used = [cpu for cpu, _ in namespaced_containers.values() if cpu is not None]
 
-            self._pod_used_namespace_cpu = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
-            self._pod_used_namespace_ram = sum(memory_used) + memory_unrestricted * mean(memory_used)
+            self._pod_used_namespace_cpu[node] = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
+            self._pod_used_namespace_ram[node] = sum(memory_used) + memory_unrestricted * mean(memory_used)
 
     def _monitor_quotas(self):
         watch = TypelessWatch()
@@ -527,6 +619,7 @@ class KubernetesController(ControllerInterface):
         watch = TypelessWatch()
 
         self._deployment_targets = {}
+        self._deployment_unavailable = {}
         label_selector = ','.join(f'{_n}={_v}' for _n, _v in self._labels.items() if _n != 'privilege')
 
         for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
@@ -539,23 +632,49 @@ class KubernetesController(ControllerInterface):
                 name = event['raw_object']['metadata']['labels'].get('component', None)
                 if name is not None:
                     self._deployment_targets[name] = event['raw_object']['spec']['replicas']
+                    self._deployment_unavailable[name] = event['raw_object']['status'].get('unavailableReplicas', 0)
             elif event['type'] == 'DELETED':
                 name = event['raw_object']['metadata']['labels'].get('component', None)
                 self._deployment_targets.pop(name, None)
+                self._deployment_unavailable.pop(name, None)
+
+    def _get_pod_used_namespace_cpu(self) -> float:
+        count = 0.0
+        for name in self.ready_nodes.keys():
+            count += self._pod_used_namespace_cpu[name]
+        return count
+
+    def _get_pod_used_cpu(self) -> float:
+        count = 0.0
+        for name in self.ready_nodes.keys():
+            count += self._pod_used_cpu[name]
+        return count
 
     def cpu_info(self):
         if self._quota_cpu_limit:
             if self._quota_cpu_used:
                 return self._quota_cpu_limit - self._quota_cpu_used, self._quota_cpu_limit
-            return self._quota_cpu_limit - self._pod_used_namespace_cpu, self._quota_cpu_limit
-        return self._node_pool_max_cpu - self._pod_used_cpu, self._node_pool_max_cpu
+            return self._quota_cpu_limit - self._get_pod_used_namespace_cpu(), self._quota_cpu_limit
+        return self._node_pool_max_cpu - self._get_pod_used_cpu(), self._node_pool_max_cpu
+
+    def _get_pod_used_namespace_ram(self) -> float:
+        count = 0.0
+        for name in self.ready_nodes.keys():
+            count += self._pod_used_namespace_ram[name]
+        return count
+
+    def _get_pod_used_ram(self) -> float:
+        count = 0.0
+        for name in self.ready_nodes.keys():
+            count += self._pod_used_ram[name]
+        return count
 
     def memory_info(self):
         if self._quota_mem_limit:
             if self._quota_mem_used:
                 return self._quota_mem_limit - self._quota_mem_used, self._quota_mem_limit
-            return self._quota_mem_limit - self._pod_used_namespace_ram, self._quota_mem_limit
-        return self._node_pool_max_ram - self._pod_used_ram, self._node_pool_max_ram
+            return self._quota_mem_limit - self._get_pod_used_namespace_ram(), self._quota_mem_limit
+        return self._node_pool_max_ram - self._get_pod_used_ram(), self._node_pool_max_ram
 
     def _create_containers(self, service_name: str, deployment_name: str, container_config, mounts,
                            core_container=False):
@@ -613,10 +732,14 @@ class KubernetesController(ControllerInterface):
         # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
-        lbls = sorted((labels or {}).items())
+        field_selector, label_selector = selector_to_list_filters(self.linux_node_selector)
+        key_labels = sorted((labels or {}).items())
         svc_env = sorted(self._service_limited_env[service_name].items())
+        deployment_labels = {_v.name: _v.value for _v in docker_config.labels}
+        key_labels += sorted(deployment_labels.items())
         change_key = str(f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
-                         f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}")
+                         f"l={key_labels}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}"
+                         f"nodes={field_selector or ''}{label_selector or ''}")
         self.logger.debug(f"{deployment_name} actual change_key: {change_key}")
         change_key = str(hash(change_key))
 
@@ -671,7 +794,8 @@ class KubernetesController(ControllerInterface):
         elif current_pull_secret:
             self.api.delete_namespaced_secret(pull_secret_name, self.namespace, _request_timeout=API_TIMEOUT)
 
-        all_labels = dict(self._labels)
+        all_labels = deployment_labels
+        all_labels.update(self._labels)
         all_labels['component'] = service_name
         if core_mounts:
             all_labels['privilege'] = 'core'
@@ -693,7 +817,8 @@ class KubernetesController(ControllerInterface):
         metadata = V1ObjectMeta(name=deployment_name, labels=all_labels, annotations={CHANGE_KEY_NAME: change_key})
 
         # Figure out which (if any) service account to use
-        service_account = self.default_service_account
+        service_account = self.default_service_account or \
+            (PRIVILEGED_SERVICE_ACCOUNT_NAME if core_mounts else UNPRIVILEGED_SERVICE_ACCOUNT_NAME)
         if docker_config.service_account:
             service_account = docker_config.service_account
 
@@ -714,27 +839,16 @@ class KubernetesController(ControllerInterface):
                 volume_mounts=chown_mounts
             ))
 
-        pod_os = None
-        security_context = V1PodSecurityContext(fs_group=1000)
-        if docker_config.operating_system:
-            #  Allow Kubernetes to schedule the pod to a compatible node
-            pod_os = V1PodOS(name=docker_config.operating_system)
-
-        if docker_config.operating_system == 'windows':
-            security_context = None
-
-
         pod = V1PodSpec(
             init_containers=init_containers,
             volumes=all_volumes,
             containers=self._create_containers(service_name, deployment_name, docker_config,
                                                all_mounts, core_container=core_mounts),
-            os=pod_os,
             priority_class_name=self.dependency_priority if high_priority else self.priority,
             termination_grace_period_seconds=shutdown_seconds,
-            security_context=security_context,
+            security_context=V1PodSecurityContext(fs_group=1000),
             service_account_name=service_account,
-
+            affinity=selector_to_node_affinity(self.linux_node_selector),
         )
 
         if use_pull_secret:
@@ -785,6 +899,10 @@ class KubernetesController(ControllerInterface):
     def get_targets(self) -> dict[str, int]:
         """Get the target for running instances of all services."""
         return self._deployment_targets
+
+    def get_unavailable(self) -> dict[str, int]:
+        """Get the number of containers the orchestration layer could not start."""
+        return self._deployment_unavailable
 
     def set_target(self, service_name: str, target: int):
         """Set the target for running instances of a service."""
@@ -837,7 +955,7 @@ class KubernetesController(ControllerInterface):
         return [pod.metadata.name for pod in pods.items]
 
     def new_events(self):
-        response = self.api.list_namespaced_event(namespace='al', pretty='false',
+        response = self.api.list_namespaced_event(namespace=self.namespace, pretty='false',
                                                   field_selector='type=Warning', watch=False,
                                                   _request_timeout=API_TIMEOUT)
 
@@ -881,6 +999,7 @@ class KubernetesController(ControllerInterface):
         # Generate the expected change key
         senv = sorted(self._service_limited_env[service_name].items())
         labels = [('container', container_name), ('dependency_for', service_name)]
+        labels += sorted([(_v.name, _v.value) for _v in spec.container.labels])
         temp_spec = DependencyConfig(spec.as_primitives())
         volumes, mounts, _ = self._get_volumes_mounts_strategy(deployment_name, container_name, temp_spec)
         temp_spec.container.environment.append(dict(name='AL_INSTANCE_KEY', value=container_key))
@@ -899,17 +1018,75 @@ class KubernetesController(ControllerInterface):
             List[V1Volume],
             List[V1VolumeMount]]:
         volumes, mounts = [], []
-        if container_name == 'updates' and os.path.exists(AL_ROOT_CA):
+        deployment_strategy = V1DeploymentStrategy()  # Default strategy should be RollingUpdate
+
+        # Since we reserved containers named 'updates' to be service updaters, they will always 'Recreate'
+        deployment_strategy = V1DeploymentStrategy(type='Recreate')
+
+        if os.path.exists(AL_ROOT_CA):
             # Specifically for service updaters when internal encryption is enabled on the cluster
-            update_cert_dir = "/etc/assemblyline/ssl/al_updates"
-            volumes.append(V1Volume(name='updates-cert', secret=V1SecretVolumeSource(secret_name='updates-cert')))
-            mounts.append(V1VolumeMount(name="updates-cert", mount_path=update_cert_dir, read_only=True))
+            dep_cert_dir = f"/etc/assemblyline/ssl/al_{container_name}"
+            cert_secret_name = f"{deployment_name}-cert"
+
+            def generate_certificate_secret() -> V1Secret:
+                # Certificate pair doesn't exist or is invalid for this dependency, create it
+                with open(AL_ROOT_CA, 'rb') as root_ca:
+                    rootca_cert = x509.load_pem_x509_certificate(root_ca.read())
+                with open(AL_ROOT_CA_PK, 'rb') as root_ca_pk:
+                    rootca_pk = serialization.load_pem_private_key(root_ca_pk.read(), None)
+
+                cert_key = rsa.generate_private_key(65537, 2048)
+                cert = x509.CertificateBuilder(
+                    issuer_name=rootca_cert.issuer,
+                    subject_name=x509.Name([x509.NameAttribute(x509.OID_COMMON_NAME, deployment_name)]),
+                    not_valid_before=(datetime.utcnow() - timedelta(days=1)),
+                    not_valid_after=(datetime.utcnow() + timedelta(days=CERTIFICATE_VALIDITY_PERIOD)),
+                    public_key=cert_key.public_key(),
+                    serial_number=x509.random_serial_number()).add_extension(
+                        x509.SubjectAlternativeName([x509.DNSName(deployment_name)]),
+                    critical=False).sign(rootca_pk, hashes.SHA256())
+
+                return V1Secret(metadata=V1ObjectMeta(name=cert_secret_name, namespace=self.namespace),
+                                type='kubernetes.io/tls',
+                                data={
+                                    'tls.crt': b64encode(cert.public_bytes(serialization.Encoding.PEM)).decode(),
+                                    'tls.key': b64encode(cert_key.private_bytes(
+                                        encoding=serialization.Encoding.PEM,
+                                        format=serialization.PrivateFormat.PKCS8,
+                                        encryption_algorithm=serialization.NoEncryption())).decode()})
+
+            try:
+                # Ensure that the certificate isn't close to expiring within a week, if it exists
+                cert_secret: V1Secret = self.api.read_namespaced_secret(
+                    name=cert_secret_name, namespace=self.namespace, _request_timeout=API_TIMEOUT)
+                expiration_date = cert_secret.metadata.managed_fields[0].time + timedelta(
+                    days=CERTIFICATE_VALIDITY_PERIOD)
+                current_date = datetime.now(tzlocal())
+                if current_date - timedelta(days=7) < expiration_date < current_date:
+                    # If this certificate is set to expire within a week, rotate it
+                    self.logger.warning(
+                        f"Certificate '{cert_secret_name}' is set to expire within a week. Beginning rotation..")
+                    self.api.patch_namespaced_secret(cert_secret_name, namespace=self.namespace,
+                                                     body=generate_certificate_secret(),
+                                                     _request_timeout=API_TIMEOUT)
+
+            except (ApiException, ValueError) as error:
+                if isinstance(error, ApiException) and error.status != 404:
+                    raise
+
+                self.api.create_namespaced_secret(namespace=self.namespace,
+                                                  body=generate_certificate_secret(),
+                                                  _request_timeout=API_TIMEOUT)
+
+            finally:
+                volumes.append(V1Volume(name=cert_secret_name,
+                                        secret=V1SecretVolumeSource(secret_name=cert_secret_name)))
+                mounts.append(V1VolumeMount(name=cert_secret_name, mount_path=dep_cert_dir, read_only=True))
 
             # Pass gunicorn settings via env
-            spec.container.environment.append({'name': 'CERTFILE', 'value': os.path.join(update_cert_dir, 'tls.crt')})
-            spec.container.environment.append({'name': 'KEYFILE', 'value': os.path.join(update_cert_dir, 'tls.key')})
+            spec.container.environment.append({'name': 'CERTFILE', 'value': os.path.join(dep_cert_dir, 'tls.crt')})
+            spec.container.environment.append({'name': 'KEYFILE', 'value': os.path.join(dep_cert_dir, 'tls.key')})
 
-        deployment_strategy = V1DeploymentStrategy()  # Default strategy should be RollingUpdate
         for volume_name, volume_spec in spec.volumes.items():
             mount_name = f'{deployment_name}-{volume_name}'
 
@@ -1042,69 +1219,76 @@ class KubernetesController(ControllerInterface):
                                                                        namespace=self.namespace,
                                                                        _request_timeout=API_TIMEOUT)
 
-    def prepare_network(self, service_name, internet, dependency_internet):
+    def prepare_network(self, service_name: str, internet: bool, dependency_internet: Tuple[str, bool]):
         safe_name = service_name.lower().replace('_', '-')
+        service_labels = {
+            'app': 'assemblyline',
+            'section': 'service',
+            'component': service_name,
+        }
+        # Gather all existing network policies pertaining to the service
+        existing_netpol = {netpol.metadata.name for netpol in self.net_api.list_namespaced_network_policy(
+            namespace=self.namespace,
+            label_selector=','.join([f"{k}={v}" for k, v in service_labels.items()])).items}
 
-        # Allow access to containers with dependency_for
-        try:
-            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-to-dep',
-                                                          _request_timeout=API_TIMEOUT)
-        except ApiException as error:
-            if error.status != 404:
-                raise
-        self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
-            metadata=V1ObjectMeta(name=f'allow-{safe_name}-to-dep'),
-            spec=V1NetworkPolicySpec(
-                pod_selector=V1LabelSelector(match_labels={
-                    'app': 'assemblyline',
-                    'section': 'service',
-                    'component': service_name,
-                }),
-                egress=[V1NetworkPolicyEgressRule(
-                    to=[V1NetworkPolicyPeer(
-                        pod_selector=V1LabelSelector(match_labels={
-                            'app': 'assemblyline',
-                            'dependency_for': service_name,
-                        })
-                    )]
-                )],
+        def create_or_patch_network_policy(netpol_body: V1NetworkPolicy):
+            netpol_body.metadata.labels = service_labels
+            try:
+                # Patch the network policy, if it exists
+                self.net_api.patch_namespaced_network_policy(name=netpol_body.metadata.name, namespace=self.namespace,
+                                                             body=netpol_body, _request_timeout=API_TIMEOUT)
+            except ApiException as error:
+                if error.status == 404:
+                    # Object doesn't exist, therefore create it
+                    self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=netpol_body,
+                                                                  _request_timeout=API_TIMEOUT)
+                else:
+                    raise
+
+        # Create a list of network policies that must exist for this service
+        # By default, we allow services to be able to interact with their dependencies and vice-versa
+        network_policies = [
+            V1NetworkPolicy(
+                metadata=V1ObjectMeta(name=f'allow-{safe_name}-to-dep'),
+                spec=V1NetworkPolicySpec(
+                    pod_selector=V1LabelSelector(match_labels={
+                        'app': 'assemblyline',
+                        'section': 'service',
+                        'component': service_name,
+                    }),
+                    egress=[V1NetworkPolicyEgressRule(
+                        to=[V1NetworkPolicyPeer(
+                            pod_selector=V1LabelSelector(match_labels={
+                                'app': 'assemblyline',
+                                'dependency_for': service_name,
+                            })
+                        )]
+                    )],
+                )
+            ),
+            V1NetworkPolicy(
+                metadata=V1ObjectMeta(name=f'allow-dep-from-{safe_name}'),
+                spec=V1NetworkPolicySpec(
+                    pod_selector=V1LabelSelector(match_labels={
+                        'app': 'assemblyline',
+                        'dependency_for': service_name,
+                    }),
+                    ingress=[V1NetworkPolicyIngressRule(
+                        _from=[V1NetworkPolicyPeer(
+                            pod_selector=V1LabelSelector(match_labels={
+                                'app': 'assemblyline',
+                                'section': 'service',
+                                'component': service_name,
+                            })
+                        )]
+                    )],
+                )
             )
-        ), _request_timeout=API_TIMEOUT)
+        ]
 
-        try:
-            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-dep-from-{safe_name}',
-                                                          _request_timeout=API_TIMEOUT)
-        except ApiException as error:
-            if error.status != 404:
-                raise
-        self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
-            metadata=V1ObjectMeta(name=f'allow-dep-from-{safe_name}'),
-            spec=V1NetworkPolicySpec(
-                pod_selector=V1LabelSelector(match_labels={
-                    'app': 'assemblyline',
-                    'dependency_for': service_name,
-                }),
-                ingress=[V1NetworkPolicyIngressRule(
-                    _from=[V1NetworkPolicyPeer(
-                        pod_selector=V1LabelSelector(match_labels={
-                            'app': 'assemblyline',
-                            'section': 'service',
-                            'component': service_name,
-                        })
-                    )]
-                )],
-            )
-        ), _request_timeout=API_TIMEOUT)
-
-        # Allow outgoing
-        try:
-            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=f'allow-{safe_name}-outgoing',
-                                                          _request_timeout=API_TIMEOUT)
-        except ApiException as error:
-            if error.status != 404:
-                raise
+        # service → anywhere
         if internet:
-            self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
+            network_policies.append(V1NetworkPolicy(
                 metadata=V1ObjectMeta(name=f'allow-{safe_name}-outgoing'),
                 spec=V1NetworkPolicySpec(
                     pod_selector=V1LabelSelector(match_labels={
@@ -1114,19 +1298,13 @@ class KubernetesController(ControllerInterface):
                     }),
                     egress=[V1NetworkPolicyEgressRule(to=[])],
                 )
-            ), _request_timeout=API_TIMEOUT)
+            ))
 
+        # dependencies → anywhere
         for dep_name, dep_internet in dependency_internet:
             safe_dep_name = dep_name.lower().replace('_', '-')
-            try:
-                self.net_api.delete_namespaced_network_policy(namespace=self.namespace,
-                                                              name=f'allow-{safe_dep_name}-{safe_name}-outgoing',
-                                                              _request_timeout=API_TIMEOUT)
-            except ApiException as error:
-                if error.status != 404:
-                    raise
             if dep_internet:
-                self.net_api.create_namespaced_network_policy(namespace=self.namespace, body=V1NetworkPolicy(
+                network_policies.append(V1NetworkPolicy(
                     metadata=V1ObjectMeta(name=f'allow-{safe_dep_name}-{safe_name}-outgoing'),
                     spec=V1NetworkPolicySpec(
                         pod_selector=V1LabelSelector(match_labels={
@@ -1137,4 +1315,12 @@ class KubernetesController(ControllerInterface):
                         }),
                         egress=[V1NetworkPolicyEgressRule(to=[])],
                     )
-                ), _request_timeout=API_TIMEOUT)
+                ))
+
+        # Create or patch the network policies based on what's required for the service
+        [create_or_patch_network_policy(netpol) for netpol in network_policies]
+
+        # Cleanup any network policies that aren't in-use
+        for np in (existing_netpol - {np.metadata.name for np in network_policies}):
+            self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=np,
+                                                          _request_timeout=API_TIMEOUT)
