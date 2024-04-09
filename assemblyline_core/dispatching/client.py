@@ -319,6 +319,7 @@ class DispatchClient:
                 'key': result_key,
                 'drop': result.drop_file,
                 'score': result.result.score,
+                'partial': result.partial,
                 'children': [(r.sha256, r.parent_relation) for r in result.response.extracted],
             },
             'tags': tags,

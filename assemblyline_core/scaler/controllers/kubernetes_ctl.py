@@ -21,16 +21,16 @@ from assemblyline.odm.models.config import Selector
 
 from kubernetes import client, config, watch
 from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec, V1DeploymentStrategy, \
-    V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
+    V1PodSpec, V1PodOS, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
     V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
     V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, \
     V1ServiceSpec, V1ServicePort, V1PodSecurityContext, V1Probe, V1ExecAction, V1SecurityContext, \
-    V1Affinity, V1NodeAffinity, V1NodeSelector, V1NodeSelectorTerm, V1NodeSelectorRequirement
+    V1Affinity, V1NodeAffinity, V1NodeSelector, V1NodeSelectorTerm, V1NodeSelectorRequirement, CoreV1Event
 from kubernetes.client.rest import ApiException
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig, PersistentVolume
 
-from assemblyline_core.scaler.controllers.interface import ControllerInterface
+from assemblyline_core.scaler.controllers.interface import ContainerEvent, ControllerInterface
 
 # RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
 
@@ -263,7 +263,7 @@ class KubernetesController(ControllerInterface):
             config.load_kube_config(client_configuration=cfg)
 
         self.running: bool = True
-        self.prefix: str = prefix.lower()
+        self.prefix: str = prefix.lower().replace('_', '-')
         self.priority: str = priority
         self.dependency_priority: str = dependency_priority
         self.cpu_reservation: float = max(0.0, min(cpu_reservation, 1.0))
@@ -839,14 +839,25 @@ class KubernetesController(ControllerInterface):
                 volume_mounts=chown_mounts
             ))
 
+        pod_os = None
+        security_context = V1PodSecurityContext(fs_group=1000)
+        if docker_config.operating_system:
+            #  Allow Kubernetes to schedule the pod to a compatible node
+            pod_os = V1PodOS(name=docker_config.operating_system)
+
+        if docker_config.operating_system == 'windows':
+            security_context = None
+
+
         pod = V1PodSpec(
             init_containers=init_containers,
             volumes=all_volumes,
             containers=self._create_containers(service_name, deployment_name, docker_config,
                                                all_mounts, core_container=core_mounts),
+            os=pod_os,
             priority_class_name=self.dependency_priority if high_priority else self.priority,
             termination_grace_period_seconds=shutdown_seconds,
-            security_context=V1PodSecurityContext(fs_group=1000),
+            security_context=security_context,
             service_account_name=service_account,
             affinity=selector_to_node_affinity(self.linux_node_selector),
         )
@@ -954,7 +965,51 @@ class KubernetesController(ControllerInterface):
                                                     _request_timeout=API_TIMEOUT)
         return [pod.metadata.name for pod in pods.items]
 
-    def new_events(self):
+    @staticmethod
+    def dropped_message(event: CoreV1Event) -> bool:
+        """These aren't messages anyone looking at the """
+
+        # These are common ephemeral states
+        if event.action in ["Scheduling"]:
+            return True
+        if event.reason in ["BackOff", "NodeNotReady", "FailedGetResourceMetric", "FailedComputeMetricsReplicas"]:
+            return True
+
+        # There is a more detailed event that starts with "Failed to pull image"
+        if event.message == "Error: ErrImagePull":
+            return True
+        if event.message == "Error: ImagePullBackOff":
+            return True
+
+        # Probes failing on exiting containers is normal
+        if "Readiness probe errored" in event.message and "container is in CONTAINER_EXITED state" in event.message:
+            return True
+        if "Liveness probe errored" in event.message and "container is in CONTAINER_EXITED state" in event.message:
+            return True
+
+        return False
+
+    def parse_container_name(self, name) -> tuple[Optional[str], Optional[bool]]:
+        if not name.startswith(self.prefix):
+            return (None, None)
+        name = name.removeprefix(self.prefix)
+
+        name, _, container_id = name.rpartition('-')
+        if not container_id:
+            return (None, None)
+
+        name, _, deployment_id = name.rpartition('-')
+        if not deployment_id:
+            return (None, None)
+
+        updater = False
+        if name.endswith('-updates'):
+            name = name.removesuffix('-updates')
+            updater = True
+
+        return (name, updater)
+
+    def new_events(self) -> list[ContainerEvent]:
         response = self.api.list_namespaced_event(namespace=self.namespace, pretty='false',
                                                   field_selector='type=Warning', watch=False,
                                                   _request_timeout=API_TIMEOUT)
@@ -964,7 +1019,15 @@ class KubernetesController(ControllerInterface):
         for event in response.items:
             if self.events_window.get(event.metadata.uid, 0) != event.count:
                 self.events_window[event.metadata.uid] = event.count
-                new.append(event.involved_object.name + ': ' + event.message)
+
+                if KubernetesController.dropped_message(event):
+                    continue
+
+                object_name = event.involved_object.name
+                service_name, is_updater = None, None
+                if event.involved_object.kind == 'Pod':
+                    service_name, is_updater = self.parse_container_name(object_name)
+                new.append(ContainerEvent(object_name, event.message, service_name, is_updater))
 
         # Flush out events that have moved outside the window
         old = set(self.events_window.keys()) - {event.metadata.uid for event in response.items}
