@@ -1,4 +1,5 @@
 from __future__ import annotations
+from copy import deepcopy
 from typing import Optional
 from assemblyline.common import forge
 from assemblyline.common.caching import TimeExpiredCache
@@ -6,7 +7,9 @@ from assemblyline.common.dict_utils import recursive_update
 from assemblyline.common.str_utils import safe_str
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.exceptions import VersionConflictException
+from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.messages.alert import AlertMessage
+from assemblyline.odm.models.alert import Alert
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 
 CACHE_LEN = 60 * 60 * 24
@@ -107,7 +110,7 @@ def get_submission_record(counter, datastore, sid):
 
     if not srecord:
         counter.increment('error')
-        raise SubmissionNotFound("Couldn't find submission: %s" % sid)
+        raise SubmissionNotFound(f"Couldn't find submission: {sid}")
 
     submission_state = srecord.get('state', 'unknown')
     if submission_state != 'completed':
@@ -116,13 +119,15 @@ def get_submission_record(counter, datastore, sid):
     return srecord
 
 
-def get_summary(datastore, srecord, user_classification):
+def get_summary(datastore, srecord, user_classification, logger):
     max_classification = srecord['classification']
 
     detailed = {v: {} for v in SUMMARY_TYPE_MAP.values()}
 
-    submission_summary = datastore.get_summary_from_keys(srecord.get('results', []), cl_engine=Classification,
-                                                         user_classification=user_classification)
+    submission_summary = datastore.get_summary_from_keys(
+        srecord.get('results', []),
+        cl_engine=Classification, user_classification=user_classification,
+        screenshot_sha256=srecord['files'][0]['sha256'])
     max_classification = Classification.max_classification(max_classification, submission_summary['classification'])
 
     # Process Att&cks
@@ -220,7 +225,14 @@ def get_summary(datastore, srecord, user_classification):
     detailed['domain'] = domains
     detailed['uri'] = uris
 
-    return max_classification, summary, submission_summary['filtered'], detailed
+    try:
+        screenshots = [{'name': x['img']['name'], 'description': x['img']['description'], 'img': x['img']
+                        ['sha256'], 'thumb': x['thumb']['sha256'], } for x in submission_summary['screenshots']]
+    except Exception:
+        logger.warning(f"Cannot parse the submission summary screenshot section. ({submission_summary['screenshots']})")
+        screenshots = []
+
+    return max_classification, summary, submission_summary['filtered'], detailed, screenshots
 
 
 def generate_alert_id(logger, alert_data):
@@ -237,10 +249,11 @@ def parse_submission_record(counter, datastore, alert_data, logger, user_classif
     psid = alert_data['submission']['params']['psid']
     srecord = get_submission_record(counter, datastore, sid)
 
-    max_classification, summary, filtered, detailed = get_summary(datastore, srecord, user_classification)
+    max_classification, summary, filtered, detailed, screenshots = get_summary(
+        datastore, srecord, user_classification, logger)
 
     extended_scan = alert_data['extended_scan']
-    if psid:
+    if psid and extended_scan == 'skipped':
         try:
             # Get errors from parent submission and submission. Strip keys
             # to only sha256 and service name. If there are any keys that
@@ -259,7 +272,8 @@ def parse_submission_record(counter, datastore, alert_data, logger, user_classif
         'srecord': srecord,
         'max_classification': max_classification,
         'filtered': filtered,
-        'detailed': detailed
+        'detailed': detailed,
+        'screenshots': screenshots
     }
 
 
@@ -277,60 +291,40 @@ AL_FIELDS = [
 ]
 
 
-def perform_alert_update(datastore, logger, alert):
-    alert_id = alert.get('alert_id', None)
-    if not alert_id:
-        raise ValueError(f"We could not find the alert ID in the alert: {str(alert)}")
+def create_or_update_alert(datastore: AssemblylineDatastore, logger, alert, counter):
+    alert = Alert(alert)
+    alert_id = alert.alert_id
 
     while True:
-        old_alert, version = datastore.alert.get_if_exists(alert_id, as_obj=False, version=True)
+        old_alert: Optional[Alert]
+        old_alert, version = datastore.alert.get_if_exists(alert_id, version=True)
         if old_alert is None:
-            raise AlertMissingError(f"{alert_id} is missing from the alert collection.")
+            try:
+                datastore.alert.save(alert_id, alert, version=version)
+                logger.info(f"Alert {alert_id} has been created.")
+                counter.increment('created')
+                return "AlertCreated", "create"
+            except VersionConflictException as vce:
+                logger.info(f"Retrying update alert due to version conflict: {str(vce)}")
+                continue
 
-        # Ensure alert keeps original timestamp
-        alert['ts'] = old_alert['ts']
+        # merge both alerts together so it doesn't matter if messages are out of order
+        old_alert.update(alert)
 
-        # Merge fields...
-        merged = {
-            x: list(set(old_alert.get('al', {}).get(x, [])).union(set(alert['al'].get(x, [])))) for x in AL_FIELDS
-        }
-
-        # Sanity check.
-        if not all([old_alert.get(x, None) == alert.get(x, None) for x in config.core.alerter.constant_alert_fields]):
-            raise ValueError(f"Constant alert field changed. ({str(old_alert)}, {str(alert)})")
-
-        old_alert = recursive_update(old_alert, alert)
-        old_alert['al'] = recursive_update(old_alert['al'], merged)
-        old_alert['workflows_completed'] = False
+        # Make sure workflows are re-triggered
+        old_alert.workflows_completed = False
 
         try:
             datastore.alert.save(alert_id, old_alert, version=version)
             logger.info(f"Alert {alert_id} has been updated.")
-            return
+            counter.increment('updated')
+            return "AlertUpdated", 'update'
         except VersionConflictException as vce:
             logger.info(f"Retrying update alert due to version conflict: {str(vce)}")
 
 
-def save_alert(datastore, counter, logger, alert, psid):
-    def create_alert():
-        msg_type = "AlertCreated"
-        datastore.alert.save(alert['alert_id'], alert)
-        logger.info(f"Alert {alert['alert_id']} has been created.")
-        counter.increment('created')
-        ret_val = 'create'
-        return msg_type, ret_val
-
-    if psid:
-        try:
-            msg_type = "AlertUpdated"
-            perform_alert_update(datastore, logger, alert)
-            counter.increment('updated')
-            ret_val = 'update'
-        except AlertMissingError as e:
-            logger.info(f"{str(e)}. Creating a new alert [{alert['alert_id']}]...")
-            msg_type, ret_val = create_alert()
-    else:
-        msg_type, ret_val = create_alert()
+def save_alert(datastore, counter, logger, alert):
+    msg_type, ret_val = create_or_update_alert(datastore, logger, alert, counter)
 
     msg = AlertMessage({
         "msg": alert,
@@ -373,7 +367,8 @@ def get_alert_update_parts(counter, datastore, alert_data, logger, user_classifi
                 'sha1': file_record['sha1'],
                 'sha256': file_record['sha256'],
                 'size': file_record['size'],
-                'type': file_record['type']
+                'type': file_record['type'],
+                'screenshots': parsed_record['screenshots']
             },
             'verdict': {
                 "malicious": parsed_record['srecord']['verdict']['malicious'],
@@ -414,6 +409,10 @@ def process_alert_message(counter, datastore, logger, alert_data):
         'alert_id': generate_alert_id(logger, alert_data),
         'archive_ts': None,
         'metadata': {safe_str(key): value for key, value in alert_data['submission']['metadata'].items()},
+        'submission_relations': [{
+            'child': alert_data['submission']['sid'],
+            'parent': alert_data['submission']['params']['psid']
+        }],
         'sid': alert_data['submission']['sid'],
         'ts': a_ts or alert_data['submission']['time'],
         'type': a_type or alert_data['submission']['params']['type']
@@ -438,4 +437,4 @@ def process_alert_message(counter, datastore, logger, alert_data):
     # Update alert with computed values
     alert = recursive_update(alert, alert_update_p2)
 
-    return save_alert(datastore, counter, logger, alert, alert_data['submission']['params']['psid'])
+    return save_alert(datastore, counter, logger, alert)

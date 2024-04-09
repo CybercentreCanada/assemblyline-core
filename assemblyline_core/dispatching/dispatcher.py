@@ -5,6 +5,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
+import typing
 from typing import Optional, Any, TYPE_CHECKING, Iterable
 import json
 import enum
@@ -16,10 +17,12 @@ import elasticapm
 from assemblyline.common import isotime
 from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
     DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.forge import get_service_queue, get_apm_client
+from assemblyline.common.forge import get_service_queue, get_apm_client, get_classification
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.postprocess import ActionWorker
+from assemblyline.datastore.helper import AssemblylineDatastore
+from assemblyline.odm.messages.changes import ServiceChange, Operation
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
 from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch, DispatcherCommandMessage, \
@@ -27,27 +30,27 @@ from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch
 from assemblyline.odm.messages.submission import SubmissionMessage, from_datastore_submission
 from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
 from assemblyline.odm.models.error import Error
+from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
-from assemblyline.odm.models.result import Result
+from assemblyline.odm.models.user import User
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
+from assemblyline.remote.datatypes.events import EventWatcher
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline.remote.datatypes.set import Set
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.remote.datatypes.set import ExpiringSet
+from assemblyline.remote.datatypes.set import ExpiringSet, Set
 from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
 from assemblyline_core.server_base import ThreadedCoreBase
-from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME
-
-
-if TYPE_CHECKING:
-    from assemblyline.odm.models.file import File
-
 
 from .schedules import Scheduler
 from .timeout import TimeoutTable
 from ..ingester.constants import COMPLETE_QUEUE_NAME
+
+if TYPE_CHECKING:
+    from assemblyline.odm.models.file import File
+    from redis import Redis
+
 
 APM_SPAN_TYPE = 'handle_message'
 
@@ -58,6 +61,12 @@ RESULT_BATCH_SIZE = int(os.environ.get('DISPATCHER_RESULT_BATCH_SIZE', '50'))
 ERROR_BATCH_SIZE = int(os.environ.get('DISPATCHER_ERROR_BATCH_SIZE', '50'))
 DYNAMIC_ANALYSIS_CATEGORY = 'Dynamic Analysis'
 DAY_IN_SECONDS = 24 * 60 * 60
+
+
+class KeyType(enum.Enum):
+    OVERWRITE = 'overwrite'
+    UNION = 'union'
+    IGNORE = 'ignore'
 
 
 class Action(enum.IntEnum):
@@ -80,6 +89,19 @@ class DispatchAction:
     event: Optional[threading.Event] = dataclasses.field(compare=False, default=None)
 
 
+@dataclasses.dataclass()
+class MonitorTask:
+    """Tracks whether a task needs to be rerun based on """
+    # Service name
+    service: str
+    # sha256 of file in question
+    sha: str
+    # The temporary values this task was last dispatached with
+    values: dict[str, Optional[str]]
+    # Should aservice be dispatched again when possible
+    dispatch_needed: bool = dataclasses.field(default=False)
+
+
 @contextmanager
 def apm_span(client, span_name: str):
     try:
@@ -95,19 +117,166 @@ def apm_span(client, span_name: str):
 
 
 class ResultSummary:
-    def __init__(self, key, drop, score, children):
+    def __init__(self, key, drop, score, children, partial=False) -> None:
         self.key: str = key
         self.drop: bool = drop
+        self.partial: bool = partial
         self.score: int = score
-        self.children: list[str, str] = children
+        self.children: list[tuple[str, str]] = children
+
+
+class TemporaryFileData:
+    def __init__(self, sha256: str) -> None:
+        self.sha256 = sha256
+        self.parents: list[TemporaryFileData] = []
+        self.children: list[TemporaryFileData] = []
+        self.parent_cache: dict[str, Any] = {}
+        self.local_values: dict[str, Any] = {}
+
+    def add_parent(self, parent_temp: TemporaryFileData):
+        """Add a parent to this node."""
+        self.parents.append(parent_temp)
+        parent_temp.children.append(self)
+
+    def new_child(self, child: str) -> TemporaryFileData:
+        """Create a linked entry for a new child."""
+        temp = TemporaryFileData(child)
+        temp.parents.append(self)
+        self.children.append(temp)
+        temp.build_parent_cache()
+        return temp
+
+    def build_parent_cache(self):
+        """Rebuild the cache of data from parent files."""
+        self.parent_cache.clear()
+        for parent in self.parents:
+            self.parent_cache.update(parent.read())
+
+    def read(self) -> dict[str, Any]:
+        """Get a copy of the current data"""
+        # Start with a shallow copy ofthe parent cache
+        data = dict(self.parent_cache)
+
+        # update, this overwrites any common keys (we want this)
+        data.update(self.local_values)
+        return data
+
+    def read_key(self, key: str) -> Any:
+        """Get a copy of the current data"""
+        try:
+            return self.local_values[key]
+        except KeyError:
+            return self.parent_cache.get(key)
+
+    def set_value(self, key: str, value: str) -> set[str]:
+        """Using a SET operation update the value on this node and all children.
+        
+        Returns a list of the sha of all files who's temporary data has been modified.
+        """
+        # Check if the local value doesn't change then we won't have any effect on children
+        old = self.local_values.get(key)
+        if type(old) is type(value) and old == value:
+            return set()
+
+        # Update the local value and recurse into children
+        self.local_values[key] = value
+        changed = [self.sha256]
+        for child in self.children:
+            changed.extend(child.set_value_from_ancestor(key, value))
+        return set(changed)
+
+    def set_value_from_ancestor(self, key: str, value: str) -> set[str]:
+        """Given that an ancestor has changed, test if this file's temporary data will change also."""
+        # If this child has already set this key, the parent values don't matter
+        if key in self.local_values:
+            return set()
+        
+        # If the parent value was already set to this nothing has changed
+        old = self.parent_cache.get(key)
+        if type(old) is type(value) and old == value:
+            return set()
+
+        # Update the parent cache and recurse into children
+        self.parent_cache[key] = value
+        changed = [self.sha256]
+        for child in self.children:
+            changed.extend(child.set_value_from_ancestor(key, value))
+        return set(changed)
+
+    def union_value(self, key: str, value: set[str]) -> set[str]:
+        """Using a MERGE operation update the value on this node and all children.
+        
+        Returns a list of the sha of all files who's temporary data has been modified.
+        """
+        if not value:
+            return set()
+
+        # Check if the local value doesn't change then we won't have any effect on children
+        new_value = merge_in_values(self.local_values.get(key), value)
+        if new_value is None:
+            return set()
+
+        # Update the local value and recurse into children
+        self.local_values[key] = new_value
+        changed = [self.sha256]
+        for child in self.children:
+            changed.extend(child.union_value_from_ancestor(key, value))
+        return set(changed)
+
+    def union_value_from_ancestor(self, key: str, value: set[str]) -> set[str]:
+        """Given that an ancestor has changed, test if this file's temporary data will change also.
+        
+        For values updated by union the parent and local values are the same.
+        """        
+        # Merge in data to parent cache, we won't be reading from it, but we still want to keep it
+        # up to date and use it to check if changes are needed
+        new_value = merge_in_values(self.parent_cache.get(key), value)
+        if new_value is None:
+            return set()
+        self.parent_cache[key] = new_value
+
+        # Update the local values as well if we need to
+        new_value = merge_in_values(self.local_values.get(key), value)
+        if new_value is None:
+            return set()
+        self.local_values[key] = new_value
+
+        # Since we did change the local value, pass the new set down to children 
+        changed = [self.sha256]
+        for child in self.children:
+            changed.extend(child.union_value_from_ancestor(key, value))
+        return set(changed)
+
+
+def merge_in_values(old_values: Any, new_values: set[str]) -> Optional[list[str]]:
+    """Merge in new values into a json list.
+    
+    If there is no new values return None.
+    """
+    # Read out the old value set
+    if isinstance(old_values, (list, set)):
+        old_values = set(old_values)
+    else:
+        old_values = set()
+
+    # If we have no new values to merge in
+    if new_values <= old_values:
+        return None
+    
+    # We have new values, build a new set
+    return list(new_values | old_values)
 
 
 class SubmissionTask:
     """Dispatcher internal model for submissions"""
 
-    def __init__(self, submission, completed_queue, scheduler, results=None,
+    def __init__(self, submission, completed_queue, scheduler, datastore: AssemblylineDatastore, results=None,
                  file_infos=None, file_tree=None, errors: Optional[Iterable[str]] = None):
         self.submission: Submission = Submission(submission)
+        submitter: Optional[User] = datastore.user.get_if_exists(self.submission.params.submitter)
+        self.service_access_control: Optional[str] = None
+        if submitter:
+            self.service_access_control = submitter.classification.value
 
         self.completed_queue = None
         if completed_queue:
@@ -118,12 +287,13 @@ class SubmissionTask:
         self.file_schedules: dict[str, list[dict[str, Service]]] = {}
         self.file_tags: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         self.file_depth: dict[str, int] = {}
-        self.file_temporary_data: dict[str, dict] = defaultdict(dict)
+        self.temporary_data: dict[str, TemporaryFileData] = {}
         self.extra_errors: list[str] = []
         self.active_files: set[str] = set()
         self.dropped_files: set[str] = set()
         self.dynamic_recursion_bypass: set[str] = set()
         self.service_logs: dict[tuple[str, str], list[str]] = defaultdict(list)
+        self.monitoring: dict[tuple[str, str], MonitorTask] = {}
 
         # mapping from file hash to a set of services that shouldn't be run on
         # any children (recursively) of that file
@@ -164,19 +334,21 @@ class SubmissionTask:
             for k, result in results.items():
                 sha256, service, _ = k.split('.', 2)
                 if service not in rescan:
-                    children = [r['sha256'] for r in result['response']['extracted']]
+                    extracted = result['response']['extracted']
+                    children: list[str] = [r['sha256'] for r in extracted]
                     self.register_children(sha256, children)
+                    children_detail: list[tuple[str, str]] = [(r['sha256'], r['parent_relation']) for r in extracted]
                     self.service_results[(sha256, service)] = ResultSummary(
                         key=k, drop=result['drop_file'], score=result['result']['score'],
-                        children=children)
+                        children=children_detail, partial=result.get('partial', False))
 
                 tags = Result(result).scored_tag_dict()
-                for key in tags.keys():
+                for key, tag in tags.items():
                     if key in self.file_tags[sha256].keys():
                         # Sum score of already known tags
-                        self.file_tags[sha256][key]['score'] += tags[key]['score']
+                        self.file_tags[sha256][key]['score'] += tag['score']
                     else:
-                        self.file_tags[sha256][key] = tags[key]
+                        self.file_tags[sha256][key] = tag
 
         if errors is not None:
             for e in errors:
@@ -185,6 +357,7 @@ class SubmissionTask:
 
     @property
     def sid(self) -> str:
+        """Shortcut to read submission SID"""
         return self.submission.sid
 
     def forbid_for_children(self, sha256: str, service_name: str):
@@ -196,16 +369,23 @@ class SubmissionTask:
 
     def register_children(self, parent: str, children: list[str]):
         """
-        Note for the purposes of dynamic recursion prevention which
-        files extracted other files.
+        Note which files extracted other files.
+        _parent_map is for dynamic recursion prevention
+        temporary_data is for cascading the temp data to children
         """
+        parent_temp = self.temporary_data[parent]
         for child in children:
+            try:
+                self.temporary_data[child].add_parent(parent_temp)
+            except KeyError:
+                self.temporary_data[child] = parent_temp.new_child(child)
             try:
                 self._parent_map[child].add(parent)
             except KeyError:
                 self._parent_map[child] = {parent}
 
     def all_ancestors(self, sha256: str) -> list[str]:
+        """Collect all the known ancestors of the given file within this submission."""
         visited = set()
         to_visit = [sha256]
         while len(to_visit) > 0:
@@ -228,6 +408,64 @@ class SubmissionTask:
             self._forbidden_services.get(parent, set())
             for parent in self.all_ancestors(sha256)
         ]))
+
+    def set_monitoring_entry(self, sha256: str, service_name: str, values: dict[str, Optional[str]]):
+        """A service with monitoring has dispatched, keep track of the conditions."""
+        self.monitoring[(sha256, service_name)] = MonitorTask(
+            service=service_name,
+            sha=sha256,
+            values=values,
+        )
+
+    def partial_result(self, sha256, service_name):
+        """Note that a partial result has been recieved. If a dispatch was requested process that now."""
+        try:
+            entry = self.monitoring[(sha256, service_name)]
+        except KeyError:
+            return
+
+        if entry.dispatch_needed:
+            self.redispatch_service(sha256, service_name)
+
+    def clear_monitoring_entry(self, sha256, service_name):
+        """A service has completed normally. If the service is monitoring clear out the record."""
+        # We have an incoming non-partial result, flush out any partial monitoring
+        self.monitoring.pop((sha256, service_name), None)
+        # If there is a partial result for this service flush that as well so we accept this new result
+        result = self.service_results.get((sha256, service_name))
+        if result and result.partial:
+            self.service_results.pop((sha256, service_name), None)
+
+    def file_temporary_data_changed(self, changed_sha256: set[str], key: str) -> list[str]:
+        """Check all of the monitored tasks on that key for changes. Redispatch as needed."""
+        changed = []
+        for (sha256, service), entry in self.monitoring.items():
+            if sha256 not in changed_sha256:
+                continue
+
+            value = self.temporary_data[sha256].read_key(key)
+            dispatched_value = entry.values.get(key)
+
+            if type(value) is not type(dispatched_value) or value != dispatched_value:
+                result = self.service_results.get((sha256, service))
+                if not result:
+                    entry.dispatch_needed = True
+                else:
+                    self.redispatch_service(sha256, service)
+                    changed.append(sha256)
+        return changed
+
+    def redispatch_service(self, sha256, service_name):
+        # Clear the result if its partial or an error
+        result = self.service_results.get((sha256, service_name))
+        if result and not result.partial:
+            return
+        self.service_results.pop((sha256, service_name), None)
+        self.service_errors.pop((sha256, service_name), None)
+        self.service_attempts[(sha256, service_name)] = 1
+
+        # Try to get the service to run again by reseting the schedule for that service
+        self.file_schedules.pop(sha256, None)
 
 
 DISPATCH_TASK_ASSIGNMENT = 'dispatcher-tasks-assigned-to-'
@@ -257,12 +495,16 @@ SUBMISSION_TOTAL_TIMEOUT = 60 * 20
 
 class Dispatcher(ThreadedCoreBase):
     @staticmethod
-    def all_instances(persistent_redis):
+    def all_instances(persistent_redis: Redis):
         return Hash(DISPATCH_DIRECTORY, host=persistent_redis).keys()
 
     @staticmethod
     def instance_assignment_size(persistent_redis, instance_id):
         return Hash(DISPATCH_TASK_ASSIGNMENT + instance_id, host=persistent_redis).length()
+
+    @staticmethod
+    def instance_assignment(persistent_redis, instance_id) -> list[str]:
+        return Hash(DISPATCH_TASK_ASSIGNMENT + instance_id, host=persistent_redis).keys()
 
     @staticmethod
     def all_queue_lengths(redis, instance_id):
@@ -273,7 +515,7 @@ class Dispatcher(ThreadedCoreBase):
         }
 
     def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None,
-                 config=None, counter_name='dispatcher'):
+                 config=None, counter_name: str = 'dispatcher'):
         super().__init__('assemblyline.dispatcher', config=config, datastore=datastore,
                          redis=redis, redis_persist=redis_persist, logger=logger)
 
@@ -283,14 +525,13 @@ class Dispatcher(ThreadedCoreBase):
         self.finalizing = threading.Event()
         self.finalizing_start = 0.0
 
-        #
-        # # Build some utility classes
+        # Build some utility classes
         self.scheduler = Scheduler(self.datastore, self.config, self.redis)
         self.running_tasks = Hash(DISPATCH_RUNNING_TASK_HASH, host=self.redis)
         self.scaler_timeout_queue = NamedQueue(SCALER_TIMEOUT_QUEUE, host=self.redis_persist)
 
-        # self.classification_engine = forge.get_classification()
-        #
+        self.classification_engine = get_classification()
+
         # Output. Duplicate our input traffic into this queue so it may be cloned by other systems
         self.traffic_queue = CommsQueue('submissions', self.redis)
         self.quota_tracker = UserQuotaTracker('submissions', timeout=60 * 60, host=self.redis_persist)
@@ -307,12 +548,12 @@ class Dispatcher(ThreadedCoreBase):
         self.ingester_scanning = Hash('m-scanning-table', self.redis_persist)
 
         # Communications queues
-        self.start_queue = NamedQueue(DISPATCH_START_EVENTS+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
-        self.result_queue = NamedQueue(DISPATCH_RESULT_QUEUE+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
-        self.command_queue = NamedQueue(DISPATCH_COMMAND_QUEUE+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
-
-        # Submissions that should have alerts generated
-        self.alert_queue = NamedQueue(ALERT_QUEUE_NAME, self.redis_persist)
+        self.start_queue: NamedQueue[tuple[str, str, str, str]] =\
+            NamedQueue(DISPATCH_START_EVENTS+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
+        self.result_queue: NamedQueue[dict] =\
+            NamedQueue(DISPATCH_RESULT_QUEUE+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
+        self.command_queue: NamedQueue[dict] =\
+            NamedQueue(DISPATCH_COMMAND_QUEUE+self.instance_id, host=self.redis, ttl=QUEUE_EXPIRY)
 
         # Publish counters to the metrics sink.
         self.counter = MetricsFactory(metrics_type='dispatcher', schema=Metrics, name=counter_name,
@@ -348,8 +589,13 @@ class Dispatcher(ThreadedCoreBase):
         self.redis_bad_sids = Set(BAD_SID_HASH, host=self.redis_persist)
         self.bad_sids: set[str] = set(self.redis_bad_sids.members())
 
+        # Event Watchers
+        self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
+        self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
+
     def stop(self):
         super().stop()
+        self.service_change_watcher.stop()
         self.postprocess_worker.stop()
 
     def interrupt_handler(self, signum, stack_frame):
@@ -368,6 +614,28 @@ class Dispatcher(ThreadedCoreBase):
                 _q = self.find_process_queue(sid)
                 _q.put(DispatchAction(kind=Action.check_submission, sid=sid))
 
+    def _handle_service_change_event(self, data: Optional[ServiceChange]):
+        if not data:
+            # We may have missed change messages, flush cache
+            self.scheduler.c12n_services.clear()
+            return
+        if data.operation == Operation.Removed:
+            # Remove all current instances of service from scheduler cache
+            for service_set in self.scheduler.c12n_services.values():
+                if data.name in service_set:
+                    service_set.remove(data.name)
+        else:
+            # If Added/Modifed, pull the service information and modify cache
+            service: Service = self.datastore.get_service_with_delta(data.name)
+            for c12n, service_set in self.scheduler.c12n_services.items():
+                if self.classification_engine.is_accessible(c12n, service.classification):
+                    # Classification group is allowed to use this service
+                    service_set.add(service.name)
+                else:
+                    # Classification group isn't allowed to use this service
+                    if service.name in service_set:
+                        service_set.remove(service.name)
+
     def process_queue_index(self, key: str) -> int:
         return sum(ord(_x) for _x in key) % RESULT_THREADS
 
@@ -381,6 +649,7 @@ class Dispatcher(ThreadedCoreBase):
 
     def try_run(self):
         self.log.info(f'Using dispatcher id {self.instance_id}')
+        self.service_change_watcher.start()
         threads = {
             # Pull in new submissions
             'Pull Submissions': self.pull_submissions,
@@ -414,7 +683,7 @@ class Dispatcher(ThreadedCoreBase):
         # If the dispatcher is exiting cleanly remove as many tasks from the service queues as we can
         service_queues = {}
         for task in self.tasks.values():
-            for (sha256, service_name), dispatch_key in task.queue_keys.items():
+            for (_sha256, service_name), dispatch_key in task.queue_keys.items():
                 try:
                     s_queue = service_queues[service_name]
                 except KeyError:
@@ -468,7 +737,7 @@ class Dispatcher(ThreadedCoreBase):
                 # Start of process dispatcher transaction
                 with apm_span(self.apm_client, 'submission_message'):
                     # This is probably a complete task
-                    task = SubmissionTask(scheduler=self.scheduler, **message)
+                    task = SubmissionTask(scheduler=self.scheduler, datastore=self.datastore, **message)
 
                     # Check the sid table
                     if task.sid in self.bad_sids:
@@ -500,7 +769,7 @@ class Dispatcher(ThreadedCoreBase):
             return
 
         if not self.active_submissions.exists(sid):
-            self.log.info(f"[{sid}] New submission received")
+            self.log.info("[%s] New submission received", sid)
             self.active_submissions.add(sid, {
                 'completed_queue': task.completed_queue,
                 'submission': submission.as_primitives()
@@ -521,9 +790,10 @@ class Dispatcher(ThreadedCoreBase):
             self.log.info(f"[{sid}] Submission counts towards {submission.params.submitter.upper()} quota")
 
         # Apply initial data parameter
+        temporary_data = task.temporary_data[sha256] = TemporaryFileData(sha256)
         if submission.params.initial_data:
             try:
-                task.file_temporary_data[sha256] = {
+                temporary_data.local_values = {
                     key: value
                     for key, value in dict(json.loads(submission.params.initial_data)).items()
                     if len(str(value)) <= self.config.submission.max_temp_data_length
@@ -541,7 +811,7 @@ class Dispatcher(ThreadedCoreBase):
         # Initialize ancestry chain by identifying the root file
         file_info = self.get_fileinfo(task, sha256)
         file_type = file_info.type if file_info else 'NOT_FOUND'
-        task.file_temporary_data[sha256]['ancestry'] = [[dict(type=file_type, parent_relation="ROOT", sha256=sha256)]]
+        temporary_data.local_values['ancestry'] = [[dict(type=file_type, parent_relation="ROOT", sha256=sha256)]]
 
         # Start the file dispatching
         task.active_files.add(sha256)
@@ -550,6 +820,7 @@ class Dispatcher(ThreadedCoreBase):
 
     @elasticapm.capture_span(span_type='dispatcher')
     def get_fileinfo(self, task: SubmissionTask, sha256: str) -> Optional[FileInfo]:
+        """Read information about a file from the database, caching it locally."""
         # First try to get the info from local cache
         file_info = task.file_info.get(sha256, None)
         if file_info:
@@ -586,7 +857,10 @@ class Dispatcher(ThreadedCoreBase):
                 sha1=filestore_info.sha1,
                 sha256=filestore_info.sha256,
                 size=filestore_info.size,
+                ssdeep=filestore_info.ssdeep,
                 type=filestore_info.type,
+                tlsh=filestore_info.tlsh,
+                uri_info=filestore_info.uri_info
             ))
         return file_info
 
@@ -623,7 +897,8 @@ class Dispatcher(ThreadedCoreBase):
                 forbidden_services = task.find_recursion_excluded_services(sha256)
 
             task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
-                                                                        file_depth, forbidden_services)
+                                                                        file_depth, forbidden_services,
+                                                                        task.service_access_control)
 
         file_info = task.file_info[sha256]
         schedule: list = list(task.file_schedules[sha256])
@@ -699,9 +974,12 @@ class Dispatcher(ThreadedCoreBase):
                         tags = list(task.file_tags.get(sha256, {}).values())
 
                     # Load the temp submission data we will pass
-                    temp_data = {}
+                    temp_data: dict[str, str] = {}
                     if service.uses_temp_submission_data:
-                        temp_data = task.file_temporary_data[sha256]
+                        temp_data = task.temporary_data[sha256].read()
+                        if service.monitored_keys:
+                            values = {key: temp_data.get(key) for key in service.monitored_keys}
+                            task.set_monitoring_entry(sha256, service.name, values)
 
                     # Load the metadata we will pass
                     metadata = {}
@@ -869,10 +1147,10 @@ class Dispatcher(ThreadedCoreBase):
                 if self.dispatch_file(task, file_hash):
                     return True
         elif processing_files:
-            self.log.debug(f"[{task.submission.sid}] Not finished waiting on {len(processing_files)} "
-                           f"files: {list(processing_files)}")
+            self.log.debug("[%s] Not finished waiting on %d files: %s",
+                           task.submission.sid, len(processing_files), list(processing_files))
         else:
-            self.log.debug(f"[{task.submission.sid}] Finalizing submission.")
+            self.log.debug("[%s] Finalizing submission.", task.submission.sid)
             max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
             if self.tasks.pop(task.sid, None):
                 self.finalize_queue.put((task, max_score, checked))
@@ -1196,6 +1474,12 @@ class Dispatcher(ThreadedCoreBase):
         self.clear_timeout(task, sha256, service_name)
         task.service_logs.pop((sha256, service_name), None)
 
+        if summary.partial:
+            self.log.info("[%s/%s] %s returned partial results", sid, sha256, service_name)
+            task.partial_result(sha256, service_name)
+        else:
+            task.clear_monitoring_entry(sha256, service_name)
+
         # Don't process duplicates
         if (sha256, service_name) in task.service_results:
             return
@@ -1217,8 +1501,8 @@ class Dispatcher(ThreadedCoreBase):
         if isinstance(tags, list):
             self.log.warning("Deprecation: Old format of tags found. "
                              "This format changed with the release of 4.3 on 09-2022. "
-                             f"Rebuilding {service_name} may be required or the result of a cache hit. "
-                             "Proceeding with conversion to compatible format..")
+                             "Rebuilding %s may be required or the result of a cache hit. "
+                             "Proceeding with conversion to compatible format..", service_name)
             alt_tags = {}
             for t in tags:
                 key = f"{t['type']}:{t['value']}"
@@ -1233,18 +1517,27 @@ class Dispatcher(ThreadedCoreBase):
             else:
                 task.file_tags[sha256][key] = value
 
-        # Update the temporary data table for this file
-        for key, value in (temporary_data or {}).items():
-            if len(str(value)) <= self.config.submission.max_temp_data_length:
-                task.file_temporary_data[sha256][key] = value
-
         # Update children to include parent_relation, likely EXTRACTED
         if summary.children and isinstance(summary.children[0], str):
-            summary.children = [(c, 'EXTRACTED') for c in summary.children]
+            old_children = typing.cast(list[str], summary.children)
+            summary.children = [(c, 'EXTRACTED') for c in old_children]
 
         # Record the result as a summary
         task.service_results[(sha256, service_name)] = summary
         task.register_children(sha256, [c for c, _ in summary.children])
+
+        # Update the temporary data table for this file
+        force_redispatch = set()
+        update_operations = self.config.submission.temporary_keys
+        for key, value in (temporary_data or {}).items():
+            if len(str(value)) <= self.config.submission.max_temp_data_length:
+                if update_operations.get(key) == KeyType.UNION:
+                    changed_files = task.temporary_data[sha256].union_value(key, value)
+                elif update_operations.get(key) == KeyType.IGNORE:
+                    changed_files = set()
+                else:
+                    changed_files = task.temporary_data[sha256].set_value(key, value)
+                force_redispatch |= set(task.file_temporary_data_changed(changed_files, key))
 
         # Set the depth of all extracted files, even if we won't be processing them
         depth_limit = self.config.submission.max_extraction_depth
@@ -1261,7 +1554,7 @@ class Dispatcher(ThreadedCoreBase):
             if new_depth < depth_limit:
                 # Prepare the temporary data from the parent to build the temporary data table for
                 # these newly extract files
-                parent_data = task.file_temporary_data[sha256]
+                parent_data = task.temporary_data[sha256]
 
                 for extracted_sha256, parent_relation in summary.children:
 
@@ -1269,7 +1562,7 @@ class Dispatcher(ThreadedCoreBase):
                         continue
 
                     if len(task.active_files) > submission.params.max_extracted:
-                        self.log.info(f'[{sid}] hit extraction limit, dropping {extracted_sha256}')
+                        self.log.info('[%s] hit extraction limit, dropping %s', sid, extracted_sha256)
                         task.dropped_files.add(extracted_sha256)
                         self._dispatching_error(task, Error({
                             'archive_ts': None,
@@ -1290,17 +1583,20 @@ class Dispatcher(ThreadedCoreBase):
 
                     dispatched += 1
                     task.active_files.add(extracted_sha256)
-                    parent_ancestry = parent_data['ancestry']
-                    existing_ancestry = task.file_temporary_data.get(extracted_sha256, {}).get('ancestry', [])
+
+                    # Get the new ancestory data
                     file_info = self.get_fileinfo(task, extracted_sha256)
                     file_type = file_info.type if file_info else 'NOT_FOUND'
                     current_ancestry_node = dict(type=file_type, parent_relation=parent_relation,
                                                  sha256=extracted_sha256)
 
-                    task.file_temporary_data[extracted_sha256] = dict(parent_data)
-                    task.file_temporary_data[extracted_sha256]['ancestry'] = existing_ancestry
-                    [task.file_temporary_data[extracted_sha256]['ancestry'].append(ancestry + [current_ancestry_node])
-                     for ancestry in parent_ancestry]
+                    # Update ancestory data
+                    parent_ancestry = parent_data.read_key('ancestry') or []
+                    existing_ancestry = task.temporary_data[extracted_sha256].local_values.setdefault('ancestry', [])
+                    for ancestry in parent_ancestry:
+                        existing_ancestry.append(ancestry + [current_ancestry_node])
+
+                    # Trigger the processing of the extracted file
                     self.find_process_queue(sid).put(DispatchAction(kind=Action.dispatch_file, sid=sid,
                                                                     sha=extracted_sha256))
             else:
@@ -1323,13 +1619,15 @@ class Dispatcher(ThreadedCoreBase):
 
         # Check if its worth trying to run the next stage
         # Not worth running if we know we are waiting for another service
-        if any(_s == sha256 for _s, _ in task.running_services):
-            return
+        if not any(_s == sha256 for _s, _ in task.running_services):
+            force_redispatch.add(sha256)
         # Not worth running if we know we have services in queue
-        if any(_s == sha256 for _s, _ in task.queue_keys.keys()):
-            return
+        if not any(_s == sha256 for _s, _ in task.queue_keys.keys()):
+            force_redispatch.add(sha256)
+        
         # Try to run the next stage
-        self.dispatch_file(task, sha256)
+        for sha256 in force_redispatch:
+            self.dispatch_file(task, sha256)
 
     @elasticapm.capture_span(span_type='dispatcher')
     def _dispatching_error(self, task: SubmissionTask, error):
@@ -1612,13 +1910,13 @@ class Dispatcher(ThreadedCoreBase):
 
     @elasticapm.capture_span(span_type='dispatcher')
     def list_outstanding(self, sid: str, queue_name: str):
-        response_queue = NamedQueue(queue_name, host=self.redis)
+        response_queue: NamedQueue[dict] = NamedQueue(queue_name, host=self.redis)
         outstanding: defaultdict[str, int] = defaultdict(int)
         task = self.tasks.get(sid)
         if task:
-            for sha, service_name in list(task.queue_keys.keys()):
+            for _sha, service_name in list(task.queue_keys.keys()):
                 outstanding[service_name] += 1
-            for sha, service_name in list(task.running_services):
+            for _sha, service_name in list(task.running_services):
                 outstanding[service_name] += 1
         response_queue.push(outstanding)
 
@@ -1633,7 +1931,7 @@ class Dispatcher(ThreadedCoreBase):
                 error_tasks = []
 
                 # iterate running tasks
-                for task_key, task_body in self.running_tasks:
+                for _task_key, task_body in self.running_tasks:
                     task = ServiceTask(task_body)
                     # Its a bad task if it's dispatcher isn't running
                     if task.metadata['dispatcher__'] not in dispatcher_instances:

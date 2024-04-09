@@ -166,7 +166,8 @@ class DockerController(ControllerInterface):
         cfg = prof.container_config
 
         # Set the list of labels
-        labels = dict(self._labels)
+        labels = {_v.name: _v.value for _v in cfg.labels}
+        labels.update(self._labels)
         labels.update({
             'component': service_name,
             'com.docker.compose.service': service_name.lower(),
@@ -341,6 +342,10 @@ class DockerController(ControllerInterface):
         names = list(self._profiles.keys())
         return {name: self.get_target(name) for name in names}
 
+    def get_unavailable(self) -> dict[str, int]:
+        """Get the number of containers the orchestration layer could not start."""
+        return {}
+
     def set_target(self, service_name, target):
         """Change how many instances of a service docker is trying to keep up.
 
@@ -478,7 +483,8 @@ class DockerController(ControllerInterface):
         if spec.run_as_core:
             volumes.update({row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.core_mounts})
 
-        all_labels = dict(self._labels)
+        all_labels = {_v.name: _v.value for _v in spec.container.labels}
+        all_labels.update(self._labels)
         all_labels.update({
             'component': service_name,
             CHANGE_KEY_NAME: change_check,

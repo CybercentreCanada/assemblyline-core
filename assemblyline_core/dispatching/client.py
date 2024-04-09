@@ -15,6 +15,7 @@ from assemblyline.common import forge
 from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SUBMISSION_QUEUE, \
     make_watcher_list_name, DISPATCH_TASK_HASH
 from assemblyline.common.forge import CachedObject, get_service_queue
+from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.exceptions import VersionConflictException
 from assemblyline.odm.base import DATEFORMAT
 from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, \
@@ -164,6 +165,9 @@ class DispatchClient:
             dispatcher_id = queue.pop(timeout=5)
             listed_dispatchers.discard(dispatcher_id)
 
+    def queued_submissions(self) -> list[dict]:
+        return self.submission_queue.content()
+
     def outstanding_services(self, sid) -> Optional[dict[str, int]]:
         """
         List outstanding services for a given submission and the number of file each
@@ -264,6 +268,7 @@ class DispatchClient:
         # Save or freshen the result, the CONTENT of the result shouldn't change, but we need to keep the
         # most distant expiry time to prevent pulling it out from under another submission too early
         if result.is_empty():
+            result.expiry_ts = now_as_iso(self.config.submission.emptyresult_dtl * 24 * 60 * 60)
             self.ds.emptyresult.save(result_key, {"expiry_ts": result.expiry_ts})
         else:
             while True:
@@ -314,6 +319,7 @@ class DispatchClient:
                 'key': result_key,
                 'drop': result.drop_file,
                 'score': result.result.score,
+                'partial': result.partial,
                 'children': [(r.sha256, r.parent_relation) for r in result.response.extracted],
             },
             'tags': tags,

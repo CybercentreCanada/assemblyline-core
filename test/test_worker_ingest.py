@@ -70,7 +70,7 @@ def test_ingest_simple(ingest_harness):
             'tobig': 'a' * (ingester.config.submission.max_metadata_length + 2),
             'small': '100'
         }
-    ), params={'submitter': 'user', 'groups': []}))
+    ), params={'submitter': 'user', 'groups': custom_user_groups}))
 
     # Process those ok message
     ingester.running.counter = 1

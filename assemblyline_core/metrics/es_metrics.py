@@ -1,23 +1,23 @@
 import json
 import tempfile
+import time
+import sys
+from os import environ, path
+from urllib.parse import urlparse
 
 import elasticapm
-import sys
-
 import elasticsearch
-import time
-
-from assemblyline_core.metrics.helper import with_retries, ensure_indexes
-from assemblyline_core.server_base import ServerBase
+from packaging import version
 
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 
-from os import environ, path
-from packaging import version
-from urllib.parse import urlparse
+from assemblyline_core.metrics.helper import with_retries, ensure_indexes
+from assemblyline_core.server_base import ServerBase
+
 
 METRICSTORE_ROOT_CA_PATH = environ.get('METRICSTORE_ROOT_CA_PATH', '/etc/assemblyline/ssl/al_root-ca.crt')
+METRICSTORE_VERIFY_CERTS = environ.get('METRICSTORE_VERIFY_CERTS', 'true').lower() == "true"
 
 
 class ESMetricsServer(ServerBase):
@@ -528,7 +528,8 @@ class ESMetricsServer(ServerBase):
 
         # Open connections to the input and output databases
         self.input_es = forge.get_datastore().ds.client
-        self.target_es = elasticsearch.Elasticsearch(hosts=self.target_hosts, max_retries=0, ca_certs=ca_certs)
+        self.target_es = elasticsearch.Elasticsearch(hosts=self.target_hosts, max_retries=0, ca_certs=ca_certs,
+                                                     verify_certs=METRICSTORE_VERIFY_CERTS)
         # Check if target_es supports datastreams (>=7.9)
         es_metric_indices = ['es_cluster', 'es_nodes', 'es_indices']
         self.is_datastream = version.parse(self.target_es.info()['version']['number']) >= version.parse("7.9")

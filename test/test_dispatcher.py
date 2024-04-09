@@ -9,6 +9,7 @@ from assemblyline.common.forge import get_service_queue, get_classification
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.file import File
 from assemblyline.odm.models.result import Result
+from assemblyline.odm.models.user import User
 from assemblyline.odm.randomizer import random_model_obj, random_minimal_obj, get_random_hash
 from assemblyline.odm import models
 from assemblyline.common.metrics import MetricsFactory
@@ -114,10 +115,13 @@ def test_simple(clean_redis, clean_datastore):
 
     def service_queue(name): return get_service_queue(name, redis)
 
-    file = random_model_obj(File)
+    file: File = random_model_obj(File)
     file_hash = file.sha256
     file.type = 'unknown'
     ds.file.save(file_hash, file)
+
+    user: User = random_model_obj(User)
+    ds.user.save(user.uname, user)
 
     sub: Submission = random_model_obj(models.submission.Submission)
     sub.sid = sid = 'first-submission'
@@ -126,6 +130,7 @@ def test_simple(clean_redis, clean_datastore):
     sub.to_be_deleted = False
     sub.params.classification = get_classification().UNRESTRICTED
     sub.params.initial_data = json.dumps({'cats': 'big'})
+    sub.params.submitter = user.uname
     sub.files = [dict(sha256=file_hash, name='file')]
 
     disp = Dispatcher(ds, redis, redis)
@@ -228,6 +233,8 @@ def test_dispatch_extracted(clean_redis, clean_datastore):
     # Setup the fake datastore
     file_hash = get_random_hash(64)
     second_file_hash = get_random_hash(64)
+    user: User = random_model_obj(User)
+    ds.user.save(user.uname, user)
 
     for fh in [file_hash, second_file_hash]:
         obj = random_model_obj(models.file.File)
@@ -238,6 +245,7 @@ def test_dispatch_extracted(clean_redis, clean_datastore):
     submission = random_model_obj(models.submission.Submission)
     submission.to_be_deleted = False
     submission.files = [dict(name='./file', sha256=file_hash)]
+    submission.params.submitter = user.uname
     sid = submission.sid = 'first-submission'
 
     disp = Dispatcher(ds, redis, redis)
@@ -290,6 +298,9 @@ def test_dispatch_extracted_bypass_drp(clean_redis, clean_datastore):
     # Setup the fake datastore
     file_hash = get_random_hash(64)
     second_file_hash = get_random_hash(64)
+
+    user: User = random_model_obj(User)
+    ds.user.save(user.uname, user)
 
     for fh in [file_hash, second_file_hash]:
         obj = random_model_obj(models.file.File)

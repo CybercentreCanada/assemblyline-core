@@ -1,4 +1,3 @@
-import concurrent.futures
 import logging
 import time
 from typing import Any, Dict, Optional
@@ -10,6 +9,7 @@ from assemblyline.common.constants import SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.dict_utils import flatten, unflatten
 from assemblyline.common.heuristics import HeuristicHandler, InvalidHeuristicException
 from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.threading import APMAwareThreadPoolExecutor
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.filestore import FileStore
 from assemblyline.odm import construct_safe
@@ -23,7 +23,6 @@ from assemblyline.odm.models.tagging import Tagging
 from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline_core.dispatching.client import DispatchClient
-
 
 class TaskingClientException(Exception):
     pass
@@ -258,12 +257,38 @@ class TaskingClient:
                 if task.ttl:
                     result.expiry_ts = now_as_iso(task.ttl * 24 * 60 * 60)
 
+                # Create a list of files to freshen
+                freshen_hashes = [task.fileinfo.sha256]
+
+                # Test each extracted and supplementary files
+                for file_item in result.response.extracted + result.response.supplementary:
+                    if file_item.sha256 in freshen_hashes:
+                        # We've already decided to freshen this file, moving on..
+                        continue
+
+                    freshen_hashes.append(file_item.sha256)
+
+                    # Bail out if file does not exists
+                    if not self.filestore.exists(file_item.sha256):
+                        self.log.info("We have a cache hit with some related files missing, ignoring it...")
+                        metric_factory.increment('cache_miss')
+                        return task.as_primitives(), False
+
+                # Freshen the files
+                for sha256 in freshen_hashes:
+                    self.datastore.save_or_freshen_file(sha256, {}, result.expiry_ts, result.classification)
+
                 self.dispatch_client.service_finished(task.sid, result_key, result)
                 cache_found = True
 
             if not cache_found:
                 # Checking for previous empty results for this key
-                result = self.datastore.emptyresult.get_if_exists(f"{result_key}.e")
+                try:
+                    result = self.datastore.emptyresult.get_if_exists(f"{result_key}.e")
+                except ValueError:
+                    self.log.warning(f"Got poisoned empty result cache record for key {result_key}.e, cleaning up...")
+                    self.datastore.emptyresult.delete(f"{result_key}.e")
+
                 if result:
                     metric_factory.increment('cache_hit')
                     metric_factory.increment('not_scored')
@@ -311,10 +336,12 @@ class TaskingClient:
     @elasticapm.capture_span(span_type='tasking_client')
     def _handle_task_result(self, exec_time: int, task: ServiceTask, result: Dict[str, Any], client_id, service_name,
                             freshen: bool, metric_factory):
+        # In the event of a result with duplicate files, let's cache file existence checks with the filestore
+        file_exists_check = {}
 
         def freshen_file(file_info_list, item):
             file_info = file_info_list.get(item['sha256'], None)
-            if file_info is None or not self.filestore.exists(item['sha256']):
+            if file_info is None or not file_exists_check[item['sha256']]:
                 return True
             else:
                 file_info['archive_ts'] = None
@@ -335,11 +362,13 @@ class TaskingClient:
             missing_files = []
             hashes = list(set([f['sha256']
                                for f in result['response']['extracted'] + result['response']['supplementary']]))
+            # Pre-compute file existence checks before freshening files
+            file_exists_check = {h: self.filestore.exists(h) for h in hashes}
             file_infos = self.datastore.file.multiget(hashes, as_obj=False, error_on_missing=False)
 
             with elasticapm.capture_span(name="handle_task_result.freshen_files",
                                          span_type="tasking_client"):
-                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                with APMAwareThreadPoolExecutor(max_workers=5) as executor:
                     res = {
                         f['sha256']: executor.submit(freshen_file, file_infos, f)
                         for f in result['response']['extracted'] + result['response']['supplementary']}

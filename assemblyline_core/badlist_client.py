@@ -1,30 +1,32 @@
 import hashlib
 import logging
-import yaml
 
 from assemblyline.common import forge
+from assemblyline.common.chunk import chunk
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.models.user import ROLES
 from assemblyline.remote.datatypes.lock import Lock
 
+
+CHUNK_SIZE = 1000
 CLASSIFICATION = forge.get_classification()
 
 
-class InvalidSafehash(Exception):
+class InvalidBadhash(Exception):
     pass
 
 
-# Safelist class
-class SafelistClient:
-    """A helper class to simplify safelisting for privileged services and service-server."""
+# Badlist class
+class BadlistClient:
+    """A helper class to simplify badlisting for privileged services and service-server."""
 
     def __init__(self, datastore: AssemblylineDatastore = None, config=None):
-        self.log = logging.getLogger('assemblyline.safelist_client')
+        self.log = logging.getLogger('assemblyline.badlist_client')
         self.config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
 
-    def _preprocess_object(self, data: dict):
+    def _preprocess_object(self, data: dict) -> str:
         # Set defaults
         data.setdefault('classification', CLASSIFICATION.UNRESTRICTED)
         data.setdefault('hashes', {})
@@ -33,7 +35,6 @@ class SafelistClient:
             # Remove file related fields
             data.pop('file', None)
             data.pop('hashes', None)
-            data.pop('signature', None)
 
             tag_data = data.get('tag', None)
             if tag_data is None or 'type' not in tag_data or 'value' not in tag_data:
@@ -46,30 +47,12 @@ class SafelistClient:
                 'sha256': hashlib.sha256(hashed_value).hexdigest()
             }
 
-        elif data['type'] == 'signature':
-            # Remove file related fields
-            data.pop('file', None)
-            data.pop('hashes', None)
-            data.pop('tag', None)
-
-            sig_data = data.get('signature', None)
-            if sig_data is None or 'name' not in sig_data:
-                raise ValueError("Signature data not found")
-
-            hashed_value = f"signature: {sig_data['name']}".encode('utf8')
-            data['hashes'] = {
-                'md5': hashlib.md5(hashed_value).hexdigest(),
-                'sha1': hashlib.sha1(hashed_value).hexdigest(),
-                'sha256': hashlib.sha256(hashed_value).hexdigest()
-            }
-
         elif data['type'] == 'file':
-            data.pop('signature', None)
             data.pop('tag', None)
             data.setdefault('file', {})
 
         # Ensure expiry_ts is set on tag-related items
-        dtl = data.pop('dtl', None) or self.config.core.expiry.safelisted_tag_dtl * 24 * 3600
+        dtl = data.pop('dtl', None) or self.config.core.expiry.badlisted_tag_dtl * 24 * 3600
         if dtl:
             data['expiry_ts'] = now_as_iso(dtl)
 
@@ -88,12 +71,12 @@ class SafelistClient:
 
         return qhash
 
-    def add_update(self, safelist_object: dict, user: dict = None):
-        qhash = self._preprocess_object(safelist_object)
+    def add_update(self, badlist_object: dict, user: dict = None):
+        qhash = self._preprocess_object(badlist_object)
 
         # Validate sources
         src_map = {}
-        for src in safelist_object['sources']:
+        for src in badlist_object['sources']:
             if user:
                 if src['type'] == 'user':
                     if src['name'] != user['uname']:
@@ -103,97 +86,83 @@ class SafelistClient:
                         raise PermissionError("You do not have sufficient priviledges to add an external source.")
 
             # Find the highest classification of all sources
-            safelist_object['classification'] = CLASSIFICATION.max_classification(
-                safelist_object['classification'], src.get('classification', None))
+            badlist_object['classification'] = CLASSIFICATION.max_classification(
+                badlist_object['classification'], src.get('classification', None))
 
             src_map[src['name']] = src
 
-        with Lock(f'add_or_update-safelist-{qhash}', 30):
-            old = self.datastore.safelist.get_if_exists(qhash, as_obj=False)
+        with Lock(f'add_or_update-badlist-{qhash}', 30):
+            old = self.datastore.badlist.get_if_exists(qhash, as_obj=False)
             if old:
                 # Save data to the DB
-                self.datastore.safelist.save(qhash, SafelistClient._merge_hashes(safelist_object, old))
+                self.datastore.badlist.save(qhash, BadlistClient._merge_hashes(badlist_object, old))
                 return qhash, "update"
             else:
                 try:
-                    safelist_object['sources'] = list(src_map.values())
-                    self.datastore.safelist.save(qhash, safelist_object)
+                    badlist_object['sources'] = list(src_map.values())
+                    self.datastore.badlist.save(qhash, badlist_object)
                     return qhash, "add"
                 except Exception as e:
                     return ValueError(f"Invalid data provided: {str(e)}")
 
-    def add_update_many(self, list_of_safelist_objects: list):
-        if not isinstance(list_of_safelist_objects, list):
+    def add_update_many(self, list_of_badlist_objects: list):
+        if not isinstance(list_of_badlist_objects, list):
             raise ValueError("Could not get the list of hashes")
 
         new_data = {}
-        for safelist_object in list_of_safelist_objects:
-            qhash = self._preprocess_object(safelist_object)
-            new_data[qhash] = safelist_object
+        for badlist_object in list_of_badlist_objects:
+            qhash = self._preprocess_object(badlist_object)
+            new_data[qhash] = badlist_object
 
         # Get already existing hashes
-        old_data = self.datastore.safelist.multiget(list(new_data.keys()), as_dictionary=True, as_obj=False,
-                                                    error_on_missing=False)
+        old_data = self.datastore.badlist.multiget(list(new_data.keys()), as_dictionary=True, as_obj=False,
+                                                   error_on_missing=False)
 
         # Test signature names
-        plan = self.datastore.safelist.get_bulk_plan()
+        plan = self.datastore.badlist.get_bulk_plan()
         for key, val in new_data.items():
             # Use maximum classification
-            old_val = old_data.get(key, {'classification': CLASSIFICATION.UNRESTRICTED,
+            old_val = old_data.get(key, {'classification': CLASSIFICATION.UNRESTRICTED, 'attribution': {},
                                          'hashes': {}, 'sources': [], 'type': val['type']})
 
             # Add upsert operation
-            plan.add_upsert_operation(key, SafelistClient._merge_hashes(val, old_val))
+            plan.add_upsert_operation(key, BadlistClient._merge_hashes(val, old_val))
 
         if not plan.empty:
             # Execute plan
-            res = self.datastore.safelist.bulk(plan)
+            res = self.datastore.badlist.bulk(plan)
             return {"success": len(res['items']), "errors": res['errors']}
 
         return {"success": 0, "errors": []}
 
     def exists(self, qhash):
-        return self.datastore.safelist.get_if_exists(qhash, as_obj=False)
+        return self.datastore.badlist.get_if_exists(qhash, as_obj=False)
 
-    def get_safelisted_tags(self, tag_types):
-        if isinstance(tag_types, str):
-            tag_types = tag_types.split(',')
+    def exists_tags(self, tag_map):
+        lookup_keys = []
+        for tag_type, tag_values in tag_map.items():
+            for tag_value in tag_values:
+                lookup_keys.append(hashlib.sha256(f"{tag_type}: {tag_value}".encode('utf8')).hexdigest())
 
-        with forge.get_cachestore('system', config=self.config, datastore=self.datastore) as cache:
-            tag_safelist_yml = cache.get('tag_safelist_yml')
-            if tag_safelist_yml:
-                tag_safelist_data = yaml.safe_load(tag_safelist_yml)
-            else:
-                tag_safelist_data = forge.get_tag_safelist_data()
+        # Elasticsearch's result window can't be more than 10000 rows
+        # we will query for matches in chunks
+        results = []
+        for key_chunk in chunk(lookup_keys, CHUNK_SIZE):
+            results += self.datastore.badlist.search("*", fl="*", rows=CHUNK_SIZE,
+                                                     as_obj=False, key_space=key_chunk)['items']
 
-        if tag_types:
-            output = {
-                'match': {k: v for k, v in tag_safelist_data.get('match', {}).items()
-                          if k in tag_types or tag_types == []},
-                'regex': {k: v for k, v in tag_safelist_data.get('regex', {}).items()
-                          if k in tag_types or tag_types == []},
-            }
-            for tag in tag_types:
-                for sl in self.datastore.safelist.stream_search(
-                        f"type:tag AND enabled:true AND tag.type:{tag}", as_obj=False):
-                    output['match'].setdefault(sl['tag']['type'], [])
-                    output['match'][sl['tag']['type']].append(sl['tag']['value'])
+        return results
 
-        else:
-            output = tag_safelist_data
-            for sl in self.datastore.safelist.stream_search("type:tag AND enabled:true", as_obj=False):
-                output['match'].setdefault(sl['tag']['type'], [])
-                output['match'][sl['tag']['type']].append(sl['tag']['value'])
+    def find_similar_tlsh(self, tlsh):
+        return self.datastore.badlist.search(f"hashes.tlsh:{tlsh}", fl="*", as_obj=False)['items']
 
-        return output
-
-    def get_safelisted_signatures(self, **_):
-        output = [
-            item['signature']['name']
-            for item in self.datastore.safelist.stream_search(
-                "type:signature AND enabled:true", fl="signature.name", as_obj=False)]
-
-        return output
+    def find_similar_ssdeep(self, ssdeep):
+        try:
+            _, long, _ = ssdeep.replace('/', '\\/').split(":")
+            return self.datastore.badlist.search(f"hashes.ssdeep:{long}~", fl="*", as_obj=False)['items']
+        except ValueError:
+            self.log.warning(f'This is not a valid SSDeep hash: {ssdeep}')
+            return []
 
     @staticmethod
     def _merge_hashes(new, old):
@@ -208,7 +177,7 @@ class SafelistClient:
         try:
             # Check if hash types match
             if new['type'] != old['type']:
-                raise InvalidSafehash(f"Safe hash type mismatch: {new['type']} != {old['type']}")
+                raise InvalidBadhash(f"Bad hash type mismatch: {new['type']} != {old['type']}")
 
             # Use the new classification but we will recompute it later anyway
             old['classification'] = new['classification']
@@ -218,6 +187,18 @@ class SafelistClient:
 
             # Update hashes
             old['hashes'].update({k: v for k, v in new['hashes'].items() if v})
+
+            # Merge attributions
+            if not old['attribution']:
+                old['attribution'] = new.get('attribution', None)
+            elif new.get('attribution', None):
+                for key in ["actor", 'campaign', 'category', 'exploit', 'implant', 'family', 'network']:
+                    old_value = old['attribution'].get(key, []) or []
+                    new_value = new['attribution'].get(key, []) or []
+                    old['attribution'][key] = list(set(old_value + new_value)) or None
+
+            if old['attribution'] is not None:
+                old['attribution'] = {key: value for key, value in old['attribution'].items() if value}
 
             # Update type specific info
             if old['type'] == 'file':
@@ -236,7 +217,7 @@ class SafelistClient:
             # Merge sources
             src_map = {x['name']: x for x in new['sources']}
             if not src_map:
-                raise InvalidSafehash("No valid source found")
+                raise InvalidBadhash("No valid source found")
 
             old_src_map = {x['name']: x for x in old['sources']}
             for name, src in src_map.items():
@@ -245,7 +226,7 @@ class SafelistClient:
                 else:
                     old_src = old_src_map[name]
                     if old_src['type'] != src['type']:
-                        raise InvalidSafehash(f"Source {name} has a type conflict: {old_src['type']} != {src['type']}")
+                        raise InvalidBadhash(f"Source {name} has a type conflict: {old_src['type']} != {src['type']}")
 
                     for reason in src['reason']:
                         if reason not in old_src['reason']:
@@ -262,4 +243,4 @@ class SafelistClient:
             old['expiry_ts'] = new.get('expiry_ts', None)
             return old
         except Exception as e:
-            raise InvalidSafehash(f"Invalid data provided: {str(e)}")
+            raise InvalidBadhash(f"Invalid data provided: {str(e)}")
