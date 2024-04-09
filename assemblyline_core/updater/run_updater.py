@@ -476,10 +476,10 @@ class ServiceUpdater(ThreadedCoreBase):
                          'version': tag,
                          'docker_config': {'image': install_data.get('image')}})
 
-                    image_name, tag_name, auth, os = get_latest_tag_for_service(
+                    image_name, tag_name, auth = get_latest_tag_for_service(
                         service,  self.config, self.log, prefix="[CI] ")
 
-                    docker_config = dict(image=f"{image_name}:{tag_name}", operating_system=os)
+                    docker_config = dict(image=f"{image_name}:{tag_name}")
                     if auth:
                         docker_config.update(dict(registry_username=auth['username'],
                                                   registry_password=auth['password']))
@@ -675,7 +675,7 @@ class ServiceUpdater(ThreadedCoreBase):
 
             for service in self.datastore.list_all_services(full=True):
                 discovered_services.append(service.name)
-                image_name, tag_name, auth, _ = get_latest_tag_for_service(service, self.config, self.log, prefix="[CV] ")
+                image_name, tag_name, auth = get_latest_tag_for_service(service, self.config, self.log, prefix="[CV] ")
                 self.latest_service_tags.set(service.name,
                                              {'auth': auth, 'image': image_name, service.update_channel: tag_name})
 
