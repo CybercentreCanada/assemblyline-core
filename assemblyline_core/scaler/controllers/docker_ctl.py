@@ -158,6 +158,14 @@ class DockerController(ControllerInterface):
             if 'already exists' in str(e):
                 return
             raise e
+        except docker.errors.NotFound as e:
+            if aliases == ['service-server']:
+                # We've lost our service-server container, time to find another
+                self.service_server = self.find_service_server()
+                network.connect(self.service_server, aliases=aliases)
+                return
+            raise e
+
 
     def _start(self, service_name):
         """Launch a docker container in a manner suitable for Assemblyline."""
