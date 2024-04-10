@@ -7,6 +7,7 @@ from assemblyline.common.archiving import ARCHIVE_QUEUE_NAME
 from assemblyline.common.constants import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, \
     SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.datastore.exceptions import SearchException
+from assemblyline.odm.messages.retrohunt_heartbeat import RetrohuntMessage
 from assemblyline.odm.messages.scaler_heartbeat import ScalerMessage
 from assemblyline.odm.messages.scaler_status_heartbeat import ScalerStatusMessage
 from assemblyline.odm.messages.alerter_heartbeat import AlerterMessage
@@ -15,6 +16,7 @@ from assemblyline.odm.messages.dispatcher_heartbeat import DispatcherMessage
 from assemblyline.odm.messages.expiry_heartbeat import ExpiryMessage
 from assemblyline.odm.messages.ingest_heartbeat import IngestMessage
 from assemblyline.odm.messages.service_heartbeat import ServiceMessage
+from assemblyline.odm.messages.shard_heartbeat import ShardMessage
 from assemblyline.odm.messages.vacuum_heartbeat import VacuumMessage
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
@@ -288,6 +290,52 @@ class HeartbeatFormatter(object):
                 self.log.info(f"Sent vacuum heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating VacuumMessage")
+
+        elif m_type == "elastic_shards":
+            try:
+                msg = {
+                    "sender": self.sender,
+                    "msg": {
+                        "instances": instances,
+                        "request_time": m_data['request_time'],
+                        "shard_sizes": m_data['shard_sizes'],
+                    }
+                }
+                self.status_queue.publish(ShardMessage(msg).as_primitives())
+                self.log.info(f"Sent elastic shard heartbeat: {msg['msg']}")
+            except Exception:
+                self.log.exception("An exception occurred while generating ShardMessage")
+
+        elif m_type == "retrohunt":
+            try:
+
+                status = m_data.get('status', {})
+                fetcher = status.get('fetcher', {})
+                resources = status.get('resources', {})
+                storage = status.get('storage', {})
+                last_minute_cpu = sum(report.get('cpu_load_1m', 0) for report in resources.values())
+                memory = sum(report.get('memory', 0) for report in resources.values())
+                free_storage = [report.get('high_water', 0) - report.get('used', 0)
+                                for report in storage.values()]
+
+                msg = {
+                    "sender": self.sender,
+                    "msg": {
+                        'instances': instances,
+                        'request_time': m_data['request_time'],
+                        'pending_files': fetcher.get('pending_files'),
+                        'ingested_last_minute': fetcher.get('last_minute_throughput'),
+                        'worker_storage_available': min(free_storage),
+                        'total_storage_available': sum(free_storage),
+                        'active_searches': status.get('active_searches'),
+                        'last_minute_cpu': last_minute_cpu,
+                        'total_memory_used': memory,
+                    }
+                }
+                self.status_queue.publish(RetrohuntMessage(msg).as_primitives())
+                self.log.info(f"Sent retrohunt heartbeat: {msg['msg']}")
+            except Exception:
+                self.log.exception("An exception occurred while generating RetrohuntMessage")
 
         else:
             self.log.warning(f"Skipping unknown counter: {m_name} [{m_type}] ==> {m_data}")
