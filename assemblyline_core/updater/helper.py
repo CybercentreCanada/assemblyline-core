@@ -37,8 +37,11 @@ class DockerRegistry(ContainerRegistry):
             # Assume the token server is the same as the container image registry host if not explicitly set
             token_server = token_server if token_server else server
             token_url = f"https://{token_server}/token?scope=repository:{image_name}:pull"
-            token = requests.get(token_url).json().get('token')
-            headers["Authorization"] = f"Bearer {token}"
+            resp = requests.get(token_url)
+            if resp.ok:
+                # Request to obtain token was successful, set Authorization header for registry API
+                token = resp.json().get('token')
+                headers["Authorization"] = f"Bearer {token}"
 
         resp = None
         try:
@@ -73,8 +76,11 @@ class HarborRegistry(ContainerRegistry):
             # Assume the token server is the same as the container image registry host if not explicitly set
             token_server = token_server if token_server else server
             token_url = f"https://{server}/service/token?scope=repository:{image_name}:pull"
-            token = requests.get(token_url).json().get('token')
-            headers["Authorization"] = f"Bearer {token}"
+            resp = requests.get(token_url)
+            if resp.ok:
+                # Request to obtain token was successful, set Authorization header for registry API
+                token = resp.json().get('token')
+                headers["Authorization"] = f"Bearer {token}"
         resp = None
         try:
             resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
