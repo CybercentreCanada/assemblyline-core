@@ -121,7 +121,10 @@ class DockerController(ControllerInterface):
                                                  aliases=['service-server'])
 
                 # As long as the current service server is still running, just block its exit code in this thread
-                self.service_server.wait()
+                try:
+                    self.service_server.wait()
+                except docker.errors.NotFound:
+                    pass
 
                 # If it does return, find the new service server
                 self.service_server = self.find_service_server()
