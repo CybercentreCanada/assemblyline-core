@@ -16,7 +16,7 @@ from assemblyline.odm.messages.dispatcher_heartbeat import DispatcherMessage
 from assemblyline.odm.messages.expiry_heartbeat import ExpiryMessage
 from assemblyline.odm.messages.ingest_heartbeat import IngestMessage
 from assemblyline.odm.messages.service_heartbeat import ServiceMessage
-from assemblyline.odm.messages.shard_heartbeat import ShardMessage
+from assemblyline.odm.messages.elastic_heartbeat import ElasticMessage
 from assemblyline.odm.messages.vacuum_heartbeat import VacuumMessage
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.hash import Hash, ExpiringHash
@@ -291,20 +291,21 @@ class HeartbeatFormatter(object):
             except Exception:
                 self.log.exception("An exception occurred while generating VacuumMessage")
 
-        elif m_type == "elastic_shards":
+        elif m_type == "elastic":
             try:
                 msg = {
                     "sender": self.sender,
                     "msg": {
                         "instances": instances,
                         "request_time": m_data['request_time'],
-                        "shard_sizes": m_data['shard_sizes'],
+                        "shard_sizes": [{'name': index, 'shard_size': size}
+                                        for index, size in m_data['shard_sizes'].items()],
                     }
                 }
-                self.status_queue.publish(ShardMessage(msg).as_primitives())
-                self.log.info(f"Sent elastic shard heartbeat: {msg['msg']}")
+                self.status_queue.publish(ElasticMessage(msg).as_primitives())
+                self.log.info(f"Sent elastic heartbeat: {msg['msg']}")
             except Exception:
-                self.log.exception("An exception occurred while generating ShardMessage")
+                self.log.exception("An exception occurred while generating ElasticMessage")
 
         elif m_type == "retrohunt":
             try:
@@ -315,19 +316,22 @@ class HeartbeatFormatter(object):
                 storage = status.get('storage', {})
                 last_minute_cpu = sum(report.get('cpu_load_1m', 0) for report in resources.values())
                 memory = sum(report.get('memory', 0) for report in resources.values())
-                free_storage = [report.get('high_water', 0) - report.get('used', 0)
-                                for report in storage.values()]
+                free_storage = [report.get('high_water', 0) for report in storage.values()]
+                min_storage = sum_storage = 0
+                if free_storage:
+                    min_storage = min(free_storage)
+                    sum_storage = sum(free_storage)
 
                 msg = {
                     "sender": self.sender,
                     "msg": {
                         'instances': instances,
                         'request_time': m_data['request_time'],
-                        'pending_files': fetcher.get('pending_files'),
-                        'ingested_last_minute': fetcher.get('last_minute_throughput'),
-                        'worker_storage_available': min(free_storage),
-                        'total_storage_available': sum(free_storage),
-                        'active_searches': status.get('active_searches'),
+                        'pending_files': fetcher.get('pending_files', 0),
+                        'ingested_last_minute': fetcher.get('last_minute_throughput', 0),
+                        'worker_storage_available': min_storage,
+                        'total_storage_available': sum_storage,
+                        'active_searches': status.get('active_searches', 0),
                         'last_minute_cpu': last_minute_cpu,
                         'total_memory_used': memory,
                     }

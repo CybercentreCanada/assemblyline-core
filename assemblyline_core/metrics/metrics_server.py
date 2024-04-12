@@ -358,7 +358,7 @@ class HeartbeatManager(ServerBase):
                 'shard_sizes': sizes,
                 'request_time': request_time,
             }
-            self.hm.send_heartbeat('elastic_shards', 'datastore', metrics, len(set(nodes)))
+            self.hm.send_heartbeat('elastic', 'datastore', metrics, len(set(nodes)))
 
     def _fetch_retrohunt(self):
         status = {}
@@ -377,7 +377,7 @@ class HeartbeatManager(ServerBase):
             instances = len(status.get('storage', {}))
 
             # Export heartbeat
-            self.hm.send_heartbeat('retrohount', 'hauntedhouse', metrics, instances)
+            self.hm.send_heartbeat('retrohunt', 'hauntedhouse', metrics, instances)
 
     def _export_hearbeats(self):
         try:
