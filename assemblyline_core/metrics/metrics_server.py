@@ -335,7 +335,7 @@ class HeartbeatManager(ServerBase):
             elapsed = time.time() - send_time
             remaining = self.config.core.metrics.export_interval - elapsed
             if remaining > 0:
-                self.sleep(remaining)     
+                self.sleep(remaining)
 
     def _fetch_shards(self):
         request_time = None
@@ -348,7 +348,7 @@ class HeartbeatManager(ServerBase):
             for shard in response.body:
                 index = shard['index']
                 sizes.setdefault(index, 0)
-                sizes[index] = max(sizes[index], int(shard['store']))
+                sizes[index] = max(sizes[index], int(shard.get('store') or 0))
                 nodes.append(shard['node'])
             request_time = time.time() - start_time
 
@@ -370,7 +370,7 @@ class HeartbeatManager(ServerBase):
             status = self.hauntedhouse_client.status()
             request_time = time.time() - start_time
 
-        finally:    
+        finally:
             metrics = {
                 'request_time': request_time,
                 'status': status,
