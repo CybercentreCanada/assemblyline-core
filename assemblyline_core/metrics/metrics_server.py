@@ -335,21 +335,26 @@ class HeartbeatManager(ServerBase):
             elapsed = time.time() - send_time
             remaining = self.config.core.metrics.export_interval - elapsed
             if remaining > 0:
-                self.sleep(remaining)     
+                self.sleep(remaining)
 
     def _fetch_shards(self):
         request_time = None
         sizes = {}
-        nodes = []
+        unassigned = 0
+        nodes = set()
         try:
             # Pull shard data from elastisearch
             start_time = time.time()
             response = self.datastore.ds.client.cat.shards(bytes='b', format='json', master_timeout='5s')
             for shard in response.body:
                 index = shard['index']
-                sizes.setdefault(index, 0)
-                sizes[index] = max(sizes[index], int(shard['store']))
-                nodes.append(shard['node'])
+                node = shard['node']
+                if node:
+                    sizes.setdefault(index, 0)
+                    sizes[index] = max(sizes[index], int(shard.get('store') or 0))
+                    nodes.add(node)
+                else:
+                    unassigned += 1
             request_time = time.time() - start_time
 
         finally:
@@ -358,8 +363,9 @@ class HeartbeatManager(ServerBase):
             metrics = {
                 'shard_sizes': sizes,
                 'request_time': request_time,
+                'unassigned': unassigned
             }
-            self.hm.send_heartbeat('elastic', 'datastore', metrics, len(set(nodes)))
+            self.hm.send_heartbeat('elastic', 'datastore', metrics, len(nodes))
 
     def _fetch_retrohunt(self):
         status = {}
@@ -370,7 +376,7 @@ class HeartbeatManager(ServerBase):
             status = self.hauntedhouse_client.status()
             request_time = time.time() - start_time
 
-        finally:    
+        finally:
             metrics = {
                 'request_time': request_time,
                 'status': status,

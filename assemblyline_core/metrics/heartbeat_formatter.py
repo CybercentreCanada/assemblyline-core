@@ -297,6 +297,7 @@ class HeartbeatFormatter(object):
                     "sender": self.sender,
                     "msg": {
                         "instances": instances,
+                        'unassigned_shards': m_data['unassigned'],
                         "request_time": m_data['request_time'],
                         "shard_sizes": [{'name': index, 'shard_size': size}
                                         for index, size in m_data['shard_sizes'].items()],
