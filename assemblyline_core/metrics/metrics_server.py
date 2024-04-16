@@ -340,16 +340,18 @@ class HeartbeatManager(ServerBase):
     def _fetch_shards(self):
         request_time = None
         sizes = {}
-        nodes = []
+        nodes = set()
         try:
             # Pull shard data from elastisearch
             start_time = time.time()
             response = self.datastore.ds.client.cat.shards(bytes='b', format='json', master_timeout='5s')
             for shard in response.body:
                 index = shard['index']
+                node = shard['node']
                 sizes.setdefault(index, 0)
                 sizes[index] = max(sizes[index], int(shard.get('store') or 0))
-                nodes.append(shard['node'])
+                if node:
+                    nodes.add(node)
             request_time = time.time() - start_time
 
         finally:
@@ -359,7 +361,7 @@ class HeartbeatManager(ServerBase):
                 'shard_sizes': sizes,
                 'request_time': request_time,
             }
-            self.hm.send_heartbeat('elastic', 'datastore', metrics, len(set(nodes)))
+            self.hm.send_heartbeat('elastic', 'datastore', metrics, len(nodes))
 
     def _fetch_retrohunt(self):
         status = {}
