@@ -18,12 +18,12 @@ DEFAULT_DOCKER_REGISTRY = "registry.hub.docker.com"
 
 class ContainerRegistry():
     # Provide a means of obtaining a list of tags from a container registry
-    def _get_proprietary_registry_tags(self, server, image_name, auth, verify):
+    def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None, token_server=None):
         raise NotImplementedError()
 
 
 class DockerRegistry(ContainerRegistry):
-    def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None):
+    def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None, token_server=None):
         # Find latest tag for each types
         url = f"https://{server}/v2/{image_name}/tags/list"
 
@@ -31,6 +31,17 @@ class DockerRegistry(ContainerRegistry):
         headers = {}
         if auth:
             headers["Authorization"] = auth
+        else:
+            # Retrieve token for authentication: https://distribution.github.io/distribution/spec/auth/token/
+
+            # Assume the token server is the same as the container image registry host if not explicitly set
+            token_server = token_server if token_server else server
+            token_url = f"https://{token_server}/token?scope=repository:{image_name}:pull"
+            resp = requests.get(token_url)
+            if resp.ok:
+                # Request to obtain token was successful, set Authorization header for registry API
+                token = resp.json().get('token')
+                headers["Authorization"] = f"Bearer {token}"
 
         resp = None
         try:
@@ -50,7 +61,7 @@ class DockerRegistry(ContainerRegistry):
 
 
 class HarborRegistry(ContainerRegistry):
-    def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None):
+    def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None, token_server=None):
         # Determine project/repo IDs from image name
         project_id, repo_id = image_name.split('/', 1)
         repo_id = repo_id.replace('/', "%2F")
@@ -59,7 +70,17 @@ class HarborRegistry(ContainerRegistry):
         headers = {}
         if auth:
             headers["Authorization"] = auth
+        else:
+            # Retrieve token for authentication: https://github.com/goharbor/harbor/wiki/Harbor-FAQs#api
 
+            # Assume the token server is the same as the container image registry host if not explicitly set
+            token_server = token_server if token_server else server
+            token_url = f"https://{server}/service/token?scope=repository:{image_name}:pull"
+            resp = requests.get(token_url)
+            if resp.ok:
+                # Request to obtain token was successful, set Authorization header for registry API
+                token = resp.json().get('token')
+                headers["Authorization"] = f"Bearer {token}"
         resp = None
         try:
             resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
@@ -131,25 +152,32 @@ def get_latest_tag_for_service(
                 break
 
     if service_config.docker_config.registry_username and service_config.docker_config.registry_password:
+        # We're authenticating using Basic Auth
         auth_config = {
             'username': service_config.docker_config.registry_username,
             'password': service_config.docker_config.registry_password
         }
         upass = f"{service_config.docker_config.registry_username}:{service_config.docker_config.registry_password}"
         auth = f"Basic {b64encode(upass.encode()).decode()}"
+    elif service_config.docker_config.registry_password:
+        # We're assuming that if only a password is given, then this is a token
+        auth = f"Bearer {service_config.docker_config.registry_password}"
 
     registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
+    token_server = None
     proxies = None
     for reg_conf in system_config.core.updater.registry_configs:
         if reg_conf.name == server:
             proxies = reg_conf.proxies or None
+            token_server = reg_conf.token_server or None
             break
 
     if server == DEFAULT_DOCKER_REGISTRY:
         tags = _get_dockerhub_tags(image_name, update_channel, proxies)
     else:
         tags = registry._get_proprietary_registry_tags(server, image_name, auth,
-                                                       not system_config.services.allow_insecure_registry, proxies)
+                                                       not system_config.services.allow_insecure_registry,
+                                                       proxies, token_server)
 
     tag_name = None
 
