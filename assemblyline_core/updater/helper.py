@@ -213,16 +213,19 @@ def get_latest_tag_for_service(
 # Default for obtaining tags from DockerHub
 def _get_dockerhub_tags(image_name, update_channel, proxies=None):
     # Find latest tag for each types
+    rv = []
     url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/repositories/{image_name}/tags" \
-        f"?page_size=5&page=1&name={update_channel}"
+          f"?page_size=50&page=1&name={update_channel}"
+    while True:
+        resp = requests.get(url, proxies=proxies)
+        if resp.ok:
+            resp_data = resp.json()
+            rv.extend([x['name'] for x in resp_data['results']])
+            # Page until there are no results left
+            url = resp_data.get('next', None)
+            if url is None:
+                break
+        else:
+            break
 
-    # Get tag list
-    resp = requests.get(url, proxies=proxies)
-
-    # Test for valid response
-    if resp.ok:
-        # Test for positive list of tags
-        resp_data = resp.json()
-        return [x['name'] for x in resp_data['results']]
-
-    return []
+    return rv
