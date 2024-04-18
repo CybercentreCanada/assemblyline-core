@@ -111,7 +111,7 @@ class TaskingClient:
             # Upload file to the filestore (upload already checks if the file exists)
             self.filestore.upload(file_path, file_info['sha256'])
         else:
-            raise TaskingClientException(f"Uploaded file '{file_path}' does not match expected file hash. "
+            raise TaskingClientException("Uploaded file does not match expected file hash. "
                                          f"[{file_info['sha256']} != {expected_sha256}]")
 
     # Service
