@@ -65,8 +65,12 @@ class Archiver(ServerBase):
                 if len(message) == 3:
                     archive_type, type_id, delete_after = message
                     metadata = None
-                else:
+                    use_alternate_dtl = False
+                elif len(message) == 4:
                     archive_type, type_id, delete_after, metadata = message
+                    use_alternate_dtl = False
+                else:
+                    archive_type, type_id, delete_after, metadata, use_alternate_dtl = message
 
                 self.counter.increment('received')
             except Exception:
@@ -97,7 +101,8 @@ class Archiver(ServerBase):
                 if not submission:
                     raise SubmissionNotFound(type_id)
 
-                self.datastore.submission.archive(type_id, delete_after=delete_after)
+                self.datastore.submission.archive(type_id, delete_after=delete_after,
+                                                  use_alternate_dtl=use_alternate_dtl)
                 if not delete_after:
                     self.datastore.submission.update(type_id, [(ESCollection.UPDATE_SET, 'archived', True)],
                                                      index_type=Index.HOT)
@@ -117,7 +122,8 @@ class Archiver(ServerBase):
                     infos = infos.union({'password' for x in tags if x['type'] == 'info.password'})
 
                     # Create the archive file
-                    self.datastore.file.archive(sha256, delete_after=delete_after, allow_missing=True)
+                    self.datastore.file.archive(sha256, delete_after=delete_after,
+                                                allow_missing=True, use_alternate_dtl=use_alternate_dtl)
 
                     # Auto-Labelling
                     operations = []
@@ -159,7 +165,8 @@ class Archiver(ServerBase):
                 for r in submission.results:
                     if not r.endswith(".e"):
                         self.counter.increment('result')
-                        self.datastore.result.archive(r, delete_after=delete_after, allow_missing=True)
+                        self.datastore.result.archive(r, delete_after=delete_after,
+                                                      allow_missing=True, use_alternate_dtl=use_alternate_dtl)
 
                 # End of process alert transaction (success)
                 self.log.info(f"Successfully archived submission '{type_id}'.")
