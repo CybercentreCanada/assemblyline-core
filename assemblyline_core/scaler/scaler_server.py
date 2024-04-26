@@ -68,7 +68,6 @@ DOCKER_CONFIGURATION_PATH = os.getenv('DOCKER_CONFIGURATION_PATH', None)
 DOCKER_CONFIGURATION_VOLUME = os.getenv('DOCKER_CONFIGURATION_VOLUME', None)
 
 SERVICE_API_HOST = os.getenv('SERVICE_API_HOST', None)
-UI_SERVER = os.getenv('UI_SERVER', None)
 INTERNAL_ENCRYPT = bool(SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'))
 
 
@@ -182,13 +181,13 @@ class ServiceProfile:
             return self.target_instances + MAX_CONTAINER_ALLOCATION
         return min(self._max_instances, self.target_instances + MAX_CONTAINER_ALLOCATION)
 
-    @property
-    def min_instances(self) -> int:
-        return self._min_instances
-
     @max_instances.setter
     def max_instances(self, value: int):
         self._max_instances = max(0, value)
+
+    @property
+    def min_instances(self) -> int:
+        return self._min_instances
 
     @min_instances.setter
     def min_instances(self, value: int):
@@ -270,7 +269,7 @@ class ScalerServer(ThreadedCoreBase):
         core_env: dict[str, str] = {}
         # If we have privileged services, we must be able to pass the necessary environment variables for them to
         # function properly.
-        for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']:
+        for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()):
             env_name = secret.strip("${}")
             try:
                 core_env[env_name] = os.environ[env_name]
@@ -598,9 +597,8 @@ class ScalerServer(ThreadedCoreBase):
                         # Use service-specific value if present
                         min_instances = service.min_instances
                     if name not in self.profiles:
-                        self.log.info(f"Adding "
-                                      f"{f'privileged {service.name}' if service.privileged else service.name}"
-                                      " to scaling")
+                        self.log.info("Adding %s%s to scaling",
+                                      'privileged ' if service.privileged else '', service.name)
                         self.add_service(ServiceProfile(
                             name=name,
                             min_instances=min_instances,

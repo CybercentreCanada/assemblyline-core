@@ -8,11 +8,16 @@ import threading
 import weakref
 import urllib3
 
+from base64 import b64encode
+from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization, hashes
 from collections import OrderedDict, defaultdict
+from datetime import datetime, timedelta
+from dateutil.tz import tzlocal
 from typing import List, Optional, Tuple
 from time import sleep
 from assemblyline.odm.models.config import Selector
-
 
 from kubernetes import client, config, watch
 from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec, V1DeploymentStrategy, \
@@ -39,8 +44,10 @@ SERVICE_LIVENESS_PERIOD = int(os.environ.get('SERVICE_LIVENESS_PERIOD', 300))
 SERVICE_LIVENESS_TIMEOUT = int(os.environ.get('SERVICE_LIVENESS_TIMEOUT', 60))
 UNPRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('UNPRIVILEGED_SERVICE_ACCOUNT_NAME', None)
 PRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('PRIVILEGED_SERVICE_ACCOUNT_NAME', None)
+CERTIFICATE_VALIDITY_PERIOD = int(os.environ.get('CERTIFICATE_VALIDITY_PERIOD', '36500'))
 
 AL_ROOT_CA = os.environ.get('AL_ROOT_CA', '/etc/assemblyline/ssl/al_root-ca.crt')
+AL_ROOT_CA_PK = os.environ.get('AL_ROOT_CA_PK', '/etc/assemblyline/ssl/al_root-ca.key')
 
 _exponents = {
     'ki': 2**10,
@@ -726,10 +733,12 @@ class KubernetesController(ControllerInterface):
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
         field_selector, label_selector = selector_to_list_filters(self.linux_node_selector)
-        lbls = sorted((labels or {}).items())
+        key_labels = sorted((labels or {}).items())
         svc_env = sorted(self._service_limited_env[service_name].items())
+        deployment_labels = {_v.name: _v.value for _v in docker_config.labels}
+        key_labels += sorted(deployment_labels.items())
         change_key = str(f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
-                         f"l={lbls}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}"
+                         f"l={key_labels}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}"
                          f"nodes={field_selector or ''}{label_selector or ''}")
         self.logger.debug(f"{deployment_name} actual change_key: {change_key}")
         change_key = str(hash(change_key))
@@ -785,7 +794,8 @@ class KubernetesController(ControllerInterface):
         elif current_pull_secret:
             self.api.delete_namespaced_secret(pull_secret_name, self.namespace, _request_timeout=API_TIMEOUT)
 
-        all_labels = dict(self._labels)
+        all_labels = deployment_labels
+        all_labels.update(self._labels)
         all_labels['component'] = service_name
         if core_mounts:
             all_labels['privilege'] = 'core'
@@ -989,6 +999,7 @@ class KubernetesController(ControllerInterface):
         # Generate the expected change key
         senv = sorted(self._service_limited_env[service_name].items())
         labels = [('container', container_name), ('dependency_for', service_name)]
+        labels += sorted([(_v.name, _v.value) for _v in spec.container.labels])
         temp_spec = DependencyConfig(spec.as_primitives())
         volumes, mounts, _ = self._get_volumes_mounts_strategy(deployment_name, container_name, temp_spec)
         temp_spec.container.environment.append(dict(name='AL_INSTANCE_KEY', value=container_key))
@@ -1008,19 +1019,73 @@ class KubernetesController(ControllerInterface):
             List[V1VolumeMount]]:
         volumes, mounts = [], []
         deployment_strategy = V1DeploymentStrategy()  # Default strategy should be RollingUpdate
-        if container_name == 'updates':
-            # Since we reserved containers named 'updates' to be service updaters, they will always 'Recreate'
-            deployment_strategy = V1DeploymentStrategy(type='Recreate')
 
-            if os.path.exists(AL_ROOT_CA):
-                # Specifically for service updaters when internal encryption is enabled on the cluster
-                update_cert_dir = "/etc/assemblyline/ssl/al_updates"
-                volumes.append(V1Volume(name='updates-cert', secret=V1SecretVolumeSource(secret_name='updates-cert')))
-                mounts.append(V1VolumeMount(name="updates-cert", mount_path=update_cert_dir, read_only=True))
+        # Since we reserved containers named 'updates' to be service updaters, they will always 'Recreate'
+        deployment_strategy = V1DeploymentStrategy(type='Recreate')
 
-                # Pass gunicorn settings via env
-                spec.container.environment.append({'name': 'CERTFILE', 'value': os.path.join(update_cert_dir, 'tls.crt')})
-                spec.container.environment.append({'name': 'KEYFILE', 'value': os.path.join(update_cert_dir, 'tls.key')})
+        if os.path.exists(AL_ROOT_CA):
+            # Specifically for service updaters when internal encryption is enabled on the cluster
+            dep_cert_dir = f"/etc/assemblyline/ssl/al_{container_name}"
+            cert_secret_name = f"{deployment_name}-cert"
+
+            def generate_certificate_secret() -> V1Secret:
+                # Certificate pair doesn't exist or is invalid for this dependency, create it
+                with open(AL_ROOT_CA, 'rb') as root_ca:
+                    rootca_cert = x509.load_pem_x509_certificate(root_ca.read())
+                with open(AL_ROOT_CA_PK, 'rb') as root_ca_pk:
+                    rootca_pk = serialization.load_pem_private_key(root_ca_pk.read(), None)
+
+                cert_key = rsa.generate_private_key(65537, 2048)
+                cert = x509.CertificateBuilder(
+                    issuer_name=rootca_cert.issuer,
+                    subject_name=x509.Name([x509.NameAttribute(x509.OID_COMMON_NAME, deployment_name)]),
+                    not_valid_before=(datetime.utcnow() - timedelta(days=1)),
+                    not_valid_after=(datetime.utcnow() + timedelta(days=CERTIFICATE_VALIDITY_PERIOD)),
+                    public_key=cert_key.public_key(),
+                    serial_number=x509.random_serial_number()).add_extension(
+                        x509.SubjectAlternativeName([x509.DNSName(deployment_name)]),
+                    critical=False).sign(rootca_pk, hashes.SHA256())
+
+                return V1Secret(metadata=V1ObjectMeta(name=cert_secret_name, namespace=self.namespace),
+                                type='kubernetes.io/tls',
+                                data={
+                                    'tls.crt': b64encode(cert.public_bytes(serialization.Encoding.PEM)).decode(),
+                                    'tls.key': b64encode(cert_key.private_bytes(
+                                        encoding=serialization.Encoding.PEM,
+                                        format=serialization.PrivateFormat.PKCS8,
+                                        encryption_algorithm=serialization.NoEncryption())).decode()})
+
+            try:
+                # Ensure that the certificate isn't close to expiring within a week, if it exists
+                cert_secret: V1Secret = self.api.read_namespaced_secret(
+                    name=cert_secret_name, namespace=self.namespace, _request_timeout=API_TIMEOUT)
+                expiration_date = cert_secret.metadata.managed_fields[0].time + timedelta(
+                    days=CERTIFICATE_VALIDITY_PERIOD)
+                current_date = datetime.now(tzlocal())
+                if current_date - timedelta(days=7) < expiration_date < current_date:
+                    # If this certificate is set to expire within a week, rotate it
+                    self.logger.warning(
+                        f"Certificate '{cert_secret_name}' is set to expire within a week. Beginning rotation..")
+                    self.api.patch_namespaced_secret(cert_secret_name, namespace=self.namespace,
+                                                     body=generate_certificate_secret(),
+                                                     _request_timeout=API_TIMEOUT)
+
+            except (ApiException, ValueError) as error:
+                if isinstance(error, ApiException) and error.status != 404:
+                    raise
+
+                self.api.create_namespaced_secret(namespace=self.namespace,
+                                                  body=generate_certificate_secret(),
+                                                  _request_timeout=API_TIMEOUT)
+
+            finally:
+                volumes.append(V1Volume(name=cert_secret_name,
+                                        secret=V1SecretVolumeSource(secret_name=cert_secret_name)))
+                mounts.append(V1VolumeMount(name=cert_secret_name, mount_path=dep_cert_dir, read_only=True))
+
+            # Pass gunicorn settings via env
+            spec.container.environment.append({'name': 'CERTFILE', 'value': os.path.join(dep_cert_dir, 'tls.crt')})
+            spec.container.environment.append({'name': 'KEYFILE', 'value': os.path.join(dep_cert_dir, 'tls.key')})
 
         for volume_name, volume_spec in spec.volumes.items():
             mount_name = f'{deployment_name}-{volume_name}'
@@ -1162,11 +1227,9 @@ class KubernetesController(ControllerInterface):
             'component': service_name,
         }
         # Gather all existing network policies pertaining to the service
-        existing_netpol = {netpol.metadata.name for netpol in
-                           self.net_api.list_namespaced_network_policy(namespace=self.namespace,
-                                                                       label_selector=','.join([f"{k}={v}"
-                                                                                                for k, v in service_labels.items()])
-                                                                       ).items}
+        existing_netpol = {netpol.metadata.name for netpol in self.net_api.list_namespaced_network_policy(
+            namespace=self.namespace,
+            label_selector=','.join([f"{k}={v}" for k, v in service_labels.items()])).items}
 
         def create_or_patch_network_policy(netpol_body: V1NetworkPolicy):
             netpol_body.metadata.labels = service_labels
