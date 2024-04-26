@@ -452,11 +452,30 @@ class ScalerServer(ThreadedCoreBase):
                 self._sync_service(service)
 
     def sync_services(self):
+        last_synced_profiles = None
         while self.running:
             with apm_span(self.apm_client, 'sync_services'):
                 self.log.info('Synchronizing service configuration')
                 with self.profiles_lock:
                     current_services = set(self.profiles.keys())
+
+                    # Check to see if the service is progressing since it's last sync
+                    if last_synced_profiles:
+                        for service, profile in self.profiles.items():
+                            # Assume there was no backlog initially if the service is new since last sync
+                            last_synced_backlog = 0
+                            if last_synced_profiles.get(service):
+                                 last_synced_backlog = last_synced_profiles[service].backlog
+
+                            # Check to see if the backlog has increased and if the service has been running since
+                            if profile.backlog and profile.backlog >= last_synced_backlog and \
+                                profile.running_instances == 0 and profile.target_instances > 0:
+                                # Restart the service in an attempt to resolve intermittent issues with container/pod
+                                self.controller.restart(profile)
+
+                    # Update the last synced profiles for next time
+                    last_synced_profiles = self.profiles
+
                 discovered_services: list[str] = []
 
                 # Get all the service data
