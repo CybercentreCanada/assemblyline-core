@@ -7,8 +7,8 @@ from assemblyline.common import forge
 from assemblyline.common.archiving import ARCHIVE_QUEUE_NAME
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.datastore.collection import ESCollection, Index
+from assemblyline.datastore.exceptions import VersionConflictException
 from assemblyline.odm.messages.archive_heartbeat import Metrics
-from assemblyline.odm.models.submission import Submission
 from assemblyline.remote.datatypes import get_client
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
@@ -62,7 +62,16 @@ class Archiver(ServerBase):
             return
         else:
             try:
-                archive_type, type_id, delete_after = message
+                if len(message) == 3:
+                    archive_type, type_id, delete_after = message
+                    metadata = None
+                    use_alternate_dtl = False
+                elif len(message) == 4:
+                    archive_type, type_id, delete_after, metadata = message
+                    use_alternate_dtl = False
+                else:
+                    archive_type, type_id, delete_after, metadata, use_alternate_dtl = message
+
                 self.counter.increment('received')
             except Exception:
                 self.log.error(f"Invalid message received: {message}")
@@ -76,11 +85,24 @@ class Archiver(ServerBase):
             if archive_type == "submission":
                 self.counter.increment('submission')
                 # Load submission
-                submission: Submission = self.datastore.submission.get_if_exists(type_id)
+                while True:
+                    try:
+                        submission, version = self.datastore.submission.get_if_exists(type_id, version=True)
+
+                        # If we have metadata passed in the message, we need to apply it before archiving the submission
+                        if metadata and self.config.core.archiver.use_metadata:
+                            submission.metadata.update({f"archive.{k}": v for k, v in metadata.items()})
+                            self.datastore.submission.save(type_id, submission, version=version)
+
+                        break
+                    except VersionConflictException as vce:
+                        self.log.info(f"Retrying saving metadata due to version conflict: {str(vce)}")
+
                 if not submission:
                     raise SubmissionNotFound(type_id)
 
-                self.datastore.submission.archive(type_id, delete_after=delete_after)
+                self.datastore.submission.archive(type_id, delete_after=delete_after,
+                                                  use_alternate_dtl=use_alternate_dtl)
                 if not delete_after:
                     self.datastore.submission.update(type_id, [(ESCollection.UPDATE_SET, 'archived', True)],
                                                      index_type=Index.HOT)
@@ -100,7 +122,8 @@ class Archiver(ServerBase):
                     infos = infos.union({'password' for x in tags if x['type'] == 'info.password'})
 
                     # Create the archive file
-                    self.datastore.file.archive(sha256, delete_after=delete_after, allow_missing=True)
+                    self.datastore.file.archive(sha256, delete_after=delete_after,
+                                                allow_missing=True, use_alternate_dtl=use_alternate_dtl)
 
                     # Auto-Labelling
                     operations = []
@@ -142,7 +165,8 @@ class Archiver(ServerBase):
                 for r in submission.results:
                     if not r.endswith(".e"):
                         self.counter.increment('result')
-                        self.datastore.result.archive(r, delete_after=delete_after, allow_missing=True)
+                        self.datastore.result.archive(r, delete_after=delete_after,
+                                                      allow_missing=True, use_alternate_dtl=use_alternate_dtl)
 
                 # End of process alert transaction (success)
                 self.log.info(f"Successfully archived submission '{type_id}'.")
