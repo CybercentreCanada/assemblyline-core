@@ -357,10 +357,24 @@ class KubernetesUpdateInterface:
 
         if blocking:
             try:
+                # Obtain the name of the pod that spawned from the Job
+                pod_name = self.api.list_namespaced_pod(namespace=self.namespace,
+                                                        label_selector=",".join([f"{k}={v}"
+                                                                                 for k, v in labels.items()]),
+                                                        limit=1).items[0].metadata.name
                 while not (status.failed or status.succeeded):
                     time.sleep(3)
                     status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name,
                                                                 _request_timeout=API_TIMEOUT).status
+                    # Monitor container's waiting status state
+                    pod_waiting_state = self.api.read_namespaced_pod(name=pod_name, namespace=self.namespace,
+                                                               _request_timeout=API_TIMEOUT).status.container_statuses[0].state.waiting
+                    # Check to see if we've encountered an issue before the container starts
+                    if pod_waiting_state and pod_waiting_state.reason == "ImagePullBackOff":
+                        # Delete job and raise exception
+                        self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace,
+                                                     propagation_policy='Background', _request_timeout=API_TIMEOUT)
+                        raise Exception(pod_waiting_state.message)
 
                 self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace,
                                                      propagation_policy='Background', _request_timeout=API_TIMEOUT)
@@ -479,6 +493,13 @@ class ServiceUpdater(ThreadedCoreBase):
                     image_name, tag_name, auth = get_latest_tag_for_service(
                         service,  self.config, self.log, prefix="[CI] ")
 
+                    if not tag_name:
+                        # Fallback to tag alias if we can't find a suitable versioned tag
+                        self.log.warning("Unable to find a versioned tag for "
+                                         f"{self.config.services.preferred_update_channel} channel. "
+                                         f"Defaulting to '{tag}' tag...")
+                        tag_name = tag
+
                     docker_config = dict(image=f"{image_name}:{tag_name}")
                     if auth:
                         docker_config.update(dict(registry_username=auth['username'],
@@ -507,12 +528,10 @@ class ServiceUpdater(ThreadedCoreBase):
                         blocking=True
                     )
 
-                    service_key = f"{service_name}_{tag_name.replace('stable', '')}"
-
                 except Exception as e:
                     self.log.error(
                         f"[CI] Service {service_name} has failed to install. Install procedure cancelled... [{str(e)}]")
-                return service_key
+                return f"{service_name}_{str(tag_name).replace('stable', '')}"
 
             # Start up installs for services in parallel
             install_threads = []
