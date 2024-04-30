@@ -21,6 +21,17 @@ class ContainerRegistry():
     def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None, token_server=None):
         raise NotImplementedError()
 
+    def _perform_request(self, url, headers, verify, proxies):
+        resp = None
+        try:
+            resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
+        except requests.exceptions.SSLError:
+            # Connect to insecure registry over HTTP (development only)
+            if not verify:
+                url = url.replace('https://','http://')
+                resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
+        return resp
+
 
 class DockerRegistry(ContainerRegistry):
     def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None, token_server=None):
@@ -37,20 +48,13 @@ class DockerRegistry(ContainerRegistry):
             # Assume the token server is the same as the container image registry host if not explicitly set
             token_server = token_server if token_server else server
             token_url = f"https://{token_server}/token?scope=repository:{image_name}:pull"
-            resp = requests.get(token_url)
-            if resp.ok:
+            resp = self._perform_request(token_url, headers, verify, proxies)
+            if resp and resp.ok:
                 # Request to obtain token was successful, set Authorization header for registry API
                 token = resp.json().get('token')
                 headers["Authorization"] = f"Bearer {token}"
 
-        resp = None
-        try:
-            resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
-        except requests.exceptions.SSLError:
-            # Connect to insecure registry over HTTP (development only)
-            if not verify:
-                url = f"http://{server}/v2/{image_name}/tags/list"
-                resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
+        resp = self._perform_request(url, headers, verify, proxies)
 
         # Test for valid response
         if resp and resp.ok:
@@ -76,20 +80,13 @@ class HarborRegistry(ContainerRegistry):
             # Assume the token server is the same as the container image registry host if not explicitly set
             token_server = token_server if token_server else server
             token_url = f"https://{server}/service/token?scope=repository:{image_name}:pull"
-            resp = requests.get(token_url)
-            if resp.ok:
+            resp = self._perform_request(token_url, headers, verify, proxies)
+            if resp and resp.ok:
                 # Request to obtain token was successful, set Authorization header for registry API
                 token = resp.json().get('token')
                 headers["Authorization"] = f"Bearer {token}"
-        resp = None
-        try:
-            resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
-        except requests.exceptions.SSLError:
-            # Connect to insecure registry over HTTP (development only)
-            if not verify:
-                url = f"http://{server}/api/v2.0/projects/{project_id}/repositories/{repo_id}/artifacts"
-                resp = requests.get(url, headers=headers, verify=verify, proxies=proxies)
 
+        resp = self._perform_request(url, headers, verify, proxies)
         if resp and resp.ok:
             return [tag['name'] for image in resp.json() if image['tags'] for tag in image['tags']]
         return []
