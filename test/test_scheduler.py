@@ -16,7 +16,7 @@ def redis(redis_connection):
     redis_connection.flushdb()
 
 
-def dummy_service(name, stage, category='static', accepts='', rejects=None, docid=None, extra_data=False):
+def dummy_service(name, stage, category='static', accepts='', rejects=None, docid=None, extra_data=False, monitored_keys=()):
     return Service({
         'name': name,
         'stage': stage,
@@ -28,6 +28,7 @@ def dummy_service(name, stage, category='static', accepts='', rejects=None, doci
         'version': '0',
         'enabled': True,
         'timeout': 2,
+        'monitored_keys': list(monitored_keys),
         'docker_config': {
             'image': 'somefakedockerimage:latest'
         }
