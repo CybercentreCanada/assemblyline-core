@@ -218,7 +218,7 @@ class ExpiryManager(ServerBase):
             self._simple_delete(collection, delete_query, number_to_delete)
 
     def run_expiry_once(self, pool: ThreadPoolExecutor):
-        reached_max = False
+        busy_iteration = False
 
         # Delete canceled submissions
         # Make sure we're not dedicating more then a quarter of the pool to this operation because it is costly
@@ -249,8 +249,11 @@ class ExpiryManager(ServerBase):
 
                 # Check if we got anything
                 if number_to_delete == 0:
-                    reached_max = True
                     break
+
+                # Tell the outer loop not to sleep between runs
+                if number_to_delete >= self.expiry_size:
+                    busy_iteration = True
 
                 # Process the chunk in the threadpool
                 pool.submit(self.log_errors(self._process_chunk), collection, start, end, final_date, number_to_delete)
@@ -263,7 +266,7 @@ class ExpiryManager(ServerBase):
             if self.apm_client:
                 self.apm_client.end_transaction(collection.name, 'deleted')
 
-        return reached_max
+        return busy_iteration
 
     def _get_final_date(self):
         now = now_as_iso()
@@ -276,8 +279,9 @@ class ExpiryManager(ServerBase):
     def _get_next_chunk(self, collection: ESCollection, start, final_date):
         """Find date of item at chunk size and the number of items that
            will be affected in between start date and the date found"""
-        rows = collection.search(f"expiry_ts: {{{start} TO {final_date}]",
-                                 rows=1, offset=self.expiry_size, sort='expiry_ts asc', as_obj=False, fl='expiry_ts')
+        rows = collection.search(f"expiry_ts: {{{start} TO {final_date}]", rows=1,
+                                 offset=self.expiry_size - 1, sort='expiry_ts asc',
+                                 as_obj=False, fl='expiry_ts')
         if rows['items']:
             return rows['items'][0]['expiry_ts'], self.expiry_size
         return final_date, rows['total']
@@ -285,15 +289,15 @@ class ExpiryManager(ServerBase):
     def try_run(self):
         while self.running:
             try:
-                expiry_maxed_out = False
+                busy_iteration = False
 
                 with ThreadPoolExecutor(self.config.core.expiry.workers) as pool:
                     try:
-                        expiry_maxed_out = self.run_expiry_once(pool)
+                        busy_iteration = self.run_expiry_once(pool)
                     except Exception as e:
                         self.log.exception(str(e))
 
-                if not expiry_maxed_out:
+                if not busy_iteration:
                     self.sleep_with_heartbeat(self.config.core.expiry.sleep_time)
 
             except BrokenProcessPool:
