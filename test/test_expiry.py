@@ -63,7 +63,8 @@ def test_expire_all(ds_expiry):
     expiry.running = True
     expiry.counter = FakeCounter()
     with concurrent.futures.ThreadPoolExecutor(5) as pool:
-        expiry.run_expiry_once(pool)
+        for collection in expiry.expirable_collections:
+            expiry.feed_expiry_jobs(collection=collection, pool=pool, start='*', jobs=[])
 
     for k, v in expiry_collections_len.items():
         assert v == expiry.counter.get(k)
