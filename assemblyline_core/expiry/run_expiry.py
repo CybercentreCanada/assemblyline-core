@@ -1,16 +1,17 @@
 #!/usr/bin/env python
 from __future__ import annotations
+
 import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, Future, as_completed
-from concurrent.futures.process import BrokenProcessPool
 import functools
-from typing import Callable, Optional, Union, TYPE_CHECKING
 import elasticapm
 import time
 
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, Future, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from datemath import dm
+from typing import Callable, Optional, TYPE_CHECKING
 
-from assemblyline.common.isotime import epoch_to_iso, now_as_iso, iso_to_epoch
+from assemblyline.common.isotime import epoch_to_iso, now_as_iso
 from assemblyline_core.server_base import ServerBase
 from assemblyline_core.dispatching.dispatcher import BAD_SID_HASH
 from assemblyline.common import forge
@@ -181,9 +182,43 @@ class ExpiryManager(ServerBase):
         if self.apm_client:
             self.apm_client.end_transaction("canceled_submissions", 'deleted')
 
+    def _process_chunk(self, collection: ESCollection, start, end, final_date, number_to_delete):
+        # We assume that no records are ever inserted such that their expiry_ts is in the past.
+        # We also assume that the `end` dates are also in the past.
+        # As long as these two things are true, the set returned by this query should be consistent.
+        # The one race condition is that a record might be refreshed while the file
+        # blob would be deleted anyway, leaving a file record with no filestore object
+        self.log.info(f"Processing collection: {collection.name}")
+        delete_query = f"expiry_ts:{{{start} TO {end}]"
+
+        # check if we are dealing with an index that needs file cleanup
+        if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
+            # Delete associated files
+            delete_objects: list[str] = []
+            for item in collection.stream_search(delete_query, fl='id', as_obj=False):
+                self.heartbeat()
+                delete_objects.append(item['id'])
+
+            # Filter archived documents if archive filestore is the same as the filestore
+            expire_only = []
+            if self.same_storage and self.config.datastore.archive.enabled and collection.name == 'file':
+                archived_files = self.datastore.file.multiexists_in_archive(delete_objects)
+                delete_objects = [k for k, v in archived_files.items() if not v]
+                expire_only = [k for k, v in archived_files.items() if v]
+
+            delete_tasks = self.fs_hashmap[collection.name](delete_objects, final_date)
+
+            # Proceed with deletion, but only after all the scheduled deletes for this
+            self.log.info(f"Scheduled {len(delete_objects)}/{number_to_delete} "
+                          f"files to be removed for: {collection.name}")
+            self._finish_delete(collection, delete_tasks, expire_only)
+
+        else:
+            # Proceed with deletion
+            self._simple_delete(collection, delete_query, number_to_delete)
+
     def run_expiry_once(self, pool: ThreadPoolExecutor):
-        now = now_as_iso()
-        reached_max = False
+        busy_iteration = False
 
         # Delete canceled submissions
         # Make sure we're not dedicating more then a quarter of the pool to this operation because it is costly
@@ -201,111 +236,68 @@ class ExpiryManager(ServerBase):
             if self.apm_client:
                 self.apm_client.begin_transaction("Delete expired documents")
 
-            if self.config.core.expiry.batch_delete:
-                final_date = dm(f"{now}||-{self.config.core.expiry.delay}h/d").float_timestamp
-            else:
-                final_date = dm(f"{now}||-{self.config.core.expiry.delay}h").float_timestamp
-            final_date_string = epoch_to_iso(final_date)
+            final_date = self._get_final_date()
 
             # Break down the expiry window into smaller chunks of data
-            unchecked_chunks: list[tuple[float, float]] = [(self._find_expiry_start(collection), final_date)]
-            ready_chunks: dict[tuple[float, float], int] = {}
-            while unchecked_chunks and len(ready_chunks) < self.config.core.expiry.iteration_max_tasks:
+            start = "*"
+            iterations = 0
+            while iterations < self.config.core.expiry.iteration_max_tasks:
                 self.heartbeat()
-                start, end = unchecked_chunks.pop()
-                chunk_size = self._count_expired(collection, start, end)
 
-                # Empty chunks are fine
-                if chunk_size == 0:
-                    continue
+                # Get the next chunk
+                end, number_to_delete = self._get_next_chunk(collection, start, final_date)
 
-                # We found a small enough chunk to
-                #  run on
-                if chunk_size < self.expiry_size:
-                    ready_chunks[(start, end)] = chunk_size
-                    continue
+                # Check if we got anything
+                if number_to_delete == 0:
+                    break
 
-                # Break this chunk into parts
-                middle = (end + start)/2
-                unchecked_chunks.append((middle, end))
-                unchecked_chunks.append((start, middle))
+                # Tell the outer loop not to sleep between runs
+                if number_to_delete >= self.expiry_size:
+                    busy_iteration = True
 
-            # If there are still chunks we haven't checked, then we know there is more data
-            if unchecked_chunks:
-                reached_max = True
+                # Process the chunk in the threadpool
+                pool.submit(self.log_errors(self._process_chunk), collection, start, end, final_date, number_to_delete)
 
-            for (start, end), number_to_delete in ready_chunks.items():
-                self.heartbeat()
-                # We assume that no records are ever inserted such that their expiry_ts is in the past.
-                # We also assume that the `end` dates are also in the past.
-                # As long as these two things are true, the set returned by this query should be consistent.
-                # The one race condition is that a record might be refreshed while the file
-                # blob would be deleted anyway, leaving a file record with no filestore object
-                self.log.info(f"Processing collection: {collection.name}")
-                delete_query = f"expiry_ts:[{epoch_to_iso(start) if start > 0 else '*'} TO {epoch_to_iso(end)}}}"
-
-                # check if we are dealing with an index that needs file cleanup
-                if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
-                    # Delete associated files
-                    delete_objects: list[str] = []
-                    for item in collection.stream_search(delete_query, fl='id', as_obj=False):
-                        self.heartbeat()
-                        delete_objects.append(item['id'])
-
-                    # Filter archived documents if archive filestore is the same as the filestore
-                    expire_only = []
-                    if self.same_storage and self.config.datastore.archive.enabled and collection.name == 'file':
-                        archived_files = self.datastore.file.multiexists_in_archive(delete_objects)
-                        delete_objects = [k for k, v in archived_files.items() if not v]
-                        expire_only = [k for k, v in archived_files.items() if v]
-
-                    delete_tasks = self.fs_hashmap[collection.name](delete_objects, final_date_string)
-
-                    # Proceed with deletion, but only after all the scheduled deletes for this
-                    self.log.info(f"Scheduled {len(delete_objects)}/{number_to_delete} "
-                                  f"files to be removed for: {collection.name}")
-                    pool.submit(self.log_errors(self._finish_delete), collection, delete_tasks, expire_only)
-
-                else:
-                    # Proceed with deletion
-                    pool.submit(self.log_errors(self._simple_delete),
-                                collection, delete_query, number_to_delete)
+                # Prepare for next chunk
+                start = end
+                iterations += 1
 
             # End of expiry transaction
             if self.apm_client:
                 self.apm_client.end_transaction(collection.name, 'deleted')
 
-        return reached_max
+        return busy_iteration
 
-    def _find_expiry_start(self, container: ESCollection):
-        """Find earliest expiring item in this container."""
-        rows = container.search(f"expiry_ts: [* TO {epoch_to_iso(time.time())}]",
-                                rows=1, sort='expiry_ts asc', as_obj=False, fl='expiry_ts')
+    def _get_final_date(self):
+        now = now_as_iso()
+        if self.config.core.expiry.batch_delete:
+            final_date = dm(f"{now}||-{self.config.core.expiry.delay}h/d").float_timestamp
+        else:
+            final_date = dm(f"{now}||-{self.config.core.expiry.delay}h").float_timestamp
+        return epoch_to_iso(final_date)
+
+    def _get_next_chunk(self, collection: ESCollection, start, final_date):
+        """Find date of item at chunk size and the number of items that
+           will be affected in between start date and the date found"""
+        rows = collection.search(f"expiry_ts: {{{start} TO {final_date}]", rows=1,
+                                 offset=self.expiry_size - 1, sort='expiry_ts asc',
+                                 as_obj=False, fl='expiry_ts')
         if rows['items']:
-            return iso_to_epoch(rows['items'][0]['expiry_ts'])
-        return time.time()
-
-    def _count_expired(self, container: ESCollection, start: Union[float, str], end: float) -> int:
-        """Count how many items need to be erased in the given window."""
-        if start == 0:
-            start = '*'
-        if isinstance(start, (float, int)):
-            start = epoch_to_iso(start)
-        query = f'expiry_ts:[{start} TO {epoch_to_iso(end)}}}'
-        return container.search(query, rows=0, as_obj=False, track_total_hits=self.expiry_size)['total']
+            return rows['items'][0]['expiry_ts'], self.expiry_size
+        return final_date, rows['total']
 
     def try_run(self):
         while self.running:
             try:
-                expiry_maxed_out = False
+                busy_iteration = False
 
                 with ThreadPoolExecutor(self.config.core.expiry.workers) as pool:
                     try:
-                        expiry_maxed_out = self.run_expiry_once(pool)
+                        busy_iteration = self.run_expiry_once(pool)
                     except Exception as e:
                         self.log.exception(str(e))
 
-                if not expiry_maxed_out:
+                if not busy_iteration:
                     self.sleep_with_heartbeat(self.config.core.expiry.sleep_time)
 
             except BrokenProcessPool:
