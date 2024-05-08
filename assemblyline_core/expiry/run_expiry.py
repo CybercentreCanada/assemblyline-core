@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import threading
 import functools
 import elasticapm
 import time
@@ -12,6 +13,7 @@ from datemath import dm
 from typing import Callable, Optional, TYPE_CHECKING
 
 from assemblyline.common.isotime import epoch_to_iso, now_as_iso
+from assemblyline.datastore.collection import Index
 from assemblyline_core.server_base import ServerBase
 from assemblyline_core.dispatching.dispatcher import BAD_SID_HASH
 from assemblyline.common import forge
@@ -151,19 +153,19 @@ class ExpiryManager(ServerBase):
             bulk.add_delete_operation(sha256)
 
         if len(file_list) > 0:
-            self.log.info(f'    Deleted associated files from the '
+            self.log.info(f'[{collection.name}] Deleted associated files from the '
                           f'{"cachestore" if "cache" in collection.name else "filestore"}...')
             collection.bulk(bulk)
             self.counter.increment(f'{collection.name}', increment_by=len(file_list))
-            self.log.info(f"    Deleted {len(file_list)} items from the datastore...")
+            self.log.info(f"[{collection.name}] Deleted {len(file_list)} items from the datastore...")
         else:
-            self.log.warning('    Expiry unable to clean up any of the files in filestore.')
+            self.log.warning(f'[{collection.name}] Expiry unable to clean up any of the files in filestore.')
 
     def _simple_delete(self, collection, delete_query, number_to_delete):
         self.heartbeat()
         collection.delete_by_query(delete_query)
         self.counter.increment(f'{collection.name}', increment_by=number_to_delete)
-        self.log.info(f"    Deleted {number_to_delete} items from the datastore...")
+        self.log.info(f"[{collection.name}] Deleted {number_to_delete} items from the datastore...")
 
     def _cleanup_canceled_submission(self, sid):
         # Allowing us at minimum 5 minutes to cleanup the submission
@@ -172,7 +174,7 @@ class ExpiryManager(ServerBase):
             self.apm_client.begin_transaction("Delete canceled submissions")
 
         # Cleaning up the submission
-        self.log.info(f"Deleting incomplete submission {sid}...")
+        self.log.info(f"[submission] Deleting incomplete submission {sid}...")
         self.datastore.delete_submission_tree_bulk(sid, self.classification, transport=self.filestore)
         self.redis_bad_sids.remove(sid)
 
@@ -188,7 +190,6 @@ class ExpiryManager(ServerBase):
         # As long as these two things are true, the set returned by this query should be consistent.
         # The one race condition is that a record might be refreshed while the file
         # blob would be deleted anyway, leaving a file record with no filestore object
-        self.log.info(f"Processing collection: {collection.name}")
         delete_query = f"expiry_ts:{{{start} TO {end}]"
 
         # check if we are dealing with an index that needs file cleanup
@@ -202,71 +203,53 @@ class ExpiryManager(ServerBase):
             # Filter archived documents if archive filestore is the same as the filestore
             expire_only = []
             if self.same_storage and self.config.datastore.archive.enabled and collection.name == 'file':
-                archived_files = self.datastore.file.multiexists_in_archive(delete_objects)
+                archived_files = self.datastore.file.multiexists(delete_objects, index_type=Index.ARCHIVE)
                 delete_objects = [k for k, v in archived_files.items() if not v]
                 expire_only = [k for k, v in archived_files.items() if v]
 
             delete_tasks = self.fs_hashmap[collection.name](delete_objects, final_date)
 
             # Proceed with deletion, but only after all the scheduled deletes for this
-            self.log.info(f"Scheduled {len(delete_objects)}/{number_to_delete} "
-                          f"files to be removed for: {collection.name}")
+            self.log.info(f"[{collection.name}] Scheduled {len(delete_objects)}/{number_to_delete} files to be removed")
             self._finish_delete(collection, delete_tasks, expire_only)
 
         else:
             # Proceed with deletion
             self._simple_delete(collection, delete_query, number_to_delete)
 
-    def run_expiry_once(self, pool: ThreadPoolExecutor):
-        busy_iteration = False
+    def feed_expiry_jobs(self, collection, start, jobs: list[concurrent.futures.Future],
+                         pool: ThreadPoolExecutor) -> tuple[str, bool]:
+        _process_chunk = self.log_errors(self._process_chunk)
+        number_to_delete = 0
+        self.heartbeat()
 
-        # Delete canceled submissions
-        # Make sure we're not dedicating more then a quarter of the pool to this operation because it is costly
-        for submission in self.datastore.submission.search(
-                "to_be_deleted:true", fl="sid", rows=max(1, int(self.config.core.expiry.workers / 4)))['items']:
-            if submission.sid not in self.current_submission_cleanup:
-                self.current_submission_cleanup.add(submission.sid)
-                pool.submit(self.log_errors(self._cleanup_canceled_submission), submission.sid)
+        # Start of expiry transaction
+        if self.apm_client:
+            self.apm_client.begin_transaction("Delete expired documents")
 
-        # Expire data
-        for collection in self.expirable_collections:
-            self.heartbeat()
+        final_date = self._get_final_date()
 
-            # Start of expiry transaction
-            if self.apm_client:
-                self.apm_client.begin_transaction("Delete expired documents")
+        # Break down the expiry window into smaller chunks of data
+        while len(jobs) < self.config.core.expiry.iteration_max_tasks:
 
-            final_date = self._get_final_date()
+            # Get the next chunk
+            end, number_to_delete = self._get_next_chunk(collection, start, final_date)
 
-            # Break down the expiry window into smaller chunks of data
-            start = "*"
-            iterations = 0
-            while iterations < self.config.core.expiry.iteration_max_tasks:
-                self.heartbeat()
+            # Check if we got anything
+            if number_to_delete == 0:
+                break
 
-                # Get the next chunk
-                end, number_to_delete = self._get_next_chunk(collection, start, final_date)
+            # Process the chunk in the threadpool
+            jobs.append(pool.submit(_process_chunk, collection, start, end, final_date, number_to_delete))
 
-                # Check if we got anything
-                if number_to_delete == 0:
-                    break
+            # Prepare for next chunk
+            start = end
 
-                # Tell the outer loop not to sleep between runs
-                if number_to_delete >= self.expiry_size:
-                    busy_iteration = True
+        # End of expiry transaction
+        if self.apm_client:
+            self.apm_client.end_transaction(collection.name, 'deleted')
 
-                # Process the chunk in the threadpool
-                pool.submit(self.log_errors(self._process_chunk), collection, start, end, final_date, number_to_delete)
-
-                # Prepare for next chunk
-                start = end
-                iterations += 1
-
-            # End of expiry transaction
-            if self.apm_client:
-                self.apm_client.end_transaction(collection.name, 'deleted')
-
-        return busy_iteration
+        return start, number_to_delete < self.expiry_size
 
     def _get_final_date(self):
         now = now_as_iso()
@@ -287,17 +270,65 @@ class ExpiryManager(ServerBase):
         return final_date, rows['total']
 
     def try_run(self):
+        pool = ThreadPoolExecutor(self.config.core.expiry.workers)
+        main_threads = []
+
+        # Launch a thread that will expire submissions that have been deleted
+        thread = threading.Thread(target=self.clean_deleted_submissions, args=[pool])
+        thread.start()
+        main_threads.append(thread)
+
+        # Launch threads that expire data from each collection of data
+        for collection in self.expirable_collections:
+            thread = threading.Thread(target=self.run_collection, args=[pool, collection])
+            thread.start()
+            main_threads.append(thread)
+
+        # Wait for all the threads to exit
+        for thread in main_threads:
+            thread.join()
+
+    def clean_deleted_submissions(self, pool):
+        """Delete canceled submissions"""
+        while self.running:
+            # Make sure we're not dedicating more then a quarter of the pool to this operation because it is costly
+            for submission in self.datastore.submission.search(
+                    "to_be_deleted:true", fl="sid", rows=max(1, int(self.config.core.expiry.workers / 4)))['items']:
+                if submission.sid not in self.current_submission_cleanup:
+                    self.current_submission_cleanup.add(submission.sid)
+                    pool.submit(self.log_errors(self._cleanup_canceled_submission), submission.sid)
+            self.sleep_with_heartbeat(self.config.core.expiry.sleep_time)
+
+    def run_collection(self, pool: concurrent.futures.ThreadPoolExecutor, collection):
+        """Feed batches of jobs to delete to the thread pool for the given collection."""
+        start = "*"
+        jobs: list[concurrent.futures.Future] = []
+
         while self.running:
             try:
-                busy_iteration = False
+                try:
+                    # Fill up 'jobs' with tasks that have been sent to the thread pool
+                    # 'jobs' may already have items in it, but 'start' makes sure the new
+                    # task added starts where the last finshed
+                    start, final_job_small = self.feed_expiry_jobs(collection, start, jobs, pool)
 
-                with ThreadPoolExecutor(self.config.core.expiry.workers) as pool:
-                    try:
-                        busy_iteration = self.run_expiry_once(pool)
-                    except Exception as e:
-                        self.log.exception(str(e))
+                    # Wait until some of our work finishes and there is room in the queue for more work
+                    finished, _jobs = concurrent.futures.wait(jobs, return_when=concurrent.futures.FIRST_COMPLETED)
+                    jobs = list(_jobs)
+                    for job in finished:
+                        job.result()
 
-                if not busy_iteration:
+                    # If we have expired all the data reset the start pointer
+                    if len(jobs) == 0:
+                        start = '*'
+
+                except Exception as e:
+                    self.log.exception(str(e))
+                    continue
+
+                # IF the most recent job added to the jobs list is short then
+                # all the data is currently queued up to delete and we can sleep
+                if final_job_small:
                     self.sleep_with_heartbeat(self.config.core.expiry.sleep_time)
 
             except BrokenProcessPool:
