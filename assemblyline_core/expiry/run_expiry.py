@@ -153,19 +153,19 @@ class ExpiryManager(ServerBase):
             bulk.add_delete_operation(sha256)
 
         if len(file_list) > 0:
-            self.log.info(f'    Deleted associated files from the '
+            self.log.info(f'[{collection.name}] Deleted associated files from the '
                           f'{"cachestore" if "cache" in collection.name else "filestore"}...')
             collection.bulk(bulk)
             self.counter.increment(f'{collection.name}', increment_by=len(file_list))
-            self.log.info(f"    Deleted {len(file_list)} items from the datastore...")
+            self.log.info(f"[{collection.name}] Deleted {len(file_list)} items from the datastore...")
         else:
-            self.log.warning('    Expiry unable to clean up any of the files in filestore.')
+            self.log.warning(f'[{collection.name}] Expiry unable to clean up any of the files in filestore.')
 
     def _simple_delete(self, collection, delete_query, number_to_delete):
         self.heartbeat()
         collection.delete_by_query(delete_query)
         self.counter.increment(f'{collection.name}', increment_by=number_to_delete)
-        self.log.info(f"    Deleted {number_to_delete} items from the datastore...")
+        self.log.info(f"[{collection.name}] Deleted {number_to_delete} items from the datastore...")
 
     def _cleanup_canceled_submission(self, sid):
         # Allowing us at minimum 5 minutes to cleanup the submission
@@ -174,7 +174,7 @@ class ExpiryManager(ServerBase):
             self.apm_client.begin_transaction("Delete canceled submissions")
 
         # Cleaning up the submission
-        self.log.info(f"Deleting incomplete submission {sid}...")
+        self.log.info(f"[submission] Deleting incomplete submission {sid}...")
         self.datastore.delete_submission_tree_bulk(sid, self.classification, transport=self.filestore)
         self.redis_bad_sids.remove(sid)
 
@@ -190,7 +190,6 @@ class ExpiryManager(ServerBase):
         # As long as these two things are true, the set returned by this query should be consistent.
         # The one race condition is that a record might be refreshed while the file
         # blob would be deleted anyway, leaving a file record with no filestore object
-        self.log.info(f"Processing collection: {collection.name}")
         delete_query = f"expiry_ts:{{{start} TO {end}]"
 
         # check if we are dealing with an index that needs file cleanup
@@ -211,19 +210,19 @@ class ExpiryManager(ServerBase):
             delete_tasks = self.fs_hashmap[collection.name](delete_objects, final_date)
 
             # Proceed with deletion, but only after all the scheduled deletes for this
-            self.log.info(f"Scheduled {len(delete_objects)}/{number_to_delete} "
-                          f"files to be removed for: {collection.name}")
+            self.log.info(f"[{collection.name}] Scheduled {len(delete_objects)}/{number_to_delete} files to be removed")
             self._finish_delete(collection, delete_tasks, expire_only)
 
         else:
             # Proceed with deletion
             self._simple_delete(collection, delete_query, number_to_delete)
 
-    def feed_expiry_jobs(self, collection, start, jobs: list[concurrent.futures.Future], pool: ThreadPoolExecutor) -> tuple[str, bool]:
+    def feed_expiry_jobs(self, collection, start, jobs: list[concurrent.futures.Future],
+                         pool: ThreadPoolExecutor) -> tuple[str, bool]:
         _process_chunk = self.log_errors(self._process_chunk)
         number_to_delete = 0
         self.heartbeat()
-        
+
         # Start of expiry transaction
         if self.apm_client:
             self.apm_client.begin_transaction("Delete expired documents")
