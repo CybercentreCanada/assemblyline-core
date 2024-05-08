@@ -232,7 +232,6 @@ class ExpiryManager(ServerBase):
 
         # Break down the expiry window into smaller chunks of data
         while len(jobs) < self.config.core.expiry.iteration_max_tasks:
-            self.heartbeat()
 
             # Get the next chunk
             end, number_to_delete = self._get_next_chunk(collection, start, final_date)
