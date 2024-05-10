@@ -16,6 +16,7 @@ from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SUBMISSION
     make_watcher_list_name, DISPATCH_TASK_HASH
 from assemblyline.common.forge import CachedObject, get_service_queue
 from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.uid import get_random_id
 from assemblyline.datastore.exceptions import VersionConflictException
 from assemblyline.odm.base import DATEFORMAT
 from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, \
@@ -279,6 +280,11 @@ class DispatchClient:
                     else:
                         result.expiry_ts = None
                 try:
+                    if self.ds.result.exists(result_key):
+                        # A result already exists for this key
+                        # Add some random data to the end of the key and save as new
+                        result_key += f".{get_random_id()}"
+                        version = "create"
                     self.ds.result.save(result_key, result, version=version)
                     break
                 except VersionConflictException as vce:
