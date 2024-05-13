@@ -367,8 +367,13 @@ class KubernetesUpdateInterface:
                     status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name,
                                                                 _request_timeout=API_TIMEOUT).status
                     # Monitor container's waiting status state
-                    pod_waiting_state = self.api.read_namespaced_pod(name=pod_name, namespace=self.namespace,
-                                                               _request_timeout=API_TIMEOUT).status.container_statuses[0].state.waiting
+                    pod_waiting_state = False
+                    pod_container_statuses = self.api.read_namespaced_pod(name=pod_name, namespace=self.namespace,
+                                                                          _request_timeout=API_TIMEOUT).status.container_statuses
+
+                    if pod_container_statuses:
+                        pod_waiting_state = pod_container_statuses[0].state.waiting
+
                     # Check to see if we've encountered an issue before the container starts
                     if pod_waiting_state and pod_waiting_state.reason == "ImagePullBackOff":
                         # Delete job and raise exception
