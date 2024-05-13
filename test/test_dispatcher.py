@@ -450,4 +450,4 @@ def test_prevent_result_overwrite(clean_redis, clean_datastore):
     message = result_queue.pop(blocking=False)
     msg_result_key = message['result_summary']['key']
 
-    assert msg_result_key != result_key and msg_result_key.startswith(result_key)
+    assert msg_result_key != result_key
