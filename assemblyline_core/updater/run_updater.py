@@ -15,7 +15,7 @@ import docker
 
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
     V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
-    V1ConfigMapVolumeSource, V1Secret, V1SecretVolumeSource, V1LocalObjectReference
+    V1ConfigMapVolumeSource, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Toleration
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
@@ -148,7 +148,7 @@ class DockerUpdateInterface:
 
 class KubernetesUpdateInterface:
     def __init__(self, logger, prefix, namespace, priority_class, extra_labels, linux_node_selector: Selector,
-                 log_level="INFO", default_service_account=None):
+                 log_level="INFO", default_service_account=None, default_service_tolerations=[]):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -181,6 +181,8 @@ class KubernetesUpdateInterface:
         self.default_service_account = default_service_account
         self.secret_env = []
         self.linux_node_selector = linux_node_selector
+        self.default_service_tolerations = [V1Toleration(**toleration.as_primitives()) for toleration in default_service_tolerations]
+
 
         # Get the deployment of this process. Use that information to fill out the secret info
         deployment = self.apps_api.read_namespaced_deployment(name='updater', namespace=self.namespace)
@@ -465,7 +467,8 @@ class ServiceUpdater(ThreadedCoreBase):
                                                         extra_labels=extra_labels,
                                                         log_level=self.config.logging.log_level,
                                                         default_service_account=self.config.services.service_account,
-                                                        linux_node_selector=self.config.core.scaler.linux_node_selector)
+                                                        linux_node_selector=self.config.core.scaler.linux_node_selector,
+                                                        default_service_tolerations=self.config.core.scaler.service_defaults.tolerations)
             # Add all additional mounts to privileged services
             self.mounts = self.config.core.scaler.service_defaults.mounts
         else:
