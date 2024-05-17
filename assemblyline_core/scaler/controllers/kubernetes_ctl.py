@@ -26,7 +26,8 @@ from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec,
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
     V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, \
     V1ServiceSpec, V1ServicePort, V1PodSecurityContext, V1Probe, V1ExecAction, V1SecurityContext, \
-    V1Affinity, V1NodeAffinity, V1NodeSelector, V1NodeSelectorTerm, V1NodeSelectorRequirement, CoreV1Event
+    V1Affinity, V1NodeAffinity, V1NodeSelector, V1NodeSelectorTerm, V1NodeSelectorRequirement, CoreV1Event, V1Toleration
+
 from kubernetes.client.rest import ApiException
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig, PersistentVolume
 
@@ -241,7 +242,7 @@ def parse_cpu(string: str) -> float:
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace: str, prefix: str, priority: str, dependency_priority: str,
                  cpu_reservation: float, linux_node_selector: Selector, labels=None, log_level="INFO", core_env={},
-                 default_service_account=None, cluster_pod_list=True):
+                 default_service_account=None, cluster_pod_list=True, default_service_tolerations = []):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
         try:
@@ -285,6 +286,7 @@ class KubernetesController(ControllerInterface):
         self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
         self.default_service_account: Optional[str] = default_service_account
         self.cluster_pod_list = cluster_pod_list
+        self.default_service_tolerations = [V1Toleration(**toleration.as_primitives()) for toleration in default_service_tolerations]
 
         # A record of previously reported events so that we don't report the same message repeatedly, fill it with
         # existing messages so we don't have a huge dump of duplicates on restart
@@ -849,6 +851,7 @@ class KubernetesController(ControllerInterface):
             security_context=V1PodSecurityContext(fs_group=1000),
             service_account_name=service_account,
             affinity=selector_to_node_affinity(self.linux_node_selector),
+            tolerations=self.default_service_tolerations
         )
 
         if use_pull_secret:
