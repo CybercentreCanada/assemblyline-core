@@ -64,7 +64,7 @@ class Archiver(ServerBase):
             try:
                 if len(message) == 3:
                     archive_type, type_id, delete_after = message
-                    metadata = None
+                    metadata = {}
                     use_alternate_dtl = False
                 elif len(message) == 4:
                     archive_type, type_id, delete_after, metadata = message
@@ -90,8 +90,9 @@ class Archiver(ServerBase):
                         submission, version = self.datastore.submission.get_if_exists(type_id, version=True)
 
                         # If we have metadata passed in the message, we need to apply it before archiving the submission
-                        if metadata and self.config.core.archiver.use_metadata:
-                            submission.metadata.update({f"archive.{k}": v for k, v in metadata.items()})
+                        if metadata and self.config.submission.metadata.archive:
+                            submission.metadata.update({k: v for k, v in metadata.items()
+                                                        if k not in submission.metadata})
                             self.datastore.submission.save(type_id, submission, version=version)
 
                         break
