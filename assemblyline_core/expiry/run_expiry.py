@@ -247,8 +247,14 @@ class ExpiryManager(ServerBase):
                 delete_from_archive = [i[0] for i in delete_objects if i[1]]
                 delete_from_hot = [i[0] for i in delete_objects if not i[1]]
 
-                # Reset objects to delete
-                delete_objects = []
+                # Check for overlap
+                overlap = set(delete_from_archive).intersection(set(delete_from_hot))
+                delete_from_archive = list(set(delete_from_archive)-overlap)
+                delete_from_hot = list(set(delete_from_hot)-overlap)
+
+                # Create the original delete_object form the overlap
+                delete_objects = [(k, False) for k in overlap]
+                delete_objects.extend([(k, True) for k in overlap])
 
                 if delete_from_hot:
                     # Check hot objects to delete if they are in archive
