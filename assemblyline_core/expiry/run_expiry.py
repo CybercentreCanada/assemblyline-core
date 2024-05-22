@@ -27,15 +27,25 @@ if TYPE_CHECKING:
     from assemblyline.datastore.collection import ESCollection
 
 
-def file_delete_worker(logger, filestore_urls, file_batch) -> list[str]:
+def file_delete_worker(logger, filestore_urls, file_batch, archive_filestore_urls=None) -> list[str]:
     try:
         filestore = FileStore(*filestore_urls)
+        if archive_filestore_urls and filestore_urls != archive_filestore_urls:
+            archivestore = FileStore(*archive_filestore_urls)
+        else:
+            archivestore = filestore
 
-        def filestore_delete(sha256: str) -> Optional[str]:
-            filestore.delete(sha256)
-            if not filestore.exists(sha256):
-                return sha256
-            return None
+        def filestore_delete(item: str) -> Optional[str]:
+            sha256, from_archive = item
+            if from_archive:
+                archivestore.delete(sha256)
+                if not archivestore.exists(sha256):
+                    return sha256, True
+            else:
+                filestore.delete(sha256)
+                if not filestore.exists(sha256):
+                    return sha256, False
+            return None, None
 
         return _file_delete_worker(logger, filestore_delete, file_batch)
 
@@ -55,9 +65,9 @@ def _file_delete_worker(logger, delete_action: Callable[[str], Optional[str]], f
 
             for future in as_completed(futures):
                 try:
-                    erased_name = future.result()
+                    erased_name, from_archive = future.result()
                     if erased_name:
-                        finished_files.append(erased_name)
+                        finished_files.append((erased_name, from_archive))
                 except Exception as error:
                     logger.exception("Error in filestore worker: " + str(error))
 
@@ -71,13 +81,25 @@ class ExpiryManager(ServerBase):
         self.config = forge.get_config()
 
         super().__init__('assemblyline.expiry', shutdown_timeout=self.config.core.expiry.sleep_time + 5)
-        self.datastore = forge.get_datastore(config=self.config)
+
+        # Set Archive related configs
+        if self.config.datastore.archive.enabled:
+            self.archive_access = True
+            self.index_type = Index.HOT_AND_ARCHIVE
+        else:
+            self.archive_access = False
+            self.index_type = Index.HOT
+
+        self.datastore = forge.get_datastore(config=self.config, archive_access=self.archive_access)
         self.filestore = forge.get_filestore(config=self.config)
         self.classification = forge.get_classification()
         self.expirable_collections: list[ESCollection] = []
         self.counter = MetricsFactory('expiry', Metrics)
         self.file_delete_worker = ProcessPoolExecutor(self.config.core.expiry.delete_workers)
-        self.same_storage = self.config.filestore.storage == self.config.filestore.archive
+        if self.config.filestore.archive:
+            self.same_storage = self.config.filestore.storage == self.config.filestore.archive
+        else:
+            self.same_storage = True
         self.current_submission_cleanup = set()
 
         self.redis_persist = redis_persist or get_client(
@@ -127,7 +149,8 @@ class ExpiryManager(ServerBase):
     def filestore_delete(self, file_batch, _):
         return self.file_delete_worker.submit(file_delete_worker, logger=self.log,
                                               filestore_urls=list(self.config.filestore.storage),
-                                              file_batch=file_batch)
+                                              file_batch=file_batch,
+                                              archive_filestore_urls=list(self.config.filestore.archive))
 
     def cachestore_delete(self, file_batch, _):
         return self.file_delete_worker.submit(file_delete_worker, logger=self.log,
@@ -145,25 +168,41 @@ class ExpiryManager(ServerBase):
             except concurrent.futures.TimeoutError:
                 pass
 
-        file_list.extend(expire_only)
-
-        # build a batch delete job for all the removed files
-        bulk = collection.get_bulk_plan()
-        for sha256 in file_list:
-            bulk.add_delete_operation(sha256)
-
-        if len(file_list) > 0:
+        if file_list:
             self.log.info(f'[{collection.name}] Deleted associated files from the '
                           f'{"cachestore" if "cache" in collection.name else "filestore"}...')
-            collection.bulk(bulk)
-            self.counter.increment(f'{collection.name}', increment_by=len(file_list))
-            self.log.info(f"[{collection.name}] Deleted {len(file_list)} items from the datastore...")
         else:
+            self.log.info(f'[{collection.name}] Nothing was deleted from the '
+                          f'{"cachestore" if "cache" in collection.name else "filestore"}...')
+
+        # From the files to be deleted, check which are from the hot index
+        hot_file_list = [x[0] for x in file_list if not x[1]]
+        hot_file_list.extend([x[0] for x in expire_only if not x[1]])
+
+        # From the files to be deleted, check which are from the archive index
+        archive_file_list = [x[0] for x in file_list if x[1]]
+        archive_file_list.extend([x[0] for x in expire_only if x[1]])
+
+        for cur_file_list, index_type in [(hot_file_list, Index.HOT), (archive_file_list, Index.ARCHIVE)]:
+            if not cur_file_list:
+                # Nothing to delete from this index type
+                continue
+
+            # build a batch delete job for all the removed files
+            bulk = collection.get_bulk_plan(index_type=index_type)
+            for sha256 in cur_file_list:
+                bulk.add_delete_operation(sha256)
+
+            collection.bulk(bulk)
+            self.counter.increment(f'{collection.name}', increment_by=len(cur_file_list))
+            self.log.info(f"[{collection.name}] Deleted {len(cur_file_list)} items from the datastore...")
+
+        if not hot_file_list and not archive_file_list:
             self.log.warning(f'[{collection.name}] Expiry unable to clean up any of the files in filestore.')
 
-    def _simple_delete(self, collection, delete_query, number_to_delete):
+    def _simple_delete(self, collection: ESCollection, delete_query, number_to_delete):
         self.heartbeat()
-        collection.delete_by_query(delete_query)
+        collection.delete_by_query(delete_query, index_type=self.index_type)
         self.counter.increment(f'{collection.name}', increment_by=number_to_delete)
         self.log.info(f"[{collection.name}] Deleted {number_to_delete} items from the datastore...")
 
@@ -196,21 +235,38 @@ class ExpiryManager(ServerBase):
         if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
             # Delete associated files
             delete_objects: list[str] = []
-            for item in collection.stream_search(delete_query, fl='id', as_obj=False):
+            for item in collection.stream_search(
+                    delete_query, fl='id,from_archive', as_obj=False, index_type=self.index_type):
                 self.heartbeat()
-                delete_objects.append(item['id'])
+                delete_objects.append((item['id'], item.get('from_archive', False)))
 
             # Filter archived documents if archive filestore is the same as the filestore
             expire_only = []
-            if self.same_storage and self.config.datastore.archive.enabled and collection.name == 'file':
-                archived_files = self.datastore.file.multiexists(delete_objects, index_type=Index.ARCHIVE)
-                delete_objects = [k for k, v in archived_files.items() if not v]
-                expire_only = [k for k, v in archived_files.items() if v]
+            if self.same_storage and self.archive_access and collection.name == 'file':
+                # Separate hot and archive files
+                delete_from_archive = [i[0] for i in delete_objects if i[1]]
+                delete_from_hot = [i[0] for i in delete_objects if not i[1]]
+
+                # Reset objects to delete
+                delete_objects = []
+
+                if delete_from_hot:
+                    # Check hot objects to delete if they are in archive
+                    archived_files = self.datastore.file.multiexists(delete_from_hot, index_type=Index.ARCHIVE)
+                    delete_objects.extend([(k, False) for k, v in archived_files.items() if not v])
+                    expire_only.extend([(k, False) for k, v in archived_files.items() if v])
+
+                if delete_from_archive:
+                    # Check hot objects to delete if they are in archive
+                    hot_files = self.datastore.file.multiexists(delete_from_archive, index_type=Index.HOT)
+                    delete_objects.extend([(k, True) for k, v in hot_files.items() if not v])
+                    expire_only.extend([(k, True) for k, v in hot_files.items() if v])
 
             delete_tasks = self.fs_hashmap[collection.name](delete_objects, final_date)
 
             # Proceed with deletion, but only after all the scheduled deletes for this
-            self.log.info(f"[{collection.name}] Scheduled {len(delete_objects)}/{number_to_delete} files to be removed")
+            self.log.info(f"[{collection.name}] Scheduled {len(delete_objects)}/{number_to_delete} files to be "
+                          f"removed from the {'cachestore' if 'cache' in collection.name else 'filestore'}")
             self._finish_delete(collection, delete_tasks, expire_only)
 
         else:
@@ -264,7 +320,7 @@ class ExpiryManager(ServerBase):
            will be affected in between start date and the date found"""
         rows = collection.search(f"expiry_ts: {{{start} TO {final_date}]", rows=1,
                                  offset=self.expiry_size - 1, sort='expiry_ts asc',
-                                 as_obj=False, fl='expiry_ts')
+                                 as_obj=False, fl='expiry_ts', index_type=self.index_type)
         if rows['items']:
             return rows['items'][0]['expiry_ts'], self.expiry_size
         return final_date, rows['total']
