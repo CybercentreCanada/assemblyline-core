@@ -4,23 +4,23 @@ from __future__ import annotations
 import concurrent.futures
 import threading
 import functools
-import elasticapm
 import time
-
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, Future, as_completed
 from concurrent.futures.process import BrokenProcessPool
-from datemath import dm
 from typing import Callable, Optional, TYPE_CHECKING
 
-from assemblyline.common.isotime import epoch_to_iso, now_as_iso
-from assemblyline.datastore.collection import Index
+import elasticapm
+from datemath import dm
+
 from assemblyline_core.server_base import ServerBase
 from assemblyline_core.dispatching.dispatcher import BAD_SID_HASH
 from assemblyline.common import forge
+from assemblyline.common.isotime import epoch_to_iso, now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.expiry_heartbeat import Metrics
 from assemblyline.remote.datatypes import get_client
+from assemblyline.datastore.collection import Index
 from assemblyline.remote.datatypes.set import Set
 
 if TYPE_CHECKING:
