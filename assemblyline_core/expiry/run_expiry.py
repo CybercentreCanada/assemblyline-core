@@ -77,8 +77,8 @@ def _file_delete_worker(logger, delete_action: Callable[[str], Optional[str]], f
 
 
 class ExpiryManager(ServerBase):
-    def __init__(self, redis_persist=None):
-        self.config = forge.get_config()
+    def __init__(self, redis_persist=None, datastore=None, filestore=None, config=None, classification=None):
+        self.config = config or forge.get_config()
 
         super().__init__('assemblyline.expiry', shutdown_timeout=self.config.core.expiry.sleep_time + 5)
 
@@ -90,9 +90,9 @@ class ExpiryManager(ServerBase):
             self.archive_access = False
             self.index_type = Index.HOT
 
-        self.datastore = forge.get_datastore(config=self.config, archive_access=self.archive_access)
-        self.filestore = forge.get_filestore(config=self.config)
-        self.classification = forge.get_classification()
+        self.datastore = datastore or forge.get_datastore(config=self.config, archive_access=self.archive_access)
+        self.filestore = filestore or forge.get_filestore(config=self.config)
+        self.classification = classification or forge.get_classification()
         self.expirable_collections: list[ESCollection] = []
         self.counter = MetricsFactory('expiry', Metrics)
         self.file_delete_worker = ProcessPoolExecutor(self.config.core.expiry.delete_workers)
