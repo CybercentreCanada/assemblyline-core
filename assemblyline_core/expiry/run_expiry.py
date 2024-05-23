@@ -4,30 +4,30 @@ from __future__ import annotations
 import concurrent.futures
 import threading
 import functools
-import elasticapm
 import time
-
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, Future, as_completed
 from concurrent.futures.process import BrokenProcessPool
-from datemath import dm
 from typing import Callable, Optional, TYPE_CHECKING
 
-from assemblyline.common.isotime import epoch_to_iso, now_as_iso
-from assemblyline.datastore.collection import Index
+import elasticapm
+from datemath import dm
+
 from assemblyline_core.server_base import ServerBase
 from assemblyline_core.dispatching.dispatcher import BAD_SID_HASH
 from assemblyline.common import forge
+from assemblyline.common.isotime import epoch_to_iso, now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.expiry_heartbeat import Metrics
 from assemblyline.remote.datatypes import get_client
+from assemblyline.datastore.collection import Index
 from assemblyline.remote.datatypes.set import Set
 
 if TYPE_CHECKING:
     from assemblyline.datastore.collection import ESCollection
 
 
-def file_delete_worker(logger, filestore_urls, file_batch, archive_filestore_urls=None) -> list[str]:
+def file_delete_worker(logger, filestore_urls, file_batch, archive_filestore_urls=None) -> list[tuple[str, bool]]:
     try:
         filestore = FileStore(*filestore_urls)
         if archive_filestore_urls and filestore_urls != archive_filestore_urls:
@@ -35,7 +35,7 @@ def file_delete_worker(logger, filestore_urls, file_batch, archive_filestore_url
         else:
             archivestore = filestore
 
-        def filestore_delete(item: str) -> Optional[str]:
+        def filestore_delete(item: tuple[str, bool]) -> tuple[Optional[str], Optional[bool]]:
             sha256, from_archive = item
             if from_archive:
                 archivestore.delete(sha256)
@@ -54,8 +54,11 @@ def file_delete_worker(logger, filestore_urls, file_batch, archive_filestore_url
     return []
 
 
-def _file_delete_worker(logger, delete_action: Callable[[str], Optional[str]], file_batch) -> list[str]:
-    finished_files: list[str] = []
+ActionSignature = Callable[[tuple[str, bool]], tuple[Optional[str], Optional[bool]]]
+
+
+def _file_delete_worker(logger, delete_action: ActionSignature, file_batch) -> list[tuple[str, bool]]:
+    finished_files: list[tuple[str, bool]] = []
     try:
         futures = []
 
@@ -66,7 +69,7 @@ def _file_delete_worker(logger, delete_action: Callable[[str], Optional[str]], f
             for future in as_completed(futures):
                 try:
                     erased_name, from_archive = future.result()
-                    if erased_name:
+                    if erased_name and from_archive is not None:
                         finished_files.append((erased_name, from_archive))
                 except Exception as error:
                     logger.exception("Error in filestore worker: " + str(error))
@@ -157,7 +160,7 @@ class ExpiryManager(ServerBase):
                                               filestore_urls=list(self.config.filestore.cache),
                                               file_batch=file_batch)
 
-    def _finish_delete(self, collection: ESCollection, task: Future, expire_only: list[str]):
+    def _finish_delete(self, collection: ESCollection, task: Future, expire_only: list[tuple[str, bool]]):
         # Wait until the worker process finishes deleting files
         file_list: list[str] = []
         while self.running:
@@ -234,14 +237,14 @@ class ExpiryManager(ServerBase):
         # check if we are dealing with an index that needs file cleanup
         if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
             # Delete associated files
-            delete_objects: list[str] = []
+            delete_objects: list[tuple[str, bool]] = []
             for item in collection.stream_search(
                     delete_query, fl='id,from_archive', as_obj=False, index_type=self.index_type):
                 self.heartbeat()
                 delete_objects.append((item['id'], item.get('from_archive', False)))
 
             # Filter archived documents if archive filestore is the same as the filestore
-            expire_only = []
+            expire_only: list[tuple[str, bool]] = []
             if self.same_storage and self.archive_access and collection.name == 'file':
                 # Separate hot and archive files
                 delete_from_archive = [i[0] for i in delete_objects if i[1]]
