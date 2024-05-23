@@ -30,6 +30,8 @@ def ds_expiry(request, datastore_connection):
             expiry_len = random.randint(MIN_OBJECTS, MAX_OBJECTS)
             for x in range(expiry_len):
                 obj = random_model_obj(collection.model_class)
+                if hasattr(definition, 'from_archive'):
+                    obj.from_archive = False
                 obj.expiry_ts = now_as_iso(-10000)
                 collection.save('longer_name'+str(x), obj)
 
