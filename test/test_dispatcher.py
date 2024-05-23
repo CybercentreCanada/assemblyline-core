@@ -284,8 +284,8 @@ def test_dispatch_extracted(clean_redis, clean_datastore):
 @mock.patch('assemblyline_core.dispatching.dispatcher.MetricsFactory', mock.MagicMock())
 @mock.patch('assemblyline_core.dispatching.dispatcher.Scheduler', DRPScheduler)
 def test_dispatch_extracted_bypass_drp(clean_redis, clean_datastore):
-    # Dynamic Recursion Prevention is to prevent services belonging to the 'Dynamic Analysis' from analyzing the children
-    # of files they've analyzed.
+    # Dynamic Recursion Prevention is to prevent services belonging to the 'Dynamic Analysis'
+    # from analyzing the children of files they've analyzed.
 
     # The bypass should allow services to specify files to run through Dynamic Analysis regardless of the
     # Dynamic Recursion Prevention parameter.
@@ -372,7 +372,7 @@ def test_dispatch_extracted_bypass_drp(clean_redis, clean_datastore):
     disp.service_worker(disp.process_queue_index(sid))
 
     # 'sandbox' should have a task for the extracted file
-    #disp.dispatch_file(disp.tasks.get(sid), second_file_hash)
+    # disp.dispatch_file(disp.tasks.get(sid), second_file_hash)
     job = client.request_work('0', 'sandbox', '0')
     assert job.fileinfo.sha256 == second_file_hash
     assert job.filename == 'second-*'
