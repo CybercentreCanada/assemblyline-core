@@ -58,7 +58,7 @@ def test_expire_all(config, ds_expiry, filestore):
     expiry = ExpiryManager(config=config, datastore=ds_expiry, filestore=filestore)
     expiry.running = True
     expiry.counter = FakeCounter()
-    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+    with concurrent.futures.ThreadPoolExecutor(5) as pool:
         for collection in expiry.expirable_collections:
             expiry.feed_expiry_jobs(collection=collection, pool=pool, start='*', jobs=[])
 
