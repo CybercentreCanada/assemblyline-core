@@ -279,6 +279,17 @@ class DispatchClient:
                     else:
                         result.expiry_ts = None
                 try:
+                    if self.ds.result.exists(result_key):
+                        # A result already exists for this key
+                        # Regenerate entire result key based on result and modified task (ignore caching)
+                        task.ignore_cache = True
+                        result_key = Result.help_build_key(sha256=task.fileinfo.sha256,
+                                                           service_name=result.response.service_name,
+                                                           service_version=result.response.service_version,
+                                                           service_tool_version=result.response.service_tool_version,
+                                                           is_empty=False,
+                                                           task=task)
+                        version = "create"
                     self.ds.result.save(result_key, result, version=version)
                     break
                 except VersionConflictException as vce:
