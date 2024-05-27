@@ -14,8 +14,8 @@ from assemblyline.odm.randomizer import random_model_obj, random_minimal_obj, ge
 from assemblyline.odm import models
 from assemblyline.common.metrics import MetricsFactory
 
-from assemblyline_core.dispatching.client import DispatchClient
-from assemblyline_core.dispatching.dispatcher import Dispatcher, Submission
+from assemblyline_core.dispatching.client import DispatchClient, DISPATCH_RESULT_QUEUE
+from assemblyline_core.dispatching.dispatcher import Dispatcher, ServiceTask, Submission
 from assemblyline_core.dispatching.schedules import Scheduler as RealScheduler
 
 # noinspection PyUnresolvedReferences
@@ -123,7 +123,7 @@ def test_simple(clean_redis, clean_datastore):
     user: User = random_model_obj(User)
     ds.user.save(user.uname, user)
 
-    sub: Submission = random_model_obj(models.submission.Submission)
+    sub: Submission = random_model_obj(Submission)
     sub.sid = sid = 'first-submission'
     sub.params.ignore_cache = False
     sub.params.max_extracted = 5
@@ -242,7 +242,7 @@ def test_dispatch_extracted(clean_redis, clean_datastore):
         ds.file.save(fh, obj)
 
     # Inject the fake submission
-    submission = random_model_obj(models.submission.Submission)
+    submission = random_model_obj(Submission)
     submission.to_be_deleted = False
     submission.files = [dict(name='./file', sha256=file_hash)]
     submission.params.submitter = user.uname
@@ -308,7 +308,7 @@ def test_dispatch_extracted_bypass_drp(clean_redis, clean_datastore):
         ds.file.save(fh, obj)
 
     # Inject the fake submission
-    submission = random_model_obj(models.submission.Submission)
+    submission = random_model_obj(Submission)
     submission.to_be_deleted = False
     submission.params.ignore_dynamic_recursion_prevention = False
     submission.params.services.selected = ['extract', 'sandbox']
@@ -417,3 +417,37 @@ def test_timeout():
 
     # Expire nothing
     assert len(table.timeouts()) == 0
+
+
+def test_prevent_result_overwrite(clean_redis, clean_datastore):
+    client = DispatchClient(clean_datastore, clean_redis, clean_redis)
+    dispatcher_name = "test"
+    result_queue = client._get_queue_from_cache(DISPATCH_RESULT_QUEUE + dispatcher_name)
+
+    # Create a task and add it to set of running tasks
+    task = random_model_obj(ServiceTask)
+    task.metadata['dispatcher__'] = dispatcher_name
+
+    # Create a result that's not "empty"
+    result = random_model_obj(Result)
+    result.response.service_name = task.service_name
+    result.sha256 = task.fileinfo.sha256
+    result.result.score = 1
+    result_key = result.build_key()
+
+    # Submit result to be saved
+    client.running_tasks.add(task.key(), task.as_primitives())
+    client.service_finished(task.sid, result_key, result)
+
+    # Pop result from queue, we expect to get the same result key as earlier
+    message = result_queue.pop(blocking=False)
+    msg_result_key = message['result_summary']['key']
+    assert msg_result_key == result_key
+
+    # Save the same result again but we expect to be saved under another key
+    client.running_tasks.add(task.key(), task.as_primitives())
+    client.service_finished(task.sid, result_key, result)
+    message = result_queue.pop(blocking=False)
+    msg_result_key = message['result_summary']['key']
+
+    assert msg_result_key != result_key
