@@ -9,6 +9,7 @@ from redis.exceptions import ConnectionError
 from assemblyline.common import forge
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.datastore.store import ESStore
+from assemblyline.odm.models.config import Config
 
 original_classification = forge.get_classification
 
@@ -52,7 +53,7 @@ def config():
 
 
 @pytest.fixture(scope='module')
-def datastore_connection(config):
+def datastore_connection(config: Config):
     store = ESStore(config.datastore.hosts)
     ret_val = store.ping()
     if not ret_val:
@@ -72,16 +73,6 @@ def function_clean_datastore(datastore_connection: AssemblylineDatastore):
     for name in datastore_connection.ds.get_models():
         datastore_connection.get_collection(name).wipe()
     return datastore_connection
-
-
-@pytest.fixture(scope='module')
-def archive_connection(config):
-    store = ESStore(config.datastore.hosts, archive_access=True)
-    ret_val = store.ping()
-    if not ret_val:
-        pytest.skip("Could not connect to datastore")
-
-    return AssemblylineDatastore(store)
 
 
 @pytest.fixture(scope='module')
