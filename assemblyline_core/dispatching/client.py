@@ -12,7 +12,6 @@ import weakref
 from typing import Optional, Any, cast
 
 from assemblyline.common import forge
-from assemblyline.common.caching import generate_conf_key
 from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SUBMISSION_QUEUE, \
     make_watcher_list_name, DISPATCH_TASK_HASH
 from assemblyline.common.forge import CachedObject, get_service_queue
@@ -282,11 +281,14 @@ class DispatchClient:
                 try:
                     if self.ds.result.exists(result_key):
                         # A result already exists for this key
-                        # Configure task to ignore cache and regenerate task configuration portion of result key
+                        # Regenerate entire result key based on result and modified task (ignore caching)
                         task.ignore_cache = True
-                        result_key_parts = result_key.split('.')
-                        result_key_parts[3] = f"c{generate_conf_key(result.response.service_tool_version, task)}"
-                        result_key = ".".join(result_key_parts)
+                        result_key = Result.help_build_key(sha256=task.fileinfo.sha256,
+                                                           service_name=result.response.service_name,
+                                                           service_version=result.response.service_version,
+                                                           service_tool_version=result.response.service_tool_version,
+                                                           is_empty=False,
+                                                           task=task)
                         version = "create"
                     self.ds.result.save(result_key, result, version=version)
                     break
