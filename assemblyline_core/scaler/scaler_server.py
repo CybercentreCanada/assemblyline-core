@@ -285,11 +285,13 @@ class ScalerServer(ThreadedCoreBase):
             'privilege': 'service'
         }
 
+        service_defaults_config = self.config.core.scaler.service_defaults
+
         # If Scaler has envs that set service-server env, then that should override configured values
         if SERVICE_API_HOST:
-            self.config.core.scaler.service_defaults.environment = \
+            service_defaults_config.environment = \
                 [EnvironmentVariable(dict(name="SERVICE_API_HOST", value=SERVICE_API_HOST))] + \
-                [env for env in self.config.core.scaler.service_defaults.environment if env.name != "SERVICE_API_HOST"]
+                [env for env in service_defaults_config.environment if env.name != "SERVICE_API_HOST"]
 
         if self.config.core.scaler.additional_labels:
             labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)})
@@ -304,7 +306,9 @@ class ScalerServer(ThreadedCoreBase):
                                                    log_level=self.config.logging.log_level,
                                                    core_env=core_env,
                                                    cluster_pod_list=self.config.core.scaler.cluster_pod_list,
-                                                   default_service_account=self.config.services.service_account)
+                                                   default_service_account=self.config.services.service_account,
+                                                   default_service_tolerations=service_defaults_config.tolerations
+                                                   )
 
             # Add global configuration for privileged services
             self.controller.add_config_mount(KUBERNETES_AL_CONFIG, config_map=KUBERNETES_AL_CONFIG, key="config",
@@ -313,7 +317,7 @@ class ScalerServer(ThreadedCoreBase):
             # If we're passed an override for server-server and it's defining an HTTPS connection, then add a global
             # mount for the Root CA that needs to be mounted
             if INTERNAL_ENCRYPT:
-                self.config.core.scaler.service_defaults.mounts.append(Mount(dict(
+                service_defaults_config.mounts.append(Mount(dict(
                     name="root-ca",
                     path="/etc/assemblyline/ssl/al_root-ca.crt",
                     resource_type="secret",
@@ -322,7 +326,7 @@ class ScalerServer(ThreadedCoreBase):
                 )))
 
             # Add default mounts for (non-)privileged services
-            for mount in self.config.core.scaler.service_defaults.mounts:
+            for mount in service_defaults_config.mounts:
                 # Deprecated configuration for mounting ConfigMap
                 # TODO: Deprecate code on next major change
                 if mount.config_map:
@@ -365,7 +369,7 @@ class ScalerServer(ThreadedCoreBase):
             if CLASSIFICATION_HOST_PATH:
                 self.controller.global_mounts.append((CLASSIFICATION_HOST_PATH, '/etc/assemblyline/classification.yml'))
 
-            for mount in self.config.core.scaler.service_defaults.mounts:
+            for mount in service_defaults_config.mounts:
                 # Mounts are all storage-based since there's no equivalent to ConfigMaps in Docker
                 if mount.privileged_only:
                     self.controller.core_mounts.append((mount.name, mount.path))
