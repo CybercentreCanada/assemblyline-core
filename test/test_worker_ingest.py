@@ -198,7 +198,7 @@ def test_ingest_always_create_submission(ingest_harness):
     datastore, ingester, in_queue = ingest_harness
 
     # Simulate configuration where we'll always create a submission
-    ingester.config.core.ingester.always_create = True
+    ingester.config.core.ingester.always_create_submission = True
     get_if_exists = datastore.filescore.get_if_exists
     try:
         # Add a valid file score for all files
