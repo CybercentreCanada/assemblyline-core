@@ -17,6 +17,7 @@ import copy
 from contextlib import contextmanager
 
 import elasticapm
+import json
 import yaml
 
 from assemblyline.remote.datatypes.queues.named import NamedQueue
@@ -360,7 +361,8 @@ class ScalerServer(ThreadedCoreBase):
                 self.controller.core_mounts.append((DOCKER_CONFIGURATION_VOLUME, '/etc/assemblyline/'))
 
                 with open(os.path.join(DOCKER_CONFIGURATION_PATH, 'config.yml'), 'w') as handle:
-                    yaml.dump(self.config.as_primitives(), handle)
+                    # Convert to JSON before converting to YAML to account for direct ODM representation errors
+                    yaml.dump(json.loads(self.config.json()), handle)
 
                 with open(os.path.join(DOCKER_CONFIGURATION_PATH, 'classification.yml'), 'w') as handle:
                     yaml.dump(get_classification().original_definition, handle)
