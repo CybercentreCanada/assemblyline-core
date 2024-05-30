@@ -52,9 +52,9 @@ class BadlistClient:
             data.setdefault('file', {})
 
         # Ensure expiry_ts is set on tag-related items
-        dtl = data.pop('dtl', None) or self.config.core.expiry.badlisted_tag_dtl * 24 * 3600
+        dtl = data.pop('dtl', None) or self.config.core.expiry.badlisted_tag_dtl
         if dtl:
-            data['expiry_ts'] = now_as_iso(dtl)
+            data['expiry_ts'] = now_as_iso(dtl * 24 * 3600)
 
         # Set last updated
         data['added'] = data['updated'] = now_as_iso()
