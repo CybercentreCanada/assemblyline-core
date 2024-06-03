@@ -177,6 +177,10 @@ class TaskingClient:
 
                         heuristic = Heuristic(heuristic)
                         heuristic_id = heuristic.heur_id
+                        existing_heuristic_obj = self.datastore.heuristic.get_if_exists(heuristic_id)
+                        if existing_heuristic_obj:
+                            # Ensure statistics of heuristic are preserved
+                            heuristic.stats = existing_heuristic_obj.stats
                         plan.add_upsert_operation(heuristic_id, heuristic)
                     except Exception as e:
                         msg = f"{service.name} has an invalid heuristic ({heuristic_id}): {str(e)}"
