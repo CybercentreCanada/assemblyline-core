@@ -595,7 +595,6 @@ class Ingester(ThreadedCoreBase):
                 task.params.submitter) if g in str(task.params.classification)]
 
         # Check if this file is already being processed
-        self.stamp_filescore_key(task)
         pprevious, previous, score = None, None, None
         if not param.ignore_cache:
             pprevious, previous, score, _ = self.check(task, count_miss=False)
@@ -627,6 +626,33 @@ class Ingester(ThreadedCoreBase):
         # (So we don't end up dropping the resubmission).
         if previous:
             self.counter.increment('duplicates')
+
+            if self.config.core.ingester.always_create_submission:
+                # Create a submission record based on the cache hit
+                submission = self.datastore.submission.get(previous, as_obj=False)
+
+                # Assign the current submission as the PSID for the new submission
+                pprevious = previous
+                previous = task.ingest_id
+                task.params.psid = pprevious
+
+                submission.update({
+                    'archived': False,
+                    'archive_ts': None,
+                    'classification': task.params.classification,
+                    'expiry_ts':now_as_iso(task.params.ttl * 24 * 60 * 60),
+                    'from_archive': False,
+                    'metadata': task.submission.metadata,
+                    'params': task.params.as_primitives(),
+                    'sid': previous,
+                    'to_be_deleted': False,
+                    'times': {
+                        'submitted': task.ingest_time,
+                        'completed': "NOW"
+                    },
+                })
+                self.datastore.submission.save(previous, submission)
+
             self.finalize(pprevious, previous, score, task, cache=True)
 
             # On cache hits of any kind we want to send out a completed message
