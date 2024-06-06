@@ -4,7 +4,7 @@ import os
 from assemblyline.filestore import FileStore
 from assemblyline.common.isotime import now_as_iso
 from assemblyline_core.replay.client import APIClient, DirectClient
-from assemblyline_core.replay.replay import ReplayBase
+from assemblyline_core.replay.replay import ReplayBase, INPUT_TYPES
 
 REPLAY_BATCH_SIZE = int(os.environ.get("REPLAY_BATCH_SIZE", "1000"))
 
@@ -39,7 +39,7 @@ class ReplayCreatorWorker(ReplayBase):
             raise ValueError(f'Invalid client type ({self.replay_config.creator.client.type}). '
                              'Must be either \'api\' or \'direct\'.')
 
-    def process_alerts(self, once=False):
+    def process_alert(self, once=False):
         while self.running:
             # Process alerts found
             alert = self.client.get_next_alert()
@@ -67,7 +67,7 @@ class ReplayCreatorWorker(ReplayBase):
             if once:
                 break
 
-    def process_submissions(self, once=False):
+    def process_submission(self, once=False):
         while self.running:
             # Process submissions found
             submission = self.client.get_next_submission()
@@ -151,31 +151,19 @@ class ReplayCreatorWorker(ReplayBase):
     def process_safelist(self, once=False):
         self._process_json_exports("safelist", "id", "updated", once)
 
+    def process_signature(self, once=False):
+        self._process_json_exports("signature", "id", "last_modified", once)
+
     def process_workflow(self, once=False):
         self._process_json_exports("workflow", "id", "last_edit", once)
 
     def try_run(self):
         threads = {}
-        if self.replay_config.creator.alert_input.enabled:
-            for ii in range(self.replay_config.creator.alert_input.threads):
-                threads[f'Alert process thread #{ii}'] = self.process_alerts
-
-        if self.replay_config.creator.badlist_input.enabled:
-            for ii in range(self.replay_config.creator.badlist_input.threads):
-                threads[f'Badlist process thread #{ii}'] = self.process_badlist
-
-        if self.replay_config.creator.safelist_input.enabled:
-            for ii in range(self.replay_config.creator.safelist_input.threads):
-                threads[f'Safelist process thread #{ii}'] = self.process_safelist
-
-        if self.replay_config.creator.submission_input.enabled:
-            for ii in range(self.replay_config.creator.submission_input.threads):
-                threads[f'Submission process thread #{ii}'] = self.process_submissions
-
-        if self.replay_config.creator.workflow_input.enabled:
-            for ii in range(self.replay_config.creator.workflow_input.threads):
-                threads[f'Workflow process thread #{ii}'] = self.process_workflow
-
+        for input_type in INPUT_TYPES:
+            input_config = getattr(self.replay_config.creator, f"{input_type}_input")
+            if input_config.enabled:
+                for ii in range(input_config.threads):
+                    threads[f"{input_type.capitalize()} process thread #{ii}"] = getattr(self, f"process_{input_type}")
         if threads:
             self.maintain_threads(threads)
         else:
