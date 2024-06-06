@@ -7,8 +7,10 @@ from assemblyline.common.bundling import create_bundle, import_bundle
 from assemblyline.odm import Model
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.hash import Hash
+from assemblyline_core.replay.replay import INPUT_TYPES
 from assemblyline_core.badlist_client import BadlistClient
 from assemblyline_core.safelist_client import SafelistClient
+from assemblyline_core.signature_client import SignatureClient
 
 EMPTY_WAIT_TIME = int(os.environ.get('EMPTY_WAIT_TIME', '30'))
 REPLAY_REQUESTED = 'requested'
@@ -18,7 +20,7 @@ REPLAY_DONE = 'done'
 
 class ClientBase(object):
     def __init__(self, log, lookback_time='*',
-                 alert_fqs=None, badlist_fqs=None, safelist_fqs=None, submission_fqs=None, workflow_fqs=None):
+                 alert_fqs=None, badlist_fqs=None, safelist_fqs=None, signature_fqs=None, submission_fqs=None, workflow_fqs=None):
         # Set logger
         self.log = log
 
@@ -31,6 +33,7 @@ class ClientBase(object):
         self.alert_fqs = alert_fqs or []
         self.badlist_fqs = badlist_fqs or []
         self.safelist_fqs = safelist_fqs or []
+        self.signature_fqs = signature_fqs or []
         self.submission_fqs = submission_fqs or []
         self.workflow_fqs = workflow_fqs or []
 
@@ -202,14 +205,17 @@ class ClientBase(object):
             if once:
                 break
 
-    def setup_workflow_input_queue(self, once=False):
-        self._setup_checkpoint_based_input_queue("workflow", "workflow_id", "last_edit", once)
-
     def setup_badlist_input_queue(self, once=False):
         self._setup_checkpoint_based_input_queue("badlist", "id", "updated", once)
 
     def setup_safelist_input_queue(self, once=False):
         self._setup_checkpoint_based_input_queue("safelist", "id", "updated", once)
+
+    def setup_signature_input_queue(self, once=False):
+        self._setup_checkpoint_based_input_queue("signature", "id", "last_modified", once)
+
+    def setup_workflow_input_queue(self, once=False):
+        self._setup_checkpoint_based_input_queue("workflow", "workflow_id", "last_edit", once)
 
     def _query(self, collection, query, filter_queries=[], rows=None, track_total_hits=False):
         raise NotImplementedError()
@@ -231,6 +237,9 @@ class ClientBase(object):
 
     def get_next_safelist(self):
         return self.get_next_message("safelist")
+
+    def get_next_signature(self):
+        return self.get_next_message("signature")
 
     def get_next_submission(self):
         return self.get_next_message("submission")
@@ -321,6 +330,9 @@ class APIClient(ClientBase):
                     elif collection == "safelist":
                         data['enabled'] = obj["enabled"]
                         self.al_client.safelist.add_update(data)
+                    elif collection == "signature":
+                        data['status'] = obj["status"]
+                        self.al_client.signature.add_update(data)
                 except ClientError as e:
                     if e.status_code == 404:
                         # The document doesn't exist in the system, therefore create it
@@ -330,6 +342,8 @@ class APIClient(ClientBase):
                             self.al_client.badlist.add_update(data)
                         elif collection == "safelist":
                             self.al_client.safelist.add_update(data)
+                        elif collection == "signature":
+                            self.al_client.signature.add_update(data)
                         return
                     raise
 
@@ -363,7 +377,7 @@ class DirectClient(ClientBase):
         self.datastore = forge.get_datastore(config=config)
         self.queues = {
             queue_type: NamedQueue(f"replay_{queue_type}", host=redis)
-            for queue_type in ['alert', 'file', 'submission', 'safelist', 'badlist', 'workflow']
+            for queue_type in INPUT_TYPES + ['file']
         }
         self.checkpoint_hash = Hash('replay_checkpoints', redis_persist)
 
@@ -431,6 +445,11 @@ class DirectClient(ClientBase):
                         # Preserve the system's enabled state of the item
                         data['enabled'] = obj["enabled"]
                     es_collection.save(id, SafelistClient._merge_hashes(data, obj))
+                elif collection == "signature":
+                    if obj:
+                        # Preserve the system's status state of the item
+                        data['status'] = obj["status"]
+                    es_collection.save(id, data)
             es_collection.commit()
 
     def set_single_object_complete(self, collection, id):
