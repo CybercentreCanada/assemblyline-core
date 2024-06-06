@@ -1,8 +1,8 @@
-import json
 import requests
 import re
 import socket
 import string
+import time
 
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
 from assemblyline.odm.models.config import Config as SystemConfig
@@ -13,7 +13,7 @@ from collections import defaultdict
 from logging import Logger
 from packaging.version import parse, Version
 
-DEFAULT_DOCKER_REGISTRY = "registry.hub.docker.com"
+DEFAULT_DOCKER_REGISTRY = "hub.docker.com"
 
 
 class ContainerRegistry():
@@ -201,7 +201,7 @@ def get_latest_tag_for_service(
     server, image_name = process_image(image)
 
     # Append server to image if not the default server
-    if server != "registry.hub.docker.com":
+    if server != DEFAULT_DOCKER_REGISTRY:
         image_name = "/".join([server, image_name])
 
     return image_name, tag_name, auth_config
@@ -211,8 +211,10 @@ def get_latest_tag_for_service(
 def _get_dockerhub_tags(image_name, update_channel, proxies=None):
     # Find latest tag for each types
     rv = []
-    url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/repositories/{image_name}/tags" \
-          f"?page_size=50&page=1&name={update_channel}"
+    namespace, repository = image_name.split('/', 1)
+    url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/namespaces/{namespace}/repositories/{repository}/tags"
+    f"?page_size=50&page=1&name={update_channel}"
+
     while True:
         resp = requests.get(url, proxies=proxies)
         if resp.ok:
@@ -222,6 +224,10 @@ def _get_dockerhub_tags(image_name, update_channel, proxies=None):
             url = resp_data.get('next', None)
             if url is None:
                 break
+        elif resp.status_code == 429:
+            # Based on https://docs.docker.com/docker-hub/api/latest/#tag/rate-limiting
+            # We've hit the rate limit so we have to wait and try again later
+            time.sleep(int(time.now()) - int(resp.headers['retry-after']))
         else:
             break
 
