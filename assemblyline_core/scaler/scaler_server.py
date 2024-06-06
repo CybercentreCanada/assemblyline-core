@@ -652,7 +652,7 @@ class ScalerServer(ThreadedCoreBase):
                         profile.privileged = service.privileged
 
                         for dependency_name, dependency_blob in dependency_blobs.items():
-                            if profile.dependency_blobs[dependency_name] != dependency_blob:
+                            if profile.dependency_blobs.get(dependency_name, '') != dependency_blob:
                                 self.log.info(f"Updating deployment information for {name}/{dependency_name}")
                                 profile.dependency_blobs[dependency_name] = dependency_blob
                                 self.controller.start_stateful_container(
