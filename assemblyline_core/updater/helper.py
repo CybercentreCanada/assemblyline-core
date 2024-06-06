@@ -227,7 +227,7 @@ def _get_dockerhub_tags(image_name, update_channel, proxies=None):
         elif resp.status_code == 429:
             # Based on https://docs.docker.com/docker-hub/api/latest/#tag/rate-limiting
             # We've hit the rate limit so we have to wait and try again later
-            time.sleep(int(time.time()) - int(resp.headers['retry-after']))
+            time.sleep(int(resp.headers['retry-after']) - int(time.time()))
         else:
             break
 
