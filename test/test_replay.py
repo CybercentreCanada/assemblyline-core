@@ -2,11 +2,12 @@ import collections
 import json
 import os
 import random
+import time
 
 import pytest
 
 from assemblyline.common import forge
-from assemblyline.odm.random_data import create_alerts, wipe_alerts, wipe_submissions, create_submission, create_badlists, create_safelists, create_workflows, wipe_badlist, wipe_safelist, wipe_workflows
+from assemblyline.odm.random_data import create_alerts, wipe_alerts, wipe_submissions, create_submission, create_badlists, create_safelists, create_workflows, wipe_badlist, wipe_safelist, wipe_workflows, create_signatures, wipe_signatures
 from assemblyline_core.replay.creator.run import ReplayCreator
 from assemblyline_core.replay.creator.run_worker import ReplayCreatorWorker
 from assemblyline_core.replay.loader.run import ReplayLoader
@@ -15,6 +16,7 @@ from assemblyline_core.replay.loader.run_worker import ReplayLoaderWorker
 NUM_ALERTS = 1
 NUM_BADLIST_ITEMS = 1
 NUM_SAFELIST_ITEMS = 1
+NUM_SIGNATURES = 1
 NUM_SUBMISSIONS = 1
 NUM_WORKFLOWS = 1
 
@@ -48,14 +50,24 @@ def datastore(request, datastore_connection, fs):
     wipe_badlist(datastore_connection)
     wipe_safelist(datastore_connection)
     wipe_submissions(datastore_connection, fs)
+    wipe_signatures(datastore_connection)
     wipe_workflows(datastore_connection)
 
     for _ in range(NUM_SUBMISSIONS):
         all_submissions.append(create_submission(datastore_connection, fs))
     create_alerts(datastore_connection, alert_count=NUM_ALERTS,
                   submission_list=all_submissions)
-    create_safelists(datastore_connection, count=NUM_SAFELIST_ITEMS)
     create_badlists(datastore_connection, count=NUM_BADLIST_ITEMS)
+
+    # Generate all signatures from testing set, but only keep what's being asked to limit to
+    create_signatures(datastore_connection)
+    data_collections["signature"] = \
+        datastore_connection.signature.search("*", rows=NUM_SIGNATURES, fl="id,*")['items']
+    wipe_signatures(datastore_connection)
+    for sig in data_collections["signature"]:
+        datastore_connection.signature.save(sig.id, sig)
+
+    create_safelists(datastore_connection, count=NUM_SAFELIST_ITEMS)
     create_workflows(datastore_connection, count=NUM_WORKFLOWS)
     for alert in datastore_connection.alert.stream_search("id:*", fl="*"):
         all_alerts.append(alert)
@@ -70,6 +82,7 @@ def datastore(request, datastore_connection, fs):
         wipe_alerts(datastore_connection)
         wipe_badlist(datastore_connection)
         wipe_safelist(datastore_connection)
+        wipe_signatures(datastore_connection)
         wipe_submissions(datastore_connection, fs)
         wipe_workflows(datastore_connection)
 
@@ -141,7 +154,7 @@ def test_replay_single_alert(config, datastore, creator, creator_worker, loader,
         'alert_id'] == alert.alert_id
 
     # Test replay creator worker
-    creator_worker.process_alerts(once=True)
+    creator_worker.process_alert(once=True)
     datastore.alert.commit()
     assert creator_worker.client.queues['alert'].length() == 0
     assert datastore.alert.get(alert.alert_id, as_obj=False)['metadata']['replay'] == 'done'
@@ -190,7 +203,7 @@ def test_replay_single_submission(config, datastore, creator, creator_worker, lo
     assert creator.client.queues['submission'].peek_next()['sid'] == sub['sid']
 
     # Test replay creator worker
-    creator_worker.process_submissions(once=True)
+    creator_worker.process_submission(once=True)
     datastore.submission.commit()
     assert creator_worker.client.queues['submission'].length() == 0
     assert datastore.submission.get(sub['sid'], as_obj=False)['metadata']['replay'] == 'done'
@@ -222,7 +235,7 @@ def test_replay_single_submission(config, datastore, creator, creator_worker, lo
     assert 'replay' not in loaded_submission['metadata']
 
 
-@pytest.mark.parametrize("collection", ["badlist", "safelist", "workflow"])
+@pytest.mark.parametrize("collection", ["badlist", "safelist", "signature", "workflow"])
 def test_replay_single_data_collection(datastore, creator, creator_worker, loader, loader_worker, collection):
     output_dir = creator.replay_config.creator.output_filestore.replace('file://', '')
     input_dir = loader.replay_config.loader.input_directory

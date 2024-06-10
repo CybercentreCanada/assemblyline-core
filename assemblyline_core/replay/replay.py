@@ -11,6 +11,7 @@ from assemblyline.odm.models.replay import ReplayConfig
 from assemblyline_core.server_base import ServerBase
 
 CONFIG_PATH = os.environ.get('REPLAY_CONFIG_PATH', '/etc/assemblyline/replay.yml')
+INPUT_TYPES = ['alert', 'badlist', 'safelist', 'signature', 'submission', 'workflow']
 
 
 class ReplayBase(ServerBase):

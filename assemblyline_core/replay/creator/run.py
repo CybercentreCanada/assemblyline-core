@@ -1,8 +1,7 @@
 import os
 
 from assemblyline_core.replay.client import APIClient, DirectClient
-from assemblyline_core.replay.replay import ReplayBase
-
+from assemblyline_core.replay.replay import ReplayBase, INPUT_TYPES
 
 class ReplayCreator(ReplayBase):
     def __init__(self):
@@ -16,12 +15,9 @@ class ReplayCreator(ReplayBase):
         os.makedirs(self.replay_config.creator.working_directory, exist_ok=True)
 
         # Load client
-        client_config = dict(lookback_time=self.replay_config.creator.lookback_time,
-                             alert_fqs=self.replay_config.creator.alert_input.filter_queries,
-                             badlist_fqs=self.replay_config.creator.badlist_input.filter_queries,
-                             safelist_fqs=self.replay_config.creator.safelist_input.filter_queries,
-                             submission_fqs=self.replay_config.creator.submission_input.filter_queries,
-                             workflow_fqs=self.replay_config.creator.workflow_input.filter_queries)
+        client_config = {f'{input_type}_fqs': getattr(self.replay_config.creator, f'{input_type}_input').filter_queries
+                         for input_type in INPUT_TYPES}
+        client_config['lookback_time'] = self.replay_config.creator.lookback_time
 
         if self.replay_config.creator.client.type == 'direct':
             self.log.info("Using direct database access client")
@@ -36,20 +32,9 @@ class ReplayCreator(ReplayBase):
 
     def try_run(self):
         threads = {}
-        if self.replay_config.creator.alert_input.enabled:
-            threads['Load Alerts'] = self.client.setup_alert_input_queue
-
-        if self.replay_config.creator.badlist_input.enabled:
-            threads['Load Badlist Items'] = self.client.setup_badlist_input_queue
-
-        if self.replay_config.creator.safelist_input.enabled:
-            threads['Load Safelist Items'] = self.client.setup_safelist_input_queue
-
-        if self.replay_config.creator.submission_input.enabled:
-            threads['Load Submissions'] = self.client.setup_submission_input_queue
-
-        if self.replay_config.creator.workflow_input.enabled:
-            threads['Load Workflows'] = self.client.setup_workflow_input_queue
+        for input_type in INPUT_TYPES:
+            if getattr(self.replay_config.creator, f'{input_type}_input').enabled:
+                threads[f'Load {input_type.capitalize()}s'] = getattr(self.client, f'setup_{input_type}_input_queue')
 
         if threads:
             self.maintain_threads(threads)
