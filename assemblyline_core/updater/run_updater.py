@@ -359,11 +359,17 @@ class KubernetesUpdateInterface:
 
         if blocking:
             try:
-                # Obtain the name of the pod that spawned from the Job
-                pod_name = self.api.list_namespaced_pod(namespace=self.namespace,
-                                                        label_selector=",".join([f"{k}={v}"
-                                                                                 for k, v in labels.items()]),
-                                                        limit=1).items[0].metadata.name
+                pod_name = None
+                while not pod_name:
+                    time.sleep(3)
+                    # Obtain the name of the pod that spawned from the Job
+                    pod = self.api.list_namespaced_pod(namespace=self.namespace,
+                                                       label_selector=",".join([f"{k}={v}"
+                                                                                for k, v in labels.items()]),
+                                                                                limit=1)
+                    if pod.items:
+                        pod_name = pod.items[0].metadata.name
+
                 while not (status.failed or status.succeeded):
                     time.sleep(3)
                     status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name,
