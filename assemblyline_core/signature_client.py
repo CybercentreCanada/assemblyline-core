@@ -17,12 +17,13 @@ CLASSIFICATION = forge.get_classification()
 class SignatureClient:
     """A helper class to simplify signature management for privileged services and service-server."""
 
-    def __init__(self, datastore: AssemblylineDatastore = None, config=None):
+    def __init__(self, datastore: AssemblylineDatastore = None, config=None, classification_replace_map={}):
         self.log = logging.getLogger('assemblyline.signature_client')
         self.config = config or forge.CachedObject(forge.get_config)
         self.datastore = datastore or forge.get_datastore(self.config)
         self.service_list = forge.CachedObject(self.datastore.list_all_services, kwargs=dict(as_obj=False, full=True))
         self.delimiters = forge.CachedObject(self._get_signature_delimiters)
+        self.classification_replace_map = classification_replace_map
 
     def _get_signature_delimiters(self):
         signature_delimiters = {}
@@ -38,6 +39,22 @@ class SignatureClient:
         else:
             delimiter = SIGNATURE_DELIMITERS.get(delimiter_type, '\n\n')
         return {'type': delimiter_type, 'delimiter': delimiter}
+
+    def _update_classification(self, signature):
+        classification = signature['classification']
+        # Update classification of signatures based on rewrite definition
+        for term, replacement in self.classification_replace_map.items():
+            if replacement.startswith('_'):
+                # Replace with known field in Signature model
+                # Otherwise replace with literal
+                if signature.get(replacement[1:]):
+                    replacement = signature[replacement[1:]]
+
+            classification = classification.replace(term, replacement)
+
+        # Save the (possibly) updated classfication
+        signature['classification'] = classification
+
 
     def add_update(self, data, dedup_name=True):
         if data.get('type', None) is None or data['name'] is None or data['data'] is None:
@@ -78,6 +95,8 @@ class SignatureClient:
 
             # Preserve signature stats
             data['stats'] = old['stats']
+
+        self._update_classification(data)
 
         # Save the signature
         success = self.datastore.signature.save(key, data)
@@ -125,6 +144,8 @@ class SignatureClient:
 
                 # Preserve signature stats
                 rule['stats'] = old_data[key]['stats']
+
+            self._update_classification(rule)
 
             plan.add_upsert_operation(key, rule)
 

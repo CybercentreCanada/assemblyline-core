@@ -103,3 +103,16 @@ def test_download_signatures(client):
 def test_update_available(client):
     assert client.update_available()
     assert not client.update_available(since='2030-01-01T00:00:00.000000Z')
+
+def test_update_classification(client):
+    sig = client.datastore.signature.search("*", rows=1, as_obj=False)['items'][0]
+
+    # Update classification with literal string
+    client.classification_replace_map = {"TLP:C": "TLP:A//TEST"}
+    client._update_classification(sig)
+    assert sig['classification'] == "TLP:A//TEST"
+
+    # Update classification with value from another field within the signature
+    client.classification_replace_map = {"TEST": "_source"}
+    client._update_classification(sig)
+    assert sig['classification'] == f"TLP:A//{sig['source']}"
