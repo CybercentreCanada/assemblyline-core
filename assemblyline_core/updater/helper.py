@@ -62,6 +62,43 @@ class DockerRegistry(ContainerRegistry):
             return resp_data['tags'] or []
         return []
 
+class AzureContainerRegistry(ContainerRegistry):
+    def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None, token_server=None):
+        # Find latest tag for each types
+        url = f"https://{server}/v2/{image_name}/tags/list"
+
+        # Get tag list
+        headers = {}
+        if auth:
+            headers["Authorization"] = auth
+
+        # Attempt request with provided credentials alone
+        resp = self._perform_request(url, headers, verify, proxies)
+
+        if not resp:
+            # Authentication with just credentials failed, moving over to generating a bearer token
+
+            # Retrieve token for authentication: https://azure.github.io/acr/Token-BasicAuth.html#using-the-token-api
+            token_url = f"https://{server}/oauth2/token?scope=repository:{image_name}:metadata_read,pull&service={server}"
+            resp = self._perform_request(token_url, headers, verify, proxies)
+            if resp and resp.ok:
+                # Request to obtain token was successful, set Authorization header for registry API
+                token = resp.json().get('access_token')
+                headers["Authorization"] = f"Bearer {token}"
+
+                resp = self._perform_request(url, headers, verify, proxies)
+                if not resp:
+                    # Fetching tag list failed
+                    return []
+
+        # At this point, we should have a response from the API
+        if resp and resp.ok:
+            # Test for positive list of tags
+            resp_data = resp.json()
+            return resp_data['tags'] or []
+
+        return []
+
 class HarborRegistry(ContainerRegistry):
     def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None, token_server=None):
         # Determine project/repo IDs from image name
@@ -158,7 +195,11 @@ def get_latest_tag_for_service(
         # We're assuming that if only a password is given, then this is a token
         auth = f"Bearer {service_config.docker_config.registry_password}"
 
-    registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
+    if server.endswith(".azurecr.io"):
+        # This is an Azure Container Registry based on the server name
+        registry = AzureContainerRegistry()
+    else:
+        registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
     token_server = None
     proxies = None
     for reg_conf in system_config.core.updater.registry_configs:
