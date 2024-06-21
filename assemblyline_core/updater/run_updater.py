@@ -337,6 +337,7 @@ class KubernetesUpdateInterface:
             priority_class_name=self.priority_class,
             service_account_name=docker_config.service_account or self.default_service_account or PRIVILEGED_SERVICE_ACCOUNT_NAME,
             affinity=selector_to_node_affinity(self.linux_node_selector),
+            tolerations=self.default_service_tolerations
         )
 
         if use_pull_secret:

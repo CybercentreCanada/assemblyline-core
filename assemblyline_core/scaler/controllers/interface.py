@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
+
 if TYPE_CHECKING:
     from assemblyline_core.scaler.scaler_server import ServiceProfile
 
@@ -9,6 +10,14 @@ class ServiceControlError(RuntimeError):
     def __init__(self, message, service_name):
         super().__init__(message)
         self.service_name = service_name
+
+
+class ContainerEvent:
+    def __init__(self, object_name: str, message: str, service_name=None, updater=None) -> None:
+        self.object_name = object_name
+        self.message = message
+        self.service_name = service_name
+        self.updater = updater
 
 
 class ControllerInterface:
@@ -50,7 +59,7 @@ class ControllerInterface:
     def get_running_container_names(self):
         raise NotImplementedError()
 
-    def new_events(self):
+    def new_events(self) -> list[ContainerEvent]:
         return []
 
     def stateful_container_key(self, service_name: str, container_name: str, spec, change_key: str) -> Optional[str]:
