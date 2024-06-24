@@ -87,9 +87,6 @@ class AzureContainerRegistry(ContainerRegistry):
                 headers["Authorization"] = f"Bearer {token}"
 
                 resp = self._perform_request(url, headers, verify, proxies)
-                if not resp:
-                    # Fetching tag list failed
-                    return []
 
         # At this point, we should have a response from the API
         if resp and resp.ok:
