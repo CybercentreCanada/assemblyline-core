@@ -217,7 +217,7 @@ def get_latest_tag_for_service(
 
     # Pre-filter tags to only consider 'compatible' tags relative to the running system
     tags = [t for t in tags
-            if re.match(f"({FRAMEWORK_VERSION})[.]({SYSTEM_VERSION})[.]\\d+[.]({update_channel})\\d+", t)]
+            if re.match(f"({FRAMEWORK_VERSION})\.({SYSTEM_VERSION})\.\\d+\.({update_channel})\\d+", t)]
 
     if not tags:
         logger.warning(f"{prefix}Cannot fetch latest tag for service {service_name} - {image_name}"
@@ -252,14 +252,28 @@ def _get_dockerhub_tags(image_name, update_channel, proxies=None):
     # Find latest tag for each types
     rv = []
     namespace, repository = image_name.split('/', 1)
-    url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/namespaces/{namespace}/repositories/{repository}/tags"
-    f"?page_size=50&page=1&name={update_channel}"
+    url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/namespaces/{namespace}/repositories/{repository}/tags" \
+        f"?page_size=50&page=1&name={update_channel}&ordering=last_updated"
 
     while True:
         resp = requests.get(url, proxies=proxies)
         if resp.ok:
             resp_data = resp.json()
-            rv.extend([x['name'] for x in resp_data['results']])
+            if namespace == "cccs":
+                # The tags are coming from a repository managed by the Assemblyline team
+                for x in resp_data['results']:
+                    tag_name = x['name']
+                    if tag_name == f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.{update_channel}":
+                        # Ignore tag aliases containing the update_channel
+                        continue
+
+                    if tag_name.startswith(f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}"):
+                        # Because the order of paging is based on `last_updated`,
+                        # we can return the first valid candidate
+                        return [tag_name]
+            else:
+                # The tags are coming from another repository, so we're don't know the ordering of tags
+                rv.extend([x['name'] for x in resp_data['results']])
             # Page until there are no results left
             url = resp_data.get('next', None)
             if url is None:
