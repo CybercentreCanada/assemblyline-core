@@ -59,8 +59,10 @@ AL_SHUTDOWN_QUIT = 60
 FINALIZING_WINDOW = max(AL_SHUTDOWN_GRACE - AL_SHUTDOWN_QUIT, 0)
 RESULT_BATCH_SIZE = int(os.environ.get('DISPATCHER_RESULT_BATCH_SIZE', '50'))
 ERROR_BATCH_SIZE = int(os.environ.get('DISPATCHER_ERROR_BATCH_SIZE', '50'))
-DYNAMIC_ANALYSIS_CATEGORY = 'Dynamic Analysis'
 DAY_IN_SECONDS = 24 * 60 * 60
+
+# TODO: DYNAMIC_ANALYSIS_CATEGORY can be removed after assemblyline version
+DYNAMIC_ANALYSIS_CATEGORY = 'Dynamic Analysis'
 
 
 class KeyType(enum.Enum):
@@ -327,8 +329,15 @@ class SubmissionTask:
                 service = scheduler.services.get(service)
                 if not service:
                     continue
+
+                # TODO: the following 2 lines can be removed when assemblyline changed to version 4.6+
                 if service.category == DYNAMIC_ANALYSIS_CATEGORY:
                     self.forbid_for_children(sha256, service.name)
+
+                prevented_services = scheduler.expand_categories(service.recursion_prevention)
+
+                for service_name in prevented_services:
+                    self.forbid_for_children(sha256, service_name)
 
             # Replay the process of receiving results for dispatcher internal state
             for k, result in results.items():
@@ -366,6 +375,7 @@ class SubmissionTask:
             self._forbidden_services[sha256].add(service_name)
         except KeyError:
             self._forbidden_services[sha256] = {service_name}
+
 
     def register_children(self, parent: str, children: list[str]):
         """
@@ -892,7 +902,8 @@ class Dispatcher(ThreadedCoreBase):
 
             # If Dynamic Recursion Prevention is in effect and the file is not part of the bypass list,
             # Find the list of services this file is forbidden from being sent to.
-            ignore_drp = submission.params.ignore_dynamic_recursion_prevention
+            # TODO: remove "or submission.params.ignore_dynamic_recursion_prevention" after assemblyline upgrade to version 4.6+
+            ignore_drp = submission.params.ignore_recursion_prevention or submission.params.ignore_dynamic_recursion_prevention
             if not ignore_drp and sha256 not in task.dynamic_recursion_bypass:
                 forbidden_services = task.find_recursion_excluded_services(sha256)
 
@@ -990,9 +1001,16 @@ class Dispatcher(ThreadedCoreBase):
                     if service.uses_tag_scores:
                         tag_fields.append('score')
 
-                    # Mark this routing for the purposes of dynamic recursion prevention
+                    # Mark this routing for the purposes of recursion prevention
+                    # TODO: The following 2 lines can be removed after assemblyline upgrade to version 4.6+
                     if service.category == DYNAMIC_ANALYSIS_CATEGORY:
                         task.forbid_for_children(sha256, service_name)
+
+                    prevented_services = self.scheduler.expand_categories(service.recursion_prevention)
+
+                    for service_name in prevented_services:
+                        task.forbid_for_children(sha256, service_name)
+
 
                     # Build the actual service dispatch message
                     config = self.build_service_config(service, submission)
@@ -1008,7 +1026,8 @@ class Dispatcher(ThreadedCoreBase):
                         max_files=task.submission.params.max_extracted,
                         ttl=submission.params.ttl,
                         ignore_cache=submission.params.ignore_cache,
-                        ignore_dynamic_recursion_prevention=submission.params.ignore_dynamic_recursion_prevention,
+                        # TODO: remove "or submission.params.ignore_dynamic_recursion_prevention" after assemblyline upgrade to version 4.6+
+                        ignore_recursion_prevention=submission.params.ignore_recursion_prevention or submission.params.ignore_dynamic_recursion_prevention ,
                         ignore_filtering=ignore_filtering,
                         tags=[{field: x[field] for field in tag_fields} for x in tags],
                         temporary_submission_data=[
