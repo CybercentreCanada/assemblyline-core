@@ -24,6 +24,7 @@ from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline_core.dispatching.client import DispatchClient
 
+
 class TaskingClientException(Exception):
     pass
 
@@ -252,7 +253,7 @@ class TaskingClient:
         # If we are allowed, try to see if the result has been cached
         if not task.ignore_cache and not service_data.disable_cache:
             # Checking for previous results for this key
-            result = self.datastore.result.get_if_exists(result_key)
+            result, version = self.datastore.result.get_if_exists(result_key, version=True)
             if result:
                 metric_factory.increment('cache_hit')
                 if result.result.score:
@@ -262,8 +263,8 @@ class TaskingClient:
 
                 result.archive_ts = None
 
-                if task.ttl:
-                    result.expiry_ts = now_as_iso(task.ttl * 24 * 60 * 60)
+                if task.ttl and result.expiry_ts:
+                    result.expiry_ts = max(result.expiry_ts, now_as_iso(task.ttl * 24 * 60 * 60))
 
                 # Create a list of files to freshen
                 freshen_hashes = [task.fileinfo.sha256]
@@ -286,7 +287,7 @@ class TaskingClient:
                 for sha256 in freshen_hashes:
                     self.datastore.save_or_freshen_file(sha256, {}, result.expiry_ts, result.classification)
 
-                self.dispatch_client.service_finished(task.sid, result_key, result)
+                self.dispatch_client.service_finished(task.sid, result_key, result, version=version)
                 cache_found = True
 
             if not cache_found:
