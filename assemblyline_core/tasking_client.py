@@ -3,7 +3,6 @@ import time
 from typing import Any, Dict, Optional
 
 import elasticapm
-
 from assemblyline.common import forge
 from assemblyline.common.constants import SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.dict_utils import flatten, unflatten
@@ -23,6 +22,7 @@ from assemblyline.odm.models.tagging import Tagging
 from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import ExpiringHash
 from assemblyline_core.dispatching.client import DispatchClient
+
 
 class TaskingClientException(Exception):
     pass

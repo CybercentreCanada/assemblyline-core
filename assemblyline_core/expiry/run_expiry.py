@@ -2,36 +2,35 @@
 from __future__ import annotations
 
 import concurrent.futures
-import threading
 import functools
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, Future, as_completed
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Optional
 
 import elasticapm
-from datemath import dm
-
-from assemblyline_core.server_base import ServerBase
-from assemblyline_core.dispatching.dispatcher import BAD_SID_HASH
 from assemblyline.common import forge
 from assemblyline.common.isotime import epoch_to_iso, now_as_iso
 from assemblyline.common.metrics import MetricsFactory
+from assemblyline.datastore.collection import Index
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.expiry_heartbeat import Metrics
 from assemblyline.remote.datatypes import get_client
-from assemblyline.datastore.collection import Index
 from assemblyline.remote.datatypes.set import Set
+from assemblyline_core.dispatching.dispatcher import BAD_SID_HASH
+from assemblyline_core.server_base import ServerBase
+from datemath import dm
 
 if TYPE_CHECKING:
     from assemblyline.datastore.collection import ESCollection
 
 
-def file_delete_worker(logger, filestore_urls, file_batch, archive_filestore_urls=None) -> list[tuple[str, bool]]:
+def file_delete_worker(logger, filestore_urls, file_batch, archive_filestore_urls=None, use_mi=False) -> list[tuple[str, bool]]:
     try:
-        filestore = FileStore(*filestore_urls)
+        filestore = FileStore(*filestore_urls, use_mi=use_mi)
         if archive_filestore_urls and filestore_urls != archive_filestore_urls:
-            archivestore = FileStore(*archive_filestore_urls)
+            archivestore = FileStore(*archive_filestore_urls, use_mi=use_mi)
         else:
             archivestore = filestore
 
@@ -153,12 +152,14 @@ class ExpiryManager(ServerBase):
         return self.file_delete_worker.submit(file_delete_worker, logger=self.log,
                                               filestore_urls=list(self.config.filestore.storage),
                                               file_batch=file_batch,
-                                              archive_filestore_urls=list(self.config.filestore.archive))
+                                              archive_filestore_urls=list(self.config.filestore.archive),
+                                              use_mi=self.config.filestore.use_mi)
 
     def cachestore_delete(self, file_batch, _):
         return self.file_delete_worker.submit(file_delete_worker, logger=self.log,
                                               filestore_urls=list(self.config.filestore.cache),
-                                              file_batch=file_batch)
+                                              file_batch=file_batch,
+                                              use_mi=self.config.filestore.use_mi)
 
     def _finish_delete(self, collection: ESCollection, task: Future, expire_only: list[tuple[str, bool]]):
         # Wait until the worker process finishes deleting files

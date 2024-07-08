@@ -1,10 +1,10 @@
 import json
 import os
 
-from assemblyline.filestore import FileStore
 from assemblyline.common.isotime import now_as_iso
+from assemblyline.filestore import FileStore
 from assemblyline_core.replay.client import APIClient, DirectClient
-from assemblyline_core.replay.replay import ReplayBase, INPUT_TYPES
+from assemblyline_core.replay.replay import INPUT_TYPES, ReplayBase
 
 REPLAY_BATCH_SIZE = int(os.environ.get("REPLAY_BATCH_SIZE", "1000"))
 
@@ -18,7 +18,7 @@ class ReplayCreatorWorker(ReplayBase):
             return
 
         # Initialize filestore object
-        self.filestore = FileStore(self.replay_config.creator.output_filestore)
+        self.filestore = FileStore(self.replay_config.creator.output_filestore, use_mi=self.config.filestore.use_mi)
 
         # Create cache directory
         os.makedirs(self.replay_config.creator.working_directory, exist_ok=True)

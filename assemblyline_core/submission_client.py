@@ -18,13 +18,13 @@ client from copying the file again. Once the client has copied the file
 (if required) it then issues a final 'submit'.
 
 """
-from assemblyline.common.classification import InvalidClassification
-import elasticapm
 import logging
 import os
-from typing import List, Optional, Tuple, Dict
+from typing import Dict, List, Optional, Tuple
 
+import elasticapm
 from assemblyline.common import forge
+from assemblyline.common.classification import InvalidClassification
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
 from assemblyline.common.isotime import epoch_to_iso, now
@@ -32,10 +32,10 @@ from assemblyline.common.str_utils import safe_str
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.submission import Submission as SubmissionObject
+from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.file import File as FileInfo
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import File, Submission
-from assemblyline.odm.models.config import Config
 from assemblyline_core.dispatching.client import DispatchClient
 
 Classification = forge.get_classification()
