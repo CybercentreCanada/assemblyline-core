@@ -62,7 +62,7 @@ RESULT_BATCH_SIZE = int(os.environ.get('DISPATCHER_RESULT_BATCH_SIZE', '50'))
 ERROR_BATCH_SIZE = int(os.environ.get('DISPATCHER_ERROR_BATCH_SIZE', '50'))
 DAY_IN_SECONDS = 24 * 60 * 60
 
-# TODO: DYNAMIC_ANALYSIS_CATEGORY can be removed after assemblyline version
+# TODO: DYNAMIC_ANALYSIS_CATEGORY can be removed after assemblyline version 4.6+
 DYNAMIC_ANALYSIS_CATEGORY = 'Dynamic Analysis'
 
 
