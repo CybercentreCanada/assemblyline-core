@@ -26,11 +26,11 @@ if TYPE_CHECKING:
     from assemblyline.datastore.collection import ESCollection
 
 
-def file_delete_worker(logger, filestore_urls, file_batch, archive_filestore_urls=None, use_mi=False) -> list[tuple[str, bool]]:
+def file_delete_worker(logger, filestore_urls, file_batch, archive_filestore_urls=None) -> list[tuple[str, bool]]:
     try:
-        filestore = FileStore(*filestore_urls, use_mi=use_mi)
+        filestore = FileStore(*filestore_urls)
         if archive_filestore_urls and filestore_urls != archive_filestore_urls:
-            archivestore = FileStore(*archive_filestore_urls, use_mi=use_mi)
+            archivestore = FileStore(*archive_filestore_urls)
         else:
             archivestore = filestore
 
@@ -152,14 +152,12 @@ class ExpiryManager(ServerBase):
         return self.file_delete_worker.submit(file_delete_worker, logger=self.log,
                                               filestore_urls=list(self.config.filestore.storage),
                                               file_batch=file_batch,
-                                              archive_filestore_urls=list(self.config.filestore.archive),
-                                              use_mi=self.config.filestore.use_mi)
+                                              archive_filestore_urls=list(self.config.filestore.archive))
 
     def cachestore_delete(self, file_batch, _):
         return self.file_delete_worker.submit(file_delete_worker, logger=self.log,
                                               filestore_urls=list(self.config.filestore.cache),
-                                              file_batch=file_batch,
-                                              use_mi=self.config.filestore.use_mi)
+                                              file_batch=file_batch)
 
     def _finish_delete(self, collection: ESCollection, task: Future, expire_only: list[tuple[str, bool]]):
         # Wait until the worker process finishes deleting files

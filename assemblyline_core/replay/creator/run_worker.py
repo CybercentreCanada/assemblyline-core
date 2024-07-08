@@ -18,7 +18,7 @@ class ReplayCreatorWorker(ReplayBase):
             return
 
         # Initialize filestore object
-        self.filestore = FileStore(self.replay_config.creator.output_filestore, use_mi=self.config.filestore.use_mi)
+        self.filestore = FileStore(self.replay_config.creator.output_filestore)
 
         # Create cache directory
         os.makedirs(self.replay_config.creator.working_directory, exist_ok=True)
