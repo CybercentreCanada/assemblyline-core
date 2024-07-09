@@ -175,7 +175,7 @@ class WorkflowManager(ServerBase):
 
                     except SearchException:
                         self.log.warning(f"Invalid query '{safe_str(workflow.query or '')}' in workflow "
-                                         f"'{workflow.name or 'unknown'}' by '{workflow.created_by or 'unknown'}'")
+                                         f"'{workflow.name or 'unknown'}' by '{workflow.creator or 'unknown'}'")
 
                         # End of transaction
                         if self.apm_client:
