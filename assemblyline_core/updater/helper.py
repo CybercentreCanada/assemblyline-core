@@ -1,4 +1,5 @@
 import requests
+import os
 import re
 import socket
 import string
@@ -12,6 +13,7 @@ from base64 import b64encode
 from collections import defaultdict
 from logging import Logger
 from packaging.version import parse, Version
+from azure.identity import DefaultAzureCredential, WorkloadIdentityCredential
 
 DEFAULT_DOCKER_REGISTRY = "hub.docker.com"
 
@@ -176,8 +178,10 @@ def get_latest_tag_for_service(
         for registry in system_config.services.registries:
             if server.startswith(registry['name']):
                 # Apply the credentials that the system is configured to use with the registry
-                service_config.docker_config.registry_username = registry['username']
-                service_config.docker_config.registry_password = registry['password']
+                if not system_config.services.use_acr_mi_auth:
+                    # Only required if not using mi for authentication
+                    service_config.docker_config.registry_username = registry['username']
+                    service_config.docker_config.registry_password = registry['password']
                 service_config.docker_config.registry_type = registry['type']
                 break
 
@@ -192,6 +196,21 @@ def get_latest_tag_for_service(
     elif service_config.docker_config.registry_password:
         # We're assuming that if only a password is given, then this is a token
         auth = f"Bearer {service_config.docker_config.registry_password}"
+    elif system_config.services.use_acr_mi_auth:
+        acr_client_id = system_config.services.acr_mi_client_id
+        acr_tenant_id = system_config.services.acr_mi_tenant_id
+        acr_scope = system_config.services.acr_mi_scope
+
+        if acr_client_id and acr_tenant_id:
+            credential = WorkloadIdentityCredential(tenant_id=acr_tenant_id, client_id=acr_client_id)
+        else:
+            credential = DefaultAzureCredential()
+
+        try:
+            token = credential.get_token(acr_scope)
+            auth = f"Bearer {token.token}"
+        except Exception as e:
+            logger.warning(f"Failed to get MI token: {str(e)}")
 
     if server.endswith(".azurecr.io"):
         # This is an Azure Container Registry based on the server name
