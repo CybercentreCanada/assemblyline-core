@@ -6,11 +6,12 @@ import time
 
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
 from assemblyline.odm.models.config import Config as SystemConfig
-from assemblyline.odm.models.service import Service as ServiceConfig
+from assemblyline.odm.models.service import Service as ServiceConfig, DockerConfig
 
 from base64 import b64encode
 from collections import defaultdict
 from logging import Logger
+from typing import Dict
 from packaging.version import parse, Version
 
 DEFAULT_DOCKER_REGISTRY = "hub.docker.com"
@@ -130,6 +131,19 @@ REGISTRY_TYPE_MAPPING = {
     'harbor': HarborRegistry()
 }
 
+def get_registry_config(docker_config: DockerConfig, system_config: SystemConfig) -> Dict[str, str]:
+    server = docker_config.image.split("/", 1)[0]
+
+    # Prioritize authentication given as a system configuration
+    for registry in system_config.services.registries:
+        if server.startswith(registry['name']):
+            # Return authentication credentials and the type of registry
+            return dict(username=registry['username'], password=registry['password'], type=registry['type'])
+
+    # Otherwise return what's configured for the service
+    return dict(username=docker_config.registry_username, password=docker_config.registry_password,
+                type=docker_config.registry_type)
+
 
 def get_latest_tag_for_service(
         service_config: ServiceConfig, system_config: SystemConfig, logger: Logger, prefix: str = ""):
@@ -168,36 +182,23 @@ def get_latest_tag_for_service(
 
     # Get authentication
     auth = None
-    auth_config = None
     server, image_name = process_image(searchable_image)
 
-    if not (service_config.docker_config.registry_username and service_config.docker_config.registry_password):
-        # If the passed in service configuration is missing registry credentials, check against system configuration
-        for registry in system_config.services.registries:
-            if server.startswith(registry['name']):
-                # Apply the credentials that the system is configured to use with the registry
-                service_config.docker_config.registry_username = registry['username']
-                service_config.docker_config.registry_password = registry['password']
-                service_config.docker_config.registry_type = registry['type']
-                break
-
-    if service_config.docker_config.registry_username and service_config.docker_config.registry_password:
-        # We're authenticating using Basic Auth
-        auth_config = {
-            'username': service_config.docker_config.registry_username,
-            'password': service_config.docker_config.registry_password
-        }
-        upass = f"{service_config.docker_config.registry_username}:{service_config.docker_config.registry_password}"
+    # Generate 'Authenication' header value for pulling tag list from registry
+    auth_config = get_registry_config(service_config.docker_config, system_config)
+    registry_type = auth_config.pop('type')
+    if auth_config['username'] and auth_config['password']:
+        upass = f"{auth_config['username']}:{auth_config['password']}"
         auth = f"Basic {b64encode(upass.encode()).decode()}"
-    elif service_config.docker_config.registry_password:
+    elif auth_config['password']:
         # We're assuming that if only a password is given, then this is a token
-        auth = f"Bearer {service_config.docker_config.registry_password}"
+        auth = f"Bearer {auth_config['password']}"
 
     if server.endswith(".azurecr.io"):
         # This is an Azure Container Registry based on the server name
         registry = AzureContainerRegistry()
     else:
-        registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
+        registry = REGISTRY_TYPE_MAPPING[registry_type]
     token_server = None
     proxies = None
     for reg_conf in system_config.core.updater.registry_configs:
