@@ -178,7 +178,8 @@ def get_latest_tag_for_service(
         for registry in system_config.services.registries:
             if server.startswith(registry['name']):
                 # Apply the credentials that the system is configured to use with the registry
-                if not system_config.services.allow_mi_auth: # Only required if not using mi for authentication
+                if not system_config.services.use_acr_mi_auth:
+                    # Only required if not using mi for authentication
                     service_config.docker_config.registry_username = registry['username']
                     service_config.docker_config.registry_password = registry['password']
                 service_config.docker_config.registry_type = registry['type']
@@ -195,19 +196,18 @@ def get_latest_tag_for_service(
     elif service_config.docker_config.registry_password:
         # We're assuming that if only a password is given, then this is a token
         auth = f"Bearer {service_config.docker_config.registry_password}"
-    elif system_config.services.allow_mi_auth:
-        acr_client_id = os.getenv("AZURE_CLIENT_ID_ACR")
-        acr_tenant_id = os.getenv("AZURE_TENANT_ID_ACR")
-        # Each pod is allowed 1 service account, which supports 1 client id.
-        # If that service account / client id is already being used, we need to specify this env.
-        # Also configure the AZURE_TENANT_ID_ACR if you're doing cross tenant auth
+    elif system_config.services.use_acr_mi_auth:
+        acr_client_id = system_config.services.acr_mi_client_id
+        acr_tenant_id = system_config.services.acr_mi_tenant_id
+        acr_scope = system_config.services.acr_mi_scope
+
         if acr_client_id and acr_tenant_id:
             credential = WorkloadIdentityCredential(tenant_id=acr_tenant_id, client_id=acr_client_id)
         else:
             credential = DefaultAzureCredential()
 
         try:
-            token = credential.get_token(system_config.services.mi_scope)
+            token = credential.get_token(acr_scope)
             auth = f"Bearer {token.token}"
         except Exception as e:
             logger.warning(f"Failed to get MI token: {str(e)}")
