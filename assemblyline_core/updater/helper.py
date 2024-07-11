@@ -5,13 +5,15 @@ import string
 import time
 
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
-from assemblyline.odm.models.config import Config as SystemConfig
-from assemblyline.odm.models.service import Service as ServiceConfig
+from assemblyline.odm.models.config import Config as SystemConfig, ServiceRegistry
+from assemblyline.odm.models.service import Service as ServiceConfig, DockerConfig
 
 from base64 import b64encode
 from collections import defaultdict
 from logging import Logger
+from typing import Dict, List
 from packaging.version import parse, Version
+from urllib.parse import urlencode
 
 DEFAULT_DOCKER_REGISTRY = "hub.docker.com"
 
@@ -129,9 +131,36 @@ REGISTRY_TYPE_MAPPING = {
     'harbor': HarborRegistry()
 }
 
+def get_registry_config(docker_config: DockerConfig, system_config: SystemConfig) -> Dict[str, str]:
+    server = docker_config.image.split("/", 1)[0]
 
-def get_latest_tag_for_service(
-        service_config: ServiceConfig, system_config: SystemConfig, logger: Logger, prefix: str = ""):
+    # Prioritize authentication given as a system configuration
+    registries: List[ServiceRegistry] = system_config.services.registries or []
+    for registry in registries:
+        if server.startswith(registry.name):
+            # Return authentication credentials and the type of registry
+            return dict(username=registry.username, password=registry.password, type=registry.type)
+
+    # Otherwise return what's configured for the service
+    return dict(username=docker_config.registry_username, password=docker_config.registry_password,
+                type=docker_config.registry_type)
+
+def get_latest_tag_for_service(service_config: ServiceConfig, system_config: SystemConfig, logger: Logger,
+                               prefix: str = ""):
+    """
+    Retrieves the latest compatible tag for a given service from its respective Docker registry.
+    This function processes the image name to determine the correct server, authenticates
+    with the registry, and then fetches the latest tag that matches the service's framework
+    and system version constraints. It handles different registry configurations including
+    private and public ones.
+    Args:
+        service_config (ServiceConfig): The configuration object for the service which includes Docker configuration.
+        system_config (SystemConfig): System-wide configuration which includes service updates and registry configurations.
+        logger (Logger): Logger object for logging messages.
+        prefix (str, optional): A prefix string to prepend to log messages for clarity in logs.
+    Returns:
+        tuple: Returns a tuple of the final image name, the latest tag, and authentication config used for the Docker registry.
+    """
     def process_image(image):
         # Find which server to search in
         server = image.split("/")[0]
@@ -151,10 +180,9 @@ def get_latest_tag_for_service(
 
         # Split repo name without the tag
         image_name = image_name.rsplit(":", 1)[0]
-
         return server, image_name
 
-    # Extract info
+    # Extract and process service information
     service_name = service_config.name
     image = service_config.docker_config.image
     update_channel = service_config.update_channel
@@ -167,36 +195,23 @@ def get_latest_tag_for_service(
 
     # Get authentication
     auth = None
-    auth_config = None
     server, image_name = process_image(searchable_image)
 
-    if not (service_config.docker_config.registry_username and service_config.docker_config.registry_password):
-        # If the passed in service configuration is missing registry credentials, check against system configuration
-        for registry in system_config.services.registries:
-            if server.startswith(registry['name']):
-                # Apply the credentials that the system is configured to use with the registry
-                service_config.docker_config.registry_username = registry['username']
-                service_config.docker_config.registry_password = registry['password']
-                service_config.docker_config.registry_type = registry['type']
-                break
-
-    if service_config.docker_config.registry_username and service_config.docker_config.registry_password:
-        # We're authenticating using Basic Auth
-        auth_config = {
-            'username': service_config.docker_config.registry_username,
-            'password': service_config.docker_config.registry_password
-        }
-        upass = f"{service_config.docker_config.registry_username}:{service_config.docker_config.registry_password}"
+    # Generate 'Authenication' header value for pulling tag list from registry
+    auth_config = get_registry_config(service_config.docker_config, system_config)
+    registry_type = auth_config.pop('type')
+    if auth_config['username'] and auth_config['password']:
+        upass = f"{auth_config['username']}:{auth_config['password']}"
         auth = f"Basic {b64encode(upass.encode()).decode()}"
-    elif service_config.docker_config.registry_password:
+    elif auth_config['password']:
         # We're assuming that if only a password is given, then this is a token
-        auth = f"Bearer {service_config.docker_config.registry_password}"
+        auth = f"Bearer {auth_config['password']}"
 
     if server.endswith(".azurecr.io"):
         # This is an Azure Container Registry based on the server name
         registry = AzureContainerRegistry()
     else:
-        registry = REGISTRY_TYPE_MAPPING[service_config.docker_config.registry_type]
+        registry = REGISTRY_TYPE_MAPPING[registry_type]
     token_server = None
     proxies = None
     for reg_conf in system_config.core.updater.registry_configs:
@@ -206,31 +221,28 @@ def get_latest_tag_for_service(
             break
 
     if server == DEFAULT_DOCKER_REGISTRY:
-        tags = _get_dockerhub_tags(image_name, update_channel, proxies)
+        tags = _get_dockerhub_tags(image_name, update_channel, prefix, proxies, logger=logger)
     else:
         tags = registry._get_proprietary_registry_tags(server, image_name, auth,
                                                        not system_config.services.allow_insecure_registry,
                                                        proxies, token_server)
-    tag_name = None
 
     # Pre-filter tags to only consider 'compatible' tags relative to the running system
-    tags = [t for t in tags
-            if re.match(f"({FRAMEWORK_VERSION})\.({SYSTEM_VERSION})\.\\d+\.({update_channel})\\d+", t)]
-
+    tags = [tag for tag in tags
+            if re.match(f"({FRAMEWORK_VERSION})\.({SYSTEM_VERSION})\.\\d+\.({update_channel})\\d+", tag)]
     if not tags:
-        logger.warning(f"{prefix}Cannot fetch latest tag for service {service_name} - {image_name}"
+        logger.warning(f"{prefix} Cannot fetch latest tag for service {service_name} - {image_name}" \
                        f" => [server: {server}, repo_name: {image_name}, channel: {update_channel}]")
-    else:
-        for t in tags:
-            t_version = Version(t.replace(update_channel, ""))
-            # Tag name gets assigned to the first viable option then relies on comparison to get the latest
-            if not tag_name:
-                tag_name = t
-            elif t_version.major == FRAMEWORK_VERSION and t_version.minor == SYSTEM_VERSION and \
-                    t_version > parse(tag_name.replace(update_channel, "")):
-                tag_name = t
-
-        logger.info(f"{prefix}Latest {service_name} tag on {update_channel.upper()} channel is: {tag_name}")
+    tag_name = None
+    for tag in tags:
+        t_version = Version(tag.replace(update_channel, ""))
+        # Tag name gets assigned to the first viable option then relies on comparison to get the latest
+        if not tag_name:
+            tag_name = tag
+        elif t_version.major == FRAMEWORK_VERSION and t_version.minor == SYSTEM_VERSION and \
+                t_version > parse(tag_name.replace(update_channel, "")):
+            tag_name = tag
+    logger.info(f"{prefix}Latest {service_name} tag on {update_channel.upper()} channel is: {tag_name}")
 
     # Fix service image for use in Kubernetes
     image_variables = defaultdict(str)
@@ -244,43 +256,73 @@ def get_latest_tag_for_service(
 
     return image_name, tag_name, auth_config
 
-
-# Default for obtaining tags from DockerHub
-def _get_dockerhub_tags(image_name, update_channel, proxies=None):
-    # Find latest tag for each types
-    rv = []
+def _get_dockerhub_tags(image_name, update_channel, prefix, proxies=None, docker_registry=DEFAULT_DOCKER_REGISTRY,
+                        logger: Logger=None):
+    """
+    Retrieve DockerHub tags for a specific image and update channel.
+    Args:
+    image_name (str): Full name of the image (including namespace).
+    update_channel (str): Specific channel to filter tags (e.g., stable, beta).
+    proxies (dict, optional): Proxy configuration.
+    docker_registry (str, optional): Docker registry URL. Defaults to DEFAULT_DOCKER_REGISTRY.
+    Returns:
+    list: A list of tag names that match the given criteria, or None if an error occurs.
+    """
     namespace, repository = image_name.split('/', 1)
-    url = f"https://{DEFAULT_DOCKER_REGISTRY}/v2/namespaces/{namespace}/repositories/{repository}/tags" \
-        f"?page_size=50&page=1&name={update_channel}&ordering=last_updated"
-
+    base_url = f"https://{docker_registry}/v2/namespaces/{namespace}/repositories/{repository}/tags"
+    query_params = {
+        'page_size': 50,
+        'page': 1,
+        'name': update_channel,
+        'ordering': 'last_updated'
+    }
+    url = f"{base_url}?{urlencode(query_params)}"
     while True:
-        resp = requests.get(url, proxies=proxies)
-        if resp.ok:
-            resp_data = resp.json()
+        try:
+            response = requests.get(url, proxies=proxies)
+            response.raise_for_status()  # Raises an HTTPError for bad responses
+            response_data = response.json()
+            tags = []
             if namespace == "cccs":
                 # The tags are coming from a repository managed by the Assemblyline team
-                for x in resp_data['results']:
-                    tag_name = x['name']
-                    if tag_name == f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.{update_channel}":
+                for tag_info in response_data['results']:
+                    tag_name = tag_info.get('name')
+                    if tag_name and tag_name == f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.{update_channel}":
                         # Ignore tag aliases containing the update_channel
                         continue
-
-                    if tag_name.startswith(f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}"):
+                    if tag_name and tag_name.startswith(f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}"):
                         # Because the order of paging is based on `last_updated`,
                         # we can return the first valid candidate
+                        logger.info(f"{prefix}Valid tag found for {repository}: {tag_name}")
                         return [tag_name]
             else:
                 # The tags are coming from another repository, so we're don't know the ordering of tags
-                rv.extend([x['name'] for x in resp_data['results']])
-            # Page until there are no results left
-            url = resp_data.get('next', None)
-            if url is None:
+                tags.extend(tag_info.get('name') for tag_info in response_data['results'] if tag_info.get('name'))
+            url = response_data.get('next')
+            if not url:
+                logger.info(f"{prefix}No more pages left to fetch.")
                 break
-        elif resp.status_code == 429:
-            # Based on https://docs.docker.com/docker-hub/api/latest/#tag/rate-limiting
-            # We've hit the rate limit so we have to wait and try again later
-            time.sleep(int(resp.headers['retry-after']) - int(time.time()))
-        else:
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 429:
+                # Based on https://docs.docker.com/docker-hub/api/latest/#tag/rate-limiting
+                # We've hit the rate limit so we have to wait and try again later
+                logger.warning(f"{prefix}Rate limit reached for DockerHub. Retrying after sleep..")
+                time.sleep(int(response.headers['retry-after']) - int(time.time()))
+            else:
+                logger.error(f"{prefix}HTTP error occurred: {e}")
             break
-
-    return rv
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"{prefix}Connection error occurred: {e}")
+            break
+        except requests.exceptions.Timeout as e:
+            logger.error(f"{prefix}Request timed out.")
+            break
+        except requests.exceptions.RequestException as e:
+            logger.error(f"{prefix}An error occurred during requests: {e}")
+            break
+        except ValueError as e:
+            logger.error(f"{prefix}JSON decode error: {e}")
+            break
+    if tags:
+        logger.info(f"{prefix}Tags retrieved successfully: {tags}")
+    return tags

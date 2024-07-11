@@ -37,6 +37,7 @@ from assemblyline.common.forge import get_classification, get_service_queue, get
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
 from assemblyline.common.isotime import now_as_iso
+from assemblyline_core.updater.helper import get_registry_config
 from assemblyline_core.scaler.controllers import KubernetesController
 from assemblyline_core.scaler.controllers.interface import ContainerEvent, ServiceControlError
 from assemblyline_core.server_base import ServiceStage, ThreadedCoreBase
@@ -518,6 +519,12 @@ class ScalerServer(ThreadedCoreBase):
             for var in default_settings.environment:
                 if var.name not in set_keys:
                     docker_config.environment.append(var)
+
+            # Set authentication to registry to pull the image
+            auth_config = get_registry_config(docker_config, self.config)
+            docker_config.registry_username = auth_config['username']
+            docker_config.registry_password = auth_config['password']
+
             return docker_config
 
         # noinspection PyBroadException
@@ -537,7 +544,7 @@ class ScalerServer(ThreadedCoreBase):
             if not service.version.startswith(system_spec):
                 # If FW and SYS version don't prefix in the service version, we can't guarantee the
                 # service is compatible. Disable and treat it as incompatible due to service version.
-                self.log.warning("Disabling service with incompatible version. "
+                self.log.warning(f"Disabling {service.name} with incompatible version. "
                                  f"[{service.version} != '{system_spec}.X.{service.update_channel}Y'].")
                 disable_incompatible_service()
             elif service.update_config and service.update_config.wait_for_update and not service.update_config.sources:
