@@ -57,7 +57,6 @@ class DockerRegistry(ContainerRegistry):
                 headers["Authorization"] = f"Bearer {token}"
 
         resp = self._perform_request(url, headers, verify, proxies)
-
         # Test for valid response
         if resp and resp.ok:
             # Test for positive list of tags
@@ -227,6 +226,7 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
         tags = registry._get_proprietary_registry_tags(server, image_name, auth,
                                                        not system_config.services.allow_insecure_registry,
                                                        proxies, token_server)
+
     # Pre-filter tags to only consider 'compatible' tags relative to the running system
     tags = [tag for tag in tags
             if re.match(f"({FRAMEWORK_VERSION})\.({SYSTEM_VERSION})\.\\d+\.({update_channel})\\d+", tag)]
