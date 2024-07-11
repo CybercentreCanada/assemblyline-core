@@ -133,7 +133,13 @@ REGISTRY_TYPE_MAPPING = {
 }
 
 def get_registry_config(docker_config: DockerConfig, system_config: SystemConfig) -> Dict[str, str]:
-    server = docker_config.image.split("/", 1)[0]
+    # Fix service image for calling Docker API
+    image_variables = defaultdict(str)
+    image_variables.update(system_config.services.image_variables)
+    image_variables.update(system_config.services.update_image_variables)
+    searchable_image = string.Template(docker_config.image).safe_substitute(image_variables)
+
+    server = searchable_image.split("/", 1)[0]
 
     # Prioritize authentication given as a system configuration
     registries: List[ServiceRegistry] = system_config.services.registries or []
