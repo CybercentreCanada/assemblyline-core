@@ -5,13 +5,13 @@ import string
 import time
 
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
-from assemblyline.odm.models.config import Config as SystemConfig
+from assemblyline.odm.models.config import Config as SystemConfig, ServiceRegistry
 from assemblyline.odm.models.service import Service as ServiceConfig, DockerConfig
 
 from base64 import b64encode
 from collections import defaultdict
 from logging import Logger
-from typing import Dict
+from typing import Dict, List
 from packaging.version import parse, Version
 from urllib.parse import urlencode
 
@@ -136,10 +136,11 @@ def get_registry_config(docker_config: DockerConfig, system_config: SystemConfig
     server = docker_config.image.split("/", 1)[0]
 
     # Prioritize authentication given as a system configuration
-    for registry in system_config.services.registries:
-        if server.startswith(registry['name']):
+    registries: List[ServiceRegistry] = system_config.services.registries or []
+    for registry in registries:
+        if server.startswith(registry.name):
             # Return authentication credentials and the type of registry
-            return dict(username=registry['username'], password=registry['password'], type=registry['type'])
+            return dict(username=registry.username, password=registry.password, type=registry.type)
 
     # Otherwise return what's configured for the service
     return dict(username=docker_config.registry_username, password=docker_config.registry_password,
@@ -221,7 +222,7 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
             break
 
     if server == DEFAULT_DOCKER_REGISTRY:
-        tags = _get_dockerhub_tags(image_name, update_channel, proxies, logger=logger)
+        tags = _get_dockerhub_tags(image_name, update_channel, prefix, proxies, logger=logger)
     else:
         tags = registry._get_proprietary_registry_tags(server, image_name, auth,
                                                        not system_config.services.allow_insecure_registry,
@@ -255,7 +256,7 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
 
     return image_name, tag_name, auth_config
 
-def _get_dockerhub_tags(image_name, update_channel, proxies=None, docker_registry=DEFAULT_DOCKER_REGISTRY,
+def _get_dockerhub_tags(image_name, update_channel, prefix, proxies=None, docker_registry=DEFAULT_DOCKER_REGISTRY,
                         logger: Logger=None):
     """
     Retrieve DockerHub tags for a specific image and update channel.
@@ -292,36 +293,36 @@ def _get_dockerhub_tags(image_name, update_channel, proxies=None, docker_registr
                     if tag_name and tag_name.startswith(f"{FRAMEWORK_VERSION}.{SYSTEM_VERSION}"):
                         # Because the order of paging is based on `last_updated`,
                         # we can return the first valid candidate
-                        logger.info(f"Valid tag found: {tag_name}")
+                        logger.info(f"{prefix}Valid tag found for {repository}: {tag_name}")
                         return [tag_name]
             else:
                 # The tags are coming from another repository, so we're don't know the ordering of tags
                 tags.extend(tag_info.get('name') for tag_info in response_data['results'] if tag_info.get('name'))
             url = response_data.get('next')
             if not url:
-                logger.info("No more pages left to fetch.")
+                logger.info(f"{prefix}No more pages left to fetch.")
                 break
         except requests.exceptions.HTTPError as e:
             if response.status_code == 429:
                 # Based on https://docs.docker.com/docker-hub/api/latest/#tag/rate-limiting
                 # We've hit the rate limit so we have to wait and try again later
-                logger.warning("Rate limit reached for DockerHub. Retrying after sleep..")
+                logger.warning(f"{prefix}Rate limit reached for DockerHub. Retrying after sleep..")
                 time.sleep(int(response.headers['retry-after']) - int(time.time()))
             else:
-                logger.error(f"HTTP error occurred: {e}")
+                logger.error(f"{prefix}HTTP error occurred: {e}")
             break
         except requests.exceptions.ConnectionError as e:
-            logger.error(f"Connection error occurred: {e}")
+            logger.error(f"{prefix}Connection error occurred: {e}")
             break
         except requests.exceptions.Timeout as e:
-            logger.error("Request timed out.")
+            logger.error(f"{prefix}Request timed out.")
             break
         except requests.exceptions.RequestException as e:
-            logger.error(f"An error occurred during requests: {e}")
+            logger.error(f"{prefix}An error occurred during requests: {e}")
             break
         except ValueError as e:
-            logger.error(f"JSON decode error: {e}")
+            logger.error(f"{prefix}JSON decode error: {e}")
             break
     if tags:
-        logger.info(f"Tags retrieved successfully: {tags}")
+        logger.info(f"{prefix}Tags retrieved successfully: {tags}")
     return tags
