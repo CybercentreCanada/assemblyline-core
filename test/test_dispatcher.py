@@ -310,7 +310,10 @@ def test_dispatch_extracted_bypass_drp(clean_redis, clean_datastore):
     # Inject the fake submission
     submission = random_model_obj(Submission)
     submission.to_be_deleted = False
+
+    # the following 1 line can be removed after assemblyline upgrade to version 4.6+
     submission.params.ignore_dynamic_recursion_prevention = False
+    submission.params.ignore_recursion_prevention = False
     submission.params.services.selected = ['extract', 'sandbox']
     submission.files = [dict(name='./file', sha256=file_hash)]
     sid = submission.sid = 'first-submission'

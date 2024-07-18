@@ -84,8 +84,8 @@ class ReplayLoader(ReplayBase):
         self.maintain_threads(threads)
 
     def stop(self):
+        super().stop()
         self.cache.close()
-        return super().stop()
 
 
 if __name__ == '__main__':
