@@ -6,7 +6,7 @@ import functools
 import threading
 from collections import defaultdict
 from string import Template
-from typing import Optional, Any
+from typing import Dict, Optional, Any
 import os
 import re
 import math
@@ -31,7 +31,7 @@ from assemblyline.odm.models.error import Error
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
 from assemblyline.odm.messages.scaler_status_heartbeat import Status
 from assemblyline.odm.messages.changes import ServiceChange, Operation
-from assemblyline.common.dict_utils import get_recursive_sorted_tuples
+from assemblyline.common.dict_utils import get_recursive_sorted_tuples, flatten
 from assemblyline.common.uid import get_id_from_data, get_random_id
 from assemblyline.common.forge import get_classification, get_service_queue, get_apm_client
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
@@ -273,17 +273,24 @@ class ScalerServer(ThreadedCoreBase):
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
 
         core_env: dict[str, str] = {}
+
         # If we have privileged services, we must be able to pass the necessary environment variables for them to
         # function properly.
-        for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()):
-            env_name = secret.strip("${}")
-            try:
-                core_env[env_name] = os.environ[env_name]
-            except KeyError:
-                # Don't pass through variables that scaler doesn't have
-                # they are likely specific to other components and shouldn't
-                # be shared with privileged services.
-                pass
+        with open('/etc/assemblyline/config.yml') as fh:
+            flattened_config: Dict[str, Any] = flatten(yaml.safe_load(fh.read()))
+
+        # Limit secrets to be shared to very specific configurations
+        for cfg in ["datastore.hosts", "filestore.archive", "filestore.cache", "filestore.storage"]:
+            for conn_str in flattened_config.get(cfg, []):
+                # Look for any secrets that need to passed onto services via env
+                for secret in Template(conn_str).get_identifiers():
+                    try:
+                        core_env[secret] = os.environ[secret]
+                    except KeyError:
+                        # Don't pass through variables that scaler doesn't have
+                        # they are likely specific to other components and shouldn't
+                        # be shared with privileged services.
+                        pass
 
         labels = {
             'app': 'assemblyline',
