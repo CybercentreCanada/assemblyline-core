@@ -8,7 +8,7 @@ from assemblyline.common import forge
 from assemblyline.common.constants import SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.dict_utils import flatten, unflatten
 from assemblyline.common.heuristics import HeuristicHandler, InvalidHeuristicException
-from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.isotime import now_as_iso, now_as_utc_datetime
 from assemblyline.common.threading import APMAwareThreadPoolExecutor
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.filestore import FileStore
@@ -264,7 +264,7 @@ class TaskingClient:
                 result.archive_ts = None
 
                 if task.ttl and result.expiry_ts:
-                    result.expiry_ts = max(result.expiry_ts, now_as_iso(task.ttl * 24 * 60 * 60))
+                    result.expiry_ts = max(result.expiry_ts, now_as_utc_datetime(task.ttl * 24 * 60 * 60))
 
                 # Create a list of files to freshen
                 freshen_hashes = [task.fileinfo.sha256]
