@@ -1,6 +1,9 @@
 import json
 import os
 
+from cart import pack_stream
+from io import BytesIO
+
 from assemblyline.filestore import FileStore
 from assemblyline.common.isotime import now_as_iso
 from assemblyline_core.replay.client import APIClient, DirectClient
@@ -107,10 +110,10 @@ class ReplayCreatorWorker(ReplayBase):
             os.makedirs(self.replay_config.creator.working_directory, exist_ok=True)
 
             # Create the JSON
-            json_fn = f"{collection}_{now_as_iso()}.al_json"
+            json_fn = f"{collection}_{now_as_iso()}.al_json.cart"
             json_path = os.path.join(self.replay_config.creator.working_directory, json_fn)
-            with open(json_path, "w") as fp:
-                json.dump(batch, fp)
+            with open(json_path, "wb") as fp:
+                pack_stream(BytesIO(json.dumps(batch).encode()), fp)
             json_path = os.path.join(self.replay_config.creator.working_directory, json_fn)
 
             # Move the JSON
