@@ -114,7 +114,6 @@ class ReplayCreatorWorker(ReplayBase):
             json_path = os.path.join(self.replay_config.creator.working_directory, json_fn)
             with open(json_path, "wb") as fp:
                 pack_stream(BytesIO(json.dumps(batch).encode()), fp)
-            json_path = os.path.join(self.replay_config.creator.working_directory, json_fn)
 
             # Move the JSON
             self.filestore.upload(json_path, json_fn)
