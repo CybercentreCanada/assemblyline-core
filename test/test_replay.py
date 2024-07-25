@@ -251,8 +251,8 @@ def test_replay_single_data_collection(datastore, creator, creator_worker, loade
     getattr(creator_worker, f'process_{collection}')(once=True)
     assert creator_worker.client.queues[collection].length() == 0
     filename = os.path.join(output_dir,
-                            ([f for f in os.listdir(output_dir) if f.startswith(
-                                collection) and f.endswith('.al_json')] + ["not_found"])[0])
+                            ([f for f in os.listdir(output_dir) if f.startswith(collection) \
+                               and f.endswith('.al_json.cart')] + ["not_found"])[0])
     assert os.path.exists(filename)
 
     # Delete the item to test the loading process
