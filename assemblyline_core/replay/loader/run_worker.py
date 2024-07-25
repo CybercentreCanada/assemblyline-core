@@ -1,6 +1,8 @@
 import shutil
 import os
 
+from cart import unpack_file
+
 from assemblyline_core.replay.client import APIClient, DirectClient
 from assemblyline_core.replay.replay import ReplayBase
 
@@ -33,6 +35,13 @@ class ReplayLoaderWorker(ReplayBase):
                                                 rescan_services=self.replay_config.loader.rescan)
                     elif file_path.endswith(".al_json"):
                         self.client.load_json(file_path)
+
+                    elif file_path.endswith(".al_json.cart"):
+                        cart_path = file_path
+                        file_path = file_path[:-5]
+                        unpack_file(cart_path, file_path)
+                        self.client.load_json(file_path)
+                        os.unlink(cart_path)
 
                     if os.path.exists(file_path):
                         os.unlink(file_path)

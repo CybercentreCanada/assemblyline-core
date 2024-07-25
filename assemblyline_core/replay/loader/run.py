@@ -50,7 +50,9 @@ class ReplayLoader(ReplayBase):
             for root, _, files in os.walk(self.replay_config.loader.input_directory, topdown=False):
                 for name in files:
                     # Unexpected files that could be the result of external transfer mechanisms
-                    if name.startswith('.') or not (name.endswith('.al_bundle') or name.endswith('.al_json')):
+                    if name.startswith('.') or not (name.endswith('.al_bundle') or \
+                                                    name.endswith('.al_json') or \
+                                                    name.endswith('.al_json.cart')):
                         continue
 
                     file_path = os.path.join(root, name)
