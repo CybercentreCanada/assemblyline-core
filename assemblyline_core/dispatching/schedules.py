@@ -112,7 +112,7 @@ class Scheduler:
                     # things that we need to evaluate, and mark this
                     # group as having been seen.
                     services.extend(categories[name])
-                    seen_categories.update(name)
+                    seen_categories.add(name)
                 continue
 
             # If it isn't a category, its a service
