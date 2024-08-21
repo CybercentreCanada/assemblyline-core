@@ -165,6 +165,11 @@ class FileProcessor(threading.Thread):
         self.config: Config = config
         self.datastore = datastore
         self.metadata_check = MetadataValidator(datastore)
+        self.metadata_check_kwargs = {
+            'validation_scheme': self.config.submission.metadata.ingest.get(self.config.core.vacuum.ingest_type, {}),
+            'strict': self.config.core.vacuum.ingest_type in self.config.submission.metadata.strict_schemes
+        }
+        self.validation_scheme = self.config.submission.metadata.ingest.get(self.config.core.vacuum.ingest_type, {})
         self.counter = counter
         self.minimum_classification = self.config.core.vacuum.minimum_classification
         logger.info("Connect to work queue")
@@ -508,7 +513,7 @@ class FileProcessor(threading.Thread):
 
                 # Validate the metadata
                 while metadata:
-                    metadata_error = self.metadata_check.check_metadata(metadata)
+                    metadata_error = self.metadata_check.check_metadata(metadata, **self.metadata_check_kwargs)
                     if metadata_error:
                         logger.error("Could not accept metadata %s on %s: %s", metadata_error[0],
                                      file_sha256, metadata_error[1])

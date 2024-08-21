@@ -9,7 +9,7 @@ import time
 import random
 import threading
 
-from assemblyline.odm.models.config import Config
+from assemblyline.odm.models.config import Config, MetadataConfig
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline_core.vacuum import crawler, worker
 
@@ -66,6 +66,17 @@ def test_worker(config: Config, redis_connection):
                 }
             }]
             config.core.vacuum.worker_threads = 1
+
+            # Apply strict metadata validation
+            config.submission.metadata.ingest = {
+                config.core.vacuum.ingest_type: {
+                    'stream': {
+                        'validator_type': 'integer',
+                        'required': True
+                    }
+                }
+            }
+            config.submission.metadata.strict_schemes = [config.core.vacuum.ingest_type]
 
             # Place a file that will be safe
             first_file = os.path.join(data_dir, uuid.uuid4().hex + '.meta')
