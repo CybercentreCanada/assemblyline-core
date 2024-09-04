@@ -283,12 +283,12 @@ def _get_dockerhub_tags(image_name, update_channel, prefix, proxies=None, docker
         'ordering': 'last_updated'
     }
     url = f"{base_url}?{urlencode(query_params)}"
+    tags = []
     while True:
         try:
             response = requests.get(url, proxies=proxies)
             response.raise_for_status()  # Raises an HTTPError for bad responses
             response_data = response.json()
-            tags = []
             if namespace == "cccs":
                 # The tags are coming from a repository managed by the Assemblyline team
                 for tag_info in response_data['results']:
