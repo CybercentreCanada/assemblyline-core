@@ -42,8 +42,6 @@ class BadlistClient:
 
             hashed_value = f"{tag_data['type']}: {tag_data['value']}".encode('utf8')
             data['hashes'] = {
-                'md5': hashlib.md5(hashed_value).hexdigest(),
-                'sha1': hashlib.sha1(hashed_value).hexdigest(),
                 'sha256': hashlib.sha256(hashed_value).hexdigest()
             }
 
