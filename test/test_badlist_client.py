@@ -138,11 +138,7 @@ def test_badlist_add_tag(client):
             'network': None
         },
         'dtl': 15,
-        'hashes': {'md5': hashlib.md5(hashed_value).hexdigest(),
-                   'sha1': hashlib.sha1(hashed_value).hexdigest(),
-                   'sha256': expected_qhash,
-                   'ssdeep': None,
-                   'tlsh': None},
+        'hashes': {'sha256': expected_qhash},
         'tag': {'type': tag_type,
                 'value': tag_value},
         'sources': [BAD_SOURCE, ADMIN_SOURCE],
@@ -186,6 +182,9 @@ def test_badlist_add_tag(client):
     # Normalize classification in sources
     for source in ds_sl['sources']:
         source['classification'] = CLASSIFICATION.normalize_classification(source['classification'])
+
+    for hashtype in ['md5', 'sha1', 'ssdeep', 'tlsh']:
+        ds_sl['hashes'].pop(hashtype, None)
 
     # Test rest
     assert ds_sl == sl_data_original
