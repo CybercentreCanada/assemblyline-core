@@ -15,6 +15,9 @@ from typing import Dict, List
 from packaging.version import parse, Version
 from urllib.parse import urlencode
 
+from azure.identity import DefaultAzureCredential
+from azure.core.exceptions import AzureError
+
 DEFAULT_DOCKER_REGISTRY = "hub.docker.com"
 
 
@@ -207,7 +210,17 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
     # Generate 'Authenication' header value for pulling tag list from registry
     auth_config = get_registry_config(service_config.docker_config, system_config)
     registry_type = auth_config.pop('type')
-    if auth_config['username'] and auth_config['password']:
+
+    if system_config.services.use_fic:
+        try:
+            credentials = DefaultAzureCredential(workload_identity_tenant_id=system_config.services.acr_tenant_id,
+                                                 workload_identity_client_id=system_config.services.acr_client_id)
+            token = credentials.get_token(system_config.services.acr_scope)
+            auth = f"Bearer {token.token}"
+        except AzureError as e:
+            logger.error(f"{prefix} Failed to acquire Azure credentials: {str(e)}")
+            return None, None, None
+    elif auth_config['username'] and auth_config['password']:
         upass = f"{auth_config['username']}:{auth_config['password']}"
         auth = f"Basic {b64encode(upass.encode()).decode()}"
     elif auth_config['password']:
