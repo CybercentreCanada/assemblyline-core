@@ -1,3 +1,4 @@
+import os
 import requests
 import re
 import socket
@@ -14,6 +15,10 @@ from logging import Logger
 from typing import Dict, List
 from packaging.version import parse, Version
 from urllib.parse import urlencode
+
+from azure.identity import WorkloadIdentityCredential
+from azure.core.exceptions import AzureError
+
 
 DEFAULT_DOCKER_REGISTRY = "hub.docker.com"
 
@@ -146,7 +151,8 @@ def get_registry_config(docker_config: DockerConfig, system_config: SystemConfig
     for registry in registries:
         if server.startswith(registry.name):
             # Return authentication credentials and the type of registry
-            return dict(username=registry.username, password=registry.password, type=registry.type)
+            return dict(username=registry.username, password=registry.password, type=registry.type,
+                        use_fic=registry.use_fic, fic_token_path=registry.fic_token_path)
 
     # Otherwise return what's configured for the service
     return dict(username=docker_config.registry_username, password=docker_config.registry_password,
@@ -213,6 +219,17 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
     elif auth_config['password']:
         # We're assuming that if only a password is given, then this is a token
         auth = f"Bearer {auth_config['password']}"
+    elif auth_config.get('use_fic', False):
+        try:
+            credentials = WorkloadIdentityCredential(
+                tenant_id = auth_config.get('fic_tenant_id', None),
+                client_id = auth_config.get('fic_client_id', None),
+                token_file_path = auth_config.get('fic_token_path', None))
+            token = credentials.get_token(".default").token
+            auth = f"Bearer {token}"
+        except AzureError as e:
+            logger.error(f"{prefix} Failed to acquire Azure credentials: {str(e)}")
+            return None, None, None
 
     if server.endswith(".azurecr.io"):
         # This is an Azure Container Registry based on the server name
@@ -235,7 +252,7 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
                                                        proxies, token_server)
     # Pre-filter tags to only consider 'compatible' tags relative to the running system
     tags = [tag for tag in tags
-            if re.match(f"({FRAMEWORK_VERSION})\.({SYSTEM_VERSION})\.\\d+\.({update_channel})\\d+", tag)]
+            if re.match(f"({FRAMEWORK_VERSION}).({SYSTEM_VERSION}).\\d+.({update_channel})\\d+", tag)]
     if not tags:
         logger.warning(f"{prefix} Cannot fetch latest tag for service {service_name} - {image_name}" \
                        f" => [server: {server}, repo_name: {image_name}, channel: {update_channel}]")
