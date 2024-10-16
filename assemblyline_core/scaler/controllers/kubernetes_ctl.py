@@ -240,9 +240,9 @@ def parse_cpu(string: str) -> float:
 
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace: str, prefix: str, priority: str, dependency_priority: str,
-                 cpu_reservation: float, linux_node_selector: Selector, labels=None,
-                 priv_labels=None, log_level="INFO", core_env={},
-                 default_service_account=None, cluster_pod_list=True, default_service_tolerations = []):
+                 cpu_reservation: float, linux_node_selector: Selector, labels=None,log_level="INFO", core_env={},
+                 default_service_account=None, cluster_pod_list=True, default_service_tolerations = [],
+                 priv_labels=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
         try:
