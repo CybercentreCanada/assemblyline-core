@@ -800,6 +800,7 @@ class KubernetesController(ControllerInterface):
         all_labels['component'] = service_name
         if core_mounts:
             all_labels['privilege'] = 'core'
+            all_labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.privileged_services_additional_labels)})
         all_labels.update(labels or {})
 
         # Build set of volumes, first the global mounts, then the core specific ones,
