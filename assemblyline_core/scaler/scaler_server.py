@@ -293,6 +293,7 @@ class ScalerServer(ThreadedCoreBase):
             'section': 'service',
             'privilege': 'service'
         }
+        priv_labels = {}
 
         service_defaults_config = self.config.core.scaler.service_defaults
 
@@ -305,9 +306,13 @@ class ScalerServer(ThreadedCoreBase):
         if self.config.core.scaler.additional_labels:
             labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)})
 
+        if self.config.core.scaler.privileged_services_additional_labels:
+            priv_labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.privileged_services_additional_labels)})
+
         if KUBERNETES_AL_CONFIG:
             self.log.info(f"Loading Kubernetes cluster interface on namespace: {NAMESPACE}")
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
+                                                   priv_labels=priv_labels,
                                                    namespace=NAMESPACE, priority='al-service-priority',
                                                    dependency_priority='al-core-priority',
                                                    cpu_reservation=self.config.services.cpu_reservation,
