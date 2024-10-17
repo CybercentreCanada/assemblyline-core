@@ -457,7 +457,10 @@ class ServiceUpdater(ThreadedCoreBase):
         if 'KUBERNETES_SERVICE_HOST' in os.environ and NAMESPACE:
             extra_labels = {}
             if self.config.core.scaler.additional_labels:
-                extra_labels = {k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)}
+                extra_labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)})
+
+            if self.config.core.scaler.privileged_services_additional_labels:
+                extra_labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.privileged_services_additional_labels)})
 
             # If Updater has envs that set the service-server to use HTTPS, then assume a Root CA needs to be mounted
             if SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'):

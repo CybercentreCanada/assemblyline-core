@@ -241,7 +241,8 @@ def parse_cpu(string: str) -> float:
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace: str, prefix: str, priority: str, dependency_priority: str,
                  cpu_reservation: float, linux_node_selector: Selector, labels=None, log_level="INFO", core_env={},
-                 default_service_account=None, cluster_pod_list=True, default_service_tolerations = []):
+                 default_service_account=None, cluster_pod_list=True, default_service_tolerations = [],
+                 priv_labels=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
         try:
@@ -270,6 +271,7 @@ class KubernetesController(ControllerInterface):
         self.logger = logger
         self.log_level: str = log_level
         self._labels: dict[str, str] = labels or {}
+        self._priv_labels: dict[str, str] = priv_labels or {}
         self.linux_node_selector = linux_node_selector
         self.apps_api = client.AppsV1Api()
         self.api = client.CoreV1Api()
@@ -800,6 +802,7 @@ class KubernetesController(ControllerInterface):
         all_labels['component'] = service_name
         if core_mounts:
             all_labels['privilege'] = 'core'
+            all_labels.update(self._priv_labels)
         all_labels.update(labels or {})
 
         # Build set of volumes, first the global mounts, then the core specific ones,

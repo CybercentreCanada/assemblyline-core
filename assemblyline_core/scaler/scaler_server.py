@@ -293,6 +293,7 @@ class ScalerServer(ThreadedCoreBase):
             'section': 'service',
             'privilege': 'service'
         }
+        priv_labels = {}
 
         service_defaults_config = self.config.core.scaler.service_defaults
 
@@ -305,6 +306,9 @@ class ScalerServer(ThreadedCoreBase):
         if self.config.core.scaler.additional_labels:
             labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)})
 
+        if self.config.core.scaler.privileged_services_additional_labels:
+            priv_labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.privileged_services_additional_labels)})
+
         if KUBERNETES_AL_CONFIG:
             self.log.info(f"Loading Kubernetes cluster interface on namespace: {NAMESPACE}")
             self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
@@ -316,7 +320,8 @@ class ScalerServer(ThreadedCoreBase):
                                                    core_env=core_env,
                                                    cluster_pod_list=self.config.core.scaler.cluster_pod_list,
                                                    default_service_account=self.config.services.service_account,
-                                                   default_service_tolerations=service_defaults_config.tolerations
+                                                   default_service_tolerations=service_defaults_config.tolerations,
+                                                   priv_labels=priv_labels
                                                    )
 
             # Add global configuration for privileged services
