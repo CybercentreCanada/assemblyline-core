@@ -210,6 +210,15 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
     auth = None
     server, image_name = process_image(searchable_image)
 
+    # Load in proxies and token server
+    token_server = None
+    proxies = None
+    for reg_conf in system_config.core.updater.registry_configs:
+        if reg_conf.name == server:
+            proxies = reg_conf.proxies or None
+            token_server = reg_conf.token_server or None
+            break
+
     # Generate 'Authenication' header value for pulling tag list from registry
     auth_config = get_registry_config(service_config.docker_config, system_config)
     registry_type = auth_config.pop('type')
@@ -219,30 +228,38 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
     elif auth_config['password']:
         # We're assuming that if only a password is given, then this is a token
         auth = f"Bearer {auth_config['password']}"
-    elif auth_config.get('use_fic', False):
-        try:
-            credentials = WorkloadIdentityCredential(
-                tenant_id = auth_config.get('fic_tenant_id', None),
-                client_id = auth_config.get('fic_client_id', None),
-                token_file_path = auth_config.get('fic_token_path', None))
-            token = credentials.get_token(".default").token
-            auth = f"Bearer {token}"
-        except AzureError as e:
-            logger.error(f"{prefix} Failed to acquire Azure credentials: {str(e)}")
-            return None, None, None
 
     if server.endswith(".azurecr.io"):
+        if auth_config.get('use_fic', False):
+            # If the use of federated identity token is set, exchange said token to an ACR token
+            try:
+                credentials = WorkloadIdentityCredential(
+                    tenant_id = auth_config.get('fic_tenant_id', None),
+                    client_id = auth_config.get('fic_client_id', None),
+                    token_file_path = auth_config.get('fic_token_path', None))
+                aad_token = credentials.get_token('https://management.core.windows.net/.default').token
+
+                refresh_token = requests.post(
+                    f"https://{server}/oauth2/exchange",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    data=f"grant_type=access_token&service={server}&access_token={aad_token}",
+                    proxies=proxies).json()["refresh_token"]
+
+                token = requests.post(
+                    f"https://{server}/oauth2/token",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    data=f"grant_type=refresh_token&service={server}&refresh_token={refresh_token}"
+                        f"&scope=repository:{image_name}:metadata_read",
+                    proxies=proxies).json()["access_token"]
+
+                auth = f"Bearer {token}"
+            except Exception as e:
+                logger.error(f"{prefix} Failed to acquire Azure credentials: {str(e)}")
+
         # This is an Azure Container Registry based on the server name
         registry = AzureContainerRegistry()
     else:
         registry = REGISTRY_TYPE_MAPPING[registry_type]
-    token_server = None
-    proxies = None
-    for reg_conf in system_config.core.updater.registry_configs:
-        if reg_conf.name == server:
-            proxies = reg_conf.proxies or None
-            token_server = reg_conf.token_server or None
-            break
 
     if server == DEFAULT_DOCKER_REGISTRY:
         tags = _get_dockerhub_tags(image_name, update_channel, prefix, proxies, logger=logger)
