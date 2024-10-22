@@ -269,7 +269,7 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
 
     # Pre-filter tags to only consider 'compatible' tags relative to the running system
     tags = [tag for tag in tags
-            if re.match(f"({FRAMEWORK_VERSION}).({SYSTEM_VERSION}).\\d+.({update_channel})\\d+", tag)]
+            if re.match(f"({FRAMEWORK_VERSION})\\.({SYSTEM_VERSION})\\.\\d+\\.({update_channel})\\d+", tag)]
     if not tags:
         logger.warning(f"{prefix} Cannot fetch latest tag for service {service_name} - {image_name}" \
                        f" => [server: {server}, repo_name: {image_name}, channel: {update_channel}]")
