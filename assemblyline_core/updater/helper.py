@@ -16,8 +16,7 @@ from typing import Dict, List
 from packaging.version import parse, Version
 from urllib.parse import urlencode
 
-from azure.identity import WorkloadIdentityCredential
-from azure.core.exceptions import AzureError
+from azure.identity import DefaultAzureCredential
 
 
 DEFAULT_DOCKER_REGISTRY = "hub.docker.com"
@@ -151,7 +150,7 @@ def get_registry_config(docker_config: DockerConfig, system_config: SystemConfig
         if server.startswith(registry.name):
             # Return authentication credentials and the type of registry
             return dict(username=registry.username, password=registry.password, type=registry.type,
-                        use_fic=registry.use_fic, fic_token_path=registry.fic_token_path)
+                        use_fic=registry.use_fic)
 
     # Otherwise return what's configured for the service
     return dict(username=docker_config.registry_username, password=docker_config.registry_password,
@@ -232,10 +231,7 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
         if auth_config.get('use_fic', False):
             # If the use of federated identity token is set, exchange said token to an ACR token
             try:
-                credentials = WorkloadIdentityCredential(
-                    tenant_id = auth_config.get('fic_tenant_id', None),
-                    client_id = auth_config.get('fic_client_id', None),
-                    token_file_path = auth_config.get('fic_token_path', None))
+                credentials = DefaultAzureCredential()
                 aad_token = credentials.get_token('https://management.core.windows.net/.default').token
 
                 refresh_token = requests.post(
