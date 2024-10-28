@@ -45,7 +45,7 @@ docker run --name dispatcher cccs/assemblyline-core python -m assemblyline_core.
 
 ### Expiry
 
-Delete submissions and their results when their TTL expires.
+Delete submissions and their results when their time-to-live expires.
 
 ```bash
 docker run --name expiry cccs/assemblyline-core python -m assemblyline_core.expiry.run_expiry
@@ -115,19 +115,19 @@ For more information about these Assemblyline components, follow this [overview]
 
 Ce dépôt fournit des services de base pour Assemblyline 4.
 
-## Variantes d'images et balises
+## Variantes et étiquettes d'image
 
-| **Type d'étiquette** | **Description**                                                                                                                    |  **Exemple d'étiquette**   |
-| :------------------: | :--------------------------------------------------------------------------------------------------------------------------------- | :------------------------: |
-|       dernière       | La version la plus récente (peut être instable).                                                                                   |          `latest`          |
-|      build_type      | Le type de compilation utilisé. `dev` est la dernière version instable. `stable` est la dernière version stable. `stable` ou `dev` |     `stable` ou `dev`      |
-|        series        | Le type de build utilisé. `dev` est le dernier build unstable : `version.buildType`.                                               | `4.5.stable`, `4.5.1.dev3` |
+| **Type d'étiquette** | **Description**                                                                                                  |  **Exemple d'étiquette**   |
+| :------------------: | :--------------------------------------------------------------------------------------------------------------- | :------------------------: |
+|       dernière       | La version la plus récente (peut être instable).                                                                 |          `latest`          |
+|      build_type      | Le type de compilation utilisé. `dev` est la dernière version instable. `stable` est la dernière version stable. |     `stable` ou `dev`      |
+|        séries        | Le détail de compilation utilisé, incluant la version et le type de compilation : `version.buildType`.           | `4.5.stable`, `4.5.1.dev3` |
 
 ## Composants
 
 ### Alerter
 
-Créer des alertes pour les différentes soumissions dans le système.
+Crée des alertes pour les différentes soumissions dans le système.
 
 ```bash
 docker run --name alerter cccs/assemblyline-core python -m assemblyline_core.alerter.run_alerter
@@ -143,7 +143,7 @@ docker run --name archiver cccs/assemblyline-core python -m assemblyline_core.ar
 
 ### Dispatcher
 
-Achemine les fichiers dans le système pendant qu'une soumission est en cours. Assurez-vous que tous les fichiers pendant une soumission sont complétés par tous les services requis.
+Achemine les fichiers dans le système durant une soumission. S'assure que tous les fichiers de la soumission courante soient complétés par tous les services requis.
 
 ```bash
 docker run --name dispatcher cccs/assemblyline-core python -m assemblyline_core.dispatching
@@ -151,7 +151,7 @@ docker run --name dispatcher cccs/assemblyline-core python -m assemblyline_core.
 
 ### Expiration
 
-Supprimer les soumissions et leurs résultats lorsque leur TTL expire.
+Supprimer les soumissions et leurs résultats à l'expiration de leur durée de vie.
 
 ```bash
 docker run --name expiry cccs/assemblyline-core python -m assemblyline_core.expiry.run_expiry
@@ -197,7 +197,7 @@ docker run --name scaler cccs/assemblyline-core python -m assemblyline_core.scal
 
 ### Mise à jour
 
-Assurez-vous que les différents services reçoivent leurs derniers fichiers de mise à jour.
+Assure que les différents services reçoivent leurs derniers fichiers de mise à jour.
 
 ```bash
 docker run --name updater cccs/assemblyline-core python -m assemblyline_core.updater.run_updater
@@ -205,7 +205,7 @@ docker run --name updater cccs/assemblyline-core python -m assemblyline_core.upd
 
 ### Workflow
 
-Exécuter les différents flux de travail dans le système et appliquer leurs étiquettes, leur priorité et leur statut.
+Exécute les différents flux de travail dans le système et appliquer leurs étiquettes, leur priorité et leur statut.
 
 ```bash
 docker run --name workflow cccs/assemblyline-core python -m assemblyline_core.workflow.run_workflow
