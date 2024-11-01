@@ -166,11 +166,15 @@ class FileProcessor(threading.Thread):
         self.config: Config = config
         self.datastore = datastore
         self.metadata_check = MetadataValidator(datastore, Hash("metadata_suggestions", persistent_redis))
+
+        # Merge the default metadata required for ingestion with the those that are required from vacuum
+        validation_scheme = config.submission.metadata.ingest.get('_default', {})
+        validation_scheme.update(config.submission.metadata.ingest.get(self.config.core.vacuum.ingest_type, {}))
+
         self.metadata_check_kwargs = {
-            'validation_scheme': self.config.submission.metadata.ingest.get(self.config.core.vacuum.ingest_type, {}),
+            'validation_scheme': validation_scheme,
             'strict': self.config.core.vacuum.ingest_type in self.config.submission.metadata.strict_schemes
         }
-        self.validation_scheme = self.config.submission.metadata.ingest.get(self.config.core.vacuum.ingest_type, {})
         self.counter = counter
         self.minimum_classification = self.config.core.vacuum.minimum_classification
         logger.info("Connect to work queue")
