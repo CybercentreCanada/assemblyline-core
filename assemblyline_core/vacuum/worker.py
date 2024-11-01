@@ -37,6 +37,7 @@ from assemblyline.common.str_utils import safe_str
 from assemblyline.remote.datatypes import get_client as get_redis_client
 from assemblyline.odm.messages.submission import Submission
 from assemblyline.remote.datatypes.queues.named import NamedQueue
+from assemblyline.remote.datatypes.hash import Hash
 
 from assemblyline_core.vacuum.crawler import VACUUM_BUFFER_NAME
 
@@ -164,7 +165,7 @@ class FileProcessor(threading.Thread):
         # Anything that can't be copied easily should be initialized in 'run'.
         self.config: Config = config
         self.datastore = datastore
-        self.metadata_check = MetadataValidator(datastore)
+        self.metadata_check = MetadataValidator(datastore, Hash("metadata_suggestions", persistent_redis))
         self.metadata_check_kwargs = {
             'validation_scheme': self.config.submission.metadata.ingest.get(self.config.core.vacuum.ingest_type, {}),
             'strict': self.config.core.vacuum.ingest_type in self.config.submission.metadata.strict_schemes
