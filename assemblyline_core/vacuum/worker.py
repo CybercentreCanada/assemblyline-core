@@ -167,7 +167,7 @@ class FileProcessor(threading.Thread):
         self.datastore = datastore
         self.metadata_check = MetadataValidator(datastore, Hash("metadata_suggestions", persistent_redis))
 
-        # Merge the default metadata required for ingestion with the those that are required from vacuum
+        # Merge the default metadata required for ingestion with those that are required from vacuum
         validation_scheme = config.submission.metadata.ingest.get('_default', {})
         validation_scheme.update(config.submission.metadata.ingest.get(self.config.core.vacuum.ingest_type, {}))
 
