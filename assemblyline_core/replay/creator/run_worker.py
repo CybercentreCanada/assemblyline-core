@@ -1,8 +1,15 @@
+import json
 import os
 
+from cart import pack_stream
+from io import BytesIO
+
 from assemblyline.filestore import FileStore
+from assemblyline.common.isotime import now_as_iso
 from assemblyline_core.replay.client import APIClient, DirectClient
-from assemblyline_core.replay.replay import ReplayBase
+from assemblyline_core.replay.replay import ReplayBase, INPUT_TYPES
+
+REPLAY_BATCH_SIZE = int(os.environ.get("REPLAY_BATCH_SIZE", "1000"))
 
 
 class ReplayCreatorWorker(ReplayBase):
@@ -35,7 +42,7 @@ class ReplayCreatorWorker(ReplayBase):
             raise ValueError(f'Invalid client type ({self.replay_config.creator.client.type}). '
                              'Must be either \'api\' or \'direct\'.')
 
-    def process_alerts(self, once=False):
+    def process_alert(self, once=False):
         while self.running:
             # Process alerts found
             alert = self.client.get_next_alert()
@@ -63,7 +70,7 @@ class ReplayCreatorWorker(ReplayBase):
             if once:
                 break
 
-    def process_submissions(self, once=False):
+    def process_submission(self, once=False):
         while self.running:
             # Process submissions found
             submission = self.client.get_next_submission()
@@ -91,16 +98,74 @@ class ReplayCreatorWorker(ReplayBase):
             if once:
                 break
 
+    def _process_json_exports(self, collection, id_field, date_field, once=False):
+        # Keep track of the last record exported to update checkpoint
+        last_obj = None
+
+        # Collection of records to be exported to a single JSON file per batch size
+        batch = []
+
+        def upload_batch():
+            # Make sure directories exists
+            os.makedirs(self.replay_config.creator.working_directory, exist_ok=True)
+
+            # Create the JSON
+            json_fn = f"{collection}_{now_as_iso()}.al_json.cart"
+            json_path = os.path.join(self.replay_config.creator.working_directory, json_fn)
+            with open(json_path, "wb") as fp:
+                pack_stream(BytesIO(json.dumps(batch).encode()), fp)
+
+            # Move the JSON
+            self.filestore.upload(json_path, json_fn)
+
+            # Remove temp file
+            if os.path.exists(json_path):
+                os.unlink(json_path)
+
+        while self.running:
+            # Process items found
+            obj = getattr(self.client, f"get_next_{collection}")()
+            if obj:
+                obj_id = obj[id_field]
+                self.log.info(f"Processing {collection}: {obj_id}")
+                batch.append(obj)
+
+                if len(batch) == REPLAY_BATCH_SIZE:
+                    upload_batch()
+            elif last_obj:
+                # Update the checkpoint based on the last item processed before nothing
+                self.client._put_checkpoint(collection, last_obj[date_field])
+
+                # Check if there's anything that hasn't been exported before the queue went silent
+                if batch:
+                    upload_batch()
+
+            # Always keep track of the last object processed for later
+            last_obj = obj
+
+            if once:
+                upload_batch()
+                break
+
+    def process_badlist(self, once=False):
+        self._process_json_exports("badlist", "id", "updated", once)
+
+    def process_safelist(self, once=False):
+        self._process_json_exports("safelist", "id", "updated", once)
+
+    def process_signature(self, once=False):
+        self._process_json_exports("signature", "id", "last_modified", once)
+
+    def process_workflow(self, once=False):
+        self._process_json_exports("workflow", "id", "last_edit", once)
+
     def try_run(self):
         threads = {}
-        if self.replay_config.creator.alert_input.enabled:
-            for ii in range(self.replay_config.creator.alert_input.threads):
-                threads[f'Alert process thread #{ii}'] = self.process_alerts
-
-        if self.replay_config.creator.submission_input.enabled:
-            for ii in range(self.replay_config.creator.submission_input.threads):
-                threads[f'Submission process thread #{ii}'] = self.process_submissions
-
+        for input_type in INPUT_TYPES:
+            input_config = getattr(self.replay_config.creator, f"{input_type}_input")
+            if input_config.enabled:
+                for ii in range(input_config.threads):
+                    threads[f"{input_type.capitalize()} process thread #{ii}"] = getattr(self, f"process_{input_type}")
         if threads:
             self.maintain_threads(threads)
         else:

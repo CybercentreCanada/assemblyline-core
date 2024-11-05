@@ -254,7 +254,8 @@ class DispatchClient:
 
     @elasticapm.capture_span(span_type='dispatch_client')
     def service_finished(self, sid: str, result_key: str, result: Result,
-                         temporary_data: Optional[dict[str, Any]] = None):
+                         temporary_data: Optional[dict[str, Any]] = None,
+                         version="create"):
         """Notifies the dispatcher of service completion, and possible new files to dispatch."""
         # Make sure the dispatcher knows we were working on this task
         task_key = ServiceTask.make_key(sid=sid, service_name=result.response.service_name, sha=result.sha256)
@@ -272,17 +273,22 @@ class DispatchClient:
             self.ds.emptyresult.save(result_key, {"expiry_ts": result.expiry_ts})
         else:
             while True:
-                old, version = self.ds.result.get_if_exists(result_key, version=True)
-                if old:
-                    if old.expiry_ts and result.expiry_ts:
-                        result.expiry_ts = max(result.expiry_ts, old.expiry_ts)
-                    else:
-                        result.expiry_ts = None
                 try:
                     self.ds.result.save(result_key, result, version=version)
                     break
                 except VersionConflictException as vce:
                     self.log.info(f"Retrying to save results due to version conflict: {str(vce)}")
+                    # A result already exists for this key
+                    # Regenerate entire result key based on result and modified task (ignore caching)
+                    version = "create"
+                    result.created = now_as_iso()
+                    task.ignore_cache = True
+                    result_key = Result.help_build_key(sha256=task.fileinfo.sha256,
+                                                       service_name=result.response.service_name,
+                                                       service_version=result.response.service_version,
+                                                       service_tool_version=result.response.service_tool_version,
+                                                       is_empty=False,
+                                                       task=task)
 
         # Send the result key to any watching systems
         msg = {'status': 'OK', 'cache_key': result_key}

@@ -3,6 +3,8 @@ filestore:
     - file:///var/cache/assemblyline/
   storage:
     - file:///var/cache/assemblyline/
+  archive:
+    - file:///var/cache/assemblyline/
 core:
   redis:
     nonpersistent:

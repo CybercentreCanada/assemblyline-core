@@ -121,7 +121,10 @@ class DockerController(ControllerInterface):
                                                  aliases=['service-server'])
 
                 # As long as the current service server is still running, just block its exit code in this thread
-                self.service_server.wait()
+                try:
+                    self.service_server.wait()
+                except docker.errors.NotFound:
+                    pass
 
                 # If it does return, find the new service server
                 self.service_server = self.find_service_server()
@@ -158,6 +161,14 @@ class DockerController(ControllerInterface):
             if 'already exists' in str(e):
                 return
             raise e
+        except docker.errors.NotFound as e:
+            if aliases == ['service-server']:
+                # We've lost our service-server container, time to find another
+                self.service_server = self.find_service_server()
+                network.connect(self.service_server, aliases=aliases)
+                return
+            raise e
+
 
     def _start(self, service_name):
         """Launch a docker container in a manner suitable for Assemblyline."""
@@ -166,7 +177,8 @@ class DockerController(ControllerInterface):
         cfg = prof.container_config
 
         # Set the list of labels
-        labels = dict(self._labels)
+        labels = {_v.name: _v.value for _v in cfg.labels}
+        labels.update(self._labels)
         labels.update({
             'component': service_name,
             'com.docker.compose.service': service_name.lower(),
@@ -179,7 +191,7 @@ class DockerController(ControllerInterface):
         # Define environment variables
         env = [f'{_e.name}={_e.value}' for _e in cfg.environment]
         env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
-        env += [f'LOG_LEVEL={self.log_level}']
+        env += [f'LOG_LEVEL={self.log_level}', f'AL_SERVICE_NAME={service_name}']
         env += [f'{_n}={_v}' for _n, _v in self._service_limited_env[service_name].items()]
         if prof.privileged:
             env.append('PRIVILEGED=true')
@@ -247,6 +259,15 @@ class DockerController(ControllerInterface):
         env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
         env += [f'LOG_LEVEL={self.log_level}', f'AL_SERVICE_NAME={service_name}']
 
+        healthcheck = {
+            'test': ["CMD", "python3", "-m", "assemblyline_v4_service.healthz"],
+            'interval': SERVICE_LIVENESS_PERIOD,
+            'timeout': SERVICE_LIVENESS_TIMEOUT
+        }
+
+        if 'assemblyline' not in cfg.image:
+            healthcheck = None
+
         container = self.client.containers.run(
             image=cfg.image,
             name=name,
@@ -262,12 +283,9 @@ class DockerController(ControllerInterface):
             environment=env,
             detach=True,
             # ports=ports,
-            healthcheck={
-                'test': ["CMD", "python3", "-m", "assemblyline_v4_service.healthz"],
-                'interval': SERVICE_LIVENESS_PERIOD,
-                'timeout': SERVICE_LIVENESS_TIMEOUT
-            }
+            healthcheck=healthcheck
         )
+
         if core_container:
             self._connect_to_network(container, self.core_network, aliases=[hostname])
 
@@ -482,7 +500,8 @@ class DockerController(ControllerInterface):
         if spec.run_as_core:
             volumes.update({row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.core_mounts})
 
-        all_labels = dict(self._labels)
+        all_labels = {_v.name: _v.value for _v in spec.container.labels}
+        all_labels.update(self._labels)
         all_labels.update({
             'component': service_name,
             CHANGE_KEY_NAME: change_check,

@@ -1,20 +1,30 @@
 import collections
+import json
 import os
 import random
+import time
 
 import pytest
 
 from assemblyline.common import forge
-from assemblyline.odm.random_data import create_alerts, wipe_alerts, wipe_submissions, create_submission
+from assemblyline.odm.random_data import create_alerts, wipe_alerts, wipe_submissions, create_submission, create_badlists, create_safelists, create_workflows, wipe_badlist, wipe_safelist, wipe_workflows, create_signatures, wipe_signatures
 from assemblyline_core.replay.creator.run import ReplayCreator
 from assemblyline_core.replay.creator.run_worker import ReplayCreatorWorker
 from assemblyline_core.replay.loader.run import ReplayLoader
 from assemblyline_core.replay.loader.run_worker import ReplayLoaderWorker
 
 NUM_ALERTS = 1
+NUM_BADLIST_ITEMS = 1
+NUM_SAFELIST_ITEMS = 1
+NUM_SIGNATURES = 1
 NUM_SUBMISSIONS = 1
-all_submissions = []
+NUM_WORKFLOWS = 1
+
 all_alerts = []
+all_submissions = []
+
+data_collections = collections.defaultdict(list)
+DATA_COLLECTION_NAMES = ["badlist", "safelist", "workflow"]
 
 
 @pytest.fixture(scope='module')
@@ -37,20 +47,44 @@ def recursive_extend(d, u):
 @pytest.fixture(scope="module")
 def datastore(request, datastore_connection, fs):
     wipe_alerts(datastore_connection)
+    wipe_badlist(datastore_connection)
+    wipe_safelist(datastore_connection)
     wipe_submissions(datastore_connection, fs)
+    wipe_signatures(datastore_connection)
+    wipe_workflows(datastore_connection)
 
     for _ in range(NUM_SUBMISSIONS):
         all_submissions.append(create_submission(datastore_connection, fs))
-    create_alerts(datastore_connection, alert_count=NUM_ALERTS, submission_list=all_submissions)
+    create_alerts(datastore_connection, alert_count=NUM_ALERTS,
+                  submission_list=all_submissions)
+    create_badlists(datastore_connection, count=NUM_BADLIST_ITEMS)
+
+    # Generate all signatures from testing set, but only keep what's being asked to limit to
+    create_signatures(datastore_connection)
+    data_collections["signature"] = \
+        datastore_connection.signature.search("*", rows=NUM_SIGNATURES, fl="id,*")['items']
+    wipe_signatures(datastore_connection)
+    for sig in data_collections["signature"]:
+        datastore_connection.signature.save(sig.id, sig)
+
+    create_safelists(datastore_connection, count=NUM_SAFELIST_ITEMS)
+    create_workflows(datastore_connection, count=NUM_WORKFLOWS)
     for alert in datastore_connection.alert.stream_search("id:*", fl="*"):
         all_alerts.append(alert)
+
+    for collection in DATA_COLLECTION_NAMES:
+        for i in getattr(datastore_connection, collection).stream_search("id:*", fl="id,*"):
+            data_collections[collection].append(i)
 
     try:
         yield datastore_connection
     finally:
         wipe_alerts(datastore_connection)
+        wipe_badlist(datastore_connection)
+        wipe_safelist(datastore_connection)
+        wipe_signatures(datastore_connection)
         wipe_submissions(datastore_connection, fs)
-        datastore_connection.alert.wipe()
+        wipe_workflows(datastore_connection)
 
 
 @pytest.fixture(scope="module")
@@ -58,7 +92,9 @@ def creator():
     # Initialize Replay Creator
     replay_creator = ReplayCreator()
     replay_creator.running = True
-    replay_creator.client.alert_queue.delete()
+    # Clear all queues
+    for q in replay_creator.client.queues.values():
+        q.delete()
     output_dir = replay_creator.replay_config.creator.output_filestore.replace('file://', '')
     if os.path.exists(output_dir):
         for f in os.listdir(output_dir):
@@ -81,7 +117,7 @@ def loader():
     # Initialize Replay Loader
     replay_loader = ReplayLoader()
     replay_loader.running = True
-    replay_loader.client.file_queue.delete()
+    replay_loader.client.queues['file'].delete()
     input_dir = replay_loader.replay_config.loader.input_directory
     if os.path.exists(input_dir):
         for f in os.listdir(input_dir):
@@ -113,13 +149,14 @@ def test_replay_single_alert(config, datastore, creator, creator_worker, loader,
 
     # Test replay creator
     creator.client.setup_alert_input_queue(once=True)
-    assert creator.client.alert_queue.length() == 1
-    assert creator.client.alert_queue.peek_next()['alert_id'] == alert.alert_id
+    assert creator.client.queues['alert'].length() == 1
+    assert creator.client.queues['alert'].peek_next()[
+        'alert_id'] == alert.alert_id
 
     # Test replay creator worker
-    creator_worker.process_alerts(once=True)
+    creator_worker.process_alert(once=True)
     datastore.alert.commit()
-    assert creator_worker.client.alert_queue.length() == 0
+    assert creator_worker.client.queues['alert'].length() == 0
     assert datastore.alert.get(alert.alert_id, as_obj=False)['metadata']['replay'] == 'done'
     assert os.path.exists(filename)
 
@@ -135,12 +172,12 @@ def test_replay_single_alert(config, datastore, creator, creator_worker, loader,
 
     # Test replay loader
     loader.load_files(once=True)
-    assert loader.client.file_queue.length() == 1
-    assert loader.client.file_queue.peek_next() == filename
+    assert loader.client.queues['file'].length() == 1
+    assert loader.client.queues['file'].peek_next() == filename
 
     # Test replay loader worker
     loader_worker.process_file(once=True)
-    assert loader_worker.client.file_queue.length() == 0
+    assert loader_worker.client.queues['file'].length() == 0
     assert not os.path.exists(filename)
 
     loaded_alert = datastore.alert.get(alert.alert_id, as_obj=False)
@@ -162,13 +199,13 @@ def test_replay_single_submission(config, datastore, creator, creator_worker, lo
 
     # Test replay creator
     creator.client.setup_submission_input_queue(once=True)
-    assert creator.client.submission_queue.length() == 1
-    assert creator.client.submission_queue.peek_next()['sid'] == sub['sid']
+    assert creator.client.queues['submission'].length() == 1
+    assert creator.client.queues['submission'].peek_next()['sid'] == sub['sid']
 
     # Test replay creator worker
-    creator_worker.process_submissions(once=True)
+    creator_worker.process_submission(once=True)
     datastore.submission.commit()
-    assert creator_worker.client.submission_queue.length() == 0
+    assert creator_worker.client.queues['submission'].length() == 0
     assert datastore.submission.get(sub['sid'], as_obj=False)['metadata']['replay'] == 'done'
     assert os.path.exists(filename)
 
@@ -184,15 +221,78 @@ def test_replay_single_submission(config, datastore, creator, creator_worker, lo
 
     # Test replay loader
     loader.load_files(once=True)
-    assert loader.client.file_queue.length() == 1
-    assert loader.client.file_queue.peek_next() == filename
+    assert loader.client.queues['file'].length() == 1
+    assert loader.client.queues['file'].peek_next() == filename
 
     # Test replay loader worker
     loader_worker.process_file(once=True)
-    assert loader_worker.client.file_queue.length() == 0
+    assert loader_worker.client.queues['file'].length() == 0
     assert not os.path.exists(filename)
 
     loaded_submission = datastore.submission.get(sub['sid'], as_obj=False)
     assert 'bundle.loaded' in loaded_submission['metadata']
     assert sub['sid'] == loaded_submission['sid']
     assert 'replay' not in loaded_submission['metadata']
+
+
+@pytest.mark.parametrize("collection", ["badlist", "safelist", "signature", "workflow"])
+def test_replay_single_data_collection(datastore, creator, creator_worker, loader, loader_worker, collection):
+    output_dir = creator.replay_config.creator.output_filestore.replace('file://', '')
+    input_dir = loader.replay_config.loader.input_directory
+
+    # Make sure the item gets picked up by the creator
+    item = random.choice(data_collections[collection])
+
+    # Test replay creator
+    getattr(creator.client, f'setup_{collection}_input_queue')(once=True)
+    assert creator.client.queues[collection].length() == 1
+    assert creator.client.queues[collection].peek_next()['id'] == item.id
+    # Test replay creator worker
+    getattr(creator_worker, f'process_{collection}')(once=True)
+    assert creator_worker.client.queues[collection].length() == 0
+    filename = os.path.join(output_dir,
+                            ([f for f in os.listdir(output_dir) if f.startswith(collection) \
+                               and f.endswith('.al_json.cart')] + ["not_found"])[0])
+    assert os.path.exists(filename)
+
+    # Delete the item to test the loading process
+    getattr(datastore, collection).delete(item.id)
+    getattr(datastore, collection).commit()
+
+    # In case the replay.yaml config creator output is not the same as loader input
+    new_filename = filename.replace(output_dir, input_dir)
+    if filename != new_filename:
+        os.rename(filename, new_filename)
+        filename = new_filename
+
+    # Test replay loader
+    loader.load_files(once=True)
+    assert loader.client.queues['file'].length() == 1
+    assert loader.client.queues['file'].peek_next() == filename
+
+    # Test replay loader worker
+    loader_worker.process_file(once=True)
+    assert loader_worker.client.queues['file'].length() == 0
+    assert not os.path.exists(filename)
+
+    loaded_item = getattr(datastore, collection).get_if_exists(item.id)
+    assert loaded_item == item
+
+    if collection == "workflow":
+        # Test updating the workflow but by a different author (reverse the author's name) and change the enabled state
+        item.edited_by = item.edited_by[::-1]
+        item.enabled = not item.enabled
+
+        new_workflow_fn = os.path.join(input_dir, "workflow_blah.al_json")
+        with open(new_workflow_fn, 'w') as fp:
+            json_blob = {"id": item.id}
+            json_blob.update(item.as_primitives())
+            json.dump([json_blob], fp)
+
+        # Load file to be processed
+        loader.load_files(once=True)
+        loader_worker.process_file(once=True)
+
+        # If the workflow was edited by someone else, they shouldn't have control over the enabled state
+        loaded_workflow = datastore.workflow.get(item.workflow_id)
+        assert loaded_workflow.enabled != item.enabled and loaded_workflow.edited_by == item.edited_by

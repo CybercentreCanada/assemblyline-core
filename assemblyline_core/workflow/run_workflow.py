@@ -105,6 +105,10 @@ class WorkflowManager(ServerBase):
                     self.apm_client.end_transaction('loading_workflows', 'success')
 
                 for workflow in workflow_queries:
+                    # Only action workflow if it's enabled
+                    if not workflow.enabled:
+                        continue
+
                     # Start of transaction
                     if self.apm_client:
                         self.apm_client.begin_transaction("Execute workflows")
@@ -171,7 +175,7 @@ class WorkflowManager(ServerBase):
 
                     except SearchException:
                         self.log.warning(f"Invalid query '{safe_str(workflow.query or '')}' in workflow "
-                                         f"'{workflow.name or 'unknown'}' by '{workflow.created_by or 'unknown'}'")
+                                         f"'{workflow.name or 'unknown'}' by '{workflow.creator or 'unknown'}'")
 
                         # End of transaction
                         if self.apm_client:

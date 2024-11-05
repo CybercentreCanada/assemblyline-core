@@ -36,6 +36,7 @@ from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.multi import MultiQueue
 from assemblyline.remote.datatypes.hash import Hash
+from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
 from assemblyline import odm
 from assemblyline.odm.models.submission import SubmissionParams, Submission as DatabaseSubmission
 from assemblyline.odm.models.alert import EXTENDED_SCAN_VALUES
@@ -180,6 +181,9 @@ class Ingester(ThreadedCoreBase):
         # Utility object to handle post-processing actions
         self.postprocess_worker = ActionWorker(cache=True, config=self.config, datastore=self.datastore,
                                                redis_persist=self.redis_persist)
+        # Async Submission quota tracker
+        self.async_submission_tracker = UserQuotaTracker('async_submissions', timeout=24 * 60 * 60,  # 1 day timeout
+                                                         redis=self.redis_persist)
 
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
@@ -595,7 +599,6 @@ class Ingester(ThreadedCoreBase):
                 task.params.submitter) if g in str(task.params.classification)]
 
         # Check if this file is already being processed
-        self.stamp_filescore_key(task)
         pprevious, previous, score = None, None, None
         if not param.ignore_cache:
             pprevious, previous, score, _ = self.check(task, count_miss=False)
@@ -627,6 +630,33 @@ class Ingester(ThreadedCoreBase):
         # (So we don't end up dropping the resubmission).
         if previous:
             self.counter.increment('duplicates')
+
+            if self.config.core.ingester.always_create_submission:
+                # Create a submission record based on the cache hit
+                submission = self.datastore.submission.get(previous, as_obj=False)
+
+                # Assign the current submission as the PSID for the new submission
+                pprevious = previous
+                previous = task.ingest_id
+                task.params.psid = pprevious
+
+                submission.update({
+                    'archived': False,
+                    'archive_ts': None,
+                    'classification': task.params.classification,
+                    'expiry_ts': now_as_iso(task.params.ttl * 24 * 60 * 60),
+                    'from_archive': False,
+                    'metadata': task.submission.metadata,
+                    'params': task.params.as_primitives(),
+                    'sid': previous,
+                    'to_be_deleted': False,
+                    'times': {
+                        'submitted': task.ingest_time,
+                        'completed': "NOW"
+                    },
+                })
+                self.datastore.submission.save(previous, submission)
+
             self.finalize(pprevious, previous, score, task, cache=True)
 
             # On cache hits of any kind we want to send out a completed message
@@ -837,6 +867,9 @@ class Ingester(ThreadedCoreBase):
         return True
 
     def _notify_drop(self, task: IngestTask):
+        if self.config.ui.enforce_quota:
+            self.async_submission_tracker.end(task.params.submitter)
+
         self.send_notification(task)
 
         c12n = task.params.classification
@@ -909,5 +942,8 @@ class Ingester(ThreadedCoreBase):
             if did_resubmit:
                 task.extended_scan = 'submitted'
                 task.params.psid = None
+
+        if self.config.ui.enforce_quota:
+            self.async_submission_tracker.end(task.params.submitter)
 
         self.send_notification(task)

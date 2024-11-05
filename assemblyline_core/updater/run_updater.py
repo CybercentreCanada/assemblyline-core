@@ -15,7 +15,7 @@ import docker
 
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
     V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
-    V1ConfigMapVolumeSource, V1Secret, V1SecretVolumeSource, V1LocalObjectReference
+    V1ConfigMapVolumeSource, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Toleration
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
@@ -39,14 +39,13 @@ NAMESPACE = os.getenv('NAMESPACE', None)
 INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] + \
     [
     secret.strip("${}")
-    for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']]
+    for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read())]
 
 CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'core')
 
 SERVICE_API_HOST = os.getenv('SERVICE_API_HOST')
-UI_SERVER = os.getenv('UI_SERVER')
 RELEASE_NAME = os.getenv('RELEASE_NAME')
 
 
@@ -149,7 +148,7 @@ class DockerUpdateInterface:
 
 class KubernetesUpdateInterface:
     def __init__(self, logger, prefix, namespace, priority_class, extra_labels, linux_node_selector: Selector,
-                 log_level="INFO", default_service_account=None):
+                 log_level="INFO", default_service_account=None, default_service_tolerations=[]):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -182,6 +181,8 @@ class KubernetesUpdateInterface:
         self.default_service_account = default_service_account
         self.secret_env = []
         self.linux_node_selector = linux_node_selector
+        self.default_service_tolerations = [V1Toleration(**toleration.as_primitives()) for toleration in default_service_tolerations]
+
 
         # Get the deployment of this process. Use that information to fill out the secret info
         deployment = self.apps_api.read_namespaced_deployment(name='updater', namespace=self.namespace)
@@ -336,6 +337,7 @@ class KubernetesUpdateInterface:
             priority_class_name=self.priority_class,
             service_account_name=docker_config.service_account or self.default_service_account or PRIVILEGED_SERVICE_ACCOUNT_NAME,
             affinity=selector_to_node_affinity(self.linux_node_selector),
+            tolerations=self.default_service_tolerations
         )
 
         if use_pull_secret:
@@ -358,10 +360,35 @@ class KubernetesUpdateInterface:
 
         if blocking:
             try:
+                pod_name = None
+                while not pod_name:
+                    time.sleep(3)
+                    # Obtain the name of the pod that spawned from the Job
+                    pod = self.api.list_namespaced_pod(namespace=self.namespace,
+                                                       label_selector=",".join([f"{k}={v}"
+                                                                                for k, v in labels.items()]),
+                                                                                limit=1)
+                    if pod.items:
+                        pod_name = pod.items[0].metadata.name
+
                 while not (status.failed or status.succeeded):
                     time.sleep(3)
                     status = self.batch_api.read_namespaced_job(namespace=self.namespace, name=name,
                                                                 _request_timeout=API_TIMEOUT).status
+                    # Monitor container's waiting status state
+                    pod_waiting_state = False
+                    pod_container_statuses = self.api.read_namespaced_pod(name=pod_name, namespace=self.namespace,
+                                                                          _request_timeout=API_TIMEOUT).status.container_statuses
+
+                    if pod_container_statuses:
+                        pod_waiting_state = pod_container_statuses[0].state.waiting
+
+                    # Check to see if we've encountered an issue before the container starts
+                    if pod_waiting_state and pod_waiting_state.reason == "ImagePullBackOff":
+                        # Delete job and raise exception
+                        self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace,
+                                                     propagation_policy='Background', _request_timeout=API_TIMEOUT)
+                        raise Exception(pod_waiting_state.message)
 
                 self.batch_api.delete_namespaced_job(name=name, namespace=self.namespace,
                                                      propagation_policy='Background', _request_timeout=API_TIMEOUT)
@@ -420,6 +447,7 @@ class ServiceUpdater(ThreadedCoreBase):
         self.incompatible_services = set()
         self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
+        self.default_service_env = {e.name: e.value for e in self.config.core.scaler.service_defaults.environment}
         self.mounts = []
 
         # We only want changes with value, we also don't want to override the image
@@ -429,7 +457,10 @@ class ServiceUpdater(ThreadedCoreBase):
         if 'KUBERNETES_SERVICE_HOST' in os.environ and NAMESPACE:
             extra_labels = {}
             if self.config.core.scaler.additional_labels:
-                extra_labels = {k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)}
+                extra_labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)})
+
+            if self.config.core.scaler.privileged_services_additional_labels:
+                extra_labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.privileged_services_additional_labels)})
 
             # If Updater has envs that set the service-server to use HTTPS, then assume a Root CA needs to be mounted
             if SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'):
@@ -446,7 +477,8 @@ class ServiceUpdater(ThreadedCoreBase):
                                                         extra_labels=extra_labels,
                                                         log_level=self.config.logging.log_level,
                                                         default_service_account=self.config.services.service_account,
-                                                        linux_node_selector=self.config.core.scaler.linux_node_selector)
+                                                        linux_node_selector=self.config.core.scaler.linux_node_selector,
+                                                        default_service_tolerations=self.config.core.scaler.service_defaults.tolerations)
             # Add all additional mounts to privileged services
             self.mounts = self.config.core.scaler.service_defaults.mounts
         else:
@@ -479,6 +511,13 @@ class ServiceUpdater(ThreadedCoreBase):
                     image_name, tag_name, auth = get_latest_tag_for_service(
                         service,  self.config, self.log, prefix="[CI] ")
 
+                    if not tag_name:
+                        # Fallback to tag alias if we can't find a suitable versioned tag
+                        self.log.warning("Unable to find a versioned tag for "
+                                         f"{self.config.services.preferred_update_channel} channel. "
+                                         f"Defaulting to '{tag}' tag...")
+                        tag_name = tag
+
                     docker_config = dict(image=f"{image_name}:{tag_name}")
                     if auth:
                         docker_config.update(dict(registry_username=auth['username'],
@@ -489,24 +528,28 @@ class ServiceUpdater(ThreadedCoreBase):
 
                     self.log.info(f"[CI] Service {service_name} is being installed to version {tag_name}...")
 
+                    # Service installation will run in privileged mode
+                    env = {
+                        "SERVICE_TAG": tag_name,
+                        "REGISTER_ONLY": 'true',
+                        "PRIVILEGED": 'true',
+                    }
+
+                    # Update environment with service defaults
+                    env.update(self.default_service_env)
+
                     self.controller.launch(
                         name=service_name,
                         docker_config=DockerConfig(docker_config),
                         mounts=self.mounts,
-                        env={
-                            "SERVICE_TAG": tag_name,
-                            "REGISTER_ONLY": 'true',
-                            "PRIVILEGED": 'true',
-                        },
+                        env=env,
                         blocking=True
                     )
-
-                    service_key = f"{service_name}_{tag_name.replace('stable', '')}"
 
                 except Exception as e:
                     self.log.error(
                         f"[CI] Service {service_name} has failed to install. Install procedure cancelled... [{str(e)}]")
-                return service_key
+                return f"{service_name}_{str(tag_name).replace('stable', '')}"
 
             # Start up installs for services in parallel
             install_threads = []
@@ -514,33 +557,46 @@ class ServiceUpdater(ThreadedCoreBase):
                 for service_name, install_data in self.container_install.items().items():
                     install_threads.append(service_installs_exec.submit(install_service, service_name, install_data))
 
-            # Once all threads are completed, check the status of the installs
-            for thread in install_threads:
-                service_key = thread.result()
-                service_name, latest_tag = service_key.split("_")
-
-                if self.datastore.service.get_if_exists(service_key):
-                    operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
-
-                    # Check if a service was previously disabled and re-enable it
-                    if service_name in self.incompatible_services:
-                        self.incompatible_services.remove(service_name)
-                        operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
-
-                    if self.datastore.service_delta.update(service_name, operations):
-                        # Update completed, cleanup
-                        self.service_events.send(service_name, {
-                            'operation': Operation.Added,
-                            'name': service_name
-                        })
-                        self.log.info(f"[CI] Service {service_name}_{latest_tag} install successful!")
+            # Check the status of the container installs
+            while install_threads:
+                # Delay each check by 5 seconds to give the container adequate time to perform version registration
+                time.sleep(5)
+                pending_threads = []
+                for thread in install_threads:
+                    if not thread.done():
+                        # Add thead to the list of still pending jobs
+                        pending_threads.append(thread)
                     else:
-                        self.log.error(f"[CI] Service {service_name} has failed to install because it cannot set "
-                                       f"{latest_tag} as the new version. Install procedure cancelled...")
-                else:
-                    self.log.error(f"[CI] Service {service_name} has failed to install because resulting "
-                                   f"service key ({service_key}) does not exist. Install procedure cancelled...")
-                self.container_install.pop(service_name)
+                        service_key = thread.result()
+                        service_name, latest_tag = service_key.split("_")
+
+                        if self.datastore.service.get_if_exists(service_key):
+                            operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
+
+                            # Check if a service was previously disabled and re-enable it
+                            if service_name in self.incompatible_services:
+                                self.incompatible_services.remove(service_name)
+                                operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
+
+                            if self.datastore.service_delta.update(service_name, operations):
+                                # Update completed, cleanup
+                                self.service_events.send(service_name, {
+                                    'operation': Operation.Added,
+                                    'name': service_name
+                                })
+                                self.log.info(f"[CI] Service {service_name}_{latest_tag} install successful!")
+                            else:
+                                self.log.error(
+                                    f"[CI] Service {service_name} has failed to install because it cannot set "
+                                    f"{latest_tag} as the new version. Install procedure cancelled...")
+                        else:
+                            self.log.error(
+                                f"[CI] Service {service_name} has failed to install because resulting "
+                                f"service key ({service_key}) does not exist. Install procedure cancelled...")
+                        self.container_install.pop(service_name)
+
+                # Update with still pending and loop until all are completed/failed
+                install_threads = pending_threads
 
             # Clear out any old dead containers
             self.controller.cleanup_stale()
@@ -570,16 +626,23 @@ class ServiceUpdater(ThreadedCoreBase):
 
                 latest_tag = update_data['latest_tag'].replace('stable', '')
                 service_key = f"{service_name}_{latest_tag}"
+
+                # Service updates will run in privileged mode
+                env = {
+                    "SERVICE_TAG": update_data['latest_tag'],
+                    "REGISTER_ONLY": 'true',
+                    "PRIVILEGED": 'true',
+                }
+
+                # Update environment with service defaults
+                env.update(self.default_service_env)
+
                 try:
                     self.controller.launch(
                         name=service_name,
                         docker_config=DockerConfig(docker_config),
                         mounts=self.mounts,
-                        env={
-                            "SERVICE_TAG": update_data['latest_tag'],
-                            "REGISTER_ONLY": 'true',
-                            "PRIVILEGED": 'true',
-                        },
+                        env=env,
                         blocking=True
                     )
                 except Exception as e:
@@ -593,33 +656,46 @@ class ServiceUpdater(ThreadedCoreBase):
                 for service_name, update_data in self.container_update.items().items():
                     update_threads.append(service_updates_exec.submit(update_service, service_name, update_data))
 
-            # Once all threads are completed, check the status of the updates
-            for thread in update_threads:
-                service_key = thread.result()
-                service_name, latest_tag = service_key.split("_")
-
-                if self.datastore.service.get_if_exists(service_key):
-                    operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
-
-                    # Check if a service waas previously disabled and re-enable it
-                    if service_name in self.incompatible_services:
-                        self.incompatible_services.remove(service_name)
-                        operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
-
-                    if self.datastore.service_delta.update(service_name, operations):
-                        # Update completed, cleanup
-                        self.service_events.send(service_name, {
-                            'operation': Operation.Modified,
-                            'name': service_name
-                        })
-                        self.log.info(f"[CU] Service {service_name} update successful!")
+            # Check the status of the container updates
+            while update_threads:
+                # Delay each check by 5 seconds to give the container adequate time to perform version registration
+                time.sleep(5)
+                pending_threads = []
+                for thread in update_threads:
+                    if not thread.done():
+                        # Add thead to the list of still pending jobs
+                        pending_threads.append(thread)
                     else:
-                        self.log.error(f"[CU] Service {service_name} has failed to update because it cannot set "
-                                       f"{latest_tag} as the new version. Update procedure cancelled...")
-                else:
-                    self.log.error(f"[CU] Service {service_name} has failed to update because resulting "
-                                   f"service key ({service_key}) does not exist. Update procedure cancelled...")
-                self.container_update.pop(service_name)
+                        # Update the version of the service
+                        service_key = thread.result()
+                        service_name, latest_tag = service_key.split("_")
+
+                        if self.datastore.service.get_if_exists(service_key):
+                            operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
+
+                            # Check if a service waas previously disabled and re-enable it
+                            if service_name in self.incompatible_services:
+                                self.incompatible_services.remove(service_name)
+                                operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
+
+                            if self.datastore.service_delta.update(service_name, operations):
+                                # Update completed, cleanup
+                                self.service_events.send(service_name, {
+                                    'operation': Operation.Modified,
+                                    'name': service_name
+                                })
+                                self.log.info(f"[CU] Service {service_name} update successful!")
+                            else:
+                                self.log.error(
+                                    f"[CU] Service {service_name} has failed to update because it cannot set "
+                                    f"{latest_tag} as the new version. Update procedure cancelled...")
+                        else:
+                            self.log.error(f"[CU] Service {service_name} has failed to update because resulting "
+                                           f"service key ({service_key}) does not exist. Update procedure cancelled...")
+                        self.container_update.pop(service_name)
+
+                # Update with still pending and loop until all are completed/failed
+                update_threads = pending_threads
 
             # Clear out any old dead containers
             self.controller.cleanup_stale()

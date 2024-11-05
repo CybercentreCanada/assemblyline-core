@@ -6,7 +6,7 @@ import functools
 import threading
 from collections import defaultdict
 from string import Template
-from typing import Optional, Any
+from typing import Dict, Optional, Any
 import os
 import re
 import math
@@ -17,6 +17,7 @@ import copy
 from contextlib import contextmanager
 
 import elasticapm
+import json
 import yaml
 
 from assemblyline.remote.datatypes.queues.named import NamedQueue
@@ -29,11 +30,12 @@ from assemblyline.odm.models.config import Mount
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
 from assemblyline.odm.messages.scaler_status_heartbeat import Status
 from assemblyline.odm.messages.changes import ServiceChange, Operation
-from assemblyline.common.dict_utils import get_recursive_sorted_tuples
+from assemblyline.common.dict_utils import get_recursive_sorted_tuples, flatten
 from assemblyline.common.uid import get_id_from_data
 from assemblyline.common.forge import get_classification, get_service_queue, get_apm_client
 from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
+from assemblyline_core.updater.helper import get_registry_config
 from assemblyline_core.scaler.controllers import KubernetesController
 from assemblyline_core.scaler.controllers.interface import ServiceControlError
 from assemblyline_core.server_base import ServiceStage, ThreadedCoreBase
@@ -68,7 +70,6 @@ DOCKER_CONFIGURATION_PATH = os.getenv('DOCKER_CONFIGURATION_PATH', None)
 DOCKER_CONFIGURATION_VOLUME = os.getenv('DOCKER_CONFIGURATION_VOLUME', None)
 
 SERVICE_API_HOST = os.getenv('SERVICE_API_HOST', None)
-UI_SERVER = os.getenv('UI_SERVER', None)
 INTERNAL_ENCRYPT = bool(SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'))
 
 
@@ -182,13 +183,13 @@ class ServiceProfile:
             return self.target_instances + MAX_CONTAINER_ALLOCATION
         return min(self._max_instances, self.target_instances + MAX_CONTAINER_ALLOCATION)
 
-    @property
-    def min_instances(self) -> int:
-        return self._min_instances
-
     @max_instances.setter
     def max_instances(self, value: int):
         self._max_instances = max(0, value)
+
+    @property
+    def min_instances(self) -> int:
+        return self._min_instances
 
     @min_instances.setter
     def min_instances(self, value: int):
@@ -268,32 +269,45 @@ class ScalerServer(ThreadedCoreBase):
         self.service_change_watcher.register('changes.services.*', self._handle_service_change_event)
 
         core_env: dict[str, str] = {}
+
         # If we have privileged services, we must be able to pass the necessary environment variables for them to
         # function properly.
-        for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read()) + ['UI_SERVER']:
-            env_name = secret.strip("${}")
-            try:
-                core_env[env_name] = os.environ[env_name]
-            except KeyError:
-                # Don't pass through variables that scaler doesn't have
-                # they are likely specific to other components and shouldn't
-                # be shared with privileged services.
-                pass
+        with open('/etc/assemblyline/config.yml') as fh:
+            flattened_config: Dict[str, Any] = flatten(yaml.safe_load(fh.read()))
+
+        # Limit secrets to be shared to very specific configurations
+        for cfg in ["datastore.hosts", "filestore.archive", "filestore.cache", "filestore.storage"]:
+            for conn_str in flattened_config.get(cfg, []):
+                # Look for any secrets that need to passed onto services via env
+                for secret in Template(conn_str).get_identifiers():
+                    try:
+                        core_env[secret] = os.environ[secret]
+                    except KeyError:
+                        # Don't pass through variables that scaler doesn't have
+                        # they are likely specific to other components and shouldn't
+                        # be shared with privileged services.
+                        pass
 
         labels = {
             'app': 'assemblyline',
             'section': 'service',
             'privilege': 'service'
         }
+        priv_labels = {}
+
+        service_defaults_config = self.config.core.scaler.service_defaults
 
         # If Scaler has envs that set service-server env, then that should override configured values
         if SERVICE_API_HOST:
-            self.config.core.scaler.service_defaults.environment = \
+            service_defaults_config.environment = \
                 [EnvironmentVariable(dict(name="SERVICE_API_HOST", value=SERVICE_API_HOST))] + \
-                [env for env in self.config.core.scaler.service_defaults.environment if env.name != "SERVICE_API_HOST"]
+                [env for env in service_defaults_config.environment if env.name != "SERVICE_API_HOST"]
 
         if self.config.core.scaler.additional_labels:
             labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)})
+
+        if self.config.core.scaler.privileged_services_additional_labels:
+            priv_labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.privileged_services_additional_labels)})
 
         if KUBERNETES_AL_CONFIG:
             self.log.info(f"Loading Kubernetes cluster interface on namespace: {NAMESPACE}")
@@ -305,7 +319,10 @@ class ScalerServer(ThreadedCoreBase):
                                                    log_level=self.config.logging.log_level,
                                                    core_env=core_env,
                                                    cluster_pod_list=self.config.core.scaler.cluster_pod_list,
-                                                   default_service_account=self.config.services.service_account)
+                                                   default_service_account=self.config.services.service_account,
+                                                   default_service_tolerations=service_defaults_config.tolerations,
+                                                   priv_labels=priv_labels
+                                                   )
 
             # Add global configuration for privileged services
             self.controller.add_config_mount(KUBERNETES_AL_CONFIG, config_map=KUBERNETES_AL_CONFIG, key="config",
@@ -314,7 +331,7 @@ class ScalerServer(ThreadedCoreBase):
             # If we're passed an override for server-server and it's defining an HTTPS connection, then add a global
             # mount for the Root CA that needs to be mounted
             if INTERNAL_ENCRYPT:
-                self.config.core.scaler.service_defaults.mounts.append(Mount(dict(
+                service_defaults_config.mounts.append(Mount(dict(
                     name="root-ca",
                     path="/etc/assemblyline/ssl/al_root-ca.crt",
                     resource_type="secret",
@@ -323,7 +340,7 @@ class ScalerServer(ThreadedCoreBase):
                 )))
 
             # Add default mounts for (non-)privileged services
-            for mount in self.config.core.scaler.service_defaults.mounts:
+            for mount in service_defaults_config.mounts:
                 # Deprecated configuration for mounting ConfigMap
                 # TODO: Deprecate code on next major change
                 if mount.config_map:
@@ -357,7 +374,8 @@ class ScalerServer(ThreadedCoreBase):
                 self.controller.core_mounts.append((DOCKER_CONFIGURATION_VOLUME, '/etc/assemblyline/'))
 
                 with open(os.path.join(DOCKER_CONFIGURATION_PATH, 'config.yml'), 'w') as handle:
-                    yaml.dump(self.config.as_primitives(), handle)
+                    # Convert to JSON before converting to YAML to account for direct ODM representation errors
+                    yaml.dump(json.loads(self.config.json()), handle)
 
                 with open(os.path.join(DOCKER_CONFIGURATION_PATH, 'classification.yml'), 'w') as handle:
                     yaml.dump(get_classification().original_definition, handle)
@@ -366,7 +384,7 @@ class ScalerServer(ThreadedCoreBase):
             if CLASSIFICATION_HOST_PATH:
                 self.controller.global_mounts.append((CLASSIFICATION_HOST_PATH, '/etc/assemblyline/classification.yml'))
 
-            for mount in self.config.core.scaler.service_defaults.mounts:
+            for mount in service_defaults_config.mounts:
                 # Mounts are all storage-based since there's no equivalent to ConfigMaps in Docker
                 if mount.privileged_only:
                     self.controller.core_mounts.append((mount.name, mount.path))
@@ -449,11 +467,30 @@ class ScalerServer(ThreadedCoreBase):
                 self._sync_service(service)
 
     def sync_services(self):
+        last_synced_profiles = None
         while self.running:
             with apm_span(self.apm_client, 'sync_services'):
                 self.log.info('Synchronizing service configuration')
                 with self.profiles_lock:
                     current_services = set(self.profiles.keys())
+
+                    # Check to see if the service is progressing since it's last sync
+                    if last_synced_profiles:
+                        for service, profile in self.profiles.items():
+                            # Assume there was no backlog initially if the service is new since last sync
+                            last_synced_backlog = 0
+                            if last_synced_profiles.get(service):
+                                 last_synced_backlog = last_synced_profiles[service].backlog
+
+                            # Check to see if the backlog has increased and if the service has been running since
+                            if profile.backlog and profile.backlog >= last_synced_backlog and \
+                                profile.running_instances == 0 and profile.target_instances > 0:
+                                # Restart the service in an attempt to resolve intermittent issues with container/pod
+                                self.controller.restart(profile)
+
+                    # Update the last synced profiles for next time
+                    last_synced_profiles = self.profiles
+
                 discovered_services: list[str] = []
 
                 # Get all the service data
@@ -490,6 +527,12 @@ class ScalerServer(ThreadedCoreBase):
             for var in default_settings.environment:
                 if var.name not in set_keys:
                     docker_config.environment.append(var)
+
+            # Set authentication to registry to pull the image
+            auth_config = get_registry_config(docker_config, self.config)
+            docker_config.registry_username = auth_config['username']
+            docker_config.registry_password = auth_config['password']
+
             return docker_config
 
         # noinspection PyBroadException
@@ -509,7 +552,7 @@ class ScalerServer(ThreadedCoreBase):
             if not service.version.startswith(system_spec):
                 # If FW and SYS version don't prefix in the service version, we can't guarantee the
                 # service is compatible. Disable and treat it as incompatible due to service version.
-                self.log.warning("Disabling service with incompatible version. "
+                self.log.warning(f"Disabling {service.name} with incompatible version. "
                                  f"[{service.version} != '{system_spec}.X.{service.update_channel}Y'].")
                 disable_incompatible_service()
             elif service.update_config and service.update_config.wait_for_update and not service.update_config.sources:
@@ -598,9 +641,8 @@ class ScalerServer(ThreadedCoreBase):
                         # Use service-specific value if present
                         min_instances = service.min_instances
                     if name not in self.profiles:
-                        self.log.info(f"Adding "
-                                      f"{f'privileged {service.name}' if service.privileged else service.name}"
-                                      " to scaling")
+                        self.log.info("Adding %s%s to scaling",
+                                      'privileged ' if service.privileged else '', service.name)
                         self.add_service(ServiceProfile(
                             name=name,
                             min_instances=min_instances,
@@ -625,7 +667,7 @@ class ScalerServer(ThreadedCoreBase):
                         profile.privileged = service.privileged
 
                         for dependency_name, dependency_blob in dependency_blobs.items():
-                            if profile.dependency_blobs[dependency_name] != dependency_blob:
+                            if profile.dependency_blobs.get(dependency_name, '') != dependency_blob:
                                 self.log.info(f"Updating deployment information for {name}/{dependency_name}")
                                 profile.dependency_blobs[dependency_name] = dependency_blob
                                 self.controller.start_stateful_container(

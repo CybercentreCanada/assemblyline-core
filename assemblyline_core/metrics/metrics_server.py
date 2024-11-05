@@ -3,11 +3,16 @@
 import tempfile
 import sys
 import time
+import threading
 from collections import Counter
-from threading import Lock
+from threading import Lock, Thread
+from os import environ, path
+from urllib.parse import urlparse
 
 import elasticapm
 import elasticsearch
+import requests
+from packaging import version
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from assemblyline_core.metrics.heartbeat_formatter import HeartbeatFormatter
@@ -16,9 +21,6 @@ from assemblyline_core.server_base import ServerBase
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common import forge
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
-from os import environ, path
-from packaging import version
-from urllib.parse import urlparse
 
 METRICS_QUEUE = "assemblyline_metrics"
 NON_AGGREGATED = ['scaler', 'scaler_status']
@@ -258,6 +260,7 @@ class HeartbeatManager(ServerBase):
         self.metrics_queue = CommsQueue(METRICS_QUEUE)
         self.scheduler = BackgroundScheduler(daemon=True)
         self.hm = HeartbeatFormatter("heartbeat_manager", self.log, config=self.config)
+        self.hauntedhouse_client = forge.get_hauntedhouse_client(self.config)
 
         self.counters_lock = Lock()
         self.counters = {}
@@ -279,6 +282,10 @@ class HeartbeatManager(ServerBase):
     def try_run(self):
         self.scheduler.add_job(self._export_hearbeats, 'interval', seconds=self.config.core.metrics.export_interval)
         self.scheduler.start()
+
+        threading.Thread(target=self._call_interval, args=('es_shards', self._fetch_shards), daemon=True).start()
+        if self.config.retrohunt.enabled:
+            threading.Thread(target=self._call_interval, args=('retrohunt', self._fetch_retrohunt), daemon=True).start()
 
         while self.running:
             for msg in self.metrics_queue.listen():
@@ -314,6 +321,70 @@ class HeartbeatManager(ServerBase):
                 # APM Transaction end
                 if self.apm_client:
                     self.apm_client.end_transaction('process_message', 'success')
+
+    def _call_interval(self, name, method):
+        while self.running:
+            # Run the heartbeat
+            send_time = time.time()
+            try:
+                method()
+            except Exception:
+                self.log.exception('Error running metric fetcher %s', name)
+
+            # Wait until we are inline with the heartbeat interval
+            elapsed = time.time() - send_time
+            remaining = self.config.core.metrics.export_interval - elapsed
+            if remaining > 0:
+                self.sleep(remaining)
+
+    def _fetch_shards(self):
+        request_time = None
+        sizes = {}
+        unassigned = 0
+        nodes = set()
+        try:
+            # Pull shard data from elastisearch
+            start_time = time.time()
+            response = self.datastore.ds.client.cat.shards(bytes='b', format='json', master_timeout='5s')
+            for shard in response.body:
+                index = shard['index']
+                node = shard['node']
+                if node:
+                    sizes.setdefault(index, 0)
+                    sizes[index] = max(sizes[index], int(shard.get('store') or 0))
+                    nodes.add(node)
+                else:
+                    unassigned += 1
+            request_time = time.time() - start_time
+
+        finally:
+            # Export metrics heartbeat, send None and empty if an error occurs while getting the data
+            # the error will be logged in the outer function
+            metrics = {
+                'shard_sizes': sizes,
+                'request_time': request_time,
+                'unassigned': unassigned
+            }
+            self.hm.send_heartbeat('elastic', 'datastore', metrics, len(nodes))
+
+    def _fetch_retrohunt(self):
+        status = {}
+        request_time = None
+        try:
+            # Pull status message from retrohunt
+            start_time = time.time()
+            status = self.hauntedhouse_client.status()
+            request_time = time.time() - start_time
+
+        finally:
+            metrics = {
+                'request_time': request_time,
+                'status': status,
+            }
+            instances = len(status.get('storage', {}))
+
+            # Export heartbeat
+            self.hm.send_heartbeat('retrohunt', 'hauntedhouse', metrics, instances)
 
     def _export_hearbeats(self):
         try:

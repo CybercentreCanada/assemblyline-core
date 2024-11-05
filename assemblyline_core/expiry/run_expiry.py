@@ -1,38 +1,51 @@
 #!/usr/bin/env python
 from __future__ import annotations
+
 import concurrent.futures
+import threading
+import functools
+import time
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, Future, as_completed
 from concurrent.futures.process import BrokenProcessPool
-import functools
-from typing import Callable, Optional, Union, TYPE_CHECKING
-import elasticapm
-import time
+from typing import Callable, Optional, TYPE_CHECKING
 
+import elasticapm
 from datemath import dm
 
-from assemblyline.common.isotime import epoch_to_iso, now_as_iso, iso_to_epoch
 from assemblyline_core.server_base import ServerBase
 from assemblyline_core.dispatching.dispatcher import BAD_SID_HASH
 from assemblyline.common import forge
+from assemblyline.common.isotime import epoch_to_iso, now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.expiry_heartbeat import Metrics
 from assemblyline.remote.datatypes import get_client
+from assemblyline.datastore.collection import Index
 from assemblyline.remote.datatypes.set import Set
 
 if TYPE_CHECKING:
     from assemblyline.datastore.collection import ESCollection
 
 
-def file_delete_worker(logger, filestore_urls, file_batch) -> list[str]:
+def file_delete_worker(logger, filestore_urls, file_batch, archive_filestore_urls=None) -> list[tuple[str, bool]]:
     try:
         filestore = FileStore(*filestore_urls)
+        if archive_filestore_urls and filestore_urls != archive_filestore_urls:
+            archivestore = FileStore(*archive_filestore_urls)
+        else:
+            archivestore = filestore
 
-        def filestore_delete(sha256: str) -> Optional[str]:
-            filestore.delete(sha256)
-            if not filestore.exists(sha256):
-                return sha256
-            return None
+        def filestore_delete(item: tuple[str, bool]) -> tuple[Optional[str], Optional[bool]]:
+            sha256, from_archive = item
+            if from_archive:
+                archivestore.delete(sha256)
+                if not archivestore.exists(sha256):
+                    return sha256, True
+            else:
+                filestore.delete(sha256)
+                if not filestore.exists(sha256):
+                    return sha256, False
+            return None, None
 
         return _file_delete_worker(logger, filestore_delete, file_batch)
 
@@ -41,8 +54,11 @@ def file_delete_worker(logger, filestore_urls, file_batch) -> list[str]:
     return []
 
 
-def _file_delete_worker(logger, delete_action: Callable[[str], Optional[str]], file_batch) -> list[str]:
-    finished_files: list[str] = []
+ActionSignature = Callable[[tuple[str, bool]], tuple[Optional[str], Optional[bool]]]
+
+
+def _file_delete_worker(logger, delete_action: ActionSignature, file_batch) -> list[tuple[str, bool]]:
+    finished_files: list[tuple[str, bool]] = []
     try:
         futures = []
 
@@ -52,9 +68,9 @@ def _file_delete_worker(logger, delete_action: Callable[[str], Optional[str]], f
 
             for future in as_completed(futures):
                 try:
-                    erased_name = future.result()
-                    if erased_name:
-                        finished_files.append(erased_name)
+                    erased_name, from_archive = future.result()
+                    if erased_name and from_archive is not None:
+                        finished_files.append((erased_name, from_archive))
                 except Exception as error:
                     logger.exception("Error in filestore worker: " + str(error))
 
@@ -64,17 +80,29 @@ def _file_delete_worker(logger, delete_action: Callable[[str], Optional[str]], f
 
 
 class ExpiryManager(ServerBase):
-    def __init__(self, redis_persist=None):
-        self.config = forge.get_config()
+    def __init__(self, redis_persist=None, datastore=None, filestore=None, config=None, classification=None):
+        self.config = config or forge.get_config()
 
         super().__init__('assemblyline.expiry', shutdown_timeout=self.config.core.expiry.sleep_time + 5)
-        self.datastore = forge.get_datastore(config=self.config)
-        self.filestore = forge.get_filestore(config=self.config)
-        self.classification = forge.get_classification()
+
+        # Set Archive related configs
+        if self.config.datastore.archive.enabled:
+            self.archive_access = True
+            self.index_type = Index.HOT_AND_ARCHIVE
+        else:
+            self.archive_access = False
+            self.index_type = Index.HOT
+
+        self.datastore = datastore or forge.get_datastore(config=self.config, archive_access=self.archive_access)
+        self.filestore = filestore or forge.get_filestore(config=self.config)
+        self.classification = classification or forge.get_classification()
         self.expirable_collections: list[ESCollection] = []
         self.counter = MetricsFactory('expiry', Metrics)
         self.file_delete_worker = ProcessPoolExecutor(self.config.core.expiry.delete_workers)
-        self.same_storage = self.config.filestore.storage == self.config.filestore.archive
+        if self.config.filestore.archive:
+            self.same_storage = self.config.filestore.storage == self.config.filestore.archive
+        else:
+            self.same_storage = True
         self.current_submission_cleanup = set()
 
         self.redis_persist = redis_persist or get_client(
@@ -124,14 +152,15 @@ class ExpiryManager(ServerBase):
     def filestore_delete(self, file_batch, _):
         return self.file_delete_worker.submit(file_delete_worker, logger=self.log,
                                               filestore_urls=list(self.config.filestore.storage),
-                                              file_batch=file_batch)
+                                              file_batch=file_batch,
+                                              archive_filestore_urls=list(self.config.filestore.archive))
 
     def cachestore_delete(self, file_batch, _):
         return self.file_delete_worker.submit(file_delete_worker, logger=self.log,
                                               filestore_urls=list(self.config.filestore.cache),
                                               file_batch=file_batch)
 
-    def _finish_delete(self, collection: ESCollection, task: Future, expire_only: list[str]):
+    def _finish_delete(self, collection: ESCollection, task: Future, expire_only: list[tuple[str, bool]]):
         # Wait until the worker process finishes deleting files
         file_list: list[str] = []
         while self.running:
@@ -142,27 +171,43 @@ class ExpiryManager(ServerBase):
             except concurrent.futures.TimeoutError:
                 pass
 
-        file_list.extend(expire_only)
-
-        # build a batch delete job for all the removed files
-        bulk = collection.get_bulk_plan()
-        for sha256 in file_list:
-            bulk.add_delete_operation(sha256)
-
-        if len(file_list) > 0:
-            self.log.info(f'    Deleted associated files from the '
+        if file_list:
+            self.log.info(f'[{collection.name}] Deleted associated files from the '
                           f'{"cachestore" if "cache" in collection.name else "filestore"}...')
-            collection.bulk(bulk)
-            self.counter.increment(f'{collection.name}', increment_by=len(file_list))
-            self.log.info(f"    Deleted {len(file_list)} items from the datastore...")
         else:
-            self.log.warning('    Expiry unable to clean up any of the files in filestore.')
+            self.log.info(f'[{collection.name}] Nothing was deleted from the '
+                          f'{"cachestore" if "cache" in collection.name else "filestore"}...')
 
-    def _simple_delete(self, collection, delete_query, number_to_delete):
+        # From the files to be deleted, check which are from the hot index
+        hot_file_list = [x[0] for x in file_list if not x[1]]
+        hot_file_list.extend([x[0] for x in expire_only if not x[1]])
+
+        # From the files to be deleted, check which are from the archive index
+        archive_file_list = [x[0] for x in file_list if x[1]]
+        archive_file_list.extend([x[0] for x in expire_only if x[1]])
+
+        for cur_file_list, index_type in [(hot_file_list, Index.HOT), (archive_file_list, Index.ARCHIVE)]:
+            if not cur_file_list:
+                # Nothing to delete from this index type
+                continue
+
+            # build a batch delete job for all the removed files
+            bulk = collection.get_bulk_plan(index_type=index_type)
+            for sha256 in cur_file_list:
+                bulk.add_delete_operation(sha256)
+
+            collection.bulk(bulk)
+            self.counter.increment(f'{collection.name}', increment_by=len(cur_file_list))
+            self.log.info(f"[{collection.name}] Deleted {len(cur_file_list)} items from the datastore...")
+
+        if not hot_file_list and not archive_file_list:
+            self.log.warning(f'[{collection.name}] Expiry unable to clean up any of the files in filestore.')
+
+    def _simple_delete(self, collection: ESCollection, delete_query, number_to_delete):
         self.heartbeat()
-        collection.delete_by_query(delete_query)
+        collection.delete_by_query(delete_query, index_type=self.index_type)
         self.counter.increment(f'{collection.name}', increment_by=number_to_delete)
-        self.log.info(f"    Deleted {number_to_delete} items from the datastore...")
+        self.log.info(f"[{collection.name}] Deleted {number_to_delete} items from the datastore...")
 
     def _cleanup_canceled_submission(self, sid):
         # Allowing us at minimum 5 minutes to cleanup the submission
@@ -171,7 +216,7 @@ class ExpiryManager(ServerBase):
             self.apm_client.begin_transaction("Delete canceled submissions")
 
         # Cleaning up the submission
-        self.log.info(f"Deleting incomplete submission {sid}...")
+        self.log.info(f"[submission] Deleting incomplete submission {sid}...")
         self.datastore.delete_submission_tree_bulk(sid, self.classification, transport=self.filestore)
         self.redis_bad_sids.remove(sid)
 
@@ -181,131 +226,174 @@ class ExpiryManager(ServerBase):
         if self.apm_client:
             self.apm_client.end_transaction("canceled_submissions", 'deleted')
 
-    def run_expiry_once(self, pool: ThreadPoolExecutor):
+    def _process_chunk(self, collection: ESCollection, start, end, final_date, number_to_delete):
+        # We assume that no records are ever inserted such that their expiry_ts is in the past.
+        # We also assume that the `end` dates are also in the past.
+        # As long as these two things are true, the set returned by this query should be consistent.
+        # The one race condition is that a record might be refreshed while the file
+        # blob would be deleted anyway, leaving a file record with no filestore object
+        delete_query = f"expiry_ts:{{{start} TO {end}]"
+
+        # check if we are dealing with an index that needs file cleanup
+        if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
+            # Delete associated files
+            delete_objects: list[tuple[str, bool]] = []
+            for item in collection.stream_search(
+                    delete_query, fl='id,from_archive', as_obj=False, index_type=self.index_type):
+                self.heartbeat()
+                delete_objects.append((item['id'], item.get('from_archive', False)))
+
+            # Filter archived documents if archive filestore is the same as the filestore
+            expire_only: list[tuple[str, bool]] = []
+            if self.same_storage and self.archive_access and collection.name == 'file':
+                # Separate hot and archive files
+                delete_from_archive = [i[0] for i in delete_objects if i[1]]
+                delete_from_hot = [i[0] for i in delete_objects if not i[1]]
+
+                # Check for overlap
+                overlap = set(delete_from_archive).intersection(set(delete_from_hot))
+                delete_from_archive = list(set(delete_from_archive)-overlap)
+                delete_from_hot = list(set(delete_from_hot)-overlap)
+
+                # Create the original delete_object form the overlap
+                delete_objects = [(k, False) for k in overlap]
+                delete_objects.extend([(k, True) for k in overlap])
+
+                if delete_from_hot:
+                    # Check hot objects to delete if they are in archive
+                    archived_files = self.datastore.file.multiexists(delete_from_hot, index_type=Index.ARCHIVE)
+                    delete_objects.extend([(k, False) for k, v in archived_files.items() if not v])
+                    expire_only.extend([(k, False) for k, v in archived_files.items() if v])
+
+                if delete_from_archive:
+                    # Check hot objects to delete if they are in archive
+                    hot_files = self.datastore.file.multiexists(delete_from_archive, index_type=Index.HOT)
+                    delete_objects.extend([(k, True) for k, v in hot_files.items() if not v])
+                    expire_only.extend([(k, True) for k, v in hot_files.items() if v])
+
+            delete_tasks = self.fs_hashmap[collection.name](delete_objects, final_date)
+
+            # Proceed with deletion, but only after all the scheduled deletes for this
+            self.log.info(f"[{collection.name}] Scheduled {len(delete_objects)}/{number_to_delete} files to be "
+                          f"removed from the {'cachestore' if 'cache' in collection.name else 'filestore'}")
+            self._finish_delete(collection, delete_tasks, expire_only)
+
+        else:
+            # Proceed with deletion
+            self._simple_delete(collection, delete_query, number_to_delete)
+
+    def feed_expiry_jobs(self, collection, start, jobs: list[concurrent.futures.Future],
+                         pool: ThreadPoolExecutor) -> tuple[str, bool]:
+        _process_chunk = self.log_errors(self._process_chunk)
+        number_to_delete = 0
+        self.heartbeat()
+
+        # Start of expiry transaction
+        if self.apm_client:
+            self.apm_client.begin_transaction("Delete expired documents")
+
+        final_date = self._get_final_date()
+
+        # Break down the expiry window into smaller chunks of data
+        while len(jobs) < self.config.core.expiry.iteration_max_tasks:
+
+            # Get the next chunk
+            end, number_to_delete = self._get_next_chunk(collection, start, final_date)
+
+            # Check if we got anything
+            if number_to_delete == 0:
+                break
+
+            # Process the chunk in the threadpool
+            jobs.append(pool.submit(_process_chunk, collection, start, end, final_date, number_to_delete))
+
+            # Prepare for next chunk
+            start = end
+
+        # End of expiry transaction
+        if self.apm_client:
+            self.apm_client.end_transaction(collection.name, 'deleted')
+
+        return start, number_to_delete < self.expiry_size
+
+    def _get_final_date(self):
         now = now_as_iso()
-        reached_max = False
+        if self.config.core.expiry.batch_delete:
+            final_date = dm(f"{now}||-{self.config.core.expiry.delay}h/d").float_timestamp
+        else:
+            final_date = dm(f"{now}||-{self.config.core.expiry.delay}h").float_timestamp
+        return epoch_to_iso(final_date)
 
-        # Delete canceled submissions
-        # Make sure we're not dedicating more then a quarter of the pool to this operation because it is costly
-        for submission in self.datastore.submission.search(
-                "to_be_deleted:true", fl="sid", rows=max(1, int(self.config.core.expiry.workers / 4)))['items']:
-            if submission.sid not in self.current_submission_cleanup:
-                self.current_submission_cleanup.add(submission.sid)
-                pool.submit(self.log_errors(self._cleanup_canceled_submission), submission.sid)
-
-        # Expire data
-        for collection in self.expirable_collections:
-            self.heartbeat()
-
-            # Start of expiry transaction
-            if self.apm_client:
-                self.apm_client.begin_transaction("Delete expired documents")
-
-            if self.config.core.expiry.batch_delete:
-                final_date = dm(f"{now}||-{self.config.core.expiry.delay}h/d").float_timestamp
-            else:
-                final_date = dm(f"{now}||-{self.config.core.expiry.delay}h").float_timestamp
-            final_date_string = epoch_to_iso(final_date)
-
-            # Break down the expiry window into smaller chunks of data
-            unchecked_chunks: list[tuple[float, float]] = [(self._find_expiry_start(collection), final_date)]
-            ready_chunks: dict[tuple[float, float], int] = {}
-            while unchecked_chunks and len(ready_chunks) < self.config.core.expiry.iteration_max_tasks:
-                self.heartbeat()
-                start, end = unchecked_chunks.pop()
-                chunk_size = self._count_expired(collection, start, end)
-
-                # Empty chunks are fine
-                if chunk_size == 0:
-                    continue
-
-                # We found a small enough chunk to
-                #  run on
-                if chunk_size < self.expiry_size:
-                    ready_chunks[(start, end)] = chunk_size
-                    continue
-
-                # Break this chunk into parts
-                middle = (end + start)/2
-                unchecked_chunks.append((middle, end))
-                unchecked_chunks.append((start, middle))
-
-            # If there are still chunks we haven't checked, then we know there is more data
-            if unchecked_chunks:
-                reached_max = True
-
-            for (start, end), number_to_delete in ready_chunks.items():
-                self.heartbeat()
-                # We assume that no records are ever inserted such that their expiry_ts is in the past.
-                # We also assume that the `end` dates are also in the past.
-                # As long as these two things are true, the set returned by this query should be consistent.
-                # The one race condition is that a record might be refreshed while the file
-                # blob would be deleted anyway, leaving a file record with no filestore object
-                self.log.info(f"Processing collection: {collection.name}")
-                delete_query = f"expiry_ts:[{epoch_to_iso(start) if start > 0 else '*'} TO {epoch_to_iso(end)}}}"
-
-                # check if we are dealing with an index that needs file cleanup
-                if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
-                    # Delete associated files
-                    delete_objects: list[str] = []
-                    for item in collection.stream_search(delete_query, fl='id', as_obj=False):
-                        self.heartbeat()
-                        delete_objects.append(item['id'])
-
-                    # Filter archived documents if archive filestore is the same as the filestore
-                    expire_only = []
-                    if self.same_storage and self.config.datastore.archive.enabled and collection.name == 'file':
-                        archived_files = self.datastore.file.multiexists_in_archive(delete_objects)
-                        delete_objects = [k for k, v in archived_files.items() if not v]
-                        expire_only = [k for k, v in archived_files.items() if v]
-
-                    delete_tasks = self.fs_hashmap[collection.name](delete_objects, final_date_string)
-
-                    # Proceed with deletion, but only after all the scheduled deletes for this
-                    self.log.info(f"Scheduled {len(delete_objects)}/{number_to_delete} "
-                                  f"files to be removed for: {collection.name}")
-                    pool.submit(self.log_errors(self._finish_delete), collection, delete_tasks, expire_only)
-
-                else:
-                    # Proceed with deletion
-                    pool.submit(self.log_errors(self._simple_delete),
-                                collection, delete_query, number_to_delete)
-
-            # End of expiry transaction
-            if self.apm_client:
-                self.apm_client.end_transaction(collection.name, 'deleted')
-
-        return reached_max
-
-    def _find_expiry_start(self, container: ESCollection):
-        """Find earliest expiring item in this container."""
-        rows = container.search(f"expiry_ts: [* TO {epoch_to_iso(time.time())}]",
-                                rows=1, sort='expiry_ts asc', as_obj=False, fl='expiry_ts')
+    def _get_next_chunk(self, collection: ESCollection, start, final_date):
+        """Find date of item at chunk size and the number of items that
+           will be affected in between start date and the date found"""
+        rows = collection.search(f"expiry_ts: {{{start} TO {final_date}]", rows=1,
+                                 offset=self.expiry_size - 1, sort='expiry_ts asc',
+                                 as_obj=False, fl='expiry_ts', index_type=self.index_type)
         if rows['items']:
-            return iso_to_epoch(rows['items'][0]['expiry_ts'])
-        return time.time()
-
-    def _count_expired(self, container: ESCollection, start: Union[float, str], end: float) -> int:
-        """Count how many items need to be erased in the given window."""
-        if start == 0:
-            start = '*'
-        if isinstance(start, (float, int)):
-            start = epoch_to_iso(start)
-        query = f'expiry_ts:[{start} TO {epoch_to_iso(end)}}}'
-        return container.search(query, rows=0, as_obj=False, track_total_hits=self.expiry_size)['total']
+            return rows['items'][0]['expiry_ts'], self.expiry_size
+        return final_date, rows['total']
 
     def try_run(self):
+        pool = ThreadPoolExecutor(self.config.core.expiry.workers)
+        main_threads = []
+
+        # Launch a thread that will expire submissions that have been deleted
+        thread = threading.Thread(target=self.clean_deleted_submissions, args=[pool])
+        thread.start()
+        main_threads.append(thread)
+
+        # Launch threads that expire data from each collection of data
+        for collection in self.expirable_collections:
+            thread = threading.Thread(target=self.run_collection, args=[pool, collection])
+            thread.start()
+            main_threads.append(thread)
+
+        # Wait for all the threads to exit
+        for thread in main_threads:
+            thread.join()
+
+    def clean_deleted_submissions(self, pool):
+        """Delete canceled submissions"""
+        while self.running:
+            # Make sure we're not dedicating more then a quarter of the pool to this operation because it is costly
+            for submission in self.datastore.submission.search(
+                    "to_be_deleted:true", fl="sid", rows=max(1, int(self.config.core.expiry.workers / 4)))['items']:
+                if submission.sid not in self.current_submission_cleanup:
+                    self.current_submission_cleanup.add(submission.sid)
+                    pool.submit(self.log_errors(self._cleanup_canceled_submission), submission.sid)
+            self.sleep_with_heartbeat(self.config.core.expiry.sleep_time)
+
+    def run_collection(self, pool: concurrent.futures.ThreadPoolExecutor, collection):
+        """Feed batches of jobs to delete to the thread pool for the given collection."""
+        start = "*"
+        jobs: list[concurrent.futures.Future] = []
+
         while self.running:
             try:
-                expiry_maxed_out = False
+                try:
+                    # Fill up 'jobs' with tasks that have been sent to the thread pool
+                    # 'jobs' may already have items in it, but 'start' makes sure the new
+                    # task added starts where the last finshed
+                    start, final_job_small = self.feed_expiry_jobs(collection, start, jobs, pool)
 
-                with ThreadPoolExecutor(self.config.core.expiry.workers) as pool:
-                    try:
-                        expiry_maxed_out = self.run_expiry_once(pool)
-                    except Exception as e:
-                        self.log.exception(str(e))
+                    # Wait until some of our work finishes and there is room in the queue for more work
+                    finished, _jobs = concurrent.futures.wait(jobs, return_when=concurrent.futures.FIRST_COMPLETED)
+                    jobs = list(_jobs)
+                    for job in finished:
+                        job.result()
 
-                if not expiry_maxed_out:
+                    # If we have expired all the data reset the start pointer
+                    if len(jobs) == 0:
+                        start = '*'
+
+                except Exception as e:
+                    self.log.exception(str(e))
+                    continue
+
+                # IF the most recent job added to the jobs list is short then
+                # all the data is currently queued up to delete and we can sleep
+                if final_job_small:
                     self.sleep_with_heartbeat(self.config.core.expiry.sleep_time)
 
             except BrokenProcessPool:
