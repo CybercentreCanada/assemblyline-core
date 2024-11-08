@@ -1250,7 +1250,7 @@ def test_temp_data_monitoring(core: CoreSession, metrics):
     sub: Submission = core.ds.submission.get(dropped_task.submission.sid)
     assert len(sub.errors) == 0
     assert len(sub.results) == 4, 'results'
-    assert core.pre_service.hits[sha] >= 2, 'pre_service.hits'
+    assert core.pre_service.hits[sha] >= 2, f'pre_service.hits {core.pre_service.hits}'
 
     # Wait until we get feedback from the metrics channel
     metrics.expect('ingester', 'submissions_ingested', 1)
