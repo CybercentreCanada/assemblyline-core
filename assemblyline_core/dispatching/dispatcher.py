@@ -126,15 +126,20 @@ class ResultSummary:
 
 
 class TemporaryFileData:
-    def __init__(self, sha256: str, config: dict[str, str], shared: Optional[dict[str, Any]] = None) -> None:
+    def __init__(self,
+                 sha256: str,
+                 config: dict[str, str],
+                 shared: Optional[dict[str, Any]] = None,
+                 local: Optional[dict[str, Any]] = None
+                 ) -> None:
         self.sha256 = sha256
         self.config = config
-        self.shared_values: dict[str, Any] = dict() if shared is None else shared            
-        self.local_values: dict[str, Any] = {}
+        self.shared_values: dict[str, Any] = dict() if shared is None else shared           
+        self.local_values: dict[str, Any] = {} if local is None else local
 
     def new_file(self, sha256: str) -> TemporaryFileData:
         """Create an entry for another file with reference to the shared values."""
-        return TemporaryFileData(sha256, self.config, self.shared_values)
+        return TemporaryFileData(sha256, self.config, self.shared_values, dict(self.local_values))
 
     def read(self) -> dict[str, Any]:
         """Get a copy of the current data"""
