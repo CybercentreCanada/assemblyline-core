@@ -11,6 +11,7 @@ import json
 import enum
 from queue import PriorityQueue, Empty, Queue
 import dataclasses
+from copy import deepcopy
 
 import elasticapm
 
@@ -102,6 +103,7 @@ class MonitorTask:
     # Should aservice be dispatched again when possible
     dispatch_needed: bool = dataclasses.field(default=False)
 
+
 @contextmanager
 def apm_span(client, span_name: str):
     try:
@@ -134,12 +136,12 @@ class TemporaryFileData:
                  ) -> None:
         self.sha256 = sha256
         self.config = config
-        self.shared_values: dict[str, Any] = dict() if shared is None else shared           
+        self.shared_values: dict[str, Any] = {} if shared is None else shared
         self.local_values: dict[str, Any] = {} if local is None else local
 
     def new_file(self, sha256: str) -> TemporaryFileData:
         """Create an entry for another file with reference to the shared values."""
-        return TemporaryFileData(sha256, self.config, self.shared_values, dict(self.local_values))
+        return TemporaryFileData(sha256, self.config, self.shared_values, deepcopy(self.local_values))
 
     def read(self) -> dict[str, Any]:
         """Get a copy of the current data"""
@@ -309,7 +311,8 @@ class SubmissionTask:
         """
         parent_temp = self.temporary_data[parent]
         for child in children:
-            self.temporary_data.setdefault(child, parent_temp.new_file(child))
+            if child not in self.temporary_data:
+                self.temporary_data[child] = parent_temp.new_file(child)
             try:
                 self._parent_map[child].add(parent)
             except KeyError:
