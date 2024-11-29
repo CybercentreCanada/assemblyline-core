@@ -1,7 +1,7 @@
 import hashlib
 import logging
-import yaml
 
+import yaml
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.helper import AssemblylineDatastore
@@ -25,6 +25,10 @@ class SafelistClient:
         self.datastore = datastore or forge.get_datastore(self.config)
 
     def _preprocess_object(self, data: dict):
+        # Remove any null classification that might already be set
+        if 'classification' in data and not data.get('classification'):
+            data.pop('classification')
+
         # Set defaults
         data.setdefault('classification', CLASSIFICATION.UNRESTRICTED)
         data.setdefault('hashes', {})

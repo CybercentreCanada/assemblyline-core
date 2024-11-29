@@ -8,7 +8,6 @@ from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.models.user import ROLES
 from assemblyline.remote.datatypes.lock import Lock
 
-
 CHUNK_SIZE = 1000
 CLASSIFICATION = forge.get_classification()
 
@@ -27,6 +26,10 @@ class BadlistClient:
         self.datastore = datastore or forge.get_datastore(self.config)
 
     def _preprocess_object(self, data: dict) -> str:
+        # Remove any null classification that might already be set
+        if 'classification' in data and not data.get('classification'):
+            data.pop('classification')
+
         # Set defaults
         data.setdefault('classification', CLASSIFICATION.UNRESTRICTED)
         data.setdefault('hashes', {})
