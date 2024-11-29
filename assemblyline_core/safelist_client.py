@@ -1,12 +1,14 @@
 import hashlib
 import logging
-import yaml
 
+import yaml
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.models.user import ROLES
 from assemblyline.remote.datatypes.lock import Lock
+
+from assemblyline_core import normalize_hashlist_item
 
 CLASSIFICATION = forge.get_classification()
 
@@ -25,6 +27,10 @@ class SafelistClient:
         self.datastore = datastore or forge.get_datastore(self.config)
 
     def _preprocess_object(self, data: dict):
+        # Remove any null classification that might already be set
+        if 'classification' in data and not data.get('classification'):
+            data.pop('classification')
+
         # Set defaults
         data.setdefault('classification', CLASSIFICATION.UNRESTRICTED)
         data.setdefault('hashes', {})
@@ -38,6 +44,9 @@ class SafelistClient:
             tag_data = data.get('tag', None)
             if tag_data is None or 'type' not in tag_data or 'value' not in tag_data:
                 raise ValueError("Tag data not found")
+
+            # Normalize tag data before further processing
+            tag_data['value'] = normalize_hashlist_item(tag_data['type'], tag_data['value'])
 
             hashed_value = f"{tag_data['type']}: {tag_data['value']}".encode('utf8')
             data['hashes'] = {

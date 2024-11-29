@@ -1,12 +1,18 @@
 
 import hashlib
 import random
+import time
 from copy import deepcopy
-import pytest
 
+import pytest
 from assemblyline.common.forge import get_classification
 from assemblyline.common.isotime import iso_to_epoch
-from assemblyline.odm.random_data import create_users, create_badlists, wipe_users, wipe_badlist
+from assemblyline.odm.random_data import (
+    create_badlists,
+    create_users,
+    wipe_badlist,
+    wipe_users,
+)
 from assemblyline.odm.randomizer import get_random_hash
 from assemblyline_core.badlist_client import BadlistClient, InvalidBadhash
 
@@ -288,3 +294,39 @@ def test_badlist_update_conflict(client):
         client.add_update(sl_data)
 
     assert 'has a type conflict:' in conflict_exc.value.args[0]
+
+def test_badlist_tag_normalization(client):
+    tag_type = 'network.static.uri'
+    tag_value = 'https://BaD.com/About'
+
+    normalized_value = 'https://bad.com/About'
+    hashed_value = f"{tag_type}: {normalized_value}".encode('utf8')
+    expected_qhash = hashlib.sha256(hashed_value).hexdigest()
+
+    # Generate a random badlist
+    sl_data = {
+        'attribution': {
+            'actor': ["SOMEONE!"],
+            'campaign': None,
+            'category': None,
+            'exploit': None,
+            'implant': None,
+            'family': None,
+            'network': None
+        },
+        'dtl': 15,
+        'tag': {'type': tag_type,
+                'value': tag_value},
+        'sources': [BAD_SOURCE, ADMIN_SOURCE],
+        'type': 'tag'
+    }
+
+    client.add_update(sl_data)
+
+    # Assert that item got created with the expected ID from the normalized tag value
+    assert client.datastore.badlist.exists(expected_qhash)
+    time.sleep(1)
+
+    # Assert that the tag exists in either format (within reason)
+    assert client.exists_tags({tag_type: [tag_value]})
+    assert client.exists_tags({tag_type: [normalized_value]})
