@@ -340,7 +340,7 @@ def test_safelist_tag_normalization(client):
     hashed_value = f"{tag_type}: {normalized_value}".encode('utf8')
     expected_qhash = hashlib.sha256(hashed_value).hexdigest()
 
-    # Generate a random safelist
+    # Generate a safelist item
     sl_data = {
         'attribution': {
             'actor': ["SOMEONE!"],
