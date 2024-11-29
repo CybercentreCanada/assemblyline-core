@@ -1,6 +1,7 @@
 
 import hashlib
 import random
+import time
 from copy import deepcopy
 
 import pytest
@@ -324,6 +325,8 @@ def test_badlist_tag_normalization(client):
 
     # Assert that item got created with the expected ID from the normalized tag value
     assert client.datastore.badlist.exists(expected_qhash)
+    time.sleep(1)
 
     # Assert that the tag exists in either format (within reason)
     assert client.exists_tags({tag_type: [tag_value]})
+    assert client.exists_tags({tag_type: [normalized_value]})
