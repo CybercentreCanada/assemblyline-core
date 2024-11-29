@@ -4,12 +4,16 @@ import random
 from copy import deepcopy
 
 import pytest
-
 from assemblyline.common.forge import get_classification
 from assemblyline.common.isotime import iso_to_epoch, now_as_iso
-from assemblyline.odm.random_data import create_users, create_safelists, wipe_users, wipe_safelist
+from assemblyline.odm.random_data import (
+    create_safelists,
+    create_users,
+    wipe_safelist,
+    wipe_users,
+)
 from assemblyline.odm.randomizer import get_random_hash
-from assemblyline_core.safelist_client import SafelistClient, InvalidSafehash
+from assemblyline_core.safelist_client import InvalidSafehash, SafelistClient
 
 add_hash_file = "10" + get_random_hash(62)
 add_error_hash = "11" + get_random_hash(62)
@@ -326,3 +330,37 @@ def test_safelist_update_conflict(client):
         client.add_update(sl_data)
 
     assert 'has a type conflict:' in conflict_exc.value.args[0]
+
+def test_safelist_tag_normalization(client):
+    tag_type = 'network.static.uri'
+    tag_value = 'https://gOOd.com/About'
+
+    normalized_value = 'https://good.com/About'
+    hashed_value = f"{tag_type}: {normalized_value}".encode('utf8')
+    expected_qhash = hashlib.sha256(hashed_value).hexdigest()
+
+    # Generate a random safelist
+    sl_data = {
+        'attribution': {
+            'actor': ["SOMEONE!"],
+            'campaign': None,
+            'category': None,
+            'exploit': None,
+            'implant': None,
+            'family': None,
+            'network': None
+        },
+        'dtl': 15,
+        'tag': {'type': tag_type,
+                'value': tag_value},
+        'sources': [NSRL_SOURCE, ADMIN_SOURCE],
+        'type': 'tag'
+    }
+
+    client.add_update(sl_data)
+
+    # Assert that item got created with the expected ID from the normalized tag value
+    assert client.datastore.safelist.exists(expected_qhash)
+
+    # Assert that the tag exists in either format (within reason)
+    assert client.get_safelisted_tags([tag_type])['match'][tag_type] == [normalized_value]
