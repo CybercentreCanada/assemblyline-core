@@ -159,8 +159,7 @@ class TaskingClient:
             if not self.datastore.service_delta.exists(service.name):
                 self.datastore.service_delta.save(service.name, {'version': service.version})
                 self.datastore.service_delta.commit()
-                self.log.info(f"{log_prefix}{service.name} "
-                              f"version ({service.version}) registered")
+                self.log.info(f"{log_prefix}{service.name} version ({service.version}) registered")
 
             new_heuristics = []
             if heuristics:
