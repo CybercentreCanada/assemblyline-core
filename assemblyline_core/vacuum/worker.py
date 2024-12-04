@@ -39,6 +39,7 @@ from assemblyline.odm.messages.submission import Submission
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 from assemblyline_core.vacuum.crawler import VACUUM_BUFFER_NAME
+from assemblyline_core.ingester.constants import INGEST_QUEUE_NAME
 
 from .safelist import VacuumSafelist
 from .department_map import DepartmentMap
@@ -184,7 +185,7 @@ class FileProcessor(threading.Thread):
         self.identify = identifier
 
         self.traffic_queue = CommsQueue('submissions', redis)
-        self.ingest_queue = NamedQueue("m-ingest", persistent_redis)
+        self.ingest_queue = NamedQueue(INGEST_QUEUE_NAME, persistent_redis)
         self.service_list = CachedObject(self.datastore.list_all_services, kwargs={'as_obj': False, 'full': True})
 
         with self.profile_lock:
