@@ -20,6 +20,7 @@ import elasticapm
 
 from assemblyline.common.postprocess import ActionWorker
 from assemblyline_core.server_base import ThreadedCoreBase
+from assemblyline.common.constants import DROP_PRIORITY
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
@@ -48,7 +49,6 @@ from .constants import INGEST_QUEUE_NAME, drop_chance, COMPLETE_QUEUE_NAME
 
 _dup_prefix = 'w-m-'
 _notification_queue_prefix = 'nq-'
-_min_priority = 1
 _max_retries = 10
 _retry_delay = 60 * 4  # Wait 4 minutes to retry
 _max_time = 2 * 24 * 60 * 60  # Wait 2 days for responses.
@@ -622,7 +622,8 @@ class Ingester(ThreadedCoreBase):
         # Reduce the priority by an order of magnitude for very old files.
         current_time = now()
         if priority and self.expired(current_time - task.submission.time.timestamp(), 0):
-            priority = (priority / 10) or 1
+            # Round priority reduction to the nearest integer
+            priority = round(priority / 10)
 
         param.priority = priority
 
@@ -845,7 +846,7 @@ class Ingester(ThreadedCoreBase):
         sample_threshold = self.config.core.ingester.sampling_at
 
         dropped = False
-        if priority <= _min_priority:
+        if priority == DROP_PRIORITY:
             dropped = True
         else:
             for level, rng in self.priority_range.items():
