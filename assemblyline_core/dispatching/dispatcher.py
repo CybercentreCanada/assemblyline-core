@@ -732,7 +732,9 @@ class Dispatcher(ThreadedCoreBase):
             self.log.info(f"[{sid}] Submission counts towards {submission.params.submitter.upper()} quota")
 
         # Apply initial data parameter
-        temporary_data = TemporaryFileData(sha256, config=self.config.submission.temporary_keys)
+        temp_key_config = dict(self.config.submission.default_temporary_keys)
+        temp_key_config.update(self.config.submission.temporary_keys)
+        temporary_data = TemporaryFileData(sha256, config=temp_key_config)
         task.temporary_data[sha256] = temporary_data
         if submission.params.initial_data:
             try:

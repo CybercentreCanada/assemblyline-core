@@ -250,8 +250,15 @@ def core(request, redis, filestore, config, clean_datastore: AssemblylineDatasto
     # Register services
     stages = get_service_stage_hash(redis)
 
+    service_config: list[tuple[str, int, str, dict]] = [
+        ('pre', 1, 'EXTRACT', {'extra_data': True, 'monitored_keys': ['passwords']}),
+        ('core-a', 2, 'CORE', {}),
+        ('core-b', 1, 'CORE', {}),
+        ('finish', 1, 'POST', {'extra_data': True})
+    ]
+
     services = []
-    for svc, stage, details in [('pre', 'EXTRACT', {'extra_data': True, 'monitored_keys': ['passwords']}), ('core-a', 'CORE', {}), ('core-b', 'CORE', {}), ('finish', 'POST', {'extra_data': True})]:
+    for svc, count, stage, details in service_config:
         ds.service.save(f'{svc}_0', dummy_service(svc, stage, docid=f'{svc}_0', **details))
         ds.service_delta.save(svc, ServiceDelta({
             'name': svc,
@@ -259,7 +266,8 @@ def core(request, redis, filestore, config, clean_datastore: AssemblylineDatasto
             'enabled': True
         }))
         stages.set(svc, ServiceStage.Running)
-        services.append(MockService(svc, ds, redis, filestore))
+        for _ in range(count):
+            services.append(MockService(svc, ds, redis, filestore))
 
     user = random_model_obj(User)
     user.uname = "user"
@@ -1272,7 +1280,7 @@ def test_complex_extracted(core: CoreSession, metrics):
     # 1. extract a file that will process to produce a partial result
     # 2. hold a few seconds on the second stage of the root file to let child start
     # 3. on the last stage of the root file produce the password
-    dispatcher.TIMEOUT_EXTRA_TIME = 10
+    dispatcher.TIMEOUT_EXTRA_TIME = 100
 
     child_sha, _ = ready_body(core, {
         'pre': {'partial': {'passwords': 'test_temp_data_monitoring'}},
@@ -1289,7 +1297,7 @@ def test_complex_extracted(core: CoreSession, metrics):
                 }]
             }
         },
-        'core-a': {'lock': 5},
+        'core-a': {'lock': 60},
         'finish': {'temporary_data': {'passwords': ['test_temp_data_monitoring']}},
     })
 
@@ -1315,6 +1323,9 @@ def test_complex_extracted(core: CoreSession, metrics):
 
     # Wait for the extract file to finish
     metrics.expect('dispatcher', 'files_completed', 1)
+    # check that there is a pending result in the dispatcher
+    task = next(iter(core.dispatcher.tasks.values()))
+    assert 1 == sum(int(summary.partial) for summary in task.service_results.values())
     _global_semaphore.release()
 
     # Wait for the entire submission to finish
