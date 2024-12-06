@@ -12,6 +12,7 @@ import threading
 from assemblyline.odm.models.config import Config, MetadataConfig
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline_core.vacuum import crawler, worker
+from assemblyline_core.ingester.constants import INGEST_QUEUE_NAME
 
 
 def test_crawler(config: Config, redis_connection):
@@ -110,7 +111,7 @@ def test_worker(config: Config, redis_connection):
             queue.push(second_file)
 
             # Get a message from for the ingested file
-            ingest_queue = NamedQueue("m-ingest", redis_connection)
+            ingest_queue = NamedQueue(INGEST_QUEUE_NAME, redis_connection)
             ingested = ingest_queue.pop(timeout=20)
             assert ingested is not None
             assert ingested['files'][0]['sha256'] == sha256
