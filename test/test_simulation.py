@@ -54,6 +54,7 @@ def redis(redis_connection: Redis[Any]):
 
 
 _global_semaphore = threading.Semaphore(value=1)
+print_lock = threading.Lock()
 
 
 class MockService(ServerBase):
@@ -107,6 +108,25 @@ class MockService(ServerBase):
                 self.dispatch_client.service_failed(task.sid, error=error, error_key=get_random_id())
                 continue
 
+            partial = False
+            temp_data = {entry.name: entry.value for entry in task.temporary_submission_data}
+            with print_lock:
+                print(self.service_name)
+                print('instructions', instructions)
+                print('temp', temp_data)
+            if 'partial' in instructions:
+                partial = True
+                requirements = instructions['partial']
+                for key, value in requirements.items():
+                    if value in temp_data.get(key, ''):
+                        partial = False
+                    else:
+                        partial = True
+                        break
+
+            if partial:
+                print(self.service_name, "will produce partial results")
+
             result_data = {
                 'archive_ts': None,
                 'classification': 'U',
@@ -115,8 +135,8 @@ class MockService(ServerBase):
                     'service_tool_version': '0',
                     'service_name': self.service_name,
                 },
-                'result': {
-                },
+                'result': {},
+                'partial': partial,
                 'sha256': task.fileinfo.sha256,
                 'expiry_ts': time.time() + 600
             }
@@ -125,8 +145,12 @@ class MockService(ServerBase):
             result_data['response'].update(instructions.get('response', {}))
 
             result = Result(result_data)
-            result_key = instructions.get('result_key', get_random_id())
-            self.dispatch_client.service_finished(task.sid, result_key, result)
+            try:
+                result_key = instructions['result_key']
+            except KeyError:
+                result_key = result.build_key(get_random_id())
+            self.dispatch_client.service_finished(task.sid, result_key, result,
+                                                  temporary_data=instructions.get('temporary_data'))
 
 
 class CoreSession:
@@ -226,16 +250,24 @@ def core(request, redis, filestore, config, clean_datastore: AssemblylineDatasto
     # Register services
     stages = get_service_stage_hash(redis)
 
+    service_config: list[tuple[str, int, str, dict]] = [
+        ('pre', 1, 'EXTRACT', {'extra_data': True, 'monitored_keys': ['passwords']}),
+        ('core-a', 2, 'CORE', {}),
+        ('core-b', 1, 'CORE', {}),
+        ('finish', 1, 'POST', {'extra_data': True})
+    ]
+
     services = []
-    for svc, stage in [('pre', 'EXTRACT'), ('core-a', 'CORE'), ('core-b', 'CORE'), ('finish', 'POST')]:
-        ds.service.save(f'{svc}_0', dummy_service(svc, stage, docid=f'{svc}_0'))
+    for svc, count, stage, details in service_config:
+        ds.service.save(f'{svc}_0', dummy_service(svc, stage, docid=f'{svc}_0', **details))
         ds.service_delta.save(svc, ServiceDelta({
             'name': svc,
             'version': '0',
             'enabled': True
         }))
         stages.set(svc, ServiceStage.Running)
-        services.append(MockService(svc, ds, redis, filestore))
+        for _ in range(count):
+            services.append(MockService(svc, ds, redis, filestore))
 
     user = random_model_obj(User)
     user.uname = "user"
@@ -1134,8 +1166,189 @@ def test_tag_filter(core: CoreSession, metrics):
         metrics.expect('dispatcher', 'submissions_completed', 1)
         metrics.expect('dispatcher', 'files_completed', 1)
 
-        alert = core.dispatcher.postprocess_worker.alert_queue.pop(timeout=5)
+        alert: dict = core.dispatcher.postprocess_worker.alert_queue.pop(timeout=5)
         assert alert['submission']['sid'] == sub['sid']
 
     finally:
         core.dispatcher.postprocess_worker.actions.pop('test_process')
+
+
+def test_partial(core: CoreSession, metrics):
+    # Have pre produce a partial result, then have core-a update a monitored key
+    sha, size = ready_body(core, {
+        'pre': {'partial': {'passwords': 'test_temp_data_monitoring'}},
+    })
+
+    core.ingest_queue.push(SubmissionInput(dict(
+        metadata={},
+        params=dict(
+            description="file abc123",
+            services=dict(selected=[]),
+            submitter='user',
+            groups=['user'],
+            max_extracted=10000
+        ),
+        notification=dict(
+            queue='temp-data-monitor',
+            threshold=0
+        ),
+        files=[dict(
+            sha256=sha,
+            size=size,
+            name='abc123'
+        )]
+    )).as_primitives())
+
+    notification_queue = NamedQueue('nq-temp-data-monitor', core.redis)
+    dropped_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
+    assert dropped_task
+    dropped_task = IngestTask(dropped_task)
+    sub: Submission = core.ds.submission.get(dropped_task.submission.sid)
+    assert len(sub.errors) == 0
+    assert len(sub.results) == 4, 'results'
+    assert core.pre_service.hits[sha] == 1, 'pre_service.hits'
+
+    # Wait until we get feedback from the metrics channel
+    metrics.expect('ingester', 'submissions_ingested', 1)
+    metrics.expect('ingester', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'files_completed', 1)
+
+    partial_results = 0
+    for res in sub.results:
+        result = core.ds.get_single_result(res, as_obj=True)
+        assert result is not None, res
+        if result.partial:
+            partial_results += 1
+    assert partial_results == 1, 'partial_results'
+
+
+def test_temp_data_monitoring(core: CoreSession, metrics):
+    # Have pre produce a partial result, then have core-a update a monitored key
+    sha, size = ready_body(core, {
+        'pre': {'partial': {'passwords': 'test_temp_data_monitoring'}},
+        'core-a': {'temporary_data': {'passwords': ['test_temp_data_monitoring']}},
+        'final': {'temporary_data': {'passwords': ['some other password']}},
+    })
+
+    core.ingest_queue.push(SubmissionInput(dict(
+        metadata={},
+        params=dict(
+            description="file abc123",
+            services=dict(selected=[]),
+            submitter='user',
+            groups=['user'],
+            max_extracted=10000
+        ),
+        notification=dict(
+            queue='temp-data-monitor',
+            threshold=0
+        ),
+        files=[dict(
+            sha256=sha,
+            size=size,
+            name='abc123'
+        )]
+    )).as_primitives())
+
+    notification_queue = NamedQueue('nq-temp-data-monitor', core.redis)
+    dropped_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
+    assert dropped_task
+    dropped_task = IngestTask(dropped_task)
+    sub: Submission = core.ds.submission.get(dropped_task.submission.sid)
+    assert len(sub.errors) == 0
+    assert len(sub.results) == 4, 'results'
+    assert core.pre_service.hits[sha] >= 2, f'pre_service.hits {core.pre_service.hits}'
+
+    # Wait until we get feedback from the metrics channel
+    metrics.expect('ingester', 'submissions_ingested', 1)
+    metrics.expect('ingester', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'files_completed', 1)
+
+    partial_results = 0
+    for res in sub.results:
+        result = core.ds.get_single_result(res, as_obj=True)
+        assert result is not None, res
+        if result.partial:
+            partial_results += 1
+    assert partial_results == 0, 'partial_results'
+
+
+def test_complex_extracted(core: CoreSession, metrics):
+    # stages to this processing when everything goes well
+    # 1. extract a file that will process to produce a partial result
+    # 2. hold a few seconds on the second stage of the root file to let child start
+    # 3. on the last stage of the root file produce the password
+    dispatcher.TIMEOUT_EXTRA_TIME = 100
+
+    child_sha, _ = ready_body(core, {
+        'pre': {'partial': {'passwords': 'test_temp_data_monitoring'}},
+    })
+
+    sha, size = ready_body(core, {
+        'pre': {
+            'response': {
+                'extracted': [{
+                    'name': child_sha,
+                    'sha256': child_sha,
+                    'description': 'abc',
+                    'classification': 'U'
+                }]
+            }
+        },
+        'core-a': {'lock': 60},
+        'finish': {'temporary_data': {'passwords': ['test_temp_data_monitoring']}},
+    })
+
+    core.ingest_queue.push(SubmissionInput(dict(
+        metadata={},
+        params=dict(
+            description="file abc123",
+            services=dict(selected=''),
+            submitter='user',
+            groups=['user'],
+            max_extracted=10000
+        ),
+        notification=dict(
+            queue='complex-extracted-file',
+            threshold=0
+        ),
+        files=[dict(
+            sha256=sha,
+            size=size,
+            name='abc123'
+        )]
+    )).as_primitives())
+
+    # Wait for the extract file to finish
+    metrics.expect('dispatcher', 'files_completed', 1)
+    # check that there is a pending result in the dispatcher
+    task = next(iter(core.dispatcher.tasks.values()))
+    assert 1 == sum(int(summary.partial) for summary in task.service_results.values())
+    _global_semaphore.release()
+
+    # Wait for the entire submission to finish
+    notification_queue = NamedQueue('nq-complex-extracted-file', core.redis)
+    dropped_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
+    assert dropped_task
+    dropped_task = IngestTask(dropped_task)
+    sub: Submission = core.ds.submission.get(dropped_task.submission.sid)
+    assert len(sub.errors) == 0
+    assert len(sub.results) == 8, 'results'
+    assert core.pre_service.hits[sha] == 1, 'pre_service.hits[root]'
+    assert core.pre_service.hits[child_sha] >= 2, 'pre_service.hits[child]'
+
+    # Wait until we get feedback from the metrics channel
+    metrics.expect('ingester', 'submissions_ingested', 1)
+    metrics.expect('ingester', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'files_completed', 2)
+
+    partial_results = 0
+    for res in sub.results:
+        result = core.ds.get_single_result(res, as_obj=True)
+        assert result is not None, res
+        if result.partial:
+            partial_results += 1
+    assert partial_results == 0, 'partial_results'
