@@ -1142,7 +1142,7 @@ class KubernetesController(ControllerInterface):
             service = self.api.read_namespaced_service(deployment_name, self.namespace)
             service.metadata.labels = labels
             service.spec.selector = labels
-            service.spec.ports = [V1ServicePort(port=int(_p)) for _p in spec.container.ports]
+            service.spec.ports = [V1ServicePort(port=int(_p), name=f"port-{_p}") for _p in spec.container.ports]
             self.api.patch_namespaced_service(deployment_name, self.namespace, service)
         except ApiException as error:
             if error.status != 404:
@@ -1152,7 +1152,7 @@ class KubernetesController(ControllerInterface):
                 spec=V1ServiceSpec(
                     cluster_ip='None',
                     selector=labels,
-                    ports=[V1ServicePort(port=int(_p)) for _p in spec.container.ports]
+                    ports=[V1ServicePort(port=int(_p), name=f"port-{_p}") for _p in spec.container.ports]
                 )
             )
             self.api.create_namespaced_service(self.namespace, service)

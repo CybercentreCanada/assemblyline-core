@@ -182,7 +182,7 @@ class TemporaryFileData:
             self.shared_values[key] = []
 
         # make sure the input is the right type
-        if not isinstance(values, list | tuple):
+        if not isinstance(values, (list, tuple)):
             return False
 
         # Add each value one at a time testing for new values
