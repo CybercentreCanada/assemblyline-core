@@ -1,6 +1,7 @@
 import time
-
 import elasticsearch
+
+from os import environ
 
 from assemblyline.datastore.exceptions import ILMException
 
@@ -64,6 +65,11 @@ def create_ilm_policy(es, name, archive_config):
 def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
     for index_type in indexes:
         try:
+            # Get the shard/replica configuration for metric-based indices from the environment
+            # Otherwise default to values for a single-node Elastic cluster
+            replicas = environ.get(f"ELASTIC_{index_type.upper()}_METRICS_REPLICAS", environ.get('ELASTIC_DEFAULT_METRICS_REPLICAS', 0))
+            shards = environ.get(f"ELASTIC_{index_type.upper()}_METRICS_SHARDS", environ.get('ELASTIC_DEFAULT_METRICS_SHARDS', 1))
+
             index = f"al_metrics_{index_type}_ds" if datastream_enabled else f"al_metrics_{index_type}"
             policy = f"{index}_policy"
             while True:
@@ -83,7 +89,9 @@ def ensure_indexes(log, es, config, indexes, datastream_enabled=False):
                 template_body = {
                     "settings": {
                         "index.lifecycle.name": policy,
-                        "index.codec": "best_compression"
+                        "index.codec": "best_compression",
+                        "index.number_of_replicas": replicas,
+                        "index.number_of_shards": shards
                     }
                 }
                 put_template_func = None
