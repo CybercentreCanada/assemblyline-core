@@ -170,7 +170,7 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
         logger (Logger): Logger object for logging messages.
         prefix (str, optional): A prefix string to prepend to log messages for clarity in logs.
     Returns:
-        tuple: Returns a tuple of the final image name, the latest tag, and authentication config used for the Docker registry.
+        tuple: Returns a tuple of the final image name, the latest tag, authentication and auto_update config used for the Docker registry.
     """
     def process_image(image):
         # Find which server to search in
@@ -197,6 +197,9 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
     service_name = service_config.name
     image = service_config.docker_config.image
     update_channel = service_config.update_channel
+    auto_update = service_config.auto_update
+    if auto_update is None:
+        auto_update = system_config.services.default_auto_update
 
     # Fix service image for calling Docker API
     image_variables = defaultdict(str)
@@ -290,7 +293,7 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
     if server != DEFAULT_DOCKER_REGISTRY:
         image_name = "/".join([server, image_name])
 
-    return image_name, tag_name, auth_config
+    return image_name, tag_name, auth_config, auto_update
 
 def _get_dockerhub_tags(image_name, update_channel, prefix, proxies=None, docker_registry=DEFAULT_DOCKER_REGISTRY,
                         logger: Logger=None):
