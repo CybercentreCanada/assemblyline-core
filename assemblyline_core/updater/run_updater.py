@@ -508,7 +508,7 @@ class ServiceUpdater(ThreadedCoreBase):
                          'version': tag,
                          'docker_config': {'image': install_data.get('image')}})
 
-                    image_name, tag_name, auth = get_latest_tag_for_service(
+                    image_name, tag_name, auth, _ = get_latest_tag_for_service(
                         service,  self.config, self.log, prefix="[CI] ")
 
                     if not tag_name:
@@ -712,9 +712,30 @@ class ServiceUpdater(ThreadedCoreBase):
 
             for service in self.datastore.list_all_services(full=True):
                 discovered_services.append(service.name)
-                image_name, tag_name, auth = get_latest_tag_for_service(service, self.config, self.log, prefix="[CV] ")
+                image_name, tag_name, auth, auto_update = get_latest_tag_for_service(
+                    service, self.config, self.log, prefix="[CV] ")
                 self.latest_service_tags.set(service.name,
                                              {'auth': auth, 'image': image_name, service.update_channel: tag_name})
+
+                # Check if the service is marked for auto-update and we found a version for it
+                if auto_update and tag_name:
+                    self.log.info(f"[CV] {service.name} auto-update is enabled...")
+                    srv_update_available = tag_name is not None and tag_name.replace('stable', '') != service.version
+                    updating = self.container_update.exists(service.name)
+
+                    # If the service is not already updating, and there is an update available, mark it for update
+                    if srv_update_available and not updating:
+                        self.log.info(f"[CV] Requesting update for service {service.name}...")
+                        self.container_update.set(service.name, {
+                            "auth": auth,
+                            "image": f"{image_name}:{tag_name}",
+                            "latest_tag": tag_name,
+                            "update_available": srv_update_available,
+                            "updating": updating
+                        })
+                    else:
+                        self.log.info(f"[CV] {service.name} already marked for update...")
+
 
             # Remove services we have locally or in redis that have been deleted from the database
             for stray_service in existing_services - set(discovered_services):
