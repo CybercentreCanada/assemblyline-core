@@ -157,7 +157,7 @@ class DockerUpdateInterface:
 
 class KubernetesUpdateInterface:
     def __init__(self, logger, prefix, namespace, priority_class, extra_labels, linux_node_selector: Selector,
-                 log_level="INFO", default_service_account=None, default_service_tolerations=[]):
+                 log_level="INFO", default_service_account=None, default_service_tolerations=[], enable_pod_security=False):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -191,7 +191,7 @@ class KubernetesUpdateInterface:
         self.secret_env = []
         self.linux_node_selector = linux_node_selector
         self.default_service_tolerations = [V1Toleration(**toleration.as_primitives()) for toleration in default_service_tolerations]
-        self.security_policy = RESTRICTED_POD_SECUTITY_CONTEXT if self.config.core.scaler.enable_pod_security else None
+        self.security_policy = RESTRICTED_POD_SECUTITY_CONTEXT if enable_pod_security else None
 
 
         # Get the deployment of this process. Use that information to fill out the secret info
@@ -489,7 +489,8 @@ class ServiceUpdater(ThreadedCoreBase):
                                                         log_level=self.config.logging.log_level,
                                                         default_service_account=self.config.services.service_account,
                                                         linux_node_selector=self.config.core.scaler.linux_node_selector,
-                                                        default_service_tolerations=self.config.core.scaler.service_defaults.tolerations)
+                                                        default_service_tolerations=self.config.core.scaler.service_defaults.tolerations,
+                                                        enable_pod_security=self.config.core.scaler.enable_pod_security)
             # Add all additional mounts to privileged services
             self.mounts = self.config.core.scaler.service_defaults.mounts
         else:
