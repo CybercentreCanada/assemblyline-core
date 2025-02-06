@@ -15,7 +15,8 @@ import docker
 
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
     V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
-    V1ConfigMapVolumeSource, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Toleration
+    V1ConfigMapVolumeSource, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Toleration, V1SecurityContext, \
+    V1Capabilities, V1SeccompProfile
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
@@ -44,6 +45,14 @@ INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http
 CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'core')
+RESTRICTED_POD_SECUTITY_CONTEXT= V1SecurityContext(
+    run_as_user=1000,
+    run_as_group=1000,
+    capabilities=V1Capabilities(drop=["ALL"]),
+    run_as_non_root=True,
+    allow_privilege_escalation=False,
+    seccomp_profile=V1SeccompProfile(type="RuntimeDefault")
+)
 
 SERVICE_API_HOST = os.getenv('SERVICE_API_HOST')
 RELEASE_NAME = os.getenv('RELEASE_NAME')
@@ -317,6 +326,7 @@ class KubernetesUpdateInterface:
         memory = docker_config.ram_mb
         memory_min = min(docker_config.ram_mb_min, memory)
 
+        security_context = RESTRICTED_POD_SECUTITY_CONTEXT if self.config.core.scaler.enable_pod_security else None
         container = V1Container(
             name=name,
             image=docker_config.image,
@@ -324,6 +334,7 @@ class KubernetesUpdateInterface:
             env=environment_variables,
             image_pull_policy='Always',
             volume_mounts=volume_mounts,
+            security_context=security_context,
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
                 requests={'cpu': cores / 4, 'memory': f'{memory_min}Mi'},
