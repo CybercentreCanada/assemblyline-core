@@ -191,6 +191,7 @@ class KubernetesUpdateInterface:
         self.secret_env = []
         self.linux_node_selector = linux_node_selector
         self.default_service_tolerations = [V1Toleration(**toleration.as_primitives()) for toleration in default_service_tolerations]
+        self.security_policy = RESTRICTED_POD_SECUTITY_CONTEXT if self.config.core.scaler.enable_pod_security else None
 
 
         # Get the deployment of this process. Use that information to fill out the secret info
@@ -326,7 +327,6 @@ class KubernetesUpdateInterface:
         memory = docker_config.ram_mb
         memory_min = min(docker_config.ram_mb_min, memory)
 
-        security_context = RESTRICTED_POD_SECUTITY_CONTEXT if self.config.core.scaler.enable_pod_security else None
         container = V1Container(
             name=name,
             image=docker_config.image,
@@ -334,7 +334,7 @@ class KubernetesUpdateInterface:
             env=environment_variables,
             image_pull_policy='Always',
             volume_mounts=volume_mounts,
-            security_context=security_context,
+            security_context=self.security_policy,
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
                 requests={'cpu': cores / 4, 'memory': f'{memory_min}Mi'},
