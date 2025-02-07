@@ -45,7 +45,7 @@ INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http
 CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'core')
-RESTRICTED_POD_SECUTITY_CONTEXT= V1SecurityContext(
+RESTRICTED_POD_SECUTITY_CONTEXT = V1SecurityContext(
     run_as_user=1000,
     run_as_group=1000,
     capabilities=V1Capabilities(drop=["ALL"]),
