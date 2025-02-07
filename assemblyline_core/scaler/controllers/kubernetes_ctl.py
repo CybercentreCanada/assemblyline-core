@@ -46,7 +46,7 @@ SERVICE_LIVENESS_TIMEOUT = int(os.environ.get('SERVICE_LIVENESS_TIMEOUT', 60))
 UNPRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('UNPRIVILEGED_SERVICE_ACCOUNT_NAME', None)
 PRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('PRIVILEGED_SERVICE_ACCOUNT_NAME', None)
 CERTIFICATE_VALIDITY_PERIOD = int(os.environ.get('CERTIFICATE_VALIDITY_PERIOD', '36500'))
-RESTRICTED_POD_SECURITY_CONTEXT= V1SecurityContext(
+RESTRICTED_POD_SECURITY_CONTEXT = V1SecurityContext(
     run_as_user=1000,
     run_as_group=1000,
     capabilities=V1Capabilities(drop=["ALL"]),
@@ -250,7 +250,8 @@ def parse_cpu(string: str) -> float:
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace: str, prefix: str, priority: str, dependency_priority: str,
                  cpu_reservation: float, linux_node_selector: Selector, labels=None, log_level="INFO", core_env={},
-                 default_service_account=None, cluster_pod_list=True, enable_pod_security=False, default_service_tolerations = [],
+                 default_service_account=None, cluster_pod_list=True, enable_pod_security=False,
+                 default_service_tolerations=[],
                  priv_labels=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
@@ -406,7 +407,8 @@ class KubernetesController(ControllerInterface):
         """Tell the controller about a service profile it needs to manage."""
         self._create_deployment(profile.name, self._deployment_name(profile.name),
                                 profile.container_config, profile.shutdown_seconds, scale,
-                                change_key=profile.config_blob, core_mounts=profile.privileged, security_context=self.security_policy),
+                                change_key=profile.config_blob, core_mounts=profile.privileged,
+                                security_context=self.security_policy),
         self._external_profiles[profile.name] = profile
 
     def _loop_forever(self, function):
@@ -742,7 +744,8 @@ class KubernetesController(ControllerInterface):
                            shutdown_seconds: int, scale: int, labels: dict[str, str] = None,
                            volumes: list[V1Volume] = None, mounts: list[V1VolumeMount] = None,
                            core_mounts: bool = False, change_key: str = '', high_priority: bool = False,
-                           deployment_strategy: V1DeploymentStrategy = V1DeploymentStrategy(), security_context: V1SecurityContext = None):
+                           deployment_strategy: V1DeploymentStrategy = V1DeploymentStrategy(),
+                           security_context: V1SecurityContext = None):
         # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
