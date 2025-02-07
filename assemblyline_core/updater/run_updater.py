@@ -15,7 +15,8 @@ import docker
 
 from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
     V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
-    V1ConfigMapVolumeSource, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Toleration
+    V1ConfigMapVolumeSource, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Toleration, V1SecurityContext, \
+    V1Capabilities, V1SeccompProfile
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
@@ -44,6 +45,14 @@ INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http
 CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'core')
+RESTRICTED_POD_SECUTITY_CONTEXT = V1SecurityContext(
+    run_as_user=1000,
+    run_as_group=1000,
+    capabilities=V1Capabilities(drop=["ALL"]),
+    run_as_non_root=True,
+    allow_privilege_escalation=False,
+    seccomp_profile=V1SeccompProfile(type="RuntimeDefault")
+)
 
 SERVICE_API_HOST = os.getenv('SERVICE_API_HOST')
 RELEASE_NAME = os.getenv('RELEASE_NAME')
@@ -148,7 +157,7 @@ class DockerUpdateInterface:
 
 class KubernetesUpdateInterface:
     def __init__(self, logger, prefix, namespace, priority_class, extra_labels, linux_node_selector: Selector,
-                 log_level="INFO", default_service_account=None, default_service_tolerations=[]):
+                 log_level="INFO", default_service_account=None, default_service_tolerations=[], enable_pod_security=False):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -182,6 +191,7 @@ class KubernetesUpdateInterface:
         self.secret_env = []
         self.linux_node_selector = linux_node_selector
         self.default_service_tolerations = [V1Toleration(**toleration.as_primitives()) for toleration in default_service_tolerations]
+        self.security_policy = RESTRICTED_POD_SECUTITY_CONTEXT if enable_pod_security else None
 
 
         # Get the deployment of this process. Use that information to fill out the secret info
@@ -324,6 +334,7 @@ class KubernetesUpdateInterface:
             env=environment_variables,
             image_pull_policy='Always',
             volume_mounts=volume_mounts,
+            security_context=self.security_policy,
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
                 requests={'cpu': cores / 4, 'memory': f'{memory_min}Mi'},
@@ -478,7 +489,8 @@ class ServiceUpdater(ThreadedCoreBase):
                                                         log_level=self.config.logging.log_level,
                                                         default_service_account=self.config.services.service_account,
                                                         linux_node_selector=self.config.core.scaler.linux_node_selector,
-                                                        default_service_tolerations=self.config.core.scaler.service_defaults.tolerations)
+                                                        default_service_tolerations=self.config.core.scaler.service_defaults.tolerations,
+                                                        enable_pod_security=self.config.core.scaler.enable_pod_security)
             # Add all additional mounts to privileged services
             self.mounts = self.config.core.scaler.service_defaults.mounts
         else:

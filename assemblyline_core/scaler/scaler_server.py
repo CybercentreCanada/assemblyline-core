@@ -319,6 +319,7 @@ class ScalerServer(ThreadedCoreBase):
                                                    log_level=self.config.logging.log_level,
                                                    core_env=core_env,
                                                    cluster_pod_list=self.config.core.scaler.cluster_pod_list,
+                                                   enable_pod_security=self.config.core.scaler.enable_pod_security,
                                                    default_service_account=self.config.services.service_account,
                                                    default_service_tolerations=service_defaults_config.tolerations,
                                                    priv_labels=priv_labels

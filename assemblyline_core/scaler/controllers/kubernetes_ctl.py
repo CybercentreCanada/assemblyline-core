@@ -26,7 +26,8 @@ from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec,
     V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
     V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, \
     V1ServiceSpec, V1ServicePort, V1PodSecurityContext, V1Probe, V1ExecAction, V1SecurityContext, \
-    V1Affinity, V1NodeAffinity, V1NodeSelector, V1NodeSelectorTerm, V1NodeSelectorRequirement, V1Toleration
+    V1Affinity, V1NodeAffinity, V1NodeSelector, V1NodeSelectorTerm, V1NodeSelectorRequirement, V1Toleration, \
+    V1Capabilities, V1SeccompProfile
 from kubernetes.client.rest import ApiException
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig, PersistentVolume
 
@@ -45,6 +46,14 @@ SERVICE_LIVENESS_TIMEOUT = int(os.environ.get('SERVICE_LIVENESS_TIMEOUT', 60))
 UNPRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('UNPRIVILEGED_SERVICE_ACCOUNT_NAME', None)
 PRIVILEGED_SERVICE_ACCOUNT_NAME = os.environ.get('PRIVILEGED_SERVICE_ACCOUNT_NAME', None)
 CERTIFICATE_VALIDITY_PERIOD = int(os.environ.get('CERTIFICATE_VALIDITY_PERIOD', '36500'))
+RESTRICTED_POD_SECURITY_CONTEXT = V1SecurityContext(
+    run_as_user=1000,
+    run_as_group=1000,
+    capabilities=V1Capabilities(drop=["ALL"]),
+    run_as_non_root=True,
+    allow_privilege_escalation=False,
+    seccomp_profile=V1SeccompProfile(type="RuntimeDefault")
+)
 
 AL_ROOT_CA = os.environ.get('AL_ROOT_CA', '/etc/assemblyline/ssl/al_root-ca.crt')
 AL_ROOT_CA_PK = os.environ.get('AL_ROOT_CA_PK', '/etc/assemblyline/ssl/al_root-ca.key')
@@ -241,7 +250,8 @@ def parse_cpu(string: str) -> float:
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace: str, prefix: str, priority: str, dependency_priority: str,
                  cpu_reservation: float, linux_node_selector: Selector, labels=None, log_level="INFO", core_env={},
-                 default_service_account=None, cluster_pod_list=True, default_service_tolerations = [],
+                 default_service_account=None, cluster_pod_list=True, enable_pod_security=False,
+                 default_service_tolerations=[],
                  priv_labels=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
@@ -287,6 +297,7 @@ class KubernetesController(ControllerInterface):
         self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
         self.default_service_account: Optional[str] = default_service_account
         self.cluster_pod_list = cluster_pod_list
+        self.security_policy = RESTRICTED_POD_SECURITY_CONTEXT if enable_pod_security else None
         self.default_service_tolerations = [V1Toleration(**toleration.as_primitives()) for toleration in default_service_tolerations]
 
         # A record of previously reported events so that we don't report the same message repeatedly, fill it with
@@ -396,7 +407,8 @@ class KubernetesController(ControllerInterface):
         """Tell the controller about a service profile it needs to manage."""
         self._create_deployment(profile.name, self._deployment_name(profile.name),
                                 profile.container_config, profile.shutdown_seconds, scale,
-                                change_key=profile.config_blob, core_mounts=profile.privileged)
+                                change_key=profile.config_blob, core_mounts=profile.privileged,
+                                security_context=self.security_policy),
         self._external_profiles[profile.name] = profile
 
     def _loop_forever(self, function):
@@ -679,7 +691,7 @@ class KubernetesController(ControllerInterface):
             return self._quota_mem_limit - self._get_pod_used_namespace_ram(), self._quota_mem_limit
         return self._node_pool_max_ram - self._get_pod_used_ram(), self._node_pool_max_ram
 
-    def _create_containers(self, service_name: str, deployment_name: str, container_config, mounts,
+    def _create_containers(self, service_name: str, deployment_name: str, container_config, mounts, security_context,
                            core_container=False):
         cores = container_config.cpu_cores
         memory = container_config.ram_mb
@@ -719,6 +731,7 @@ class KubernetesController(ControllerInterface):
             env=environment_variables,
             image_pull_policy=image_pull_policy,
             volume_mounts=mounts,
+            security_context=security_context,
             resources=V1ResourceRequirements(
                 limits={'cpu': cores, 'memory': f'{memory}Mi'},
                 requests={'cpu': cores*self.cpu_reservation, 'memory': f'{min_memory}Mi'},
@@ -731,7 +744,8 @@ class KubernetesController(ControllerInterface):
                            shutdown_seconds: int, scale: int, labels: dict[str, str] = None,
                            volumes: list[V1Volume] = None, mounts: list[V1VolumeMount] = None,
                            core_mounts: bool = False, change_key: str = '', high_priority: bool = False,
-                           deployment_strategy: V1DeploymentStrategy = V1DeploymentStrategy()):
+                           deployment_strategy: V1DeploymentStrategy = V1DeploymentStrategy(),
+                           security_context: V1SecurityContext = None):
         # Build a cache key to check for changes, just trying to only patch what changed
         # will still potentially result in a lot of restarts due to different kubernetes
         # systems returning differently formatted data
@@ -742,7 +756,8 @@ class KubernetesController(ControllerInterface):
         key_labels += sorted(deployment_labels.items())
         change_key = str(f"n={deployment_name}{change_key}dc={docker_config}ss={shutdown_seconds}"
                          f"l={key_labels}v={volumes}m={mounts}cm={core_mounts}senv={svc_env}"
-                         f"nodes={field_selector or ''}{label_selector or ''}")
+                         f"nodes={field_selector or ''}{label_selector or ''}"
+                         f"security_context={security_context or ''}")
         self.logger.debug(f"{deployment_name} actual change_key: {change_key}")
         change_key = str(hash(change_key))
 
@@ -847,7 +862,7 @@ class KubernetesController(ControllerInterface):
             init_containers=init_containers,
             volumes=all_volumes,
             containers=self._create_containers(service_name, deployment_name, docker_config,
-                                               all_mounts, core_container=core_mounts),
+                                               all_mounts, security_context, core_container=core_mounts),
             priority_class_name=self.dependency_priority if high_priority else self.priority,
             termination_grace_period_seconds=shutdown_seconds,
             security_context=V1PodSecurityContext(fs_group=1000),
@@ -952,7 +967,7 @@ class KubernetesController(ControllerInterface):
     def restart(self, service):
         self._create_deployment(service.name, self._deployment_name(service.name), service.container_config,
                                 service.shutdown_seconds, self.get_target(service.name), core_mounts=service.privileged,
-                                change_key=service.config_blob)
+                                change_key=service.config_blob, security_context=self.security_policy)
 
     def get_running_container_names(self):
         pods = self.api.list_pod_for_all_namespaces(field_selector='status.phase==Running',
@@ -1135,7 +1150,7 @@ class KubernetesController(ControllerInterface):
         self._create_deployment(service_name, deployment_name, spec.container,
                                 30, 1, labels, volumes=volumes, mounts=mounts, high_priority=True,
                                 core_mounts=spec.run_as_core, change_key=change_key,
-                                deployment_strategy=deployment_strategy)
+                                deployment_strategy=deployment_strategy, security_context=self.security_policy)
 
         # Setup a service to direct to the deployment
         try:
