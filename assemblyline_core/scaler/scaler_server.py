@@ -70,6 +70,7 @@ DOCKER_CONFIGURATION_PATH = os.getenv('DOCKER_CONFIGURATION_PATH', None)
 DOCKER_CONFIGURATION_VOLUME = os.getenv('DOCKER_CONFIGURATION_VOLUME', None)
 
 SERVICE_API_HOST = os.getenv('SERVICE_API_HOST', None)
+SERVICE_API_KEY = os.getenv('SERVICE_API_KEY', None)
 INTERNAL_ENCRYPT = bool(SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'))
 
 
@@ -302,6 +303,11 @@ class ScalerServer(ThreadedCoreBase):
             service_defaults_config.environment = \
                 [EnvironmentVariable(dict(name="SERVICE_API_HOST", value=SERVICE_API_HOST))] + \
                 [env for env in service_defaults_config.environment if env.name != "SERVICE_API_HOST"]
+
+        if SERVICE_API_KEY:
+            service_defaults_config.environment = \
+                [EnvironmentVariable(dict(name="SERVICE_API_KEY", value=SERVICE_API_KEY))] + \
+                [env for env in service_defaults_config.environment if env.name != "SERVICE_API_KEY"]
 
         if self.config.core.scaler.additional_labels:
             labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)})
