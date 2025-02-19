@@ -701,8 +701,6 @@ class KubernetesController(ControllerInterface):
             environment_variables += [V1EnvVar(name=_n, value=_v) for _n, _v in self.core_env.items()]
             environment_variables.extend(self.core_secret_env)
             environment_variables.append(V1EnvVar(name='PRIVILEGED', value='true'))
-        # Overwrite them with configured special environment variables
-        environment_variables += [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]
         # Overwrite those with special hard coded variables
         environment_variables += [
             V1EnvVar(name='AL_SERVICE_NAME', value=service_name),
@@ -711,6 +709,8 @@ class KubernetesController(ControllerInterface):
         # Overwrite ones defined dynamically by dependency container launches
         for name, value in self._service_limited_env[service_name].items():
             environment_variables.append(V1EnvVar(name=name, value=value))
+        # Overwrite them with configured special environment variables
+        environment_variables += [V1EnvVar(name=_e.name, value=_e.value) for _e in container_config.environment]
         image_pull_policy = 'Always' if DEV_MODE else 'IfNotPresent'
         return [V1Container(
             name=deployment_name,
