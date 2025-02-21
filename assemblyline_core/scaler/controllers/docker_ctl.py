@@ -189,10 +189,10 @@ class DockerController(ControllerInterface):
         volumes = {row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.global_mounts}
 
         # Define environment variables
-        env = [f'{_e.name}={_e.value}' for _e in cfg.environment]
-        env += [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
+        env = [f'{name}={os.environ[name]}' for name in INHERITED_VARIABLES if name in os.environ]
         env += [f'LOG_LEVEL={self.log_level}', f'AL_SERVICE_NAME={service_name}']
         env += [f'{_n}={_v}' for _n, _v in self._service_limited_env[service_name].items()]
+        env += [f'{_e.name}={_e.value}' for _e in cfg.environment]
         if prof.privileged:
             env.append('PRIVILEGED=true')
             volumes.update({row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.core_mounts})
