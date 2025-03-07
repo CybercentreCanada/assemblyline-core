@@ -109,6 +109,9 @@ class WorkflowManager(ServerBase):
                     if not workflow.enabled:
                         continue
 
+                    # Trigger a heartbeat to let the system know the workflow manager is still alive between tasks
+                    self.heartbeat()
+
                     # Start of transaction
                     if self.apm_client:
                         self.apm_client.begin_transaction("Execute workflows")
