@@ -193,6 +193,19 @@ class TaskingClient:
                         self.log.info(f"{log_prefix}{service.name} "
                                       f"heuristic {item['update']['_id']}: {item['update']['result'].upper()}")
 
+                # Look for heuristics that are no longer managed by the service and clean them up
+                all_heuristics = set(h_id for h_id in self.heuristics.keys()
+                                     if h_id.startswith(f"{service.name.upper()}."))
+                removed_heuristics = all_heuristics - set(h['heur_id'] for h in heuristics)
+
+                for heuristic in removed_heuristics:
+                    # Only remove heuristics that aren't actively referenced in a result
+                    if not self.datastore.result.search(f"result.sections.heuristic.heur_id:{heuristic}",
+                                                        rows=0, track_total_hits=True)['total']:
+                        self.datastore.heuristic.delete(heuristic)
+
+
+
                 self.datastore.heuristic.commit()
 
                 # Notify components watching for heuristic config changes
