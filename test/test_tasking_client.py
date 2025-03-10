@@ -5,26 +5,12 @@ from assemblyline_core.tasking_client import TaskingClient
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.heuristic import Heuristic
 from assemblyline.odm.models.result import Result, Section, Heuristic as SectionHeuristic
-from assemblyline.odm.random_data import (
-    create_badlists,
-    create_users,
-    wipe_badlist,
-    wipe_users,
-)
+
 from assemblyline.odm.randomizer import random_minimal_obj
 
+def test_register_service(datastore_connection):
+    client = TaskingClient(datastore_connection, register_only=True)
 
-@pytest.fixture(scope="module")
-def client(datastore_connection):
-    try:
-        create_users(datastore_connection)
-        create_badlists(datastore_connection)
-        yield TaskingClient(datastore_connection)
-    finally:
-        wipe_users(datastore_connection)
-        wipe_badlist(datastore_connection)
-
-def test_register_service(client, datastore_connection):
     # Test service registration
     service = random_minimal_obj(Service).as_primitives()
     heuristics = [random_minimal_obj(Heuristic).as_primitives() for _ in range(2)]

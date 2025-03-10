@@ -49,6 +49,8 @@ class TaskingClient:
         self.event_sender = EventSender('changes', redis)
         self.cleanup = False
         self.event_listener = None
+        self.heuristics: dict[str, Heuristic] = {}
+        self.register_only = register_only
 
         # If we're performing service registration, we only need a connection to the datastore
         if not register_only:
@@ -56,7 +58,6 @@ class TaskingClient:
             self.event_listener = EventWatcher(redis)
             self.filestore = filestore or forge.get_filestore(self.config)
             self.heuristic_handler = HeuristicHandler(self.datastore)
-            self.heuristics: dict[str, Heuristic] = {}
             self.reload_heuristics({})
             self.status_table = ExpiringHash(SERVICE_STATE_HASH, ttl=60*30, host=redis)
             self.tag_safelister = forge.CachedObject(forge.get_tag_safelister, kwargs=dict(
@@ -195,6 +196,10 @@ class TaskingClient:
                                     f"heuristic {item['update']['_id']}: {item['update']['result'].upper()}")
 
             # Look for heuristics that are no longer managed by the service and clean them up
+            if self.register_only:
+                # Fetch current heuristics for the service during registration
+                self.reload_heuristics({'service_name': service.name})
+
             all_heuristics = set(h_id for h_id in self.heuristics.keys()
                                 if h_id.startswith(f"{service.name.upper()}."))
             removed_heuristics = all_heuristics - set(h['heur_id'] for h in heuristics)
