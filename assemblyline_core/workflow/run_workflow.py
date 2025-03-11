@@ -59,7 +59,7 @@ class WorkflowManager(ServerBase):
 
         return ret_val
 
-    def try_run(self):
+    def try_run(self, run_once=False):
         self.datastore.alert.commit()
         while self.running:
             self.heartbeat()
@@ -217,6 +217,8 @@ class WorkflowManager(ServerBase):
             else:
                 self.log.info("Skipping all workflows since there where no new alerts in the specified time period.")
 
+            if run_once:
+                break
             time.sleep(30)
             self.start_ts = end_ts
 

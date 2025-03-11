@@ -1,5 +1,3 @@
-
-import pytest
 from assemblyline_core.tasking_client import TaskingClient
 
 from assemblyline.odm.models.service import Service
