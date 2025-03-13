@@ -49,6 +49,8 @@ class TaskingClient:
         self.event_sender = EventSender('changes', redis)
         self.cleanup = False
         self.event_listener = None
+        self.heuristics: dict[str, Heuristic] = {}
+        self.register_only = register_only
 
         # If we're performing service registration, we only need a connection to the datastore
         if not register_only:
@@ -56,7 +58,6 @@ class TaskingClient:
             self.event_listener = EventWatcher(redis)
             self.filestore = filestore or forge.get_filestore(self.config)
             self.heuristic_handler = HeuristicHandler(self.datastore)
-            self.heuristics: dict[str, Heuristic] = {}
             self.reload_heuristics({})
             self.status_table = ExpiringHash(SERVICE_STATE_HASH, ttl=60*30, host=redis)
             self.tag_safelister = forge.CachedObject(forge.get_tag_safelister, kwargs=dict(
@@ -126,7 +127,7 @@ class TaskingClient:
 
         try:
             # Get heuristics list
-            heuristics = service_data.pop('heuristics', None)
+            heuristics = service_data.pop('heuristics', [])
 
             # Patch update_channel, registry_type before Service registration object creation
             service_data['update_channel'] = service_data.get(
@@ -162,44 +163,62 @@ class TaskingClient:
                 self.log.info(f"{log_prefix}{service.name} version ({service.version}) registered")
 
             new_heuristics = []
-            if heuristics:
-                plan = self.datastore.heuristic.get_bulk_plan()
-                for index, heuristic in enumerate(heuristics):
-                    heuristic_id = f'#{index}'  # Set heuristic id to it's position in the list for logging purposes
-                    try:
-                        # Append service name to heuristic ID
-                        heuristic['heur_id'] = f"{service.name.upper()}.{str(heuristic['heur_id'])}"
+            
+            plan = self.datastore.heuristic.get_bulk_plan()
+            for index, heuristic in enumerate(heuristics):
+                heuristic_id = f'#{index}'  # Set heuristic id to it's position in the list for logging purposes
+                try:
+                    # Append service name to heuristic ID
+                    heuristic['heur_id'] = f"{service.name.upper()}.{str(heuristic['heur_id'])}"
 
-                        # Attack_id field is now a list, make it a list if we receive otherwise
-                        attack_id = heuristic.get('attack_id', None)
-                        if isinstance(attack_id, str):
-                            heuristic['attack_id'] = [attack_id]
+                    # Attack_id field is now a list, make it a list if we receive otherwise
+                    attack_id = heuristic.get('attack_id', None)
+                    if isinstance(attack_id, str):
+                        heuristic['attack_id'] = [attack_id]
 
-                        heuristic = Heuristic(heuristic)
-                        heuristic_id = heuristic.heur_id
-                        existing_heuristic_obj = self.datastore.heuristic.get_if_exists(heuristic_id)
-                        if existing_heuristic_obj:
-                            # Ensure statistics of heuristic are preserved
-                            heuristic.stats = existing_heuristic_obj.stats
-                        plan.add_upsert_operation(heuristic_id, heuristic)
-                    except Exception as e:
-                        msg = f"{service.name} has an invalid heuristic ({heuristic_id}): {str(e)}"
-                        self.log.exception(f"{log_prefix}{msg}")
-                        raise ValueError(msg)
+                    heuristic = Heuristic(heuristic)
+                    heuristic_id = heuristic.heur_id
+                    existing_heuristic_obj = self.datastore.heuristic.get_if_exists(heuristic_id)
+                    if existing_heuristic_obj:
+                        # Ensure statistics of heuristic are preserved
+                        heuristic.stats = existing_heuristic_obj.stats
+                    plan.add_upsert_operation(heuristic_id, heuristic)
+                except Exception as e:
+                    msg = f"{service.name} has an invalid heuristic ({heuristic_id}): {str(e)}"
+                    self.log.exception(f"{log_prefix}{msg}")
+                    raise ValueError(msg)
 
+            if plan.operations:
                 for item in self.datastore.heuristic.bulk(plan)['items']:
                     if item['update']['result'] != "noop":
                         new_heuristics.append(item['update']['_id'])
                         self.log.info(f"{log_prefix}{service.name} "
-                                      f"heuristic {item['update']['_id']}: {item['update']['result'].upper()}")
+                                    f"heuristic {item['update']['_id']}: {item['update']['result'].upper()}")
 
-                self.datastore.heuristic.commit()
+            # Look for heuristics that are no longer managed by the service and clean them up
+            if self.register_only:
+                # Fetch current heuristics for the service during registration
+                self.reload_heuristics({'service_name': service.name})
 
-                # Notify components watching for heuristic config changes
-                self.event_sender.send('heuristics', {
-                    'operation': Operation.Modified,
-                    'service_name': service.name
-                })
+            all_heuristics = set(h_id for h_id in self.heuristics.keys()
+                                if h_id.startswith(f"{service.name.upper()}."))
+            removed_heuristics = all_heuristics - set(h['heur_id'] for h in heuristics)
+
+            for heuristic in removed_heuristics:
+                # Only remove heuristics that aren't actively referenced in a result
+                if not self.datastore.result.search(f"result.sections.heuristic.heur_id:{heuristic}",
+                                                    rows=0, track_total_hits=True)['total']:
+                    self.datastore.heuristic.delete(heuristic)
+
+
+
+            self.datastore.heuristic.commit()
+
+            # Notify components watching for heuristic config changes
+            self.event_sender.send('heuristics', {
+                'operation': Operation.Modified,
+                'service_name': service.name
+            })
 
             service_config = self.datastore.get_service_with_delta(service.name, as_obj=False)
 
