@@ -191,6 +191,7 @@ class Ingester(ThreadedCoreBase):
         # Watchers
         self.submission_delete_watcher = EventWatcher(self.redis)
         self.submission_delete_watcher.register("delete.submission", self.handle_submission_delete)
+        self.submission_delete_watcher.start()
 
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
