@@ -263,7 +263,7 @@ def core(request, redis, filestore, config, clean_datastore: AssemblylineDatasto
     service_config: list[tuple[str, int, str, dict]] = [
         ('pre', 1, 'EXTRACT', {'extra_data': True, 'monitored_keys': ['passwords']}),
         ('core-a', 2, 'CORE', {}),
-        ('core-b', 1, 'CORE', {}),
+        ('core-b', 1, 'CORE', {'extra_data': True, 'monitored_keys': ['passwords']}),
         ('finish', 1, 'POST', {'extra_data': True})
     ]
 
@@ -1287,11 +1287,11 @@ def test_temp_data_monitoring(core: CoreSession, metrics):
 
 def test_final_partial(core: CoreSession, metrics):
     # This test was written to cover an error where a partial result produced as the final
-    # result of a submission would not trigger dispatching when it should due to data 
+    # result of a submission would not trigger dispatching when it should due to data
     # that was produced while it was running.
 
     # Both services run at the same time, but one requires info from the other.
-    # We lock down the timing of the service completion so that: 
+    # We lock down the timing of the service completion so that:
     # a) both run at the same time so that in its first run core-b does not have the
     #    temp data it wants and produces a partial result.
     # b) core-a finishes before core-b adding the temporary data to the dispatcher
@@ -1358,7 +1358,7 @@ def test_final_partial(core: CoreSession, metrics):
     assert len(sub.results) == 2, sub.results
 
     # b service should have run twice to produce the results
-    assert core_b.hits[sha] >= 2, f'core_b.hits {core_b.hits}'
+    assert core_b.hits[sha] >= 2, f'core_b.hits {core_b.hits[sha]}'
 
     # Wait until we get feedback from the metrics channel
     metrics.expect('ingester', 'submissions_ingested', 1)
