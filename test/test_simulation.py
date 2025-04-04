@@ -72,6 +72,9 @@ class MockService(ServerBase):
         self.dispatch_client = DispatchClient(self.datastore, redis)
         self.hits = dict()
         self.drops = dict()
+        self.finish = dict()
+        self.local_lock = threading.Event()
+        self.local_lock.set()
 
     def try_run(self):
         while self.running:
@@ -96,6 +99,9 @@ class MockService(ServerBase):
 
             if instructions.get('lock', False):
                 _global_semaphore.acquire(blocking=True, timeout=instructions['lock'])
+
+            if instructions.get('local_lock', False):
+                self.local_lock.wait(instructions['local_lock'])
 
             if 'drop' in instructions:
                 if instructions['drop'] >= hits:
@@ -124,8 +130,10 @@ class MockService(ServerBase):
                         partial = True
                         break
 
-            if partial:
-                print(self.service_name, "will produce partial results")
+                if partial:
+                    print(self.service_name, "will produce partial results")
+                else:
+                    print(self.service_name, "will produce complete results")
 
             result_data = {
                 'archive_ts': None,
@@ -151,15 +159,17 @@ class MockService(ServerBase):
                 result_key = result.build_key(get_random_id())
             self.dispatch_client.service_finished(task.sid, result_key, result,
                                                   temporary_data=instructions.get('temporary_data'))
+            self.finish[task.fileinfo.sha256] = self.finish.get(task.fileinfo.sha256, 0) + 1
 
 
 class CoreSession:
-    def __init__(self, config, ingest):
+    def __init__(self, config, ingest, services):
         self.ds: typing.Optional[AssemblylineDatastore] = None
         self.filestore = None
         self.redis = None
         self.config: Config = config
         self.ingest: Ingester = ingest
+        self.services: list[MockService] = services
         self.dispatcher: Dispatcher
 
     @property
@@ -253,7 +263,7 @@ def core(request, redis, filestore, config, clean_datastore: AssemblylineDatasto
     service_config: list[tuple[str, int, str, dict]] = [
         ('pre', 1, 'EXTRACT', {'extra_data': True, 'monitored_keys': ['passwords']}),
         ('core-a', 2, 'CORE', {}),
-        ('core-b', 1, 'CORE', {}),
+        ('core-b', 1, 'CORE', {'extra_data': True, 'monitored_keys': ['passwords']}),
         ('finish', 1, 'POST', {'extra_data': True})
     ]
 
@@ -282,7 +292,7 @@ def core(request, redis, filestore, config, clean_datastore: AssemblylineDatasto
 
     ingester = Ingester(datastore=ds, redis=redis, persistent_redis=redis, config=config)
 
-    fields = CoreSession(config, ingester)
+    fields = CoreSession(config, ingester, services)
     fields.redis = redis
     fields.ds = ds
 
@@ -1266,6 +1276,97 @@ def test_temp_data_monitoring(core: CoreSession, metrics):
     metrics.expect('dispatcher', 'submissions_completed', 1)
     metrics.expect('dispatcher', 'files_completed', 1)
 
+    partial_results = 0
+    for res in sub.results:
+        result = core.ds.get_single_result(res, as_obj=True)
+        assert result is not None, res
+        if result.partial:
+            partial_results += 1
+    assert partial_results == 0, 'partial_results'
+
+
+def test_final_partial(core: CoreSession, metrics):
+    # This test was written to cover an error where a partial result produced as the final
+    # result of a submission would not trigger dispatching when it should due to data
+    # that was produced while it was running.
+
+    # Both services run at the same time, but one requires info from the other.
+    # We lock down the timing of the service completion so that:
+    # a) both run at the same time so that in its first run core-b does not have the
+    #    temp data it wants and produces a partial result.
+    # b) core-a finishes before core-b adding the temporary data to the dispatcher
+    # c) core-b finishes and should trigger a rerun with the data to produce a full result
+    sha, size = ready_body(core, {
+        'core-a': {'local_lock': 10, 'temporary_data': {'passwords': ['test_temp_data_monitoring']}},
+        'core-b': {'local_lock': 10, 'partial': {'passwords': 'test_temp_data_monitoring'}},
+    })
+
+    core_a = [s for s in core.services if s.service_name == 'core-a']
+    core_b = [s for s in core.services if s.service_name == 'core-b'][0]
+
+    for service in core_a + [core_b]:
+        service.local_lock.clear()
+
+    core.ingest_queue.push(SubmissionInput(dict(
+        metadata={},
+        params=dict(
+            description="file abc123",
+            services=dict(selected=['core-a', 'core-b']),
+            submitter='user',
+            groups=['user'],
+            max_extracted=10000
+        ),
+        notification=dict(
+            queue='temp-final-partial',
+            threshold=0
+        ),
+        files=[dict(
+            sha256=sha,
+            size=size,
+            name='abc123'
+        )]
+    )).as_primitives())
+ 
+    # Wait until both of the services have started (so service b doesn't get the temp data a produces on its first run)
+    start = time.time()
+    while sum(s.hits.get(sha, 0) for s in core.services) != 2:
+        if time.time() - start > RESPONSE_TIMEOUT:
+            pytest.fail()
+        time.sleep(0.01)
+
+    # Release a
+    for service in core_a:
+        service.local_lock.set()
+
+    # Let a finish so that the temporary data is added in the dispatcher
+    while sum(s.finish.get(sha, 0) for s in core_a) < 1:
+        if time.time() - start > RESPONSE_TIMEOUT:
+            pytest.fail()
+        time.sleep(0.01)    
+
+    # Let b finish, it should produce a partial result then rerun right away
+    core_b.local_lock.set()
+
+    notification_queue = NamedQueue('nq-temp-final-partial', core.redis)
+    dropped_task = notification_queue.pop(timeout=RESPONSE_TIMEOUT)
+    assert dropped_task
+    dropped_task = IngestTask(dropped_task)
+    sub: Submission = core.ds.submission.get(dropped_task.submission.sid)
+
+    # The submission should produce no errors and two results
+    assert len(sub.errors) == 0
+    assert len(sub.results) == 2, sub.results
+
+    # b service should have run twice to produce the results
+    assert core_b.hits[sha] >= 2, f'core_b.hits {core_b.hits[sha]}'
+
+    # Wait until we get feedback from the metrics channel
+    metrics.expect('ingester', 'submissions_ingested', 1)
+    metrics.expect('ingester', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'submissions_completed', 1)
+    metrics.expect('dispatcher', 'files_completed', 1)
+
+    # Verify thath there are no partial results in the final submission
     partial_results = 0
     for res in sub.results:
         result = core.ds.get_single_result(res, as_obj=True)
