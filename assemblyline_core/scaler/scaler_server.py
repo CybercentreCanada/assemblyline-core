@@ -8,7 +8,6 @@ from collections import defaultdict
 from string import Template
 from typing import Dict, Optional, Any
 import os
-import re
 import math
 import time
 import platform
