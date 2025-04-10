@@ -351,15 +351,17 @@ class SubmissionTask:
             values=values,
         )
 
-    def partial_result(self, sha256, service_name):
+    def partial_result(self, sha256, service_name) -> bool:
         """Note that a partial result has been recieved. If a dispatch was requested process that now."""
         try:
             entry = self.monitoring[(sha256, service_name)]
         except KeyError:
-            return
+            return False
 
         if entry.dispatch_needed:
             self.redispatch_service(sha256, service_name)
+            return True
+        return False
 
     def clear_monitoring_entry(self, sha256, service_name):
         """A service has completed normally. If the service is monitoring clear out the record."""
@@ -1426,9 +1428,11 @@ class Dispatcher(ThreadedCoreBase):
         self.clear_timeout(task, sha256, service_name)
         task.service_logs.pop((sha256, service_name), None)
 
+        force_redispatch = set()
         if summary.partial:
             self.log.info("[%s/%s] %s returned partial results", sid, sha256, service_name)
-            task.partial_result(sha256, service_name)
+            if task.partial_result(sha256, service_name):
+                force_redispatch.add(sha256)
         else:
             task.clear_monitoring_entry(sha256, service_name)
 
@@ -1475,11 +1479,11 @@ class Dispatcher(ThreadedCoreBase):
             summary.children = [(c, 'EXTRACTED') for c in old_children]
 
         # Record the result as a summary
-        task.service_results[(sha256, service_name)] = summary
+        if not force_redispatch:
+            task.service_results[(sha256, service_name)] = summary
         task.register_children(sha256, [c for c, _ in summary.children])
 
         # Update the temporary data table for this file
-        force_redispatch = set()
         for key, value in (temporary_data or {}).items():
             if len(str(value)) <= self.config.submission.max_temp_data_length:
                 if task.temporary_data[sha256].set_value(key, value):
