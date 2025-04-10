@@ -18,34 +18,37 @@ from typing import Any, Iterable, List, Optional, Tuple
 
 import elasticapm
 
-from assemblyline.common.postprocess import ActionWorker
-from assemblyline_core.server_base import ThreadedCoreBase
+from assemblyline import odm
+from assemblyline.common import exceptions, forge, isotime
 from assemblyline.common.constants import DROP_PRIORITY
-from assemblyline.common.metrics import MetricsFactory
-from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.common.exceptions import get_stacktrace_info
-from assemblyline.common.isotime import now, now_as_iso
 from assemblyline.common.importing import load_module_by_path
-from assemblyline.common import forge, exceptions, isotime
+from assemblyline.common.isotime import now, now_as_iso
+from assemblyline.common.metrics import MetricsFactory
+from assemblyline.common.postprocess import ActionWorker
+from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.datastore.exceptions import DataStoreException
 from assemblyline.filestore import CorruptedFileStoreException, FileStoreException
-from assemblyline.odm.models.filescore import FileScore
-from assemblyline.odm.models.user import User
 from assemblyline.odm.messages.ingest_heartbeat import Metrics
-from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.remote.datatypes.queues.priority import PriorityQueue
+from assemblyline.odm.messages.submission import Submission as MessageSubmission
+from assemblyline.odm.messages.submission import SubmissionMessage
+from assemblyline.odm.models.alert import EXTENDED_SCAN_VALUES
+from assemblyline.odm.models.filescore import FileScore
+from assemblyline.odm.models.submission import Submission as DatabaseSubmission
+from assemblyline.odm.models.submission import SubmissionParams
+from assemblyline.odm.models.user import User
+from assemblyline.remote.datatypes.events import EventWatcher
+from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.multi import MultiQueue
-from assemblyline.remote.datatypes.hash import Hash
+from assemblyline.remote.datatypes.queues.named import NamedQueue
+from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
-from assemblyline import odm
-from assemblyline.odm.models.submission import SubmissionParams, Submission as DatabaseSubmission
-from assemblyline.odm.models.alert import EXTENDED_SCAN_VALUES
-from assemblyline.odm.messages.submission import Submission as MessageSubmission, SubmissionMessage
-
 from assemblyline_core.dispatching.dispatcher import Dispatcher
+from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline_core.submission_client import SubmissionClient
-from .constants import INGEST_QUEUE_NAME, drop_chance, COMPLETE_QUEUE_NAME
+
+from .constants import COMPLETE_QUEUE_NAME, INGEST_QUEUE_NAME, drop_chance
 
 _dup_prefix = 'w-m-'
 _notification_queue_prefix = 'nq-'
@@ -184,6 +187,11 @@ class Ingester(ThreadedCoreBase):
         # Async Submission quota tracker
         self.async_submission_tracker = UserQuotaTracker('async_submissions', timeout=24 * 60 * 60,  # 1 day timeout
                                                          redis=self.redis_persist)
+
+        # Watchers
+        self.submission_delete_watcher = EventWatcher(self.redis)
+        self.submission_delete_watcher.register("delete.submission", self.handle_submission_delete)
+        self.submission_delete_watcher.start()
 
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
@@ -398,6 +406,15 @@ class Ingester(ThreadedCoreBase):
                 # End of ingest message (exception)
                 if self.apm_client:
                     self.apm_client.end_transaction('ingest_submit', 'exception')
+
+    def handle_submission_delete(self, sid: Optional[str]):
+        with self.cache_lock:
+            if not sid:
+                # Clear the entire local cache
+                self.cache = {}
+            else:
+                # Ensure to cleanup the local cache of filescores relative to the SID
+                self.cache = {k: v for k, v in self.cache.items() if v.sid != sid}
 
     def handle_complete(self):
         while self.running:
