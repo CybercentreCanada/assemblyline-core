@@ -11,14 +11,17 @@ import warnings
 from typing import Optional
 
 from assemblyline.common.constants import service_queue_name
-from assemblyline.common.forge import get_service_queue
-from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.forge import get_service_queue, get_config
+from assemblyline.common.isotime import DAY_IN_SECONDS, now_as_iso
+from assemblyline.odm.models.apikey import get_apikey_id
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.service import Service
+from assemblyline.odm.models.user import load_roles, load_roles_form_acls
 from assemblyline.remote.datatypes import retry_call
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.server_base import CoreBase, ServiceStage
+
 
 DAY = 60 * 60 * 24
 TASK_DELETE_CHUNK = 10000
@@ -53,6 +56,8 @@ class Plumber(CoreBase):
                                      name="redis_notification_queue_cleanup")
         nq_thread.start()
 
+        ua_thread = threading.Thread(target=self.user_apikey_cleanup, daemon=True, name="user_apikey_cleanup")
+        ua_thread.start()
         self.service_queue_plumbing()
 
     def service_queue_plumbing(self):
@@ -187,6 +192,63 @@ class Plumber(CoreBase):
                 self.dispatch_client.service_failed(task.sid, error_key, error)
             self.sleep(2)
         self.log.info(f"Done watching {service_name} service queue")
+
+
+
+    def user_apikey_cleanup(self):
+        query = "id:*"
+        offset = 0
+        rows = 100
+        total = 1
+        cur_total = 0
+
+        config = get_config()
+        apikey_max_dtl = config.auth.apikey_max_dtl
+
+        expiry_ts = now_as_iso(apikey_max_dtl * DAY_IN_SECONDS) if apikey_max_dtl is not None else None
+
+        while cur_total < total:
+            result = self.datastore.user.search(query, offset=offset, rows=rows)
+            total = result.get('total', 0)
+            cur_total = cur_total + (result.get("count", total))
+
+            # check for API keys in total
+            users = result.get('items', [])
+
+            for u in users:
+                uname = u['uname']
+                user = self.datastore.user.get(uname)
+                apikeys = user.apikeys
+
+                for key in apikeys:
+                    old_apikey = apikeys[key]
+                    key_id = get_apikey_id(key, uname)
+
+                    roles = None
+                    if old_apikey['acl'] == ["C"]:
+
+                        roles = [r for r in old_apikey['roles']
+                                    if r in load_roles(user['type'], user['roles'])]
+
+                    else:
+                        roles = [r for r in load_roles_form_acls(old_apikey['acl'], roles)
+                                if r in load_roles(user['type'], user['roles'])]
+                    new_apikey = {
+                        "password": old_apikey['password'],
+                        "acl": old_apikey['acl'],
+                        "uname": uname,
+                        "key_name": key,
+                        "roles": roles,
+                        "expiry_ts": expiry_ts
+                    }
+                    self.datastore.apikey.save(key_id, new_apikey)
+
+                user['apikeys'] = {}
+                self.datastore.user.save(uname, user)
+
+
+
+
 
 
 if __name__ == '__main__':
