@@ -7,17 +7,31 @@ import os
 import re
 import time
 import uuid
-
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, List, Optional
 
 import docker
-
-from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
-    V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
-    V1ConfigMapVolumeSource, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Toleration, V1SecurityContext, \
-    V1Capabilities, V1SeccompProfile
 from kubernetes import client, config
+from kubernetes.client import (
+    V1Capabilities,
+    V1ConfigMapVolumeSource,
+    V1Container,
+    V1EnvVar,
+    V1Job,
+    V1JobSpec,
+    V1LocalObjectReference,
+    V1ObjectMeta,
+    V1PodSpec,
+    V1PodTemplateSpec,
+    V1ResourceRequirements,
+    V1SeccompProfile,
+    V1Secret,
+    V1SecretVolumeSource,
+    V1SecurityContext,
+    V1Toleration,
+    V1Volume,
+    V1VolumeMount,
+)
 from kubernetes.client.rest import ApiException
 
 from assemblyline.common import isotime
@@ -26,7 +40,11 @@ from assemblyline.odm.models.config import Mount, Selector
 from assemblyline.odm.models.service import DockerConfig, Service
 from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config, selector_to_node_affinity, PRIVILEGED_SERVICE_ACCOUNT_NAME
+from assemblyline_core.scaler.controllers.kubernetes_ctl import (
+    PRIVILEGED_SERVICE_ACCOUNT_NAME,
+    create_docker_auth_config,
+    selector_to_node_affinity,
+)
 from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline_core.updater.helper import get_latest_tag_for_service
 
@@ -157,7 +175,7 @@ class DockerUpdateInterface:
 
 class KubernetesUpdateInterface:
     def __init__(self, logger, prefix, namespace, priority_class, extra_labels, linux_node_selector: Selector,
-                 log_level="INFO", default_service_account=None, default_service_tolerations=[], enable_pod_security=False):
+                 log_level="INFO", default_service_tolerations=[], enable_pod_security=False):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -187,7 +205,6 @@ class KubernetesUpdateInterface:
         self.priority_class = priority_class
         self.extra_labels = extra_labels
         self.log_level = log_level
-        self.default_service_account = default_service_account
         self.secret_env = []
         self.linux_node_selector = linux_node_selector
         self.default_service_tolerations = [V1Toleration(**toleration.as_primitives()) for toleration in default_service_tolerations]
@@ -346,7 +363,7 @@ class KubernetesUpdateInterface:
             restart_policy='Never',
             containers=[container],
             priority_class_name=self.priority_class,
-            service_account_name=docker_config.service_account or self.default_service_account or PRIVILEGED_SERVICE_ACCOUNT_NAME,
+            service_account_name=docker_config.service_account or PRIVILEGED_SERVICE_ACCOUNT_NAME,
             affinity=selector_to_node_affinity(self.linux_node_selector),
             tolerations=self.default_service_tolerations
         )
@@ -487,7 +504,6 @@ class ServiceUpdater(ThreadedCoreBase):
                                                         priority_class='al-core-priority',
                                                         extra_labels=extra_labels,
                                                         log_level=self.config.logging.log_level,
-                                                        default_service_account=self.config.services.service_account,
                                                         linux_node_selector=self.config.core.scaler.linux_node_selector,
                                                         default_service_tolerations=self.config.core.scaler.service_defaults.tolerations,
                                                         enable_pod_security=self.config.core.scaler.enable_pod_security)
@@ -512,7 +528,6 @@ class ServiceUpdater(ThreadedCoreBase):
                     tag = 'stable'
                 else:
                     tag = 'latest'
-                service_key = None
                 try:
                     service = Service(
                         {'name': service_name,
