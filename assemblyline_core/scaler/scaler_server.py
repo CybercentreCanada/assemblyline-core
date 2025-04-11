@@ -356,14 +356,6 @@ class ScalerServer(ThreadedCoreBase):
 
             # Add default mounts for (non-)privileged services
             for mount in service_defaults_config.mounts:
-                # Deprecated configuration for mounting ConfigMap
-                # TODO: Deprecate code on next major change
-                if mount.config_map:
-                    self.controller.add_config_mount(mount.name, config_map=mount.config_map, key=mount.key,
-                                                     target_path=mount.path, read_only=mount.read_only,
-                                                     core=mount.privileged_only)
-                    continue
-
                 if mount.resource_type == 'configmap':
                     # ConfigMap-based mount
                     self.controller.add_config_mount(mount.name, config_map=mount.resource_name, key=mount.resource_key,
