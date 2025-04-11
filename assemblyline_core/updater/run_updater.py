@@ -285,13 +285,7 @@ class KubernetesUpdateInterface:
                 read_only=mount.read_only,
             )
 
-            if mount.config_map:
-                # Deprecated configuration for mounting ConfigMap
-                # TODO: Deprecate code on next major change
-                vol_kwargs.update(dict(config_map=V1ConfigMapVolumeSource(name=mount.config_map, optional=False)))
-                vol_mount_kwargs.update(dict(sub_path=mount.key))
-
-            elif mount.resource_type == 'secret':
+            if mount.resource_type == 'secret':
                 # Secret-based source
                 vol_kwargs.update(dict(secret=V1SecretVolumeSource(secret_name=mount.resource_name)))
                 vol_mount_kwargs.update(dict(sub_path=mount.resource_key))
