@@ -2,45 +2,55 @@
 An auto-scaling service specific to Assemblyline services.
 """
 from __future__ import annotations
-import functools
-import threading
-from collections import defaultdict
-from string import Template
-from typing import Dict, Optional, Any
-import os
-import math
-import time
-import platform
+
 import concurrent.futures
 import copy
+import functools
+import json
+import math
+import os
+import platform
+import threading
+import time
+from collections import defaultdict
 from contextlib import contextmanager
+from string import Template
+from typing import Any, Dict, Optional
 
 import elasticapm
-import json
 import yaml
 
-from assemblyline.remote.datatypes.queues.named import NamedQueue
-from assemblyline.remote.datatypes.queues.priority import PriorityQueue, length as pq_length
-from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
-from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
-from assemblyline.remote.datatypes.events import EventWatcher, EventSender
-from assemblyline.odm.models.service import Service, DockerConfig, EnvironmentVariable
-from assemblyline.odm.models.config import Mount
+from assemblyline.common.constants import (
+    SCALER_TIMEOUT_QUEUE,
+    SERVICE_STATE_HASH,
+    ServiceStatus,
+)
+from assemblyline.common.dict_utils import flatten, get_recursive_sorted_tuples
+from assemblyline.common.forge import (
+    get_apm_client,
+    get_classification,
+    get_service_queue,
+)
+from assemblyline.common.uid import get_id_from_data
+from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
+from assemblyline.odm.messages.changes import Operation, ServiceChange
 from assemblyline.odm.messages.scaler_heartbeat import Metrics
 from assemblyline.odm.messages.scaler_status_heartbeat import Status
-from assemblyline.odm.messages.changes import ServiceChange, Operation
-from assemblyline.common.dict_utils import get_recursive_sorted_tuples, flatten
-from assemblyline.common.uid import get_id_from_data
-from assemblyline.common.forge import get_classification, get_service_queue, get_apm_client
-from assemblyline.common.constants import SCALER_TIMEOUT_QUEUE, SERVICE_STATE_HASH, ServiceStatus
-from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
-from assemblyline_core.updater.helper import get_registry_config
+from assemblyline.odm.models.config import Mount
+from assemblyline.odm.models.service import DockerConfig, EnvironmentVariable, Service
+from assemblyline.remote.datatypes.events import EventSender, EventWatcher
+from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
+from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
+from assemblyline.remote.datatypes.queues.named import NamedQueue
+from assemblyline.remote.datatypes.queues.priority import PriorityQueue
+from assemblyline.remote.datatypes.queues.priority import length as pq_length
 from assemblyline_core.scaler.controllers import KubernetesController
 from assemblyline_core.scaler.controllers.interface import ServiceControlError
 from assemblyline_core.server_base import ServiceStage, ThreadedCoreBase
+from assemblyline_core.updater.helper import get_registry_config
 
-from .controllers import DockerController
 from . import collection
+from .controllers import DockerController
 
 APM_SPAN_TYPE = 'scaler'
 
@@ -325,7 +335,6 @@ class ScalerServer(ThreadedCoreBase):
                                                    core_env=core_env,
                                                    cluster_pod_list=self.config.core.scaler.cluster_pod_list,
                                                    enable_pod_security=self.config.core.scaler.enable_pod_security,
-                                                   default_service_account=self.config.services.service_account,
                                                    default_service_tolerations=service_defaults_config.tolerations,
                                                    priv_labels=priv_labels
                                                    )
@@ -347,14 +356,6 @@ class ScalerServer(ThreadedCoreBase):
 
             # Add default mounts for (non-)privileged services
             for mount in service_defaults_config.mounts:
-                # Deprecated configuration for mounting ConfigMap
-                # TODO: Deprecate code on next major change
-                if mount.config_map:
-                    self.controller.add_config_mount(mount.name, config_map=mount.config_map, key=mount.key,
-                                                     target_path=mount.path, read_only=mount.read_only,
-                                                     core=mount.privileged_only)
-                    continue
-
                 if mount.resource_type == 'configmap':
                     # ConfigMap-based mount
                     self.controller.add_config_mount(mount.name, config_map=mount.resource_name, key=mount.resource_key,

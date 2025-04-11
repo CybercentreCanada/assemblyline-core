@@ -1,42 +1,63 @@
 from __future__ import annotations
-import uuid
+
+import dataclasses
+import enum
+import json
 import os
 import threading
 import time
+import typing
+import uuid
 from collections import defaultdict
 from contextlib import contextmanager
-import typing
-from typing import Optional, Any, TYPE_CHECKING, Iterable
-import json
-import enum
-from queue import PriorityQueue, Empty, Queue
-import dataclasses
 from copy import deepcopy
+from queue import Empty, PriorityQueue, Queue
+from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 import elasticapm
 
 from assemblyline.common import isotime
-from assemblyline.common.constants import make_watcher_list_name, SUBMISSION_QUEUE, \
-    DISPATCH_RUNNING_TASK_HASH, SCALER_TIMEOUT_QUEUE, DISPATCH_TASK_HASH
-from assemblyline.common.forge import get_service_queue, get_apm_client, get_classification
+from assemblyline.common.constants import (
+    DISPATCH_RUNNING_TASK_HASH,
+    DISPATCH_TASK_HASH,
+    SCALER_TIMEOUT_QUEUE,
+    SUBMISSION_QUEUE,
+    make_watcher_list_name,
+)
+from assemblyline.common.forge import (
+    get_apm_client,
+    get_classification,
+    get_service_queue,
+)
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.common.postprocess import ActionWorker
 from assemblyline.datastore.helper import AssemblylineDatastore
-from assemblyline.odm.messages.changes import ServiceChange, Operation
+from assemblyline.odm.messages.changes import Operation, ServiceChange
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
+from assemblyline.odm.messages.dispatching import (
+    CREATE_WATCH,
+    LIST_OUTSTANDING,
+    UPDATE_BAD_SID,
+    CreateWatch,
+    DispatcherCommandMessage,
+    ListOutstanding,
+    WatchQueueMessage,
+)
 from assemblyline.odm.messages.service_heartbeat import Metrics as ServiceMetrics
-from assemblyline.odm.messages.dispatching import WatchQueueMessage, CreateWatch, DispatcherCommandMessage, \
-    CREATE_WATCH, LIST_OUTSTANDING, UPDATE_BAD_SID, ListOutstanding
-from assemblyline.odm.messages.submission import SubmissionMessage, from_datastore_submission
-from assemblyline.odm.messages.task import FileInfo, Task as ServiceTask
+from assemblyline.odm.messages.submission import (
+    SubmissionMessage,
+    from_datastore_submission,
+)
+from assemblyline.odm.messages.task import FileInfo
+from assemblyline.odm.messages.task import Task as ServiceTask
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.submission import Submission
 from assemblyline.odm.models.user import User
-from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.events import EventWatcher
+from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
 from assemblyline.remote.datatypes.hash import Hash
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
 from assemblyline.remote.datatypes.queues.named import NamedQueue
@@ -44,13 +65,14 @@ from assemblyline.remote.datatypes.set import ExpiringSet, Set
 from assemblyline.remote.datatypes.user_quota_tracker import UserQuotaTracker
 from assemblyline_core.server_base import ThreadedCoreBase
 
+from ..ingester.constants import COMPLETE_QUEUE_NAME
 from .schedules import Scheduler
 from .timeout import TimeoutTable
-from ..ingester.constants import COMPLETE_QUEUE_NAME
 
 if TYPE_CHECKING:
-    from assemblyline.odm.models.file import File
     from redis import Redis
+
+    from assemblyline.odm.models.file import File
 
 
 APM_SPAN_TYPE = 'handle_message'
@@ -61,9 +83,6 @@ FINALIZING_WINDOW = max(AL_SHUTDOWN_GRACE - AL_SHUTDOWN_QUIT, 0)
 RESULT_BATCH_SIZE = int(os.environ.get('DISPATCHER_RESULT_BATCH_SIZE', '50'))
 ERROR_BATCH_SIZE = int(os.environ.get('DISPATCHER_ERROR_BATCH_SIZE', '50'))
 DAY_IN_SECONDS = 24 * 60 * 60
-
-# TODO: DYNAMIC_ANALYSIS_CATEGORY can be removed after assemblyline version 4.6+
-DYNAMIC_ANALYSIS_CATEGORY = 'Dynamic Analysis'
 
 
 class KeyType(enum.Enum):
@@ -161,17 +180,17 @@ class TemporaryFileData:
 
     def set_value(self, key: str, value: Any) -> bool:
         """Set the value of a temporary data key using the appropriate method for the key.
-        
+
         Return true if this change could mean partial results should be reevaluated.
         """
         if self.config.get(key) == KeyType.UNION.value:
             return self._union_shared_value(key, value)
-        
+
         if self.config.get(key) == KeyType.OVERWRITE.value:
             change = self.shared_values.get(key) != value
             self.shared_values[key] = value
             return change
-        
+
         self.local_values[key] = value
         return False
 
@@ -256,10 +275,6 @@ class SubmissionTask:
                 service = scheduler.services.get(service)
                 if not service:
                     continue
-
-                # TODO: the following 2 lines can be removed when assemblyline changed to version 4.6+
-                if service.category == DYNAMIC_ANALYSIS_CATEGORY:
-                    self.forbid_for_children(sha256, service.name)
 
                 prevented_services = scheduler.expand_categories(service.recursion_prevention)
 
@@ -393,7 +408,7 @@ class SubmissionTask:
                     entry.dispatch_needed = True
                 else:
                     # If there are results and there is a monitoring entry, the result was partial
-                    # so redispatch it immediately. If there are not partial results the monitoring 
+                    # so redispatch it immediately. If there are not partial results the monitoring
                     # entry will have been cleared.
                     self.redispatch_service(sha256, service)
                     changed.append(sha256)
@@ -836,11 +851,9 @@ class Dispatcher(ThreadedCoreBase):
 
             forbidden_services = None
 
-            # If Dynamic Recursion Prevention is in effect and the file is not part of the bypass list,
+            # If Recursion Prevention is in effect and the file is not part of the bypass list,
             # Find the list of services this file is forbidden from being sent to.
-            # TODO: remove "or submission.params.ignore_dynamic_recursion_prevention" after assemblyline upgrade to version 4.6+
-            ignore_drp = submission.params.ignore_recursion_prevention or submission.params.ignore_dynamic_recursion_prevention
-            if not ignore_drp and sha256 not in task.dynamic_recursion_bypass:
+            if not submission.params.ignore_recursion_prevention and sha256 not in task.dynamic_recursion_bypass:
                 forbidden_services = task.find_recursion_excluded_services(sha256)
 
             task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
@@ -938,10 +951,6 @@ class Dispatcher(ThreadedCoreBase):
                         tag_fields.append('score')
 
                     # Mark this routing for the purposes of recursion prevention
-                    # TODO: The following 2 lines can be removed after assemblyline upgrade to version 4.6+
-                    if service.category == DYNAMIC_ANALYSIS_CATEGORY:
-                        task.forbid_for_children(sha256, service_name)
-
                     prevented_services = self.scheduler.expand_categories(service.recursion_prevention)
 
                     for service_name in prevented_services:
@@ -961,8 +970,7 @@ class Dispatcher(ThreadedCoreBase):
                         max_files=task.submission.params.max_extracted,
                         ttl=submission.params.ttl,
                         ignore_cache=submission.params.ignore_cache,
-                        # TODO: remove "or submission.params.ignore_dynamic_recursion_prevention" after assemblyline upgrade to version 4.6+
-                        ignore_recursion_prevention=submission.params.ignore_recursion_prevention or submission.params.ignore_dynamic_recursion_prevention ,
+                        ignore_recursion_prevention=submission.params.ignore_recursion_prevention,
                         ignore_filtering=ignore_filtering,
                         tags=[{field: x[field] for field in tag_fields} for x in tags],
                         temporary_submission_data=[
@@ -1574,7 +1582,7 @@ class Dispatcher(ThreadedCoreBase):
         # Not worth running if we know we have services in queue
         if not any(_s == sha256 for _s, _ in task.queue_keys.keys()):
             force_redispatch.add(sha256)
-        
+
         # Try to run the next stage
         for sha256 in force_redispatch:
             self.dispatch_file(task, sha256)
