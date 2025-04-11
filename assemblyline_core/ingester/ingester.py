@@ -408,12 +408,13 @@ class Ingester(ThreadedCoreBase):
                     self.apm_client.end_transaction('ingest_submit', 'exception')
 
     def handle_submission_delete(self, sid: Optional[str]):
-        if not sid:
-            return
-
-        # Upon submission deletion, ensure to cleanup the local cache of filescores relative to the SID
         with self.cache_lock:
-            self.cache = {k: v for k, v in self.cache.items() if v.sid != sid}
+            if not sid:
+                # Clear the entire local cache
+                self.cache = {}
+            else:
+                # Ensure to cleanup the local cache of filescores relative to the SID
+                self.cache = {k: v for k, v in self.cache.items() if v.sid != sid}
 
     def handle_complete(self):
         while self.running:

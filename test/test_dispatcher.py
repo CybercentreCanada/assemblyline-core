@@ -1,20 +1,10 @@
+import json
 import logging
 import time
 from unittest import mock
 
-import json
 import pytest
-
-from assemblyline.common.forge import get_service_queue, get_classification
-from assemblyline.odm.models.error import Error
-from assemblyline.odm.models.file import File
-from assemblyline.odm.models.result import Result
-from assemblyline.odm.models.user import User
-from assemblyline.odm.randomizer import random_model_obj, random_minimal_obj, get_random_hash
-from assemblyline.odm import models
-from assemblyline.common.metrics import MetricsFactory
-
-from assemblyline_core.dispatching.client import DispatchClient, DISPATCH_RESULT_QUEUE
+from assemblyline_core.dispatching.client import DISPATCH_RESULT_QUEUE, DispatchClient
 from assemblyline_core.dispatching.dispatcher import Dispatcher, ServiceTask, Submission
 from assemblyline_core.dispatching.schedules import Scheduler as RealScheduler
 
@@ -23,6 +13,18 @@ from assemblyline_core.dispatching.timeout import TimeoutTable
 from mocking import ToggleTrue
 from test_scheduler import dummy_service
 
+from assemblyline.common.forge import get_classification, get_service_queue
+from assemblyline.common.metrics import MetricsFactory
+from assemblyline.odm import models
+from assemblyline.odm.models.error import Error
+from assemblyline.odm.models.file import File
+from assemblyline.odm.models.result import Result
+from assemblyline.odm.models.user import User
+from assemblyline.odm.randomizer import (
+    get_random_hash,
+    random_minimal_obj,
+    random_model_obj,
+)
 
 logger = logging.getLogger('assemblyline.test')
 
@@ -311,8 +313,6 @@ def test_dispatch_extracted_bypass_drp(clean_redis, clean_datastore):
     submission = random_model_obj(Submission)
     submission.to_be_deleted = False
 
-    # the following 1 line can be removed after assemblyline upgrade to version 4.6+
-    submission.params.ignore_dynamic_recursion_prevention = False
     submission.params.ignore_recursion_prevention = False
     submission.params.services.selected = ['extract', 'sandbox']
     submission.files = [dict(name='./file', sha256=file_hash)]
