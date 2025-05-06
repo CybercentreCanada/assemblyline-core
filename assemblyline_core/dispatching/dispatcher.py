@@ -54,7 +54,7 @@ from assemblyline.odm.messages.task import Task as ServiceTask
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.service import Service
-from assemblyline.odm.models.submission import Submission
+from assemblyline.odm.models.submission import Submission, TraceEvent
 from assemblyline.odm.models.user import User
 from assemblyline.remote.datatypes.events import EventWatcher
 from assemblyline.remote.datatypes.exporting_counter import export_metrics_once
@@ -310,6 +310,16 @@ class SubmissionTask:
     def sid(self) -> str:
         """Shortcut to read submission SID"""
         return self.submission.sid
+
+    def trace(self, event_type: str, sha256: Optional[str] = None,
+              service: Optional[str] = None, message: Optional[str] = None) -> None:
+        if self.submission.params.trace:
+            self.submission.tracing_events.append(TraceEvent({
+                'event_type': event_type,
+                'service': service,
+                'file': sha256,
+                'message': message,
+            }))
 
     def forbid_for_children(self, sha256: str, service_name: str):
         """Mark that children of a given file should not be routed to a service."""
@@ -729,6 +739,7 @@ class Dispatcher(ThreadedCoreBase):
 
         if not self.active_submissions.exists(sid):
             self.log.info("[%s] New submission received", sid)
+            task.trace('submission_start')
             self.active_submissions.add(sid, {
                 'completed_queue': task.completed_queue,
                 'submission': submission.as_primitives()
@@ -742,6 +753,7 @@ class Dispatcher(ThreadedCoreBase):
             }).as_primitives())
 
         else:
+            task.trace('submission_start', message='Received a pre-existing submission')
             self.log.warning(f"[{sid}] Received a pre-existing submission, check if it is complete")
 
         # Refresh the quota hold
@@ -840,6 +852,7 @@ class Dispatcher(ThreadedCoreBase):
         sid = submission.sid
         if self.apm_client:
             elasticapm.label(sid=sid, sha256=sha256)
+        task.trace('dispatch_file', sha256=sha256)
 
         file_depth: int = task.file_depth[sha256]
         # If its the first time we've seen this file, we won't have a schedule for it
@@ -859,6 +872,8 @@ class Dispatcher(ThreadedCoreBase):
             task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
                                                                         file_depth, forbidden_services,
                                                                         task.service_access_control)
+            task.trace('schedule_built', sha256=sha256, message=str(task.file_schedules[sha256]))
+
 
         file_info = task.file_info[sha256]
         schedule: list = list(task.file_schedules[sha256])
@@ -990,9 +1005,9 @@ class Dispatcher(ThreadedCoreBase):
 
             if sent or enqueued or running:
                 # If we have confirmed that we are waiting, or have taken an action, log that.
-                self.log.info(f"[{sid}] File {sha256} sent to: {sent} "
-                              f"already in queue for: {enqueued} "
-                              f"running on: {running}")
+                logs = f"sent to: {sent} already in queue for: {enqueued} running on: {running}"
+                self.log.info(f"[{sid}] File {sha256} {logs}")
+                task.trace('dispatch_file_result', sha256=sha256, message=logs)
                 return False
             elif skipped:
                 # Not waiting for anything, and have started skipping what is left over
@@ -1007,10 +1022,12 @@ class Dispatcher(ThreadedCoreBase):
 
         self.counter.increment('files_completed')
         if len(task.queue_keys) > 0 or len(task.running_services) > 0:
-            self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete "
-                          f"(queued: {len(task.queue_keys)} running: {len(task.running_services)})")
+            logs = f"queued: {len(task.queue_keys)} running: {len(task.running_services)}"
+            self.log.info(f"[{sid}] Finished processing file '{sha256}', submission incomplete ({logs})")
+            task.trace('file_finished', sha256=sha256, message=logs)
         else:
             self.log.info(f"[{sid}] Finished processing file '{sha256}', checking if submission complete")
+            task.trace('file_finished', sha256=sha256)
             return self.check_submission(task)
         return False
 
@@ -1104,14 +1121,17 @@ class Dispatcher(ThreadedCoreBase):
         # file isn't done yet, and hasn't been filtered by any of the previous few steps
         # poke those files.
         if pending_files:
+            task.trace('submission_check', message=f"Dispatching {list(pending_files)}")
             self.log.debug(f"[{task.submission.sid}] Dispatching {len(pending_files)} files: {list(pending_files)}")
             for file_hash in pending_files:
                 if self.dispatch_file(task, file_hash):
                     return True
         elif processing_files:
+            task.trace('submission_check', message=f"Waiting for {list(processing_files)}")
             self.log.debug("[%s] Not finished waiting on %d files: %s",
                            task.submission.sid, len(processing_files), list(processing_files))
         else:
+            task.trace('submission_check', message="Finished")
             self.log.debug("[%s] Finalizing submission.", task.submission.sid)
             max_score = max(file_scores.values()) if file_scores else 0  # Submissions with no results have no score
             if self.tasks.pop(task.sid, None):
@@ -1341,6 +1361,8 @@ class Dispatcher(ThreadedCoreBase):
                         self.log.warning(f'[{message.sid}] Service started missing data.')
                         continue
 
+                    task.trace('service_start', sha256=message.sha, service=message.service_name,
+                               message=message.worker_id)
                     key = (message.sha, message.service_name)
                     if task.queue_keys.pop(key, None) is not None:
                         # If this task is already finished (result message processed before start
@@ -1384,8 +1406,9 @@ class Dispatcher(ThreadedCoreBase):
                     continue
 
                 if task:
-                    task.service_logs[(message.sha, message.service_name)].append(
-                        f'Service timeout at {now_as_iso()} on worker {message.worker_id}')
+                    log = f'Service timeout at {now_as_iso()} on worker {message.worker_id}'
+                    task.service_logs[(message.sha, message.service_name)].append(log)
+                    task.trace('service_timeout', sha256=message.sha, service=message.service_name, message=log)
                     self.timeout_service(task, message.sha, message.service_name, message.worker_id)
 
             elif kind == Action.dispatch_file:
@@ -1428,6 +1451,8 @@ class Dispatcher(ThreadedCoreBase):
         except KeyError as missing:
             self.log.exception(f"Malformed result message, missing key: {missing}")
             return
+
+        task.trace('process_result', sha256=sha256, service=service_name, message="Processing result " + summary.key)
 
         # Add SHA256s of files that allowed to run regardless of Dynamic Recursion Prevention
         task.dynamic_recursion_bypass = task.dynamic_recursion_bypass.union(set(dynamic_recursion_bypass))
@@ -1599,6 +1624,8 @@ class Dispatcher(ThreadedCoreBase):
     @elasticapm.capture_span(span_type='dispatcher')
     def process_service_error(self, task: SubmissionTask, error_key, error: Error):
         self.log.info(f'[{task.submission.sid}] Error from service {error.response.service_name} on {error.sha256}')
+        task.trace('process_error', sha256=error.sha256, service=error.response.service_name,
+                   message="Service error " + error_key)
         self.clear_timeout(task, error.sha256, error.response.service_name)
         key = (error.sha256, error.response.service_name)
         if error.response.status == "FAIL_NONRECOVERABLE":
