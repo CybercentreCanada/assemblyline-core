@@ -872,7 +872,8 @@ class Dispatcher(ThreadedCoreBase):
             task.file_schedules[sha256] = self.scheduler.build_schedule(submission, file_info.type,
                                                                         file_depth, forbidden_services,
                                                                         task.service_access_control)
-            task.trace('schedule_built', sha256=sha256, message=str(task.file_schedules[sha256]))
+            schedule_summary = [list(stage.keys()) for stage in task.file_schedules[sha256]]
+            task.trace('schedule_built', sha256=sha256, message=str(schedule_summary))
 
 
         file_info = task.file_info[sha256]
