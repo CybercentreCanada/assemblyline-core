@@ -1,13 +1,14 @@
 from time import sleep
 from unittest import mock
 
-from assemblyline.odm.messages.task import Task
-from assemblyline.odm.models.service import Service
-from assemblyline.odm.random_data import random_model_obj
 from assemblyline_core.plumber.run_plumber import Plumber
 from assemblyline_core.server_base import ServiceStage
 from mocking import TrueCountTimes
 from redis import Redis
+
+from assemblyline.odm.messages.task import Task
+from assemblyline.odm.models.service import Service
+from assemblyline.odm.random_data import random_model_obj
 
 
 def test_expire_missing_service():
@@ -107,3 +108,39 @@ def test_cleanup_old_tasks(datastore_connection):
                                               q="task.start_time_in_millis:0",
                                               track_total_hits=True,
                                               size=0)['hits']['total']['value'] == 0
+
+def test_user_setting_migrations(datastore_connection):
+    from assemblyline.odm.models.config import SubmissionProfileParams
+
+    SubmissionProfileParams.fields().keys()
+    # Create a bunch of random "old" tasks and clean them up
+    redis = mock.MagicMock(spec=Redis)
+    redis_persist = mock.MagicMock(spec=Redis)
+    plumber = Plumber(redis=redis, redis_persist=redis_persist, datastore=datastore_connection, delay=1)
+
+    # Create a user with old settings (format prior to 4.6)
+    settings = {'classification': 'TLP:CLEAR', 'deep_scan': False, 'description': '', 'download_encoding': 'cart', 'default_external_sources': ['Malware Bazaar', 'VirusTotal'], 'default_zip_password': 'zippy', 'executive_summary': False, 'expand_min_score': 500, 'generate_alert': False, 'ignore_cache': False, 'ignore_dynamic_recursion_prevention': False, 'ignore_recursion_prevention': False, 'ignore_filtering': False, 'malicious': False, 'priority': 369, 'profile': False, 'service_spec': {'AVClass': {'include_malpedia_dataset': False}}, 'services': {'selected': ['Extraction', 'ConfigExtractor', 'YARA'], 'excluded': [], 'rescan': [], 'resubmit': [], 'runtime_excluded': []}, 'submission_view': 'report', 'ttl': 0}
+    datastore_connection.ds.client.index(index="user_settings", id="admin", document=settings)
+    datastore_connection.user_settings.commit()
+
+    # Initiate the migration
+    plumber.migrate_user_settings()
+
+    # Check that the settings have been migrated
+    migrated_settings = datastore_connection.user_settings.get("admin", as_obj=False)
+
+    # Deprecated settings should be removed
+    assert "ignore_dynamic_recursion_prevention" not in migrated_settings
+
+    # All former submission settings at the root-level should be moved to submission profiles
+    assert all([key not in migrated_settings for key in SubmissionProfileParams.fields().keys()] )
+
+    for name, settings in migrated_settings['submission_profiles'].items():
+        assert settings['classification'] == 'TLP:C'
+        assert settings['deep_scan'] is False
+        assert settings['generate_alert'] is False
+        assert settings['ignore_cache'] is False
+        assert settings['priority'] == 369
+        # Full service spec should be preserved in default profile, but not in pre-defined ones
+        assert settings['service_spec'] == {} if name != "default" else {'AVClass': {'include_malpedia_dataset': False}}
+        assert settings['ttl'] == 0
