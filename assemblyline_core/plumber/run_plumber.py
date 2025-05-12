@@ -292,10 +292,10 @@ class Plumber(CoreBase):
                 # Ensure the selected services are not in the excluded list
                 for service in service_list:
                     if service['name'] in updates['services']['selected'] and service['name'] in updates['services']['excluded']:
-                        updates['services']['included'].remove(service['name'])
+                        updates['services']['selected'].remove(service['name'])
                         profile_error_checks[profile.name] += 1
                     elif service['category'] in updates['services']['selected'] and service['category'] in updates['services']['excluded']:
-                        updates['services']['included'].remove(service['category'])
+                        updates['services']['selected'].remove(service['category'])
                         profile_error_checks[profile.name] += 1
 
 
