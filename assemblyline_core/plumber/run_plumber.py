@@ -234,6 +234,10 @@ class Plumber(CoreBase):
             user['apikeys'] = {}
             self.datastore.user.save(uname, user)
 
+        # Commit changes made to indices
+        self.datastore.user.commit()
+        self.datastore.apikey.commit()
+
     def migrate_user_settings(self):
         service_list = self.datastore.list_all_services(as_obj=False)
 
