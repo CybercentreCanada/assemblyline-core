@@ -148,7 +148,7 @@ def test_user_setting_migrations(datastore_connection):
     assert all([key not in migrated_settings for key in SubmissionProfileParams.fields().keys()] )
 
     for settings in migrated_settings['submission_profiles'].values():
-        assert settings['classification'] == 'TLP:CLEAR'
+        assert settings['classification'] == 'TLP:C'
         assert settings['deep_scan'] is False
         assert settings['generate_alert'] is False
         assert settings['ignore_cache'] is False
