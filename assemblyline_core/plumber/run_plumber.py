@@ -200,55 +200,43 @@ class Plumber(CoreBase):
         self.log.info(f"Done watching {service_name} service queue")
 
     def user_apikey_cleanup(self):
-        query = "id:*"
-        offset = 0
-        rows = 100
-        total = 1
-        cur_total = 0
+        expiry_ts = None
+        if self.config.auth.apikey_max_dtl is not None:
+            expiry_ts = now_as_iso(self.config.auth.apikey_max_dtl * DAY_IN_SECONDS)
 
-        config = get_config()
-        apikey_max_dtl = config.auth.apikey_max_dtl
+        for user in self.datastore.user.stream_search(query="*", fl="*", as_obj=False):
+            uname = user['uname']
+            apikeys = user['apikeys']
 
-        expiry_ts = now_as_iso(apikey_max_dtl * DAY_IN_SECONDS) if apikey_max_dtl is not None else None
+            for key in apikeys:
+                old_apikey = apikeys[key]
+                key_id = get_apikey_id(key, uname)
 
-        while cur_total < total:
-            result = self.datastore.user.search(query, offset=offset, rows=rows)
-            total = result.get('total', 0)
-            cur_total = cur_total + (result.get("count", total))
+                roles = None
+                if old_apikey['acl'] == ["C"]:
 
-            # check for API keys in total
-            users = result.get('items', [])
-
-            for u in users:
-                uname = u['uname']
-                user = self.datastore.user.get(uname)
-                apikeys = user.apikeys
-
-                for key in apikeys:
-                    old_apikey = apikeys[key]
-                    key_id = get_apikey_id(key, uname)
-
-                    roles = None
-                    if old_apikey['acl'] == ["C"]:
-
-                        roles = [r for r in old_apikey['roles']
-                                    if r in load_roles(user['type'], user['roles'])]
-
-                    else:
-                        roles = [r for r in load_roles_form_acls(old_apikey['acl'], roles)
+                    roles = [r for r in old_apikey['roles']
                                 if r in load_roles(user['type'], user['roles'])]
-                    new_apikey = {
-                        "password": old_apikey['password'],
-                        "acl": old_apikey['acl'],
-                        "uname": uname,
-                        "key_name": key,
-                        "roles": roles,
-                        "expiry_ts": expiry_ts
-                    }
-                    self.datastore.apikey.save(key_id, new_apikey)
 
-                user['apikeys'] = {}
-                self.datastore.user.save(uname, user)
+                else:
+                    roles = [r for r in load_roles_form_acls(old_apikey['acl'], roles)
+                            if r in load_roles(user['type'], user['roles'])]
+                new_apikey = {
+                    "password": old_apikey['password'],
+                    "acl": old_apikey['acl'],
+                    "uname": uname,
+                    "key_name": key,
+                    "roles": roles,
+                    "expiry_ts": expiry_ts
+                }
+                self.datastore.apikey.save(key_id, new_apikey)
+
+            user['apikeys'] = {}
+            self.datastore.user.save(uname, user)
+
+        # Commit changes made to indices
+        self.datastore.user.commit()
+        self.datastore.apikey.commit()
 
     def migrate_user_settings(self):
         service_list = self.datastore.list_all_services(as_obj=False)
