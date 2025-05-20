@@ -8,6 +8,7 @@ from redis import Redis
 
 from assemblyline.odm.messages.task import Task
 from assemblyline.odm.models.service import Service
+from assemblyline.odm.models.user import ApiKey, User
 from assemblyline.odm.random_data import random_model_obj
 
 
@@ -120,14 +121,25 @@ def test_user_setting_migrations(datastore_connection):
 
     # Create a user with old settings (format prior to 4.6)
     settings = {'classification': 'TLP:CLEAR', 'deep_scan': False, 'description': '', 'download_encoding': 'cart', 'default_external_sources': ['Malware Bazaar', 'VirusTotal'], 'default_zip_password': 'zippy', 'executive_summary': False, 'expand_min_score': 500, 'generate_alert': False, 'ignore_cache': False, 'ignore_dynamic_recursion_prevention': False, 'ignore_recursion_prevention': False, 'ignore_filtering': False, 'malicious': False, 'priority': 369, 'profile': False, 'service_spec': {'AVClass': {'include_malpedia_dataset': False}}, 'services': {'selected': ['Extraction', 'ConfigExtractor', 'YARA'], 'excluded': [], 'rescan': [], 'resubmit': [], 'runtime_excluded': []}, 'submission_view': 'report', 'ttl': 0}
+
+    user_account = random_model_obj(User, as_json=True)
+    user_account['uname'] = "admin"
+    user_account['apikeys'] = {'test': random_model_obj(ApiKey, as_json=True)}
     datastore_connection.ds.client.index(index="user_settings", id="admin", document=settings)
+    datastore_connection.ds.client.index(index="user", id="admin", document=user_account)
+
     datastore_connection.user_settings.commit()
+    datastore_connection.user.commit()
 
     # Initiate the migration
+    plumber.user_apikey_cleanup()
     plumber.migrate_user_settings()
 
     # Check that the settings have been migrated
     migrated_settings = datastore_connection.user_settings.get("admin", as_obj=False)
+
+    # Check to see if API keys for the user were transferred to the new index
+    assert datastore_connection.apikey.search('uname:admin', rows=0)['total'] > 0
 
     # Deprecated settings should be removed
     assert "ignore_dynamic_recursion_prevention" not in migrated_settings
@@ -135,12 +147,12 @@ def test_user_setting_migrations(datastore_connection):
     # All former submission settings at the root-level should be moved to submission profiles
     assert all([key not in migrated_settings for key in SubmissionProfileParams.fields().keys()] )
 
-    for name, settings in migrated_settings['submission_profiles'].items():
-        assert settings['classification'] == 'TLP:C'
+    for settings in migrated_settings['submission_profiles'].values():
+        assert settings['classification'] == 'TLP:CLEAR'
         assert settings['deep_scan'] is False
         assert settings['generate_alert'] is False
         assert settings['ignore_cache'] is False
         assert settings['priority'] == 369
-        # Full service spec should be preserved in default profile, but not in pre-defined ones
-        assert settings['service_spec'] == {} if name != "default" else {'AVClass': {'include_malpedia_dataset': False}}
+        # Full service spec should be preserved in default profile (along with others by default if there's no restricted parameters)
+        assert settings['service_spec'] == {'AVClass': {'include_malpedia_dataset': False}}
         assert settings['ttl'] == 0
