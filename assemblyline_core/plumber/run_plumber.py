@@ -204,7 +204,7 @@ class Plumber(CoreBase):
         if self.config.auth.apikey_max_dtl is not None:
             expiry_ts = now_as_iso(self.config.auth.apikey_max_dtl * DAY_IN_SECONDS)
 
-        for user in self.datastore.user.stream_search(query="*", fl="*", as_obj=False):
+        for user in self.datastore.user.stream_search(query="*", fl="uname,apikeys,type,roles", as_obj=False):
             uname = user['uname']
             apikeys = user['apikeys']
 
@@ -216,11 +216,11 @@ class Plumber(CoreBase):
                 if old_apikey['acl'] == ["C"]:
 
                     roles = [r for r in old_apikey['roles']
-                                if r in load_roles(user['type'], user['roles'])]
+                                if r in load_roles(user['type'], user.get('roles'))]
 
                 else:
                     roles = [r for r in load_roles_form_acls(old_apikey['acl'], roles)
-                            if r in load_roles(user['type'], user['roles'])]
+                            if r in load_roles(user['type'], user.get('roles'))]
                 new_apikey = {
                     "password": old_apikey['password'],
                     "acl": old_apikey['acl'],
@@ -231,11 +231,8 @@ class Plumber(CoreBase):
                 }
                 self.datastore.apikey.save(key_id, new_apikey)
 
-            user['apikeys'] = {}
-            self.datastore.user.save(uname, user)
 
         # Commit changes made to indices
-        self.datastore.user.commit()
         self.datastore.apikey.commit()
 
     def migrate_user_settings(self):
