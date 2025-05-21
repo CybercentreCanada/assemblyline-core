@@ -7,21 +7,21 @@ disabled or deleted for which a service queue exists, the dispatcher will be inf
 had an error.
 """
 import threading
-import warnings
+from copy import deepcopy
 from typing import Optional
 
 from assemblyline.common.constants import service_queue_name
-from assemblyline.common.forge import get_service_queue, get_config
+from assemblyline.common.forge import get_config, get_service_queue
 from assemblyline.common.isotime import DAY_IN_SECONDS, now_as_iso
 from assemblyline.odm.models.apikey import get_apikey_id
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.user import load_roles, load_roles_form_acls
+from assemblyline.odm.models.user_settings import SubmissionProfileParams
 from assemblyline.remote.datatypes import retry_call
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline_core.dispatching.client import DispatchClient
 from assemblyline_core.server_base import CoreBase, ServiceStage
-
 
 DAY = 60 * 60 * 24
 TASK_DELETE_CHUNK = 10000
@@ -56,8 +56,14 @@ class Plumber(CoreBase):
                                      name="redis_notification_queue_cleanup")
         nq_thread.start()
 
+        # Start a user apikey cleanup thread
         ua_thread = threading.Thread(target=self.user_apikey_cleanup, daemon=True, name="user_apikey_cleanup")
         ua_thread.start()
+
+        # Start a user setting migration thread
+        usm_thread = threading.Thread(target=self.migrate_user_settings, daemon=True, name="migrate_user_settings")
+        usm_thread.start()
+
         self.service_queue_plumbing()
 
     def service_queue_plumbing(self):
@@ -193,60 +199,127 @@ class Plumber(CoreBase):
             self.sleep(2)
         self.log.info(f"Done watching {service_name} service queue")
 
-
-
     def user_apikey_cleanup(self):
-        query = "id:*"
-        offset = 0
-        rows = 100
-        total = 1
-        cur_total = 0
+        expiry_ts = None
+        if self.config.auth.apikey_max_dtl is not None:
+            expiry_ts = now_as_iso(self.config.auth.apikey_max_dtl * DAY_IN_SECONDS)
 
-        config = get_config()
-        apikey_max_dtl = config.auth.apikey_max_dtl
+        for user in self.datastore.user.stream_search(query="*", fl="*", as_obj=False):
+            uname = user['uname']
+            apikeys = user['apikeys']
 
-        expiry_ts = now_as_iso(apikey_max_dtl * DAY_IN_SECONDS) if apikey_max_dtl is not None else None
+            for key in apikeys:
+                old_apikey = apikeys[key]
+                key_id = get_apikey_id(key, uname)
 
-        while cur_total < total:
-            result = self.datastore.user.search(query, offset=offset, rows=rows)
-            total = result.get('total', 0)
-            cur_total = cur_total + (result.get("count", total))
+                roles = None
+                if old_apikey['acl'] == ["C"]:
 
-            # check for API keys in total
-            users = result.get('items', [])
-
-            for u in users:
-                uname = u['uname']
-                user = self.datastore.user.get(uname)
-                apikeys = user.apikeys
-
-                for key in apikeys:
-                    old_apikey = apikeys[key]
-                    key_id = get_apikey_id(key, uname)
-
-                    roles = None
-                    if old_apikey['acl'] == ["C"]:
-
-                        roles = [r for r in old_apikey['roles']
-                                    if r in load_roles(user['type'], user['roles'])]
-
-                    else:
-                        roles = [r for r in load_roles_form_acls(old_apikey['acl'], roles)
+                    roles = [r for r in old_apikey['roles']
                                 if r in load_roles(user['type'], user['roles'])]
-                    new_apikey = {
-                        "password": old_apikey['password'],
-                        "acl": old_apikey['acl'],
-                        "uname": uname,
-                        "key_name": key,
-                        "roles": roles,
-                        "expiry_ts": expiry_ts
+
+                else:
+                    roles = [r for r in load_roles_form_acls(old_apikey['acl'], roles)
+                            if r in load_roles(user['type'], user['roles'])]
+                new_apikey = {
+                    "password": old_apikey['password'],
+                    "acl": old_apikey['acl'],
+                    "uname": uname,
+                    "key_name": key,
+                    "roles": roles,
+                    "expiry_ts": expiry_ts
+                }
+                self.datastore.apikey.save(key_id, new_apikey)
+
+            user['apikeys'] = {}
+            self.datastore.user.save(uname, user)
+
+        # Commit changes made to indices
+        self.datastore.user.commit()
+        self.datastore.apikey.commit()
+
+    def migrate_user_settings(self):
+        service_list = self.datastore.list_all_services(as_obj=False)
+
+        # Migrate user settings to the new format
+        for doc in self.datastore.user_settings.scan_with_search_after(query={
+            "bool": {
+                "must": {
+                    "query_string": {
+                        "query": "*",
                     }
-                    self.datastore.apikey.save(key_id, new_apikey)
+                }
+            }
+        }):
+            user_settings = doc["_source"]
+            if user_settings.get('submission_profiles'):
+                # User settings already migrated, skip
+                continue
 
-                user['apikeys'] = {}
-                self.datastore.user.save(uname, user)
+            # Create the list of submission profiles
+            submission_profiles = {
+                # Grant everyone a default of which all settings from before 4.6 should be transferred
+                "default" : SubmissionProfileParams(user_settings).as_primitives(strip_null=True)
+            }
+
+            profile_error_checks = {}
+            # Try to apply the original settings to the system-defined profiles
+            for profile in self.config.submission.profiles:
+                updates = deepcopy(user_settings)
+                profile_error_checks.setdefault(profile.name, 0)
+                validated_profile = profile.params.as_primitives(strip_null=True)
+
+                updates.setdefault("services", {})
+                updates["services"].setdefault("selected", [])
+                updates["services"].setdefault("excluded", [])
+
+                # Append the exclusion list set by the profile
+                updates['services']['excluded'] = updates['services']['excluded'] + \
+                    list(validated_profile.get("services", {}).get("excluded", []))
+
+                # Ensure the selected services are not in the excluded list
+                for service in service_list:
+                    if service['name'] in updates['services']['selected'] and service['name'] in updates['services']['excluded']:
+                        updates['services']['selected'].remove(service['name'])
+                        profile_error_checks[profile.name] += 1
+                    elif service['category'] in updates['services']['selected'] and service['category'] in updates['services']['excluded']:
+                        updates['services']['selected'].remove(service['category'])
+                        profile_error_checks[profile.name] += 1
 
 
+                # Check the services parameters
+                for param_type, list_of_params in profile.restricted_params.items():
+                    # Check if there are restricted submission parameters
+                    if param_type == "submission":
+                        requested_params = (set(list_of_params) & set(updates.keys())) - set({'services', 'service_spec'})
+                        if requested_params:
+                            # Track the number of errors for each profile
+                            profile_error_checks[profile.name] += len(requested_params)
+                            for param in requested_params:
+                                # Remove the parameter from the updates
+                                updates.pop(param, None)
+
+                    # Check if there are restricted service parameters
+                    else:
+                        service_spec = updates.get('service_spec', {}).get(param_type, {})
+                        requested_params = set(list_of_params) & set(service_spec)
+                        if requested_params:
+                            # Track the number of errors for each profile
+                            profile_error_checks[profile.name] += len(requested_params)
+                            for param in requested_params:
+                                # Remove the parameter from the updates
+                                service_spec.pop(param, None)
+
+                            if not service_spec:
+                                # Remove the service spec if empty
+                                updates['service_spec'].pop(param_type, None)
+                submission_profiles[profile.name] = SubmissionProfileParams(updates).as_primitives(strip_null=True)
+
+            # Assign the profile with the least number of errors
+            user_settings['submission_profiles'] = submission_profiles
+            user_settings['preferred_submission_profile'] = sorted(profile_error_checks.items(), key=lambda x: x[1])[0][0]
+
+            self.datastore.user_settings.save(doc["_id"], user_settings)
 
 
 
