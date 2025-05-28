@@ -11,7 +11,7 @@ from copy import deepcopy
 from typing import Optional
 
 from assemblyline.common.constants import service_queue_name
-from assemblyline.common.forge import get_config, get_service_queue
+from assemblyline.common.forge import get_service_queue
 from assemblyline.common.isotime import DAY_IN_SECONDS, now_as_iso
 from assemblyline.odm.models.apikey import get_apikey_id
 from assemblyline.odm.models.error import Error
@@ -204,7 +204,9 @@ class Plumber(CoreBase):
         if self.config.auth.apikey_max_dtl is not None:
             expiry_ts = now_as_iso(self.config.auth.apikey_max_dtl * DAY_IN_SECONDS)
 
+        changes_made = False
         for user in self.datastore.user.stream_search(query="*", fl="uname,apikeys,type,roles", as_obj=False):
+            changes_made = True
             uname = user['uname']
             apikeys = user['apikeys']
 
@@ -231,9 +233,13 @@ class Plumber(CoreBase):
                 }
                 self.datastore.apikey.save(key_id, new_apikey)
 
+        if changes_made:
+            # Commit changes made to indices
+            self.datastore.apikey.commit()
 
-        # Commit changes made to indices
-        self.datastore.apikey.commit()
+            # Update permissions for API keys based on submission customization
+            self.datastore.apikey.update_by_query('roles:"submission_create" AND NOT roles:"submission_customize"',
+                                                  [(self.datastore.apikey.UPDATE_APPEND, 'roles', 'submission_customize')])
 
     def migrate_user_settings(self):
         service_list = self.datastore.list_all_services(as_obj=False)
