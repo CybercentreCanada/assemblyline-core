@@ -2,16 +2,31 @@ import collections
 import json
 import os
 import random
-import time
+import tarfile
+import tempfile
 
+import cart
 import pytest
-
-from assemblyline.common import forge
-from assemblyline.odm.random_data import create_alerts, wipe_alerts, wipe_submissions, create_submission, create_badlists, create_safelists, create_workflows, wipe_badlist, wipe_safelist, wipe_workflows, create_signatures, wipe_signatures
 from assemblyline_core.replay.creator.run import ReplayCreator
 from assemblyline_core.replay.creator.run_worker import ReplayCreatorWorker
 from assemblyline_core.replay.loader.run import ReplayLoader
 from assemblyline_core.replay.loader.run_worker import ReplayLoaderWorker
+
+from assemblyline.common import forge
+from assemblyline.odm.random_data import (
+    create_alerts,
+    create_badlists,
+    create_safelists,
+    create_signatures,
+    create_submission,
+    create_workflows,
+    wipe_alerts,
+    wipe_badlist,
+    wipe_safelist,
+    wipe_signatures,
+    wipe_submissions,
+    wipe_workflows,
+)
 
 NUM_ALERTS = 1
 NUM_BADLIST_ITEMS = 1
@@ -189,6 +204,7 @@ def test_replay_single_alert(config, datastore, creator, creator_worker, loader,
 def test_replay_single_submission(config, datastore, creator, creator_worker, loader, loader_worker):
     output_dir = creator.replay_config.creator.output_filestore.replace('file://', '')
     input_dir = loader.replay_config.loader.input_directory
+    loader_worker.replay_config.loader.reclassification = "TLP:CLEAR"
 
     # Make sure the submission get picked up by the creator
     sub = random.choice(all_submissions).as_primitives()
@@ -213,6 +229,30 @@ def test_replay_single_submission(config, datastore, creator, creator_worker, lo
     datastore.submission.delete(sub['sid'])
     datastore.submission.commit()
 
+    # Manipulate the classfication of the bundle to something that's invalid to the system importing
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Unpack the bundle to manipulate the results.json file
+        tar_file = os.path.join(temp_dir, "bundle.tar.gz")
+        with open(tar_file, 'wb') as fp:
+            with open(filename, 'rb') as ffp:
+                hdr, _ = cart.unpack_stream(ffp, fp)
+
+
+        with tarfile.open(tar_file, 'r:gz') as tar:
+            results = json.load(tar.extractfile("results.json"))
+
+        # Insert a random classification string that isn't recognized by the Assemblyline system
+        results['submission']['classification'] = "ASSEMBLYLINE"
+
+        with tarfile.open(tar_file, 'w:gz') as tar:
+            with tempfile.NamedTemporaryFile("w") as temp_result:
+                json.dump(results, temp_result)
+                temp_result.seek(0)
+                tar.add(temp_result.name, "results.json")
+
+        # Cart the file and overwrite the original file
+        cart.pack_file(tar_file, filename, optional_header=hdr)
+
     # In case the replay.yaml config creator output is not the same as loader input
     new_filename = filename.replace(output_dir, input_dir)
     if filename != new_filename:
@@ -231,9 +271,11 @@ def test_replay_single_submission(config, datastore, creator, creator_worker, lo
 
     loaded_submission = datastore.submission.get(sub['sid'], as_obj=False)
     assert 'bundle.loaded' in loaded_submission['metadata']
+    # Check to see if the reclassification took place and if we're preserving the original classification in the metadata
+    assert loaded_submission['classification'] in ["TLP:CLEAR", "TLP:C"]
+    assert loaded_submission['metadata']['bundle.classification'] == "ASSEMBLYLINE"
     assert sub['sid'] == loaded_submission['sid']
     assert 'replay' not in loaded_submission['metadata']
-
 
 @pytest.mark.parametrize("collection", ["badlist", "safelist", "signature", "workflow"])
 def test_replay_single_data_collection(datastore, creator, creator_worker, loader, loader_worker, collection):

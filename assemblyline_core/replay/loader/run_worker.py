@@ -1,5 +1,5 @@
-import shutil
 import os
+import shutil
 
 from cart import unpack_file
 
@@ -32,15 +32,16 @@ class ReplayLoaderWorker(ReplayBase):
                     if file_path.endswith(".al_bundle"):
                         self.client.load_bundle(file_path,
                                                 min_classification=self.replay_config.loader.min_classification,
-                                                rescan_services=self.replay_config.loader.rescan)
+                                                rescan_services=self.replay_config.loader.rescan,
+                                                reclassification=self.replay_config.loader.reclassification)
                     elif file_path.endswith(".al_json"):
-                        self.client.load_json(file_path)
+                        self.client.load_json(file_path, reclassification=self.replay_config.loader.reclassification)
 
                     elif file_path.endswith(".al_json.cart"):
                         cart_path = file_path
                         file_path = file_path[:-5]
                         unpack_file(cart_path, file_path)
-                        self.client.load_json(file_path)
+                        self.client.load_json(file_path, reclassification=self.replay_config.loader.reclassification)
                         os.unlink(cart_path)
 
                     if os.path.exists(file_path):
@@ -55,11 +56,11 @@ class ReplayLoaderWorker(ReplayBase):
                         # Terminate on NFS-related error
                         self.log.warning("'Invalid cross-device link' exception detected. Terminating..")
                         self.stop()
-                except Exception:
+                except Exception as e:
                     # Make sure failed directory exists
                     os.makedirs(self.replay_config.loader.failed_directory, exist_ok=True)
 
-                    self.log.error(f"Failed to load the bundle file {file_path}, moving it to the failed directory.")
+                    self.log.error(f"Failed to load the bundle file {file_path}, moving it to the failed directory. Reason: {e}")
                     failed_path = os.path.join(self.replay_config.loader.failed_directory, os.path.basename(file_path))
                     shutil.move(file_path, failed_path)
 
