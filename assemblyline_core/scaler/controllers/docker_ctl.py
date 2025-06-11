@@ -500,6 +500,7 @@ class DockerController(ControllerInterface):
             instance_key = uuid.uuid4().hex
 
         volumes = {_n: {'bind': _v.mount_path, 'mode': 'rw'} for _n, _v in spec.volumes.items()}
+        volumes.update({row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.global_mounts})
         if spec.run_as_core:
             volumes.update({row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.core_mounts})
 
