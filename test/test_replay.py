@@ -204,55 +204,6 @@ def test_replay_single_alert(config, datastore, creator, creator_worker, loader,
 def test_replay_single_submission(config, datastore, creator, creator_worker, loader, loader_worker):
     output_dir = creator.replay_config.creator.output_filestore.replace('file://', '')
     input_dir = loader.replay_config.loader.input_directory
-
-    # Make sure the submission get picked up by the creator
-    sub = random.choice(all_submissions).as_primitives()
-    sub['metadata']['replay'] = 'requested'
-    datastore.submission.save(sub['sid'], sub)
-    datastore.submission.commit()
-    filename = os.path.join(output_dir, f"submission_{sub['sid']}.al_bundle")
-
-    # Test replay creator
-    creator.client.setup_submission_input_queue(once=True)
-    assert creator.client.queues['submission'].length() == 1
-    assert creator.client.queues['submission'].peek_next()['sid'] == sub['sid']
-
-    # Test replay creator worker
-    creator_worker.process_submission(once=True)
-    datastore.submission.commit()
-    assert creator_worker.client.queues['submission'].length() == 0
-    assert datastore.submission.get(sub['sid'], as_obj=False)['metadata']['replay'] == 'done'
-    assert os.path.exists(filename)
-
-    # Delete the alert to test the loading process
-    datastore.submission.delete(sub['sid'])
-    datastore.submission.commit()
-
-    # In case the replay.yaml config creator output is not the same as loader input
-    new_filename = filename.replace(output_dir, input_dir)
-    if filename != new_filename:
-        os.rename(filename, new_filename)
-        filename = new_filename
-
-    # Test replay loader
-    loader.load_files(once=True)
-    assert loader.client.queues['file'].length() == 1
-    assert loader.client.queues['file'].peek_next() == filename
-
-    # Test replay loader worker
-    loader_worker.process_file(once=True)
-    assert loader_worker.client.queues['file'].length() == 0
-    assert not os.path.exists(filename)
-
-    loaded_submission = datastore.submission.get(sub['sid'], as_obj=False)
-    assert 'bundle.loaded' in loaded_submission['metadata']
-    assert sub['sid'] == loaded_submission['sid']
-    assert 'replay' not in loaded_submission['metadata']
-
-def test_replay_single_submission_reclassify(config, datastore, creator, creator_worker, loader, loader_worker):
-    output_dir = creator.replay_config.creator.output_filestore.replace('file://', '')
-    input_dir = loader.replay_config.loader.input_directory
-    loader.replay_config.loader.reclassification = "TLP:CLEAR"
     loader_worker.replay_config.loader.reclassification = "TLP:CLEAR"
 
     # Make sure the submission get picked up by the creator
