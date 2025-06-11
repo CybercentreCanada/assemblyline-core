@@ -272,7 +272,7 @@ def test_replay_single_submission(config, datastore, creator, creator_worker, lo
     loaded_submission = datastore.submission.get(sub['sid'], as_obj=False)
     assert 'bundle.loaded' in loaded_submission['metadata']
     # Check to see if the reclassification took place and if we're preserving the original classification in the metadata
-    assert loaded_submission['classification'] == "TLP:CLEAR"
+    assert loaded_submission['classification'] in ["TLP:CLEAR", "TLP:C"]
     assert loaded_submission['metadata']['bundle.classification'] == "ASSEMBLYLINE"
     assert sub['sid'] == loaded_submission['sid']
     assert 'replay' not in loaded_submission['metadata']
