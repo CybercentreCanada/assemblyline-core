@@ -1,14 +1,13 @@
-from unittest import mock
-import pytest
 import time
+from unittest import mock
+
+import pytest
+from assemblyline_core.ingester.ingester import Ingester, IngestTask, _dup_prefix
+from mocking import TrueCountTimes
 
 from assemblyline.datastore.helper import AssemblylineDatastore
-from assemblyline.odm.models.submission import SubmissionParams
 from assemblyline.odm.models.filescore import FileScore
-
-from assemblyline_core.ingester.ingester import IngestTask, _dup_prefix, Ingester
-
-from mocking import TrueCountTimes
+from assemblyline.odm.models.submission import SubmissionParams
 
 
 @pytest.fixture
@@ -80,7 +79,7 @@ def test_submit_duplicate(submit_harness):
         'ingest_id': 'abc123'
     })
     # Make sure the scan key is correct, this is normally done on ingest
-    task.submission.scan_key = task.params.create_filescore_key(task.submission.files[0].sha256, [])
+    task.submission.scan_key = task.params.create_filescore_key(task.submission.files[0].sha256, {})
 
     # Add this file to the scanning table, so it looks like it has already been submitted + ingest again
     submitter.scanning.add(task.submission.scan_key, task.as_primitives())
