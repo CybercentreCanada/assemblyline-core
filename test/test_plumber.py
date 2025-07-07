@@ -110,6 +110,7 @@ def test_cleanup_old_tasks(datastore_connection):
                                               track_total_hits=True,
                                               size=0)['hits']['total']['value'] == 0
 
+
 def test_user_setting_migrations(datastore_connection):
     from assemblyline.odm.models.config import SubmissionProfileParams
 
@@ -125,6 +126,9 @@ def test_user_setting_migrations(datastore_connection):
     user_account = random_model_obj(User, as_json=True)
     user_account['uname'] = "admin"
     user_account['apikeys'] = {'test': random_model_obj(ApiKey, as_json=True)}
+
+    # Disable the dynamic mapping prevention to allow an old document to be inserted
+    datastore_connection.ds.client.indices.put_mapping(index='user_settings', dynamic='false')
     datastore_connection.ds.client.index(index="user_settings", id="admin", document=settings)
     datastore_connection.ds.client.index(index="user", id="admin", document=user_account)
 
