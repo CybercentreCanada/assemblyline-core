@@ -1489,6 +1489,7 @@ def test_rescan_submission(core: CoreSession, metrics: MetricsCounter, to_ingest
 
         metrics.expect("ingester", "submissions_ingested", 1)
         metrics.expect("dispatcher", "submissions_completed", 1)
+        metrics.expect("ingester", "submissions_completed", 1)
         if submission_metadata:
             metrics.expect("dispatcher", "files_completed", len(submission["files"]))
 
