@@ -164,7 +164,7 @@ class TaskingClient:
             else:
                 # Check for any updates to the service that should be applied to the service delta
                 service_delta = flatten(self.datastore.service_delta.get(service.name, as_obj=False))
-                if service_delta['version'] != service.version:
+                if service_delta.get('version') != service.version:
                     # Update the service delta based on changes in the new service version
                     old_service = flatten(self.datastore.service.get(f'{service.name}_{service_delta["version"]}',
                                                                     as_obj=False))
