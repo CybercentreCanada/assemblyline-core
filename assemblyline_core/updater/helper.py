@@ -19,7 +19,6 @@ from azure.identity import DefaultAzureCredential
 from packaging.version import Version, parse
 
 DEFAULT_DOCKER_REGISTRY = "hub.docker.com"
-DEFAULT_GITHUB_REGISTRY = "ghcr.io"
 
 
 class ContainerRegistry():
@@ -206,15 +205,6 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
     image_variables = defaultdict(str)
     image_variables.update(system_config.services.image_variables)
     image_variables.update(system_config.services.update_image_variables)
-
-    # Set default registries if not already defined in image variables
-    if not image_variables.get('GHCR_REGISTRY'):
-        # Typically reserved for pulling images from GitHub Container Registry
-        image_variables['GHCR_REGISTRY'] = f"{DEFAULT_GITHUB_REGISTRY}/"
-    if not image_variables.get('REGISTRY'):
-        # Typically reserved for pulling images from DockerHub
-        image_variables['REGISTRY'] = f"{DEFAULT_DOCKER_REGISTRY}/"
-
     searchable_image = string.Template(image).safe_substitute(image_variables)
 
     # Get authentication
