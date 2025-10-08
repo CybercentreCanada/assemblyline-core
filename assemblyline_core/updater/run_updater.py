@@ -11,6 +11,12 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, List, Optional
 
 import docker
+from assemblyline.common import isotime
+from assemblyline.odm.messages.changes import Operation, ServiceChange
+from assemblyline.odm.models.config import Mount, Selector
+from assemblyline.odm.models.service import DockerConfig, Service
+from assemblyline.remote.datatypes.events import EventSender, EventWatcher
+from assemblyline.remote.datatypes.hash import Hash
 from kubernetes import client, config
 from kubernetes.client import (
     V1Capabilities,
@@ -34,12 +40,6 @@ from kubernetes.client import (
 )
 from kubernetes.client.rest import ApiException
 
-from assemblyline.common import isotime
-from assemblyline.odm.messages.changes import Operation, ServiceChange
-from assemblyline.odm.models.config import Mount, Selector
-from assemblyline.odm.models.service import DockerConfig, Service
-from assemblyline.remote.datatypes.events import EventSender, EventWatcher
-from assemblyline.remote.datatypes.hash import Hash
 from assemblyline_core.scaler.controllers.kubernetes_ctl import (
     PRIVILEGED_SERVICE_ACCOUNT_NAME,
     create_docker_auth_config,
@@ -692,14 +692,32 @@ class ServiceUpdater(ThreadedCoreBase):
                         service_name, latest_tag = service_key.split("_")
 
                         if self.datastore.service.get_if_exists(service_key):
-                            operations = [(self.datastore.service_delta.UPDATE_SET, 'version', latest_tag)]
+                            service_image = self.datastore.service.get(service_key, as_obj=False)['docker_config']['image'].rsplit(':', 1)[0].split('/', 1)[1]
+
+                            service_delta = self.datastore.service_delta.get(service_name, as_obj=False)
+                            # Update the service version in the delta
+                            service_delta['version'] = latest_tag
+
+                            # If the container images related to the service have been changed, update the version
+                            if service_delta.get('docker_config', {}).get('image'):
+                                image_path, _ = service_delta['docker_config']['image'].rsplit(':', 1)
+                                service_delta['docker_config']['image'] = f"{image_path}:{latest_tag}"
+
+                            if service_delta.get('dependencies', {}).items():
+                                for _, dep_data in service_delta['dependencies'].items():
+                                    if dep_data.get('image'):
+                                        dep_image_path, _ = dep_data['image'].rsplit(':', 1)
+                                        if service_image in dep_image_path:
+                                            # Only update dependencies that share the same image as the main service
+                                            dep_data['image'] = f"{dep_image_path}:{latest_tag}"
 
                             # Check if a service waas previously disabled and re-enable it
                             if service_name in self.incompatible_services:
                                 self.incompatible_services.remove(service_name)
-                                operations.append((self.datastore.service_delta.UPDATE_SET, 'enabled', True))
+                                service_delta['enabled'] = True
 
-                            if self.datastore.service_delta.update(service_name, operations):
+
+                            if self.datastore.service_delta.save(service_name, service_delta):
                                 # Update completed, cleanup
                                 self.service_events.send(service_name, {
                                     'operation': Operation.Modified,
