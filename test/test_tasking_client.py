@@ -1,18 +1,16 @@
-from assemblyline_core.tasking_client import TaskingClient
-
-from assemblyline.datastore.helper import AssemblylineDatastore as Datastore
 from assemblyline.odm.models.heuristic import Heuristic
 from assemblyline.odm.models.result import Heuristic as SectionHeuristic
 from assemblyline.odm.models.result import Result, Section
 from assemblyline.odm.models.service import Service
-from assemblyline.odm.randomizer import random_minimal_obj
+from assemblyline.odm.randomizer import random_minimal_obj, random_model_obj
+from assemblyline_core.tasking_client import TaskingClient
 
 
-def test_register_service(datastore_connection: Datastore):
+def test_register_service(datastore_connection):
     client = TaskingClient(datastore_connection, register_only=True)
 
     # Test service registration
-    service = random_minimal_obj(Service).as_primitives()
+    service = random_model_obj(Service).as_primitives()
     heuristics = [random_minimal_obj(Heuristic).as_primitives() for _ in range(2)]
     service['heuristics'] = heuristics
     assert client.register_service(service)
@@ -38,40 +36,54 @@ def test_register_service(datastore_connection: Datastore):
     assert client.register_service(service)
     assert not datastore_connection.heuristic.exists(heuristic['heur_id'])
 
-def test_service_update(datastore_connection: Datastore):
-    client = TaskingClient(datastore_connection, register_only=True)
+    # Test registration with new and removed sources, submission parameters and configurations
+    datastore_connection.service_delta.save(service['name'], {
+        "version": service['version'],
+        # Let's imagine a user added a new configuration parameter between updates
+        "config": {"user_config": "user_value"},
+        "submission_params": [
+            {
+                # Let's imagine a user added a new submission parameter between updates
+                "name": "user_param",
+                "type": "str",
+                "default": "user_value",
+                "value": "user_value",
+            }
+        ],
+        "update_config": {
+            # Let's imagine a user removed a sources between updates
+            "sources": service['update_config']['sources'][1:],
+        }
+    })
 
-    # Test service registration
-    service = random_minimal_obj(Service).as_primitives()
-    assert client.register_service(service)
-
-    # Test registering a service update where there's a new submission parameter and configuration
-    service['submission_params'].append({"name": 'new_param', 'type': 'str', 'default': 'default_value', 'value': 'default_value'})
+    # Now let's update the service with a new version that has some changes
+    service['config']['new_config'] = 'new_value'
+    service['submission_params'].append({
+        "name": "new_param",
+        "type": "str",
+        "default": "new_value",
+        "value": "new_value",
+    })
+    service['update_config']['sources'].append({"name": "new_source", "uri": "http://new_source"})
     service['version'] = "new_version"
-    service['config']  = {'new_config': 'value'}
     assert client.register_service(service)
 
-    # Pretend I'm the updater acknowledging the new version has been registered
-    datastore_connection.service_delta.update(service['name'], [(datastore_connection.service_delta.UPDATE_SET, 'version', service['version'])])
+    datastore_connection.service_delta.update(service['name'],
+                                              [(datastore_connection.service_delta.UPDATE_SET, 'version', service['version'])])
 
-    # We should see the new submission parameter in the service while applying delta changes
-    delta = datastore_connection.get_service_with_delta(service['name'])
-    assert delta['submission_params'][-1]['name'] == 'new_param'
-    assert delta['config']['new_config'] == 'value'
+    merged_service = datastore_connection.get_service_with_delta(service['name'], as_obj=False)
+    # Update sources that have been removed should stay removed
+    sources = [s['name'] for s in merged_service['update_config']['sources']]
+    assert service['update_config']['sources'][0]['name'] not in sources
 
-    # Test registering a service update where the user has changed a submission parameter prior to the update and new parameter was added
-    assert datastore_connection.service_delta.update(service['name'], [(datastore_connection.service_delta.UPDATE_APPEND, 'submission_params', {'name': 'new_param', 'type': 'str', 'default': 'custom_value', 'value': 'custom_value'})])
-    datastore_connection.service_delta.commit()
+    # Update sources that are new should be added
+    assert 'new_source' in sources
 
-    service['submission_params'].append({"name": 'new_new_param', 'type': 'str', 'default': 'default_value', 'value': 'default_value'})
-    service['version'] = "new_new_version"
+    # Submission parameters that are new should be added and old user parameters should stay
+    submission_param_names = [p['name'] for p in merged_service['submission_params']]
+    assert 'new_param' in submission_param_names
+    assert 'user_param' in submission_param_names
 
-    assert client.register_service(service)
-
-    # Pretend I'm the updater acknowledging the new version has been registered
-    datastore_connection.service_delta.update(service['name'], [(datastore_connection.service_delta.UPDATE_SET, 'version', service['version'])])
-
-    # We expect to see both the updated submission parameter and the newly added one (while still keeping the custom value changes)
-    delta = datastore_connection.get_service_with_delta(service['name'])
-    assert delta['submission_params'][-2]['name'] == 'new_param' and delta['submission_params'][-2]['value'] == 'custom_value'
-    assert delta['submission_params'][-1]['name'] == 'new_new_param'
+    # Configurations that are new should be added and old user configurations should stay
+    assert merged_service['config']['new_config'] == 'new_value'
+    assert merged_service['config']['user_config'] == 'user_value'

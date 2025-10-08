@@ -3,7 +3,6 @@ import time
 from typing import Any, Dict, Optional
 
 import elasticapm
-
 from assemblyline.common import forge
 from assemblyline.common.constants import SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.dict_utils import flatten, unflatten
@@ -22,6 +21,7 @@ from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.tagging import Tagging
 from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import ExpiringHash
+
 from assemblyline_core.dispatching.client import DispatchClient
 
 
@@ -161,9 +161,32 @@ class TaskingClient:
                 self.datastore.service_delta.save(service.name, {'version': service.version})
                 self.datastore.service_delta.commit()
                 self.log.info(f"{log_prefix}{service.name} version ({service.version}) registered")
+            else:
+                # Check for any updates to the service that should be applied to the service delta
+                service_delta = flatten(self.datastore.service_delta.get(service.name, as_obj=False))
+                if service_delta['version'] != service.version:
+                    # Update the service delta based on changes in the new service version
+                    old_service = flatten(self.datastore.service.get(f'{service.name}_{service_delta["version"]}',
+                                                                    as_obj=False))
+                    new_service = flatten(service.as_primitives())
+
+                    # Check for cases elements from internal lists have been removed
+                    for key, id_field in self.datastore.service_list_keys.items():
+                        if key in service_delta:
+                            # Check to see what was removed from the list in the previous version
+                            old_ids = set(item[id_field] for item in old_service.get(key, []))
+                            new_ids = set(item[id_field] for item in service_delta[key])
+                            removed_ids = old_ids - new_ids
+
+                            # Add any new items to the delta so it can be included in the merged service configuration
+                            added_ids = set(item[id_field] for item in new_service[key]) - removed_ids
+                            if added_ids:
+                                service_delta[key].extend([{id_field: added_id} for added_id in added_ids])
+
+                    self.datastore.service_delta.save(service.name, unflatten(service_delta))
 
             new_heuristics = []
-            
+
             plan = self.datastore.heuristic.get_bulk_plan()
             for index, heuristic in enumerate(heuristics):
                 heuristic_id = f'#{index}'  # Set heuristic id to it's position in the list for logging purposes
