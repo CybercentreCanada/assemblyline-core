@@ -14,6 +14,12 @@ from time import sleep
 from typing import List, Optional, Tuple
 
 import urllib3
+from assemblyline.odm.models.config import Selector
+from assemblyline.odm.models.service import (
+    DependencyConfig,
+    DockerConfig,
+    PersistentVolume,
+)
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -22,6 +28,7 @@ from kubernetes import client, config, watch
 from kubernetes.client import (
     V1Affinity,
     V1Capabilities,
+    V1ConfigMap,
     V1ConfigMapVolumeSource,
     V1Container,
     V1Deployment,
@@ -62,12 +69,6 @@ from kubernetes.client import (
 )
 from kubernetes.client.rest import ApiException
 
-from assemblyline.odm.models.config import Selector
-from assemblyline.odm.models.service import (
-    DependencyConfig,
-    DockerConfig,
-    PersistentVolume,
-)
 from assemblyline_core.scaler.controllers.interface import ControllerInterface
 
 # RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
@@ -390,7 +391,7 @@ class KubernetesController(ControllerInterface):
     def _dependency_name(self, service_name: str, container_name: str):
         return f"{self._deployment_name(service_name)}-{container_name}".lower()
 
-    def add_config_mount(self, name: str, config_map: str, key: str, target_path: str, read_only=True, core=False):
+    def add_config_mount(self, name: str, config_map: str, key: Optional[str], target_path: str, read_only=True, core=False):
         volumes, mounts = self.volumes, self.mounts
         if core:
             volumes, mounts = self.core_volumes, self.core_mounts
@@ -1379,3 +1380,19 @@ class KubernetesController(ControllerInterface):
         for np in (existing_netpol - {np.metadata.name for np in network_policies}):
             self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=np,
                                                           _request_timeout=API_TIMEOUT)
+
+    def update_config_map(self, data: dict, name: str):
+        """Update or create a ConfigMap in Kubernetes."""
+        config_map = V1ConfigMap(
+            metadata=V1ObjectMeta(name=name, namespace=self.namespace),
+            data=data
+        )
+        try:
+            self.api.patch_namespaced_config_map(name=name, namespace=self.namespace, body=config_map,
+                                                 _request_timeout=API_TIMEOUT)
+        except ApiException as error:
+            if error.status == 404:
+                self.api.create_namespaced_config_map(namespace=self.namespace, body=config_map,
+                                                      _request_timeout=API_TIMEOUT)
+            else:
+                raise

@@ -19,7 +19,6 @@ from typing import Any, Dict, Optional
 
 import elasticapm
 import yaml
-
 from assemblyline.common.constants import (
     SCALER_TIMEOUT_QUEUE,
     SERVICE_STATE_HASH,
@@ -44,13 +43,12 @@ from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 from assemblyline.remote.datatypes.queues.priority import length as pq_length
-from assemblyline_core.scaler.controllers import KubernetesController
+
+from assemblyline_core.scaler import collection
+from assemblyline_core.scaler.controllers import DockerController, KubernetesController
 from assemblyline_core.scaler.controllers.interface import ServiceControlError
 from assemblyline_core.server_base import ServiceStage, ThreadedCoreBase
 from assemblyline_core.updater.helper import get_registry_config
-
-from . import collection
-from .controllers import DockerController
 
 APM_SPAN_TYPE = 'scaler'
 
@@ -298,6 +296,16 @@ class ScalerServer(ThreadedCoreBase):
                         # be shared with privileged services.
                         pass
 
+        # Create a configuration file specifically meant for privileged services to consume
+        # This should only contain the relevant information to connect to the databases
+        privileged_config = yaml.dump({
+            'datastore': self.config.datastore.as_primitives(),
+            'filestore': self.config.filestore.as_primitives(),
+            'core': {
+                'redis': self.config.core.redis.as_primitives()
+            }
+        })
+
         labels = {
             'app': 'assemblyline',
             'section': 'service',
@@ -340,7 +348,9 @@ class ScalerServer(ThreadedCoreBase):
                                                    )
 
             # Add global configuration for privileged services
-            self.controller.add_config_mount(KUBERNETES_AL_CONFIG, config_map=KUBERNETES_AL_CONFIG, key="config",
+            # Check if the ConfigMap already exists, if it does, update it
+            self.controller.update_config_map(data={'config': privileged_config}, name='privileged-service-config')
+            self.controller.add_config_mount(KUBERNETES_AL_CONFIG, config_map='privileged-service-config', key="config",
                                              target_path="/etc/assemblyline/config.yml", read_only=True, core=True)
 
             # If we're passed an override for server-server and it's defining an HTTPS connection, then add a global
@@ -382,7 +392,7 @@ class ScalerServer(ThreadedCoreBase):
 
                 with open(os.path.join(DOCKER_CONFIGURATION_PATH, 'config.yml'), 'w') as handle:
                     # Convert to JSON before converting to YAML to account for direct ODM representation errors
-                    yaml.dump(json.loads(self.config.json()), handle)
+                    handle.write(privileged_config)
 
                 with open(os.path.join(DOCKER_CONFIGURATION_PATH, 'classification.yml'), 'w') as handle:
                     yaml.dump(get_classification().original_definition, handle)
