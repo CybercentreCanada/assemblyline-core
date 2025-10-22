@@ -3,7 +3,6 @@ import time
 from typing import Any, Dict, Optional
 
 import elasticapm
-
 from assemblyline.common import forge
 from assemblyline.common.constants import SERVICE_STATE_HASH, ServiceStatus
 from assemblyline.common.dict_utils import flatten, unflatten
@@ -22,6 +21,7 @@ from assemblyline.odm.models.service import Service
 from assemblyline.odm.models.tagging import Tagging
 from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import ExpiringHash
+
 from assemblyline_core.dispatching.client import DispatchClient
 
 
@@ -161,9 +161,31 @@ class TaskingClient:
                 self.datastore.service_delta.save(service.name, {'version': service.version})
                 self.datastore.service_delta.commit()
                 self.log.info(f"{log_prefix}{service.name} version ({service.version}) registered")
+            else:
+                # Check for any changes that should be merged into the service delta
+                service_delta = self.datastore.service_delta.get(service.name, as_obj=False)
+
+                # Check for any new configuration keys that should be added to the service delta
+                if service_delta.get('config'):
+                    new_config = {k: v for k, v in service.config.items() if k not in service_delta['config']}
+                    if new_config:
+                        if 'config' not in service_delta:
+                            service_delta['config'] = {}
+                        service_delta['config'].update(new_config)
+
+                # Check for any new submission parameters that should be added to the service delta
+                if service_delta.get('submission_params'):
+                    old_submission_params = {param['name'] for param in service_delta['submission_params']}
+                    for param in service.submission_params:
+                        if param['name'] not in old_submission_params:
+                            # New parameter, add it to the old submission params
+                            service_delta['submission_params'].append(param.as_primitives())
+
+                # Save any changes to the service delta
+                self.datastore.service_delta.save(service.name, service_delta)
 
             new_heuristics = []
-            
+
             plan = self.datastore.heuristic.get_bulk_plan()
             for index, heuristic in enumerate(heuristics):
                 heuristic_id = f'#{index}'  # Set heuristic id to it's position in the list for logging purposes
