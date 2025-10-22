@@ -5,7 +5,7 @@ from unittest import mock
 
 import pytest
 from assemblyline_core.dispatching.client import DISPATCH_RESULT_QUEUE, DispatchClient
-from assemblyline_core.dispatching.dispatcher import Dispatcher, ServiceTask, Submission
+from assemblyline_core.dispatching.dispatcher import Dispatcher, ServiceTask, Submission, SubmissionTask
 from assemblyline_core.dispatching.schedules import Scheduler as RealScheduler
 
 # noinspection PyUnresolvedReferences
@@ -18,8 +18,9 @@ from assemblyline.common.metrics import MetricsFactory
 from assemblyline.odm import models
 from assemblyline.odm.models.error import Error
 from assemblyline.odm.models.file import File
-from assemblyline.odm.models.result import Result
+from assemblyline.odm.models.result import Result, File as ResponseFile
 from assemblyline.odm.models.user import User
+from assemblyline.odm.models.submission import Submission as SubmissionModel
 from assemblyline.odm.randomizer import (
     get_random_hash,
     random_minimal_obj,
@@ -454,3 +455,148 @@ def test_prevent_result_overwrite(clean_redis, clean_datastore):
     msg_result_key = message['result_summary']['key']
 
     assert msg_result_key != result_key
+
+
+def test_create_submission_task(datastore_connection, config, filestore, clean_redis):
+
+    # create a test submission
+    scheduler = Scheduler(datastore_connection, config, clean_redis)
+    submission = random_model_obj(SubmissionModel)
+    sid = get_random_hash(64)
+    submission.sid = sid
+
+    # create files and results with file tree:
+    #     root_1
+    #       |
+    #     middle_1
+    #     |     |
+    #   leaf_1 leaf_2
+
+    leaf_1_sha = get_random_hash(64)
+    leaf_2_sha = get_random_hash(64)
+    middle_1_sha = get_random_hash(64)
+    root_1_sha = get_random_hash(64)
+
+    file_shas = [root_1_sha, middle_1_sha, leaf_2_sha, leaf_1_sha]
+
+    files = [
+        {"name": ["root_1"], "size": 1, "sha256": root_1_sha},
+        {"name": ["middle_1"], "size": 1, "sha256": middle_1_sha},
+        {"name": ["leaf-2"], "size": 1, "sha256": leaf_2_sha},
+        {
+            "name": ["leaf-1"],
+            "size": 1,
+            "sha256": leaf_1_sha,
+        },
+    ]
+
+    submission.files = files
+
+    leaf_1 = {
+        "name": ["leaf-1"],
+        "type": "test_type",
+        "sha256": leaf_1_sha,
+        "children": {},
+        "truncated": False,
+        "score": 0,
+    }
+
+    leaf_2 = {
+        "name": ["leaf-2"],
+        "type": "test_type",
+        "sha256": leaf_2_sha,
+        "children": {},
+        "truncated": False,
+        "score": 0,
+    }
+
+    middle_1 = {
+        "name": ["middle-1"],
+        "type": "test_type",
+        "sha256": middle_1_sha,
+        "children": {leaf_1_sha: leaf_1, leaf_2_sha: leaf_2},
+        "truncated": False,
+        "score": 0,
+    }
+
+    root_1 = {
+        root_1_sha: {
+            "name": ["root-1"],
+            "type": "test_type",
+            "sha256": root_1_sha,
+            "children": {middle_1_sha: middle_1},
+            "truncated": False,
+            "score": 0,
+        }
+    }
+
+    file_infos = {}
+    errors = []
+    for file_sha in file_shas:
+        file_infos[file_sha] = random_model_obj(File).as_primitives()
+        errors.append(f"{file_sha}.serviceName.v0_0_0.c0.e0")
+
+    submission.errors = errors
+
+    results = {}
+
+    result_root_1_key = f"{root_1_sha}.serviceName.v0_0_0.c0"
+    results[result_root_1_key] = random_model_obj(Result).as_primitives()
+    results[result_root_1_key]["sha256"] = root_1_sha
+    result_file_middle = random_model_obj(ResponseFile)
+    result_file_middle.sha256 = middle_1_sha
+    results[result_root_1_key]["response"]["extracted"] = [result_file_middle]
+
+    result_middle_1_key = f"{middle_1_sha}.serviceName.v0_0_0.c0"
+    results[result_middle_1_key] = random_model_obj(Result).as_primitives()
+    results[result_middle_1_key]["sha256"] = middle_1_sha
+    result_file_leaf1 = random_model_obj(ResponseFile)
+    result_file_leaf1.sha256 = leaf_1_sha
+    result_file_leaf2 = random_model_obj(ResponseFile)
+    result_file_leaf2.sha256 = leaf_2_sha
+
+    results[result_middle_1_key]["response"]["extracted"] = [result_file_leaf1, result_file_leaf2]
+
+    result_leaf_1_key = f"{leaf_1_sha}.serviceName.v0_0_0.c0"
+    results[result_leaf_1_key] = random_model_obj(Result).as_primitives()
+    results[result_leaf_1_key]["sha256"] = leaf_1_sha
+    results[result_leaf_1_key]["response"]["extracted"] = []
+
+    result_leaf_2_key = f"{leaf_2_sha}.serviceName.v0_0_0.c0"
+    results[result_leaf_2_key] = random_model_obj(Result).as_primitives()
+    results[result_leaf_2_key]["sha256"] = leaf_2_sha
+    results[result_leaf_2_key]["response"]["extracted"] = []
+
+    submission.results = results.keys()
+
+    # Create a message from submission queue
+    submission_message = {
+        "submission": submission.as_primitives(),
+        "results": results,
+        "file_infos": file_infos,
+        "file_tree": root_1,
+        "errors": errors,
+        "completed_queue": "test",
+    }
+
+    task = SubmissionTask(
+        scheduler=scheduler,
+        datastore=datastore_connection,
+        config=config,
+        **submission_message,
+    )
+
+    assert task.sid == sid
+
+    parent_map = {middle_1_sha: {root_1_sha}, leaf_1_sha: {middle_1_sha}, leaf_2_sha: {middle_1_sha}}
+
+    assert task._parent_map.keys() == parent_map.keys()
+    for key, val in parent_map.items():
+        assert val == task._parent_map[key]
+
+    file_depth = {root_1_sha: 0, middle_1_sha: 1, leaf_1_sha: 2, leaf_2_sha: 2}
+    assert task.file_depth.keys() == file_depth.keys()
+    for key, val in file_depth.items():
+        assert val == task.file_depth[key]
+
+    assert task.temporary_data.keys() == file_depth.keys()

@@ -37,6 +37,8 @@ from assemblyline.odm.models.result import Result
 from assemblyline.odm.models.submission import File, Submission
 from assemblyline.odm.models.config import Config
 from assemblyline_core.dispatching.client import DispatchClient
+from assemblyline_core.ingester.constants import INGEST_QUEUE_NAME
+from assemblyline.remote.datatypes.queues.named import NamedQueue
 
 Classification = forge.get_classification()
 SECONDS_PER_DAY = 24 * 60 * 60
@@ -72,6 +74,7 @@ class SubmissionClient:
 
         # A client for interacting with the dispatcher
         self.dispatcher = DispatchClient(datastore, redis)
+        self.ingest_queue = NamedQueue(INGEST_QUEUE_NAME, redis)
 
     def __enter__(self):
         return self
@@ -84,8 +87,16 @@ class SubmissionClient:
             self.identify.stop()
 
     @elasticapm.capture_span(span_type='submission_client')
-    def rescan(self, submission: Submission, results: Dict[str, Result], file_infos: Dict[str, FileInfo],
-               file_tree, errors: List[str], rescan_services: List[str]):
+    def rescan(
+        self,
+        submission,
+        results: Dict[str, Result],
+        file_infos: Dict[str, FileInfo],
+        file_tree: dict,
+        errors: List[str],
+        rescan_services: List[str],
+        to_ingest: bool = False,
+    ):
         """
         Rescan a submission started on another system.
         """
@@ -114,8 +125,29 @@ class SubmissionClient:
         self.datastore.submission.save(submission_obj.sid, submission_obj)
 
         # Dispatch the submission
-        self.log.debug("Submission complete. Dispatching: %s", submission_obj.sid)
-        self.dispatcher.dispatch_bundle(submission_obj, results, file_infos, file_tree, errors)
+        if to_ingest:
+            self.log.debug("Submission complete. Submission sent to ingester: %s", submission_obj.sid)
+
+            submission_obj = SubmissionObject(
+                {
+                    "sid": submission["sid"],
+                    "files": submission.get("files", []),
+                    "metadata": submission.get("metadata", {}),
+                    "params": submission.get("params", {}),
+                    "notification": submission.get("notification", {}),
+                    "scan_key": submission.get("scan_key", None),
+                    "errors": errors,
+                    "file_infos": file_infos,
+                    "file_tree": file_tree,
+                    "results": results,
+                }
+            ).as_primitives()
+
+            self.ingest_queue.push(submission_obj)
+
+        else:
+            self.log.debug("Submission complete. Dispatching: %s", submission_obj.sid)
+            self.dispatcher.dispatch_bundle(submission_obj, results, file_infos, file_tree, errors)
 
         return submission
 
@@ -252,3 +284,22 @@ class SubmissionClient:
             if extracted_path:
                 if os.path.exists(extracted_path):
                     os.unlink(extracted_path)
+
+    @elasticapm.capture_span(span_type="submission_client")
+    def send_bundle_to_dispatch(
+        self,
+        submission_obj: SubmissionObject,
+        completed_queue: str = None,
+    ):
+
+        sid = submission_obj.sid
+        submission = self.datastore.submission.get(sid)
+
+        self.dispatcher.dispatch_bundle(
+            submission=submission,
+            results=submission_obj.results,
+            file_infos=submission_obj.file_infos,
+            file_tree=submission_obj.file_tree,
+            errors=submission_obj.errors,
+            completed_queue=completed_queue,
+        )

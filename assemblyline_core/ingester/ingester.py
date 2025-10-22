@@ -112,6 +112,7 @@ class IngestTask(odm.Model):
     ingest_id = odm.UUID()  # Ingestion Identifier
     ingest_time = odm.Date(default="NOW")  # Time at which the file was ingested
     notify_time = odm.Optional(odm.Date())  # Time at which the user is notify the submission is finished
+    to_ingest = odm.Boolean(default=False)
 
 
 class Ingester(ThreadedCoreBase):
@@ -250,7 +251,13 @@ class Ingester(ThreadedCoreBase):
                         submission=sub,
                         ingest_id=sub.sid,
                     ))
-                    task.submission.sid = None  # Reset to new random uuid
+
+                    # if this is a new task from imported bundle we want to use the same sid
+                    # because all the submission information are stored in the datastore
+                    # else create a new sid for this submission
+                    if "bundle.source" not in task.submission.metadata:
+                        task.submission.sid = None  # Reset to new random uuid
+
                     # Write all input to the traffic queue
                     self.traffic_queue.publish(SubmissionMessage({
                         'msg': sub,
@@ -920,10 +927,15 @@ class Ingester(ThreadedCoreBase):
         return reason
 
     def submit(self, task: IngestTask):
-        self.submit_client.submit(
-            submission_obj=task.submission,
-            completed_queue=COMPLETE_QUEUE_NAME,
-        )
+
+        if "bundle.source" in task.submission.metadata:
+            self.submit_client.send_bundle_to_dispatch(task.submission, completed_queue=COMPLETE_QUEUE_NAME)
+        else:
+
+            self.submit_client.submit(
+                submission_obj=task.submission,
+                completed_queue=COMPLETE_QUEUE_NAME,
+            )
 
         self.timeout_queue.push(int(now(_max_time)), task.submission.scan_key)
         self.log.info(f"[{task.ingest_id} :: {task.sha256}] Submitted to dispatcher for analysis")

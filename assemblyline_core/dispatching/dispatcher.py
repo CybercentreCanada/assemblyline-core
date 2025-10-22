@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from redis import Redis
 
     from assemblyline.odm.models.file import File
+    from assemblyline.odm.models.config import Config
 
 
 APM_SPAN_TYPE = 'handle_message'
@@ -218,8 +219,18 @@ class TemporaryFileData:
 class SubmissionTask:
     """Dispatcher internal model for submissions"""
 
-    def __init__(self, submission, completed_queue, scheduler, datastore: AssemblylineDatastore, results=None,
-                 file_infos=None, file_tree=None, errors: Optional[Iterable[str]] = None):
+    def __init__(
+        self,
+        submission,
+        completed_queue,
+        scheduler,
+        datastore: AssemblylineDatastore,
+        config: Config,
+        results=None,
+        file_infos=None,
+        file_tree=None,
+        errors: Optional[Iterable[str]] = None,
+    ):
         self.submission: Submission = Submission(submission)
         submitter: Optional[User] = datastore.user.get_if_exists(self.submission.params.submitter)
         self.service_access_control: Optional[str] = None
@@ -227,6 +238,7 @@ class SubmissionTask:
             self.service_access_control = submitter.classification.value
 
         self.completed_queue = None
+
         if completed_queue:
             self.completed_queue = str(completed_queue)
 
@@ -265,9 +277,31 @@ class SubmissionTask:
                     recurse_tree(file_data['children'], depth + 1)
 
             recurse_tree(file_tree, 0)
+            sorted_file_depth = [(k, v) for k, v in sorted(self.file_depth.items(), key=lambda fd: fd[1])]
+        else:
+            sorted_file_depth = [(self.submission.files[0].sha256, 0)]
+
+        for sha256, depth in sorted_file_depth:
+            # populate temporary data to root level files
+            if depth == 0:
+                # Apply initial data parameter
+                temp_key_config = dict(config.submission.default_temporary_keys)
+                temp_key_config.update(config.submission.temporary_keys)
+                temporary_data = TemporaryFileData(sha256, config=temp_key_config)
+                self.temporary_data[sha256] = temporary_data
+                if self.submission.params.initial_data:
+                    try:
+                        for key, value in dict(json.loads(self.submission.params.initial_data)).items():
+                            if len(str(value)) > config.submission.max_temp_data_length:
+                                continue
+                            temporary_data.set_value(key, value)
+
+                    except (ValueError, TypeError):
+                        pass
 
         if results is not None:
             rescan = scheduler.expand_categories(self.submission.params.services.rescan)
+            result_keys = list(results.keys())
 
             # Replay the process of routing files for dispatcher internal state.
             for k, result in results.items():
@@ -282,24 +316,35 @@ class SubmissionTask:
                     self.forbid_for_children(sha256, service_name)
 
             # Replay the process of receiving results for dispatcher internal state
-            for k, result in results.items():
-                sha256, service, _ = k.split('.', 2)
-                if service not in rescan:
-                    extracted = result['response']['extracted']
-                    children: list[str] = [r['sha256'] for r in extracted]
-                    self.register_children(sha256, children)
-                    children_detail: list[tuple[str, str]] = [(r['sha256'], r['parent_relation']) for r in extracted]
-                    self.service_results[(sha256, service)] = ResultSummary(
-                        key=k, drop=result['drop_file'], score=result['result']['score'],
-                        children=children_detail, partial=result.get('partial', False))
+            # iterate through result based on file depth
+            for sha256, depth in sorted_file_depth:
+                results_to_process = list(filter(lambda k: sha256 in k, result_keys))
+                for result_key in results_to_process:
+                    result = results[result_key]
+                    sha256, service, _ = result_key.split(".", 2)
 
-                tags = Result(result).scored_tag_dict()
-                for key, tag in tags.items():
-                    if key in self.file_tags[sha256].keys():
-                        # Sum score of already known tags
-                        self.file_tags[sha256][key]['score'] += tag['score']
-                    else:
-                        self.file_tags[sha256][key] = tag
+                    if service not in rescan:
+                        extracted = result["response"]["extracted"]
+                        children: list[str] = [r["sha256"] for r in extracted]
+                        self.register_children(sha256, children)
+                        children_detail: list[tuple[str, str]] = [
+                            (r["sha256"], r["parent_relation"]) for r in extracted
+                        ]
+                        self.service_results[(sha256, service)] = ResultSummary(
+                            key=result_key,
+                            drop=result["drop_file"],
+                            score=result["result"]["score"],
+                            children=children_detail,
+                            partial=result.get("partial", False),
+                        )
+
+                    tags = Result(result).scored_tag_dict()
+                    for key, tag in tags.items():
+                        if key in self.file_tags[sha256].keys():
+                            # Sum score of already known tags
+                            self.file_tags[sha256][key]["score"] += tag["score"]
+                        else:
+                            self.file_tags[sha256][key] = tag
 
         if errors is not None:
             for e in errors:
@@ -334,6 +379,7 @@ class SubmissionTask:
         _parent_map is for dynamic recursion prevention
         temporary_data is for cascading the temp data to children
         """
+
         parent_temp = self.temporary_data[parent]
         for child in children:
             if child not in self.temporary_data:
@@ -706,7 +752,13 @@ class Dispatcher(ThreadedCoreBase):
                 # Start of process dispatcher transaction
                 with apm_span(self.apm_client, 'submission_message'):
                     # This is probably a complete task
-                    task = SubmissionTask(scheduler=self.scheduler, datastore=self.datastore, **message)
+
+                    task = SubmissionTask(
+                        scheduler=self.scheduler,
+                        datastore=self.datastore,
+                        config=self.config,
+                        **message,
+                    )
 
                     # Check the sid table
                     if task.sid in self.bad_sids:
@@ -739,6 +791,7 @@ class Dispatcher(ThreadedCoreBase):
 
         if not self.active_submissions.exists(sid):
             self.log.info("[%s] New submission received", sid)
+
             task.trace('submission_start')
             self.active_submissions.add(sid, {
                 'completed_queue': task.completed_queue,
@@ -760,21 +813,6 @@ class Dispatcher(ThreadedCoreBase):
         if submission.params.quota_item and submission.params.submitter:
             self.log.info(f"[{sid}] Submission counts towards {submission.params.submitter.upper()} quota")
 
-        # Apply initial data parameter
-        temp_key_config = dict(self.config.submission.default_temporary_keys)
-        temp_key_config.update(self.config.submission.temporary_keys)
-        temporary_data = TemporaryFileData(sha256, config=temp_key_config)
-        task.temporary_data[sha256] = temporary_data
-        if submission.params.initial_data:
-            try:
-                for key, value in dict(json.loads(submission.params.initial_data)).items():
-                    if len(str(value)) > self.config.submission.max_temp_data_length:
-                        continue
-                    temporary_data.set_value(key, value)
-
-            except (ValueError, TypeError) as err:
-                self.log.warning(f"[{sid}] could not process initialization data: {err}")
-
         self.tasks[sid] = task
         self._submission_timeouts.set(task.sid, SUBMISSION_TOTAL_TIMEOUT, None)
 
@@ -784,7 +822,10 @@ class Dispatcher(ThreadedCoreBase):
         # Initialize ancestry chain by identifying the root file
         file_info = self.get_fileinfo(task, sha256)
         file_type = file_info.type if file_info else 'NOT_FOUND'
-        temporary_data.local_values['ancestry'] = [[dict(type=file_type, parent_relation="ROOT", sha256=sha256)]]
+
+        task.temporary_data[sha256].local_values["ancestry"] = [
+            [dict(type=file_type, parent_relation="ROOT", sha256=sha256)]
+        ]
 
         # Start the file dispatching
         task.active_files.add(sha256)
@@ -874,7 +915,6 @@ class Dispatcher(ThreadedCoreBase):
                                                                         task.service_access_control)
             schedule_summary = [list(stage.keys()) for stage in task.file_schedules[sha256]]
             task.trace('schedule_built', sha256=sha256, message=str(schedule_summary))
-
 
         file_info = task.file_info[sha256]
         schedule: list = list(task.file_schedules[sha256])
