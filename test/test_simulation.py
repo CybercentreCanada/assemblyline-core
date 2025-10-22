@@ -12,6 +12,7 @@ import threading
 import logging
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Any
+from assemblyline_core.submission_client import SubmissionClient
 
 import pytest
 
@@ -29,6 +30,7 @@ from assemblyline.odm.models.user import User
 from assemblyline.odm.randomizer import random_model_obj
 from assemblyline.odm.messages.submission import Submission as SubmissionInput
 from assemblyline.remote.datatypes.queues.named import NamedQueue
+from assemblyline.odm.random_data import create_submission
 
 import assemblyline_core
 from assemblyline_core.plumber.run_plumber import Plumber
@@ -84,7 +86,6 @@ class MockService(ServerBase):
             self.log.info(f"{self.service_name} has received a job {task.sid}")
 
             file = self.filestore.get(task.fileinfo.sha256)
-
             instructions = json.loads(file)
             instructions = instructions.get(self.service_name, {})
             self.log.info(f"{self.service_name} following instruction: {instructions}")
@@ -1326,7 +1327,7 @@ def test_final_partial(core: CoreSession, metrics):
             name='abc123'
         )]
     )).as_primitives())
- 
+
     # Wait until both of the services have started (so service b doesn't get the temp data a produces on its first run)
     start = time.time()
     while sum(s.hits.get(sha, 0) for s in core.services) != 2:
@@ -1342,7 +1343,7 @@ def test_final_partial(core: CoreSession, metrics):
     while sum(s.finish.get(sha, 0) for s in core_a) < 1:
         if time.time() - start > RESPONSE_TIMEOUT:
             pytest.fail()
-        time.sleep(0.01)    
+        time.sleep(0.01)
 
     # Let b finish, it should produce a partial result then rerun right away
     core_b.local_lock.set()
@@ -1453,3 +1454,48 @@ def test_complex_extracted(core: CoreSession, metrics):
         if result.partial:
             partial_results += 1
     assert partial_results == 0, 'partial_results'
+
+
+@pytest.mark.parametrize("to_ingest,submission_metadata", [(False, {}), (True, {}),(True, {"bundle.source": "test_source"})])
+def test_rescan_submission(core: CoreSession, metrics: MetricsCounter, to_ingest, submission_metadata):
+    # when a submission is rescan, the submission information should be stored in the database
+    # file_tree, results, errors are passed to ingestion queue first and then sent to dispatcher
+
+    # Create a new submission
+    submission = create_submission(core.ds, core.filestore, metadata=submission_metadata)
+
+    file_hashes = [x[:64] for x in submission["results"]]
+    file_hashes.extend([x[:64] for x in submission["errors"]])
+    file_hashes.extend([f["sha256"] for f in submission["files"]])
+    file_tree = core.ds.get_or_create_file_tree(submission, core.config.submission.max_extraction_depth)["tree"]
+    file_infos = core.ds.file.multiget(list(set(file_hashes)), as_dictionary=True, as_obj=False)
+    rescan_services = ["core-aaa"]
+    result_ids = list(filter(lambda x: not x.endswith(".e"), submission.results))
+    results = core.ds.result.multiget(result_ids, as_dictionary=True, as_obj=False)
+
+    with SubmissionClient(datastore=core.ds, filestore=core.filestore, config=core.config, identify=None) as sc:
+        sc.ingest_queue = core.ingest_queue
+        sc.rescan(
+            submission.as_primitives(),
+            results,
+            file_infos,
+            file_tree,
+            submission["errors"],
+            rescan_services,
+            to_ingest=to_ingest,
+        )
+
+    if to_ingest:
+
+        metrics.expect("ingester", "submissions_ingested", 1)
+        metrics.expect("dispatcher", "submissions_completed", 1)
+        metrics.expect("ingester", "submissions_completed", 1)
+        if submission_metadata:
+            metrics.expect("dispatcher", "files_completed", len(submission["files"]))
+
+    else:
+        # when to_ingest is false, the submission should be route to dispatcher directly
+        metrics.expect("dispatcher", "submissions_completed", 1)
+        metrics.expect("dispatcher", "files_completed", 1)
+        metrics.expect("ingester", "submissions_ingested", 0)
+        metrics.expect("ingester", "submissions_completed", 0)

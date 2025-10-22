@@ -297,11 +297,14 @@ class APIClient(ClientBase):
         self.al_client.bundle.create(id, output=bundle_path, use_alert=use_alert)
 
     def load_bundle(self, bundle_path, min_classification, rescan_services, exist_ok=True, reclassification=None):
-        self.al_client.bundle.import_bundle(bundle_path,
-                                            min_classification=min_classification,
-                                            rescan_services=rescan_services,
-                                            exist_ok=exist_ok,
-                                            reclassification=reclassification)
+        self.al_client.bundle.import_bundle(
+            bundle_path,
+            min_classification=min_classification,
+            rescan_services=rescan_services,
+            exist_ok=exist_ok,
+            reclassification=reclassification,
+            to_ingest=True,  # send submissions to ingester
+        )
 
     def load_json(self, file_path, reclassification=None):
         from assemblyline_client import ClientError
@@ -412,11 +415,14 @@ class DirectClient(ClientBase):
         os.rename(temp_bundle_file, bundle_path)
 
     def load_bundle(self, bundle_path, min_classification, rescan_services, exist_ok=True, reclassification=None):
-        import_bundle(bundle_path,
-                      min_classification=min_classification,
-                      rescan_services=rescan_services,
-                      exist_ok=exist_ok,
-                      reclassification=reclassification)
+        import_bundle(
+            bundle_path,
+            min_classification=min_classification,
+            rescan_services=rescan_services,
+            exist_ok=exist_ok,
+            reclassification=reclassification,
+            to_ingest=True,  # send submissions to ingester
+        )
 
     def load_json(self, file_path, reclassification=None):
         # We're assuming all JSON that loaded has an "enabled" field
@@ -441,7 +447,6 @@ class DirectClient(ClientBase):
                             obj['classification'] = reclassification
                         else:
                             raise
-
 
                 if collection == "workflow":
                     # If there has been any edits by another user, then preserve the enabled state
