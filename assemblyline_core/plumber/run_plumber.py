@@ -324,9 +324,3 @@ class Plumber(CoreBase):
 
             self.datastore.user_settings.save(doc["_id"], user_settings)
 
-
-
-
-if __name__ == '__main__':
-    with Plumber() as server:
-        server.serve_forever()
