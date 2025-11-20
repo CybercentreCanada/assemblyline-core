@@ -16,6 +16,7 @@ from assemblyline.common.constants import DISPATCH_RUNNING_TASK_HASH, SUBMISSION
     make_watcher_list_name, DISPATCH_TASK_HASH
 from assemblyline.common.forge import CachedObject, get_service_queue
 from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.dispatcher import Dispatcher
 from assemblyline.datastore.exceptions import VersionConflictException
 from assemblyline.odm.base import DATEFORMAT
 from assemblyline.odm.messages.dispatching import DispatcherCommandMessage, CREATE_WATCH, \
@@ -30,7 +31,7 @@ from assemblyline.remote.datatypes.hash import ExpiringHash, Hash
 from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.set import ExpiringSet, Set
 from assemblyline_core.dispatching.dispatcher import DISPATCH_START_EVENTS, DISPATCH_RESULT_QUEUE, \
-    DISPATCH_COMMAND_QUEUE, QUEUE_EXPIRY, BAD_SID_HASH, ServiceTask, Dispatcher
+    DISPATCH_COMMAND_QUEUE, QUEUE_EXPIRY, BAD_SID_HASH, ServiceTask
 
 
 MAX_CANCEL_RESPONSE_WAIT = 10
