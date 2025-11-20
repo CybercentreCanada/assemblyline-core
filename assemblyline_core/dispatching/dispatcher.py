@@ -106,18 +106,6 @@ class DispatchAction:
     event: Optional[threading.Event] = dataclasses.field(compare=False, default=None)
 
 
-@dataclasses.dataclass()
-class MonitorTask:
-    """Tracks whether a task needs to be rerun based on """
-    # Service name
-    service: str
-    # sha256 of file in question
-    sha: str
-    # The temporary values this task was last dispatached with
-    values: dict[str, Optional[str]]
-    # Should aservice be dispatched again when possible
-    dispatch_needed: bool = dataclasses.field(default=False)
-
 
 @contextmanager
 def apm_span(client, span_name: str):
@@ -131,84 +119,6 @@ def apm_span(client, span_name: str):
         if client:
             client.end_transaction(span_name, 'exception')
         raise
-
-
-class ResultSummary:
-    def __init__(self, key, drop, score, children, partial=False) -> None:
-        self.key: str = key
-        self.drop: bool = drop
-        self.partial: bool = partial
-        self.score: int = score
-        self.children: list[tuple[str, str]] = children
-
-
-class TemporaryFileData:
-    def __init__(self,
-                 sha256: str,
-                 config: dict[str, str],
-                 shared: Optional[dict[str, Any]] = None,
-                 local: Optional[dict[str, Any]] = None
-                 ) -> None:
-        self.sha256 = sha256
-        self.config = config
-        self.shared_values: dict[str, Any] = {} if shared is None else shared
-        self.local_values: dict[str, Any] = {} if local is None else local
-
-    def new_file(self, sha256: str) -> TemporaryFileData:
-        """Create an entry for another file with reference to the shared values."""
-        return TemporaryFileData(sha256, self.config, self.shared_values, deepcopy(self.local_values))
-
-    def read(self) -> dict[str, Any]:
-        """Get a copy of the current data"""
-        # Start with a shallow copy of the local data
-        data = dict(self.local_values)
-
-        # mix in whatever the latest submission wide values are values are
-        data.update(self.shared_values)
-        return data
-
-    def read_key(self, key: str) -> Any:
-        """Get a copy of the current data"""
-        try:
-            return self.shared_values[key]
-        except KeyError:
-            return self.local_values.get(key)
-
-    def set_value(self, key: str, value: Any) -> bool:
-        """Set the value of a temporary data key using the appropriate method for the key.
-
-        Return true if this change could mean partial results should be reevaluated.
-        """
-        if self.config.get(key) == KeyType.UNION.value:
-            return self._union_shared_value(key, value)
-
-        if self.config.get(key) == KeyType.OVERWRITE.value:
-            change = self.shared_values.get(key) != value
-            self.shared_values[key] = value
-            return change
-
-        self.local_values[key] = value
-        return False
-
-    def _union_shared_value(self, key: str, values: Any) -> bool:
-        # Make sure the existing value is the right type
-        self.shared_values.setdefault(key, [])
-        if not isinstance(self.shared_values[key], list):
-            self.shared_values[key] = []
-
-        # make sure the input is the right type
-        if not isinstance(values, (list, tuple)):
-            return False
-
-        # Add each value one at a time testing for new values
-        # This is slower than using set intersection, but isn't type sensitive
-        changed = False
-        for new_item in values:
-            if new_item in self.shared_values[key]:
-                continue
-            self.shared_values[key].append(new_item)
-            changed = True
-        return changed
 
 
 DISPATCH_TASK_ASSIGNMENT = 'dispatcher-tasks-assigned-to-'
@@ -237,25 +147,25 @@ SUBMISSION_TOTAL_TIMEOUT = 60 * 20
 
 
 class Dispatcher(ThreadedCoreBase):
-    @staticmethod
-    def all_instances(persistent_redis: Redis):
-        return Hash(DISPATCH_DIRECTORY, host=persistent_redis).keys()
+    # @staticmethod
+    # def all_instances(persistent_redis: Redis):
+    #     return Hash(DISPATCH_DIRECTORY, host=persistent_redis).keys()
 
-    @staticmethod
-    def instance_assignment_size(persistent_redis, instance_id):
-        return Hash(DISPATCH_TASK_ASSIGNMENT + instance_id, host=persistent_redis).length()
+    # @staticmethod
+    # def instance_assignment_size(persistent_redis, instance_id):
+    #     return Hash(DISPATCH_TASK_ASSIGNMENT + instance_id, host=persistent_redis).length()
 
-    @staticmethod
-    def instance_assignment(persistent_redis, instance_id) -> list[str]:
-        return Hash(DISPATCH_TASK_ASSIGNMENT + instance_id, host=persistent_redis).keys()
+    # @staticmethod
+    # def instance_assignment(persistent_redis, instance_id) -> list[str]:
+    #     return Hash(DISPATCH_TASK_ASSIGNMENT + instance_id, host=persistent_redis).keys()
 
-    @staticmethod
-    def all_queue_lengths(redis, instance_id):
-        return {
-            'start': NamedQueue(DISPATCH_START_EVENTS + instance_id, host=redis).length(),
-            'result': NamedQueue(DISPATCH_RESULT_QUEUE + instance_id, host=redis).length(),
-            'command': NamedQueue(DISPATCH_COMMAND_QUEUE + instance_id, host=redis).length()
-        }
+    # @staticmethod
+    # def all_queue_lengths(redis, instance_id):
+    #     return {
+    #         'start': NamedQueue(DISPATCH_START_EVENTS + instance_id, host=redis).length(),
+    #         'result': NamedQueue(DISPATCH_RESULT_QUEUE + instance_id, host=redis).length(),
+    #         'command': NamedQueue(DISPATCH_COMMAND_QUEUE + instance_id, host=redis).length()
+    #     }
 
     def __init__(self, datastore=None, redis=None, redis_persist=None, logger=None,
                  config=None, counter_name: str = 'dispatcher'):
@@ -341,81 +251,13 @@ class Dispatcher(ThreadedCoreBase):
         self.service_change_watcher.stop()
         self.postprocess_worker.stop()
 
-    def interrupt_handler(self, signum, stack_frame):
-        self.log.info("Instance caught signal. Beginning to drain work.")
-        self.finalizing_start = time.time()
-        self._shutdown_timeout = AL_SHUTDOWN_QUIT
-        self.finalizing.set()
-        self.dispatchers_directory_finalize.set(self.instance_id, int(time.time()))
-
-    def _handle_status_change(self, status: Optional[bool]):
-        super()._handle_status_change(status)
-
-        # If we may have lost redis connection check all of our submissions
-        if status is None:
-            for sid in self.tasks.keys():
-                _q = self.find_process_queue(sid)
-                _q.put(DispatchAction(kind=Action.check_submission, sid=sid))
-
-    def _handle_service_change_event(self, data: Optional[ServiceChange]):
-        if not data:
-            # We may have missed change messages, flush cache
-            self.scheduler.c12n_services.clear()
-            return
-        if data.operation == Operation.Removed:
-            # Remove all current instances of service from scheduler cache
-            for service_set in self.scheduler.c12n_services.values():
-                if data.name in service_set:
-                    service_set.remove(data.name)
-        else:
-            # If Added/Modifed, pull the service information and modify cache
-            service: Service = self.datastore.get_service_with_delta(data.name)
-            for c12n, service_set in self.scheduler.c12n_services.items():
-                if self.classification_engine.is_accessible(c12n, service.classification):
-                    # Classification group is allowed to use this service
-                    service_set.add(service.name)
-                else:
-                    # Classification group isn't allowed to use this service
-                    if service.name in service_set:
-                        service_set.remove(service.name)
-
-    def process_queue_index(self, key: str) -> int:
-        return sum(ord(_x) for _x in key) % RESULT_THREADS
-
-    def find_process_queue(self, key: str):
-        return self.process_queues[self.process_queue_index(key)]
-
-    def service_worker_factory(self, index: int):
-        def service_worker():
-            return self.service_worker(index)
-        return service_worker
-
     def try_run(self):
         self.log.info(f'Using dispatcher id {self.instance_id}')
         self.service_change_watcher.start()
         threads = {
-            # Pull in new submissions
-            'Pull Submissions': self.pull_submissions,
-            # pull start messages
-            'Pull Service Start': self.pull_service_starts,
-            # pull result messages
-            'Pull Service Result': self.pull_service_results,
-            # Save errors to DB
-            'Save Errors': self.save_errors,
-            # Handle timeouts
-            'Process Timeouts': self.handle_timeouts,
-            # Work guard/thief
-            'Guard Work': self.work_guard,
-            'Work Thief': self.work_thief,
-            # Handle RPC commands
-            'Commands': self.handle_commands,
             # Process to protect against old dead tasks timing out
             'Global Timeout Backstop': self.timeout_backstop,
         }
-
-        for ii in range(FINALIZE_THREADS):
-            # Finilize submissions that are done
-            threads[f'Save Submissions #{ii}'] = self.save_submission
 
         for ii in range(RESULT_THREADS):
             # Process results
@@ -434,19 +276,6 @@ class Dispatcher(ThreadedCoreBase):
                     service_queues[service_name] = s_queue
                 s_queue.remove(dispatch_key)
 
-    @classmethod
-    def build_service_config(cls, service: Service, submission: Submission) -> dict[str, str]:
-        """Prepare the service config that will be used downstream.
-
-        v3 names: get_service_params get_config_data
-        """
-        # Load the default service config
-        params = {x.name: x.default for x in service.submission_params}
-
-        # Over write it with values from the submission
-        if service.name in submission.params.service_spec:
-            params.update(submission.params.service_spec[service.name])
-        return params
 
     def timeout_backstop(self):
         while self.running:
@@ -493,67 +322,6 @@ class Dispatcher(ThreadedCoreBase):
                     export_metrics_once(task.service_name, ServiceMetrics, dict(fail_recoverable=1),
                                         host=task.metadata['worker__'], counter_type='service', redis=self.redis)
 
-            # Look for unassigned submissions in the datastore if we don't have a
-            # large number of outstanding things in the queue already.
-            with apm_span(self.apm_client, 'orphan_submission_check'):
-                assignments = self.submissions_assignments.items()
-                recovered_from_database = []
-                if self.submission_queue.length() < 500:
-                    with apm_span(self.apm_client, 'abandoned_submission_check'):
-                        # Get the submissions belonging to an dispatcher we don't know about
-                        for item in self.datastore.submission.stream_search('state: submitted', fl='sid'):
-                            if item['sid'] in assignments:
-                                continue
-                            recovered_from_database.append(item['sid'])
-
-            # Look for instances that are in the assignment table, but the instance its assigned to doesn't exist.
-            # We try to remove the instance from the table to prevent multiple dispatcher instances from
-            # recovering it at the same time
-            with apm_span(self.apm_client, 'orphan_submission_check'):
-                # Get the submissions belonging to an dispatcher we don't know about
-                assignments = self.submissions_assignments.items()
-                dispatcher_instances = set(Dispatcher.all_instances(persistent_redis=self.redis_persist))
-                # List all dispatchers with jobs assigned
-                for raw_key in self.redis_persist.keys(TASK_ASSIGNMENT_PATTERN):
-                    key: str = raw_key.decode()
-                    dispatcher_instances.add(key[len(DISPATCH_TASK_ASSIGNMENT):])
-
-                # Submissions that didn't belong to anyone should be recovered
-                for sid, instance in assignments.items():
-                    if instance in dispatcher_instances:
-                        continue
-                    if self.submissions_assignments.conditional_remove(sid, instance):
-                        self.recover_submission(sid, 'from assignment table')
-
-            # Go back over the list of sids from the database now that we have a copy of the
-            # assignments table taken after our database scan
-            for sid in recovered_from_database:
-                if sid not in assignments:
-                    self.recover_submission(sid, 'from database scan')
-
             self.counter.increment_execution_time('cpu_seconds', time.process_time() - cpu_mark)
             self.counter.increment_execution_time('busy_seconds', time.time() - time_mark)
             self.sleep(GLOBAL_TASK_CHECK_INTERVAL)
-
-    def recover_submission(self, sid: str, message: str) -> bool:
-        # Make sure we can load the submission body
-        submission: Optional[Submission] = self.datastore.submission.get_if_exists(sid)
-        if not submission:
-            return False
-        if submission.state != 'submitted':
-            return False
-
-        self.log.warning(f'Recovered dead submission: {sid} {message}')
-
-        # Try to recover the completion queue value by checking with the ingest table
-        completed_queue = ''
-        if submission.scan_key:
-            completed_queue = COMPLETE_QUEUE_NAME
-
-        # Put the file back into processing
-        self.submission_queue.unpop(dict(
-            submission=submission.as_primitives(),
-            completed_queue=completed_queue,
-        ))
-        return True
-
