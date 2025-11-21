@@ -8,9 +8,15 @@ import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import docker
+from assemblyline.common import isotime
+from assemblyline.odm.messages.changes import Operation, ServiceChange
+from assemblyline.odm.models.config import Mount, Selector
+from assemblyline.odm.models.service import DockerConfig, Service
+from assemblyline.remote.datatypes.events import EventSender, EventWatcher
+from assemblyline.remote.datatypes.hash import Hash
 from kubernetes import client, config
 from kubernetes.client import (
     V1Capabilities,
@@ -34,12 +40,6 @@ from kubernetes.client import (
 )
 from kubernetes.client.rest import ApiException
 
-from assemblyline.common import isotime
-from assemblyline.odm.messages.changes import Operation, ServiceChange
-from assemblyline.odm.models.config import Mount, Selector
-from assemblyline.odm.models.service import DockerConfig, Service
-from assemblyline.remote.datatypes.events import EventSender, EventWatcher
-from assemblyline.remote.datatypes.hash import Hash
 from assemblyline_core.scaler.controllers.kubernetes_ctl import (
     PRIVILEGED_SERVICE_ACCOUNT_NAME,
     create_docker_auth_config,
@@ -99,7 +99,7 @@ class DockerUpdateInterface:
                 self._external_network = self.client.networks.create(name='external', internal=False)
         return self._external_network
 
-    def launch(self, name, docker_config: DockerConfig, mounts, env, blocking: bool = True):
+    def launch(self, name, docker_config: DockerConfig, mounts: List[Mount], env: Dict[str, str], blocking: bool = True):
         """Run a container to completion."""
         docker_mounts = dict()
         # Add the configuration file if path is given
@@ -130,8 +130,7 @@ class DockerUpdateInterface:
 
         self.client.images.pull(repository, tag, auth_config=auth_config)
 
-        docker_mounts.update({os.path.join(row['volume'], row['source_path']): {'bind': row['dest_path'],
-                                                                                'mode': row.get('mode', 'ro')}
+        docker_mounts.update({os.path.join(row.name, row.resource_name or ""): {'bind': row.path, 'mode': "ro"}
                               for row in mounts})
         # Launch container
         container = self.client.containers.run(
@@ -505,6 +504,8 @@ class ServiceUpdater(ThreadedCoreBase):
             self.mounts = self.config.core.scaler.service_defaults.mounts
         else:
             self.controller = DockerUpdateInterface(logger=self.log, log_level=self.config.logging.log_level)
+
+        self.mounts = self.config.core.scaler.service_defaults.mounts
 
     def _handle_service_change_event(self, data: Optional[ServiceChange]):
         if data is not None:
