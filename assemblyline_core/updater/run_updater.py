@@ -55,10 +55,11 @@ CONTAINER_CHECK_INTERVAL = int(os.getenv("CONTAINER_CHECK_INTERVAL", "300"))
 
 API_TIMEOUT = 90
 NAMESPACE = os.getenv('NAMESPACE', None)
-INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] + \
-    [
+INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy',
+                                  'https_proxy', 'no_proxy', 'SERVICE_API_HOST', 'SERVICE_API_KEY'] + [
     secret.strip("${}")
-    for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read())]
+    for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read())
+]
 
 CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
@@ -209,7 +210,6 @@ class KubernetesUpdateInterface:
         self.linux_node_selector = linux_node_selector
         self.default_service_tolerations = [V1Toleration(**toleration.as_primitives()) for toleration in default_service_tolerations]
         self.security_policy = RESTRICTED_POD_SECUTITY_CONTEXT if enable_pod_security else None
-
 
         # Get the deployment of this process. Use that information to fill out the secret info
         deployment = self.apps_api.read_namespaced_deployment(name='updater', namespace=self.namespace)
