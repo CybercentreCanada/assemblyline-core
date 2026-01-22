@@ -80,7 +80,7 @@ class AzureContainerRegistry(ContainerRegistry):
         # Attempt request with provided credentials alone
         resp = self._perform_request(url, headers, verify, proxies)
 
-        if not resp:
+        if not resp or not resp.ok:
             # Authentication with just credentials failed, moving over to generating a bearer token
 
             # Retrieve token for authentication: https://azure.github.io/acr/Token-BasicAuth.html#using-the-token-api
@@ -89,6 +89,40 @@ class AzureContainerRegistry(ContainerRegistry):
             if resp and resp.ok:
                 # Request to obtain token was successful, set Authorization header for registry API
                 token = resp.json().get('access_token')
+                headers["Authorization"] = f"Bearer {token}"
+
+                resp = self._perform_request(url, headers, verify, proxies)
+
+        # At this point, we should have a response from the API
+        if resp and resp.ok:
+            # Test for positive list of tags
+            resp_data = resp.json()
+            return resp_data['tags'] or []
+
+        return []
+
+class GitHubContainerRegistry(ContainerRegistry):
+    def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None, token_server=None):
+        # Find latest tag for each types
+        url = f"https://{server}/v2/{image_name}/tags/list"
+
+        # Get tag list
+        headers = {}
+        if auth:
+            headers["Authorization"] = auth
+
+        # Attempt request with provided credentials alone
+        resp = self._perform_request(url, headers, verify, proxies)
+
+        if not resp or not resp.ok:
+            # Authentication with just credentials failed, moving over to generating a bearer token
+
+            # Retrieve token for authentication:
+            token_url = f"https://{server}/token?service=ghcr.io&scope=repository:{image_name}:pull"
+            resp = self._perform_request(token_url, headers, verify, proxies)
+            if resp and resp.ok:
+                # Request to obtain token was successful, set Authorization header for registry API
+                token = resp.json().get('token')
                 headers["Authorization"] = f"Bearer {token}"
 
                 resp = self._perform_request(url, headers, verify, proxies)
@@ -255,6 +289,8 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
 
         # This is an Azure Container Registry based on the server name
         registry = AzureContainerRegistry()
+    elif server == "ghcr.io":
+        registry = GitHubContainerRegistry()
     else:
         registry = REGISTRY_TYPE_MAPPING[registry_type]
 
