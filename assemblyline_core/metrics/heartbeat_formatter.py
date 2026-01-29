@@ -6,6 +6,7 @@ from assemblyline.common import forge, metrics
 from assemblyline.common.archiving import ARCHIVE_QUEUE_NAME
 from assemblyline.common.constants import DISPATCH_TASK_HASH, SUBMISSION_QUEUE, \
     SERVICE_STATE_HASH, ServiceStatus
+from assemblyline.common.dispatcher import Dispatcher
 from assemblyline.datastore.exceptions import SearchException
 from assemblyline.odm.messages.retrohunt_heartbeat import RetrohuntMessage
 from assemblyline.odm.messages.scaler_heartbeat import ScalerMessage
@@ -25,7 +26,6 @@ from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.queues.priority import PriorityQueue
 
 from assemblyline_core.alerter.run_alerter import ALERT_QUEUE_NAME, ALERT_RETRY_QUEUE_NAME
-from assemblyline_core.dispatching.dispatcher import Dispatcher
 from assemblyline_core.ingester import INGEST_QUEUE_NAME, drop_chance
 from assemblyline_core.ingester.constants import COMPLETE_QUEUE_NAME
 
