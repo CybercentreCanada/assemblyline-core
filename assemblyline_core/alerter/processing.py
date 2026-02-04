@@ -22,6 +22,10 @@ cache: TimeExpiredCache[tuple[Optional[dict], Optional[dict]]] = TimeExpiredCach
 Classification = forge.get_classification()
 config = forge.get_config()
 
+URI_ODM = URI()
+DOMAIN_ODM = Domain()
+IP_ODM = IP()
+
 
 SUMMARY_TYPE_MAP = {
     'av.virus_name': 'av',
@@ -212,21 +216,23 @@ def get_summary(datastore, srecord, user_classification, logger):
     # Validate the network IOCs raised to ensure they're valid when creating/updating alerts
     for net_type in ['ip_dynamic', 'ip_static', 'domain_dynamic', 'domain_static', 'uri_dynamic', 'uri_static']:
         valid_items = []
-        for item in detailed.get(net_type, []):
-            try:
-                if net_type.startswith('ip'):
-                    IP(item['value'])
-                elif net_type.startswith('domain'):
-                    Domain(item['value'])
-                elif net_type.startswith('uri'):
-                    URI(item['value'])
-            except Exception:
-                logger.warning(f"Invalid {net_type} IOC found in submission {srecord['sid']}: {item}")
-                continue
-            valid_items.append(item)
+        if net_type in detailed:
+            # If the key exists, validate each item in the collection
+            for item in detailed[net_type]:
+                try:
+                    if net_type.startswith('ip'):
+                        IP_ODM.check(item['value'])
+                    elif net_type.startswith('domain'):
+                        DOMAIN_ODM.check(item['value'])
+                    elif net_type.startswith('uri'):
+                        URI_ODM.check(item['value'])
+                except Exception:
+                    logger.warning(f"Invalid {net_type} IOC found in submission {srecord['sid']}: {item}")
+                    continue
+                valid_items.append(item)
 
-        # Update with only valid items
-        detailed[net_type] = valid_items
+            # Update with only valid items
+            detailed[net_type] = valid_items
 
     # Generate the Summary
     summary = {k: set([f"{item['value']} [{item['subtype']}]" if item.get('subtype', None) else item['value']
