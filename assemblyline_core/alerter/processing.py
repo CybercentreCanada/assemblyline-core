@@ -1,13 +1,15 @@
 from __future__ import annotations
-from copy import deepcopy
+
 from typing import Optional
+
 from assemblyline.common import forge
 from assemblyline.common.caching import TimeExpiredCache
 from assemblyline.common.dict_utils import recursive_update
-from assemblyline.common.str_utils import safe_str
 from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.str_utils import safe_str
 from assemblyline.datastore.exceptions import VersionConflictException
 from assemblyline.datastore.helper import AssemblylineDatastore
+from assemblyline.odm import IP, URI, Domain
 from assemblyline.odm.messages.alert import AlertMessage
 from assemblyline.odm.models.alert import Alert
 from assemblyline.remote.datatypes.queues.comms import CommsQueue
@@ -206,6 +208,25 @@ def get_summary(datastore, srecord, user_classification, logger):
 
     # Simplify the detailed items
     detailed = {k: list(v.values()) for k, v in detailed.items()}
+
+    # Validate the network IOCs raised to ensure they're valid when creating/updating alerts
+    for net_type in ['ip_dynamic', 'ip_static', 'domain_dynamic', 'domain_static', 'uri_dynamic', 'uri_static']:
+        valid_items = []
+        for item in detailed.get(net_type, []):
+            try:
+                if net_type.startswith('ip'):
+                    IP(item['value'])
+                elif net_type.startswith('domain'):
+                    Domain(item['value'])
+                elif net_type.startswith('uri'):
+                    URI(item['value'])
+            except Exception:
+                logger.warning(f"Invalid {net_type} IOC found in submission {srecord['sid']}: {item}")
+                continue
+            valid_items.append(item)
+
+        # Update with only valid items
+        detailed[net_type] = valid_items
 
     # Generate the Summary
     summary = {k: set([f"{item['value']} [{item['subtype']}]" if item.get('subtype', None) else item['value']
