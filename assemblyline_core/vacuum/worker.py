@@ -1,52 +1,55 @@
 import contextlib
 import datetime
 import json
-import tempfile
 import logging
 import os
-import time
-import signal
 import shutil
-from copy import deepcopy
-from typing import Optional, Any
-from multiprocessing import Lock, Event
+import signal
+import tempfile
 import threading
+import time
+from copy import deepcopy
+from multiprocessing import Event, Lock
+from typing import Any, Optional
 
-import elasticapm
 import arrow
+import elasticapm
 
-from assemblyline.common.forge import CachedObject, get_classification, get_config, get_datastore, get_filestore, \
-    get_apm_client
+from assemblyline.common import identify
 from assemblyline.common.codec import decode_file
 from assemblyline.common.dict_utils import flatten
+from assemblyline.common.forge import (
+    CachedObject,
+    get_apm_client,
+    get_classification,
+    get_config,
+    get_datastore,
+    get_filestore,
+)
+from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.log import init_logging
 from assemblyline.common.metrics import MetricsFactory
-from assemblyline.datastore.helper import AssemblylineDatastore, MetadataValidator
-from assemblyline.common import identify
-from assemblyline.common.isotime import now_as_iso
+from assemblyline.common.str_utils import safe_str
 from assemblyline.common.uid import get_random_id
+from assemblyline.datastore.helper import AssemblylineDatastore, MetadataValidator
+from assemblyline.filestore import FileStore
+from assemblyline.odm.messages.submission import Submission
+from assemblyline.odm.messages.vacuum_heartbeat import Metrics
 from assemblyline.odm.models import user
 from assemblyline.odm.models.config import Config
 from assemblyline.odm.models.submission import DEFAULT_SRV_SEL
 from assemblyline.odm.models.user_settings import UserSettings
-from assemblyline.remote.datatypes.queues.comms import CommsQueue
-from assemblyline.odm.messages.vacuum_heartbeat import Metrics
-
-from assemblyline.filestore import FileStore
-from assemblyline.common.str_utils import safe_str
 from assemblyline.remote.datatypes import get_client as get_redis_client
-from assemblyline.odm.messages.submission import Submission
-from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.hash import Hash
-
-from assemblyline_core.vacuum.crawler import VACUUM_BUFFER_NAME
+from assemblyline.remote.datatypes.queues.comms import CommsQueue
+from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline_core.ingester.constants import INGEST_QUEUE_NAME
+from assemblyline_core.vacuum.crawler import VACUUM_BUFFER_NAME
 
-from .safelist import VacuumSafelist
-from .department_map import DepartmentMap
-from .stream_map import StreamMap, Stream
 from .crawler import heartbeat
-
+from .department_map import DepartmentMap
+from .safelist import VacuumSafelist
+from .stream_map import Stream, StreamMap
 
 # init_logging('assemblyline.vacuum.worker')
 logger = logging.getLogger('assemblyline.vacuum.worker')
@@ -410,7 +413,7 @@ class FileProcessor(threading.Thread):
                     'deep_scan': False,
                     "priority": 150,
                     "ignore_cache": False,
-                    "ignore_dynamic_recursion_prevention": False,
+                    "ignore_recursion_prevention": False,
                     "ignore_filtering": False,
                     "type": "INGEST"
                 })

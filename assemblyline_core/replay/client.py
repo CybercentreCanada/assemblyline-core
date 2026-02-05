@@ -4,13 +4,13 @@ import time
 
 from assemblyline.common import forge
 from assemblyline.common.bundling import create_bundle, import_bundle
+from assemblyline.common.classification import InvalidClassification
 from assemblyline.odm import Model
-from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline_core.replay.replay import INPUT_TYPES
+from assemblyline.remote.datatypes.queues.named import NamedQueue
 from assemblyline_core.badlist_client import BadlistClient
+from assemblyline_core.replay.replay import INPUT_TYPES
 from assemblyline_core.safelist_client import SafelistClient
-from assemblyline_core.signature_client import SignatureClient
 
 EMPTY_WAIT_TIME = int(os.environ.get('EMPTY_WAIT_TIME', '30'))
 REPLAY_REQUESTED = 'requested'
@@ -296,13 +296,17 @@ class APIClient(ClientBase):
     def create_al_bundle(self, id, bundle_path, use_alert=False):
         self.al_client.bundle.create(id, output=bundle_path, use_alert=use_alert)
 
-    def load_bundle(self, bundle_path, min_classification, rescan_services, exist_ok=True):
-        self.al_client.bundle.import_bundle(bundle_path,
-                                            min_classification=min_classification,
-                                            rescan_services=rescan_services,
-                                            exist_ok=exist_ok)
+    def load_bundle(self, bundle_path, min_classification, rescan_services, exist_ok=True, reclassification=None):
+        self.al_client.bundle.import_bundle(
+            bundle_path,
+            min_classification=min_classification,
+            rescan_services=rescan_services,
+            exist_ok=exist_ok,
+            reclassification=reclassification,
+            to_ingest=True,  # send submissions to ingester
+        )
 
-    def load_json(self, file_path):
+    def load_json(self, file_path, reclassification=None):
         from assemblyline_client import ClientError
 
         # We're assuming all JSON that loaded has an "enabled" field
@@ -374,6 +378,7 @@ class DirectClient(ClientBase):
         # Initialize connection to redis-persistent for checkpointing
         redis_persist = get_client(config.core.redis.persistent.host,
                                    config.core.redis.persistent.port, False)
+        self.classification = forge.get_classification()
         self.datastore = forge.get_datastore(config=config)
         self.queues = {
             queue_type: NamedQueue(f"replay_{queue_type}", host=redis)
@@ -409,13 +414,17 @@ class DirectClient(ClientBase):
         temp_bundle_file = create_bundle(id, working_dir=os.path.dirname(bundle_path), use_alert=use_alert)
         os.rename(temp_bundle_file, bundle_path)
 
-    def load_bundle(self, bundle_path, min_classification, rescan_services, exist_ok=True):
-        import_bundle(bundle_path,
-                      min_classification=min_classification,
-                      rescan_services=rescan_services,
-                      exist_ok=exist_ok)
+    def load_bundle(self, bundle_path, min_classification, rescan_services, exist_ok=True, reclassification=None):
+        import_bundle(
+            bundle_path,
+            min_classification=min_classification,
+            rescan_services=rescan_services,
+            exist_ok=exist_ok,
+            reclassification=reclassification,
+            to_ingest=True,  # send submissions to ingester
+        )
 
-    def load_json(self, file_path):
+    def load_json(self, file_path, reclassification=None):
         # We're assuming all JSON that loaded has an "enabled" field
         collection = os.path.basename(file_path).split('_', 1)[0]
         with open(file_path) as fp:
@@ -428,6 +437,16 @@ class DirectClient(ClientBase):
 
                 # Let's see if there's an existing document with the same ID in the collection
                 obj = es_collection.get_if_exists(id, as_obj=False)
+                if obj:
+                    # Check if the classification of the object is compatible with the system's classification
+                    try:
+                        self.classification.normalize_classification(obj['classification'])
+                    except InvalidClassification:
+                        if reclassification:
+                            # If reclassification is requested, then we can change the classification
+                            obj['classification'] = reclassification
+                        else:
+                            raise
 
                 if collection == "workflow":
                     # If there has been any edits by another user, then preserve the enabled state

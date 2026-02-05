@@ -1,13 +1,16 @@
 from __future__ import annotations
-import docker
+
 import os
 import threading
 import time
-from collections import defaultdict
-from typing import List, Optional, Tuple, Dict
 import uuid
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
+
+import docker
 
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig
+
 from .interface import ControllerInterface, ServiceControlError
 
 # Where to find the update directory inside this container.
@@ -382,7 +385,7 @@ class DockerController(ControllerInterface):
                            container.labels]
                 running = running[0:-delta]
                 for container in running:
-                    container.kill()
+                    container.kill(signal='SIGTERM')
 
             if delta > 0:
                 # Start delta instances of the service
@@ -497,6 +500,7 @@ class DockerController(ControllerInterface):
             instance_key = uuid.uuid4().hex
 
         volumes = {_n: {'bind': _v.mount_path, 'mode': 'rw'} for _n, _v in spec.volumes.items()}
+        volumes.update({row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.global_mounts})
         if spec.run_as_core:
             volumes.update({row[0]: {'bind': row[1], 'mode': 'ro'} for row in self.core_mounts})
 
@@ -531,6 +535,7 @@ class DockerController(ControllerInterface):
         dynamically rather than in prepare_network.
         """
         from docker.errors import NotFound
+
         # Create network for service
         network_name = f'{COMPOSE_PROJECT}_service-net-{service_name}'
         try:
@@ -553,6 +558,7 @@ class DockerController(ControllerInterface):
         This lets us override the auth_config on a per image basis.
         """
         from docker.errors import ImageNotFound
+
         # Split the image string into "[registry/]image_name" and "tag"
         repository, _, tag = service.container_config.image.rpartition(':')
         if '/' in tag:

@@ -7,26 +7,44 @@ import os
 import re
 import time
 import uuid
-
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import docker
-
-from kubernetes.client import V1Job, V1ObjectMeta, V1JobSpec, V1PodTemplateSpec, V1PodSpec, V1Volume, \
-    V1VolumeMount, V1EnvVar, V1Container, V1ResourceRequirements, \
-    V1ConfigMapVolumeSource, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Toleration, V1SecurityContext, \
-    V1Capabilities, V1SeccompProfile
-from kubernetes import client, config
-from kubernetes.client.rest import ApiException
-
 from assemblyline.common import isotime
 from assemblyline.odm.messages.changes import Operation, ServiceChange
 from assemblyline.odm.models.config import Mount, Selector
 from assemblyline.odm.models.service import DockerConfig, Service
 from assemblyline.remote.datatypes.events import EventSender, EventWatcher
 from assemblyline.remote.datatypes.hash import Hash
-from assemblyline_core.scaler.controllers.kubernetes_ctl import create_docker_auth_config, selector_to_node_affinity, PRIVILEGED_SERVICE_ACCOUNT_NAME
+from kubernetes import client, config
+from kubernetes.client import (
+    V1Capabilities,
+    V1ConfigMapVolumeSource,
+    V1Container,
+    V1EnvVar,
+    V1Job,
+    V1JobSpec,
+    V1LocalObjectReference,
+    V1ObjectMeta,
+    V1PodSpec,
+    V1PodTemplateSpec,
+    V1ResourceRequirements,
+    V1SeccompProfile,
+    V1Secret,
+    V1SecretVolumeSource,
+    V1SecurityContext,
+    V1Toleration,
+    V1Volume,
+    V1VolumeMount,
+)
+from kubernetes.client.rest import ApiException
+
+from assemblyline_core.scaler.controllers.kubernetes_ctl import (
+    PRIVILEGED_SERVICE_ACCOUNT_NAME,
+    create_docker_auth_config,
+    selector_to_node_affinity,
+)
 from assemblyline_core.server_base import ThreadedCoreBase
 from assemblyline_core.updater.helper import get_latest_tag_for_service
 
@@ -37,10 +55,11 @@ CONTAINER_CHECK_INTERVAL = int(os.getenv("CONTAINER_CHECK_INTERVAL", "300"))
 
 API_TIMEOUT = 90
 NAMESPACE = os.getenv('NAMESPACE', None)
-INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] + \
-    [
+INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy',
+                                  'https_proxy', 'no_proxy', 'SERVICE_API_HOST', 'SERVICE_API_KEY'] + [
     secret.strip("${}")
-    for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read())]
+    for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read())
+]
 
 CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
@@ -81,7 +100,7 @@ class DockerUpdateInterface:
                 self._external_network = self.client.networks.create(name='external', internal=False)
         return self._external_network
 
-    def launch(self, name, docker_config: DockerConfig, mounts, env, blocking: bool = True):
+    def launch(self, name, docker_config: DockerConfig, mounts: List[Mount], env: Dict[str, str], blocking: bool = True):
         """Run a container to completion."""
         docker_mounts = dict()
         # Add the configuration file if path is given
@@ -112,8 +131,7 @@ class DockerUpdateInterface:
 
         self.client.images.pull(repository, tag, auth_config=auth_config)
 
-        docker_mounts.update({os.path.join(row['volume'], row['source_path']): {'bind': row['dest_path'],
-                                                                                'mode': row.get('mode', 'ro')}
+        docker_mounts.update({os.path.join(row.name, row.resource_name or ""): {'bind': row.path, 'mode': "ro"}
                               for row in mounts})
         # Launch container
         container = self.client.containers.run(
@@ -157,7 +175,7 @@ class DockerUpdateInterface:
 
 class KubernetesUpdateInterface:
     def __init__(self, logger, prefix, namespace, priority_class, extra_labels, linux_node_selector: Selector,
-                 log_level="INFO", default_service_account=None, default_service_tolerations=[], enable_pod_security=False):
+                 log_level="INFO", default_service_tolerations=[], enable_pod_security=False):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or we have a configuration in the normal location
         try:
@@ -187,12 +205,10 @@ class KubernetesUpdateInterface:
         self.priority_class = priority_class
         self.extra_labels = extra_labels
         self.log_level = log_level
-        self.default_service_account = default_service_account
         self.secret_env = []
         self.linux_node_selector = linux_node_selector
         self.default_service_tolerations = [V1Toleration(**toleration.as_primitives()) for toleration in default_service_tolerations]
         self.security_policy = RESTRICTED_POD_SECUTITY_CONTEXT if enable_pod_security else None
-
 
         # Get the deployment of this process. Use that information to fill out the secret info
         deployment = self.apps_api.read_namespaced_deployment(name='updater', namespace=self.namespace)
@@ -268,13 +284,7 @@ class KubernetesUpdateInterface:
                 read_only=mount.read_only,
             )
 
-            if mount.config_map:
-                # Deprecated configuration for mounting ConfigMap
-                # TODO: Deprecate code on next major change
-                vol_kwargs.update(dict(config_map=V1ConfigMapVolumeSource(name=mount.config_map, optional=False)))
-                vol_mount_kwargs.update(dict(sub_path=mount.key))
-
-            elif mount.resource_type == 'secret':
+            if mount.resource_type == 'secret':
                 # Secret-based source
                 vol_kwargs.update(dict(secret=V1SecretVolumeSource(secret_name=mount.resource_name)))
                 vol_mount_kwargs.update(dict(sub_path=mount.resource_key))
@@ -346,7 +356,7 @@ class KubernetesUpdateInterface:
             restart_policy='Never',
             containers=[container],
             priority_class_name=self.priority_class,
-            service_account_name=docker_config.service_account or self.default_service_account or PRIVILEGED_SERVICE_ACCOUNT_NAME,
+            service_account_name=docker_config.service_account or PRIVILEGED_SERVICE_ACCOUNT_NAME,
             affinity=selector_to_node_affinity(self.linux_node_selector),
             tolerations=self.default_service_tolerations
         )
@@ -487,7 +497,6 @@ class ServiceUpdater(ThreadedCoreBase):
                                                         priority_class='al-core-priority',
                                                         extra_labels=extra_labels,
                                                         log_level=self.config.logging.log_level,
-                                                        default_service_account=self.config.services.service_account,
                                                         linux_node_selector=self.config.core.scaler.linux_node_selector,
                                                         default_service_tolerations=self.config.core.scaler.service_defaults.tolerations,
                                                         enable_pod_security=self.config.core.scaler.enable_pod_security)
@@ -495,6 +504,8 @@ class ServiceUpdater(ThreadedCoreBase):
             self.mounts = self.config.core.scaler.service_defaults.mounts
         else:
             self.controller = DockerUpdateInterface(logger=self.log, log_level=self.config.logging.log_level)
+
+        self.mounts = self.config.core.scaler.service_defaults.mounts
 
     def _handle_service_change_event(self, data: Optional[ServiceChange]):
         if data is not None:
@@ -512,7 +523,6 @@ class ServiceUpdater(ThreadedCoreBase):
                     tag = 'stable'
                 else:
                     tag = 'latest'
-                service_key = None
                 try:
                     service = Service(
                         {'name': service_name,

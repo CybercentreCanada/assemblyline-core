@@ -1,35 +1,73 @@
 from __future__ import annotations
+
 import base64
 import functools
 import json
-import uuid
 import os
 import threading
+import uuid
 import weakref
-import urllib3
-
 from base64 import b64encode
-from cryptography import x509
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization, hashes
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timedelta
-from dateutil.tz import tzlocal
-from typing import List, Optional, Tuple
 from time import sleep
-from assemblyline.odm.models.config import Selector
+from typing import List, Optional, Tuple
 
+import urllib3
+from assemblyline.odm.models.config import Selector
+from assemblyline.odm.models.service import (
+    DependencyConfig,
+    DockerConfig,
+    PersistentVolume,
+)
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from dateutil.tz import tzlocal
 from kubernetes import client, config, watch
-from kubernetes.client import V1Deployment, V1DeploymentSpec, V1PodTemplateSpec, V1DeploymentStrategy, \
-    V1PodSpec, V1ObjectMeta, V1Volume, V1Container, V1VolumeMount, V1EnvVar, V1ConfigMapVolumeSource, \
-    V1PersistentVolumeClaimVolumeSource, V1LabelSelector, V1ResourceRequirements, V1PersistentVolumeClaim, \
-    V1PersistentVolumeClaimSpec, V1NetworkPolicy, V1NetworkPolicySpec, V1NetworkPolicyEgressRule, V1NetworkPolicyPeer, \
-    V1NetworkPolicyIngressRule, V1Secret, V1SecretVolumeSource, V1LocalObjectReference, V1Service, \
-    V1ServiceSpec, V1ServicePort, V1PodSecurityContext, V1Probe, V1ExecAction, V1SecurityContext, \
-    V1Affinity, V1NodeAffinity, V1NodeSelector, V1NodeSelectorTerm, V1NodeSelectorRequirement, V1Toleration, \
-    V1Capabilities, V1SeccompProfile
+from kubernetes.client import (
+    V1Affinity,
+    V1Capabilities,
+    V1ConfigMap,
+    V1ConfigMapVolumeSource,
+    V1Container,
+    V1Deployment,
+    V1DeploymentSpec,
+    V1DeploymentStrategy,
+    V1EnvVar,
+    V1ExecAction,
+    V1LabelSelector,
+    V1LocalObjectReference,
+    V1NetworkPolicy,
+    V1NetworkPolicyEgressRule,
+    V1NetworkPolicyIngressRule,
+    V1NetworkPolicyPeer,
+    V1NetworkPolicySpec,
+    V1NodeAffinity,
+    V1NodeSelector,
+    V1NodeSelectorRequirement,
+    V1NodeSelectorTerm,
+    V1ObjectMeta,
+    V1PersistentVolumeClaim,
+    V1PersistentVolumeClaimSpec,
+    V1PersistentVolumeClaimVolumeSource,
+    V1PodSecurityContext,
+    V1PodSpec,
+    V1PodTemplateSpec,
+    V1Probe,
+    V1ResourceRequirements,
+    V1SeccompProfile,
+    V1Secret,
+    V1SecretVolumeSource,
+    V1SecurityContext,
+    V1Service,
+    V1ServicePort,
+    V1ServiceSpec,
+    V1Toleration,
+    V1Volume,
+    V1VolumeMount,
+)
 from kubernetes.client.rest import ApiException
-from assemblyline.odm.models.service import DependencyConfig, DockerConfig, PersistentVolume
 
 from assemblyline_core.scaler.controllers.interface import ControllerInterface
 
@@ -250,7 +288,7 @@ def parse_cpu(string: str) -> float:
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace: str, prefix: str, priority: str, dependency_priority: str,
                  cpu_reservation: float, linux_node_selector: Selector, labels=None, log_level="INFO", core_env={},
-                 default_service_account=None, cluster_pod_list=True, enable_pod_security=False,
+                 cluster_pod_list=True, enable_pod_security=False,
                  default_service_tolerations=[],
                  priv_labels=None):
         # Try loading a kubernetes connection from either the fact that we are running
@@ -295,7 +333,6 @@ class KubernetesController(ControllerInterface):
         self.core_mounts: dict[str, V1VolumeMount] = {}
         self._external_profiles = weakref.WeakValueDictionary()
         self._service_limited_env: dict[str, dict[str, str]] = defaultdict(dict)
-        self.default_service_account: Optional[str] = default_service_account
         self.cluster_pod_list = cluster_pod_list
         self.security_policy = RESTRICTED_POD_SECURITY_CONTEXT if enable_pod_security else None
         self.default_service_tolerations = [V1Toleration(**toleration.as_primitives()) for toleration in default_service_tolerations]
@@ -354,7 +391,7 @@ class KubernetesController(ControllerInterface):
     def _dependency_name(self, service_name: str, container_name: str):
         return f"{self._deployment_name(service_name)}-{container_name}".lower()
 
-    def add_config_mount(self, name: str, config_map: str, key: str, target_path: str, read_only=True, core=False):
+    def add_config_mount(self, name: str, config_map: str, key: Optional[str], target_path: str, read_only=True, core=False):
         volumes, mounts = self.volumes, self.mounts
         if core:
             volumes, mounts = self.core_volumes, self.core_mounts
@@ -836,8 +873,7 @@ class KubernetesController(ControllerInterface):
         metadata = V1ObjectMeta(name=deployment_name, labels=all_labels, annotations={CHANGE_KEY_NAME: change_key})
 
         # Figure out which (if any) service account to use
-        service_account = self.default_service_account or \
-            (PRIVILEGED_SERVICE_ACCOUNT_NAME if core_mounts else UNPRIVILEGED_SERVICE_ACCOUNT_NAME)
+        service_account = PRIVILEGED_SERVICE_ACCOUNT_NAME if core_mounts else UNPRIVILEGED_SERVICE_ACCOUNT_NAME
         if docker_config.service_account:
             service_account = docker_config.service_account
 
@@ -1344,3 +1380,19 @@ class KubernetesController(ControllerInterface):
         for np in (existing_netpol - {np.metadata.name for np in network_policies}):
             self.net_api.delete_namespaced_network_policy(namespace=self.namespace, name=np,
                                                           _request_timeout=API_TIMEOUT)
+
+    def update_config_map(self, data: dict, name: str):
+        """Update or create a ConfigMap in Kubernetes."""
+        config_map = V1ConfigMap(
+            metadata=V1ObjectMeta(name=name, namespace=self.namespace),
+            data=data
+        )
+        try:
+            self.api.patch_namespaced_config_map(name=name, namespace=self.namespace, body=config_map,
+                                                 _request_timeout=API_TIMEOUT)
+        except ApiException as error:
+            if error.status == 404:
+                self.api.create_namespaced_config_map(namespace=self.namespace, body=config_map,
+                                                      _request_timeout=API_TIMEOUT)
+            else:
+                raise
