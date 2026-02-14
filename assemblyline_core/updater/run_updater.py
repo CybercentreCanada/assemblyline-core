@@ -61,9 +61,12 @@ INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http
     for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read())
 ]
 
+AL_REGISTRATION_NETWORK = os.environ.get("AL_REGISTRATION_NETWORK", 'al_registration')
 CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
-AL_CORE_NETWORK = os.environ.get("AL_CORE_NETWORK", 'core')
+SERVICE_API_HOST = os.environ.get('SERVICE_API_HOST', "http://service_server:5003")
+SERVICE_API_KEY = os.environ.get('SERVICE_API_KEY', 'ThisIsARandomAuthKey...ChangeMe!')
+
 RESTRICTED_POD_SECUTITY_CONTEXT = V1SecurityContext(
     run_as_user=1000,
     run_as_group=1000,
@@ -73,7 +76,6 @@ RESTRICTED_POD_SECUTITY_CONTEXT = V1SecurityContext(
     seccomp_profile=V1SeccompProfile(type="RuntimeDefault")
 )
 
-SERVICE_API_HOST = os.getenv('SERVICE_API_HOST')
 RELEASE_NAME = os.getenv('RELEASE_NAME')
 
 
@@ -138,7 +140,7 @@ class DockerUpdateInterface:
             image=docker_config.image,
             name='update_' + name + '_' + uuid.uuid4().hex,
             labels={'update_for': name, 'updater_launched': 'true'},
-            network=AL_CORE_NETWORK,
+            network=AL_REGISTRATION_NETWORK,
             restart_policy={'Name': 'no'},
             command=docker_config.command,
             volumes=docker_mounts,
@@ -312,11 +314,9 @@ class KubernetesUpdateInterface:
                 read_only=True,
             ))
 
-        section = 'service'
         labels = {
             'app': 'assemblyline',
-            'section': section,
-            'privilege': 'core',
+            'section': 'service',
             'component': 'update-script',
         }
         labels.update(self.extra_labels)
@@ -480,9 +480,6 @@ class ServiceUpdater(ThreadedCoreBase):
             if self.config.core.scaler.additional_labels:
                 extra_labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.additional_labels)})
 
-            if self.config.core.scaler.privileged_services_additional_labels:
-                extra_labels.update({k: v for k, v in (_l.split("=") for _l in self.config.core.scaler.privileged_services_additional_labels)})
-
             # If Updater has envs that set the service-server to use HTTPS, then assume a Root CA needs to be mounted
             if SERVICE_API_HOST and SERVICE_API_HOST.startswith('https'):
                 self.config.core.scaler.service_defaults.mounts.append(dict(
@@ -500,11 +497,10 @@ class ServiceUpdater(ThreadedCoreBase):
                                                         linux_node_selector=self.config.core.scaler.linux_node_selector,
                                                         default_service_tolerations=self.config.core.scaler.service_defaults.tolerations,
                                                         enable_pod_security=self.config.core.scaler.enable_pod_security)
-            # Add all additional mounts to privileged services
-            self.mounts = self.config.core.scaler.service_defaults.mounts
         else:
             self.controller = DockerUpdateInterface(logger=self.log, log_level=self.config.logging.log_level)
 
+        # Add any mounts defined in the service defaults to the updater interface so they get applied to all updates/installs
         self.mounts = self.config.core.scaler.service_defaults.mounts
 
     def _handle_service_change_event(self, data: Optional[ServiceChange]):
@@ -554,7 +550,6 @@ class ServiceUpdater(ThreadedCoreBase):
                     env = {
                         "SERVICE_TAG": tag_name,
                         "REGISTER_ONLY": 'true',
-                        "PRIVILEGED": 'true',
                     }
 
                     # Update environment with service defaults
@@ -653,7 +648,6 @@ class ServiceUpdater(ThreadedCoreBase):
                 env = {
                     "SERVICE_TAG": update_data['latest_tag'],
                     "REGISTER_ONLY": 'true',
-                    "PRIVILEGED": 'true',
                 }
 
                 # Update environment with service defaults
