@@ -56,10 +56,7 @@ CONTAINER_CHECK_INTERVAL = int(os.getenv("CONTAINER_CHECK_INTERVAL", "300"))
 API_TIMEOUT = 90
 NAMESPACE = os.getenv('NAMESPACE', None)
 INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy',
-                                  'https_proxy', 'no_proxy', 'SERVICE_API_HOST', 'SERVICE_API_KEY'] + [
-    secret.strip("${}")
-    for secret in re.findall(r'\${\w+}', open('/etc/assemblyline/config.yml', 'r').read())
-]
+                                  'https_proxy', 'no_proxy', 'SERVICE_API_HOST', 'SERVICE_API_KEY']
 
 AL_REGISTRATION_NETWORK = os.environ.get("AL_REGISTRATION_NETWORK", 'al_registration')
 CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
@@ -299,20 +296,6 @@ class KubernetesUpdateInterface:
             volumes.append(V1Volume(**vol_kwargs))
             volume_mounts.append(V1VolumeMount(**vol_mount_kwargs))
 
-        if CONFIGURATION_CONFIGMAP:
-            volumes.append(V1Volume(
-                name='mount-configuration',
-                config_map=V1ConfigMapVolumeSource(
-                    name=CONFIGURATION_CONFIGMAP
-                ),
-            ))
-
-            volume_mounts.append(V1VolumeMount(
-                name='mount-configuration',
-                mount_path='/etc/assemblyline/config.yml',
-                sub_path="config",
-                read_only=True,
-            ))
 
         labels = {
             'app': 'assemblyline',
