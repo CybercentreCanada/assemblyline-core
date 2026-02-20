@@ -8,7 +8,6 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 import docker
-
 from assemblyline.odm.models.service import DependencyConfig, DockerConfig
 
 from .interface import ControllerInterface, ServiceControlError
@@ -87,6 +86,9 @@ class DockerController(ControllerInterface):
         threading.Thread(target=self._refresh_service_networks, daemon=True).start()
         self._flush_containers()  # Clear out any containers that are left over from a previous run
 
+        # Start a background thread to watch for container events for debugging purposes
+        threading.Thread(target=self._container_events, daemon=True).start()
+
         if COMPOSE_PROJECT:
             self._prefix = COMPOSE_PROJECT + "_svc_"
             self._labels["com.docker.compose.project"] = COMPOSE_PROJECT
@@ -99,6 +101,24 @@ class DockerController(ControllerInterface):
                 for label in COPY_LABELS:
                     if label in container.labels:
                         self._labels[label] = container.labels[label]
+
+    def _container_events(self):
+        """General watch of docker events for debugging purposes.
+
+        @contributor: @kam193
+        """
+
+        # Filter for OOM events from our containers, and log them when they happen.
+        oom_filter = {"event": "oom", "type": "container"}
+        if COMPOSE_PROJECT:
+            oom_filter["label"] = f"com.docker.compose.project={COMPOSE_PROJECT}"
+        elif self._labels:
+            oom_filter["label"] = [f"{k}={v}" for k, v in self._labels.items() if v]
+
+        for event in self.client.events(decode=True, filters=oom_filter):
+            self.log.warning(f"Container {event.get('Actor', {}).get('Attributes', {}).get('name', 'unknown')}"
+                             "killed by OOM")
+
 
     def find_service_server(self):
         service_server_container = None
