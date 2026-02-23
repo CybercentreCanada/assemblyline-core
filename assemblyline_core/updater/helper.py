@@ -380,7 +380,19 @@ def _get_dockerhub_tags(image_name, update_channel, prefix, proxies=None, docker
                 # Based on https://docs.docker.com/docker-hub/api/latest/#tag/rate-limiting
                 # We've hit the rate limit so we have to wait and try again later
                 logger.warning(f"{prefix}Rate limit reached for DockerHub. Retrying after sleep..")
-                time.sleep(int(response.headers['retry-after']) - int(time.time()))
+                # Fix for crash when retry-after is seconds vs timestamp
+                retry_after = int(response.headers.get('retry-after', 60))
+                # Check if it looks like a timestamp (huge number) or duration (small number)
+                # Docker Hub API documentation says duration in seconds.
+                if retry_after > 1700000000: # It's a timestamp
+                     sleep_time = retry_after - int(time.time())
+                else: # It's a duration
+                     sleep_time = retry_after
+
+                if sleep_time < 0:
+                     sleep_time = 60 # Default to 60 seconds if calculation is wrong
+
+                time.sleep(sleep_time)
             else:
                 logger.error(f"{prefix}HTTP error occurred: {e}")
             break
