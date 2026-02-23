@@ -222,7 +222,7 @@ class MetricsServer(ServerBase):
                     # We have an entry that is a timer, should also have a .c count
                     elif key.endswith('.t'):
                         name = key.rstrip('.t')
-                        output_metrics[name] = counts[key] / counts.get(name + ".c", 1)
+                        output_metrics[name] = counts[key] / max(counts.get(name + ".c", 1), 1)
                         output_metrics[name + "_count"] = counts.get(name + ".c", 0)
                     # Plain old metric, no modifications needed
                     else:
