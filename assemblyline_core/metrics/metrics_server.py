@@ -200,55 +200,58 @@ class MetricsServer(ServerBase):
                     self.apm_client.end_transaction('process_message', 'success')
 
     def _create_aggregated_metrics(self):
-        self.log.info("Copying counters ...")
-        # APM Transaction start
-        if self.apm_client:
-            self.apm_client.begin_transaction('metrics')
+        try:
+            self.log.info("Copying counters ...")
+            # APM Transaction start
+            if self.apm_client:
+                self.apm_client.begin_transaction('metrics')
 
-        with self.counters_lock:
-            counter_copy, self.counters = self.counters, {}
+            with self.counters_lock:
+                counter_copy, self.counters = self.counters, {}
 
-        self.log.info("Aggregating metrics ...")
-        timestamp = now_as_iso()
-        for component, counts in counter_copy.items():
-            component_name, component_type = component
-            output_metrics = {'name': component_name, 'type': component_type}
+            self.log.info("Aggregating metrics ...")
+            timestamp = now_as_iso()
+            for component, counts in counter_copy.items():
+                component_name, component_type = component
+                output_metrics = {'name': component_name, 'type': component_type}
 
-            for key, value in counts.items():
-                # Skip counts, they will be paired with a time entry and we only want to count it once
-                if key.endswith('.c'):
-                    continue
-                # We have an entry that is a timer, should also have a .c count
-                elif key.endswith('.t'):
-                    name = key.rstrip('.t')
-                    output_metrics[name] = counts[key] / counts.get(name + ".c", 1)
-                    output_metrics[name + "_count"] = counts.get(name + ".c", 0)
-                # Plain old metric, no modifications needed
-                else:
-                    output_metrics[key] = value
+                for key, value in counts.items():
+                    # Skip counts, they will be paired with a time entry and we only want to count it once
+                    if key.endswith('.c'):
+                        continue
+                    # We have an entry that is a timer, should also have a .c count
+                    elif key.endswith('.t'):
+                        name = key.rstrip('.t')
+                        output_metrics[name] = counts[key] / counts.get(name + ".c", 1)
+                        output_metrics[name + "_count"] = counts.get(name + ".c", 0)
+                    # Plain old metric, no modifications needed
+                    else:
+                        output_metrics[key] = value
 
-            ensure_indexes(self.log, self.es, self.config.core.metrics.elasticsearch, [component_type],
-                           datastream_enabled=self.is_datastream)
+                ensure_indexes(self.log, self.es, self.config.core.metrics.elasticsearch, [component_type],
+                               datastream_enabled=self.is_datastream)
 
-            index = f"al_metrics_{component_type}"
-            # Were data streams created for the index specified?
-            try:
-                if self.es.indices.get_index_template(name=f"{index}_ds"):
-                    output_metrics['@timestamp'] = timestamp
-                    index = f"{index}_ds"
-            except elasticsearch.exceptions.TransportError:
-                pass
-            output_metrics['timestamp'] = timestamp
-            output_metrics = cleanup_metrics(output_metrics)
+                index = f"al_metrics_{component_type}"
+                # Were data streams created for the index specified?
+                try:
+                    if self.es.indices.get_index_template(name=f"{index}_ds"):
+                        output_metrics['@timestamp'] = timestamp
+                        index = f"{index}_ds"
+                except elasticsearch.exceptions.TransportError:
+                    pass
+                output_metrics['timestamp'] = timestamp
+                output_metrics = cleanup_metrics(output_metrics)
 
-            self.log.info(output_metrics)
-            with_retries(self.log, self.es.index, index=index, body=output_metrics)
+                self.log.info(output_metrics)
+                with_retries(self.log, self.es.index, index=index, body=output_metrics)
 
-        self.log.info("Metrics aggregated. Waiting for next run...")
+            self.log.info("Metrics aggregated. Waiting for next run...")
 
-        # APM Transaction end
-        if self.apm_client:
-            self.apm_client.end_transaction('aggregate_metrics', 'success')
+            # APM Transaction end
+            if self.apm_client:
+                self.apm_client.end_transaction('aggregate_metrics', 'success')
+        except Exception:
+            self.log.exception("Unknown exception occurred during metrics aggregation:")
 
 
 # noinspection PyBroadException
