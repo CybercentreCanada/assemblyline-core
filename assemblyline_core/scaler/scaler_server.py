@@ -334,18 +334,20 @@ class ScalerServer(ThreadedCoreBase):
 
         if KUBERNETES_AL_CONFIG:
             self.log.info(f"Loading Kubernetes cluster interface on namespace: {NAMESPACE}")
-            self.controller = KubernetesController(logger=self.log, prefix='alsvc_', labels=labels,
-                                                   namespace=NAMESPACE, priority='al-service-priority',
-                                                   dependency_priority='al-core-priority',
-                                                   cpu_reservation=self.config.services.cpu_reservation,
-                                                   linux_node_selector=self.config.core.scaler.linux_node_selector,
-                                                   log_level=self.config.logging.log_level,
-                                                   core_env=core_env,
-                                                   cluster_pod_list=self.config.core.scaler.cluster_pod_list,
-                                                   enable_pod_security=self.config.core.scaler.enable_pod_security,
-                                                   default_service_tolerations=service_defaults_config.tolerations,
-                                                   priv_labels=priv_labels
-                                                   )
+            self.controller = KubernetesController(
+                logger=self.log, prefix='alsvc_', labels=labels,
+                namespace=NAMESPACE, priority='al-service-priority',
+                dependency_priority='al-core-priority',
+                cpu_reservation=self.config.services.cpu_reservation,
+                cpu_slack=self.config.services.cpu_slack,
+                linux_node_selector=self.config.core.scaler.linux_node_selector,
+                log_level=self.config.logging.log_level,
+                core_env=core_env,
+                cluster_pod_list=self.config.core.scaler.cluster_pod_list,
+                enable_pod_security=self.config.core.scaler.enable_pod_security,
+                default_service_tolerations=service_defaults_config.tolerations,
+                priv_labels=priv_labels
+            )
 
             # Add global configuration for privileged services
             # Check if the ConfigMap already exists, if it does, update it
