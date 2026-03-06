@@ -287,10 +287,9 @@ def parse_cpu(string: str) -> float:
 
 class KubernetesController(ControllerInterface):
     def __init__(self, logger, namespace: str, prefix: str, priority: str, dependency_priority: str,
-                 cpu_reservation: float, linux_node_selector: Selector, labels=None, log_level="INFO", core_env={},
-                 cluster_pod_list=True, enable_pod_security=False,
-                 default_service_tolerations=[],
-                 priv_labels=None):
+                 cpu_reservation: float, cpu_slack: float, linux_node_selector: Selector, labels=None,
+                 log_level="INFO", core_env={}, cluster_pod_list=True, enable_pod_security=False,
+                 default_service_tolerations=[], priv_labels=None):
         # Try loading a kubernetes connection from either the fact that we are running
         # inside of a cluster, or have a config file that tells us how
         try:
@@ -316,6 +315,7 @@ class KubernetesController(ControllerInterface):
         self.priority: str = priority
         self.dependency_priority: str = dependency_priority
         self.cpu_reservation: float = max(0.0, min(cpu_reservation, 1.0))
+        self.cpu_slack: float = max(1.0, cpu_slack + 1.0)
         self.logger = logger
         self.log_level: str = log_level
         self._labels: dict[str, str] = labels or {}
@@ -770,7 +770,7 @@ class KubernetesController(ControllerInterface):
             volume_mounts=mounts,
             security_context=security_context,
             resources=V1ResourceRequirements(
-                limits={'cpu': cores, 'memory': f'{memory}Mi'},
+                limits={'cpu': cores*self.cpu_slack, 'memory': f'{memory}Mi'},
                 requests={'cpu': cores*self.cpu_reservation, 'memory': f'{min_memory}Mi'},
             ),
             liveness_probe=health_probe,
