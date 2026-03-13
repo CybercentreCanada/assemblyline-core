@@ -27,7 +27,6 @@ from assemblyline.common.forge import (
 )
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.metrics import MetricsFactory
-from assemblyline.common.postprocess import ActionWorker
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.messages.changes import Operation, ServiceChange
 from assemblyline.odm.messages.dispatcher_heartbeat import Metrics
@@ -234,10 +233,6 @@ class Dispatcher(ThreadedCoreBase):
         # already processed
         self.timeout_queue: Queue[DispatchAction] = Queue()
 
-        # Utility object to handle post-processing actions
-        self.postprocess_worker = ActionWorker(cache=False, config=self.config, datastore=self.datastore,
-                                               redis_persist=self.redis_persist)
-
         # Update bad sid list
         self.redis_bad_sids = Set(BAD_SID_HASH, host=self.redis_persist)
         self.bad_sids: set[str] = set(self.redis_bad_sids.members())
@@ -249,7 +244,6 @@ class Dispatcher(ThreadedCoreBase):
     def stop(self):
         super().stop()
         self.service_change_watcher.stop()
-        self.postprocess_worker.stop()
 
     def try_run(self):
         self.log.info(f'Using dispatcher id {self.instance_id}')

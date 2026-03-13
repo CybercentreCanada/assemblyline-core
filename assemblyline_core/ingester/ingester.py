@@ -25,7 +25,6 @@ from assemblyline.common.exceptions import get_stacktrace_info
 from assemblyline.common.importing import load_module_by_path
 from assemblyline.common.isotime import now, now_as_iso
 from assemblyline.common.metrics import MetricsFactory
-from assemblyline.common.postprocess import ActionWorker
 from assemblyline.common.str_utils import dotdump, safe_str
 from assemblyline.datastore.exceptions import DataStoreException
 from assemblyline.filestore import CorruptedFileStoreException, FileStoreException
