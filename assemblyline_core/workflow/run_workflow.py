@@ -222,7 +222,7 @@ class WorkflowManager(ServerBase):
 
             if run_once:
                 break
-            time.sleep(30)
+            self.sleep_with_heartbeat(30)
             self.start_ts = end_ts
 
 
