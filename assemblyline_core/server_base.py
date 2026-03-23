@@ -161,7 +161,7 @@ class ServerBase(threading.Thread):
             with io.open(self.config.logging.heartbeat_file, 'ab'):
                 os.utime(self.config.logging.heartbeat_file, times=utime_timestamp)
 
-    def sleep_with_heartbeat(self, duration):
+    def sleep_with_heartbeat(self, duration: float):
         """Sleep while calling heartbeat periodically."""
         while duration > 0:
             self.heartbeat()
