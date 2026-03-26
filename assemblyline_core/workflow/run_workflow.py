@@ -21,7 +21,7 @@ class WorkflowManager(ServerBase):
         self.datastore = forge.get_datastore(self.config)
 
         # Get the earliest alert that has yet to have been triaged (or default to the last day)
-        alert = (self.datastore.alert.search("status:TRIAGE", sort='reporting_ts desc', rows=1,
+        alert = (self.datastore.alert.search("status:TRIAGE", sort='reporting_ts asc', rows=1,
                                              fl='reporting_ts', as_obj=False)['items'] \
                                                 or \
                                             [{'reporting_ts': 'now-1d/d'}])[0]
