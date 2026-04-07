@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import docker
 from assemblyline.common import isotime
+from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
 from assemblyline.odm.messages.changes import Operation, ServiceChange
 from assemblyline.odm.models.config import Mount, Selector
 from assemblyline.odm.models.service import DockerConfig, Service
@@ -499,9 +500,9 @@ class ServiceUpdater(ThreadedCoreBase):
             # Install function for services
             def install_service(service_name: str, install_data: dict) -> str:
                 if self.config.services.preferred_update_channel == 'stable':
-                    tag = 'stable'
+                    tag = f'{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.stable'
                 else:
-                    tag = 'latest'
+                    tag = f'{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.latest'
                 try:
                     service = Service(
                         {'name': service_name,
