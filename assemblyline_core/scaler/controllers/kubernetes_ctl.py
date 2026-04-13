@@ -904,7 +904,8 @@ class KubernetesController(ControllerInterface):
             security_context=V1PodSecurityContext(fs_group=1000),
             service_account_name=service_account,
             affinity=selector_to_node_affinity(self.linux_node_selector),
-            tolerations=self.default_service_tolerations
+            tolerations=self.default_service_tolerations,
+            automount_service_account_token=False,
         )
 
         if use_pull_secret:
