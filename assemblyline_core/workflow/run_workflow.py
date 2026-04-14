@@ -1,16 +1,16 @@
 #!/usr/bin/env python
 
-import elasticapm
 import time
 
-from assemblyline_core.server_base import ServerBase
+import elasticapm
 from assemblyline.common import forge
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.common.str_utils import safe_str
-
 from assemblyline.datastore.exceptions import SearchException
 from assemblyline.odm.models.alert import Event
 from assemblyline.odm.models.workflow import Workflow
+
+from assemblyline_core.server_base import ServerBase
 
 
 class WorkflowManager(ServerBase):
@@ -19,7 +19,13 @@ class WorkflowManager(ServerBase):
 
         self.config = forge.get_config()
         self.datastore = forge.get_datastore(self.config)
-        self.start_ts = f"{self.datastore.ds.now}/{self.datastore.ds.day}-1{self.datastore.ds.day}"
+
+        # Get the earliest alert that has yet to have been triaged (or default to the last day)
+        alert = (self.datastore.alert.search("status:TRIAGE", sort='reporting_ts asc', rows=1,
+                                             fl='reporting_ts', as_obj=False)['items'] \
+                                                or \
+                                            [{'reporting_ts': 'now-1d/d'}])[0]
+        self.start_ts = alert['reporting_ts']
 
         if self.config.core.metrics.apm_server.server_url is not None:
             self.log.info(f"Exporting application metrics to: {self.config.core.metrics.apm_server.server_url}")
