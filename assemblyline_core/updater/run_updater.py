@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import docker
 from assemblyline.common import isotime
+from assemblyline.common.constants import SERVICE_API_KEY_HASH
 from assemblyline.common.version import FRAMEWORK_VERSION, SYSTEM_VERSION
 from assemblyline.odm.messages.changes import Operation, ServiceChange
 from assemblyline.odm.models.config import Mount, Selector
@@ -57,13 +58,13 @@ CONTAINER_CHECK_INTERVAL = int(os.getenv("CONTAINER_CHECK_INTERVAL", "300"))
 API_TIMEOUT = 90
 NAMESPACE = os.getenv('NAMESPACE', None)
 INHERITED_VARIABLES: list[str] = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy',
-                                  'https_proxy', 'no_proxy', 'SERVICE_API_HOST', 'SERVICE_API_KEY']
+                                  'https_proxy', 'no_proxy', 'SERVICE_API_HOST']
 
 AL_REGISTRATION_NETWORK = os.environ.get("AL_REGISTRATION_NETWORK", 'al_registration')
 CONFIGURATION_HOST_PATH = os.getenv('CONFIGURATION_HOST_PATH', 'service_config')
 CONFIGURATION_CONFIGMAP = os.getenv('KUBERNETES_AL_CONFIG', None)
 SERVICE_API_HOST = os.environ.get('SERVICE_API_HOST', "http://service_server:5003")
-SERVICE_API_KEY = os.environ.get('SERVICE_API_KEY', 'ThisIsARandomAuthKey...ChangeMe!')
+API_KEY_TIMEOUT = 60 * 60
 
 RESTRICTED_POD_SECUTITY_CONTEXT = V1SecurityContext(
     run_as_user=1000,
@@ -440,7 +441,7 @@ class KubernetesUpdateInterface:
 
 
 class ServiceUpdater(ThreadedCoreBase):
-    def __init__(self, redis_persist=None, redis=None, logger=None, datastore=None):
+    def __init__(self, redis_persist=None, redis=None, logger=None, datastore=None) -> None:
         super().__init__('assemblyline.service.updater', logger=logger, datastore=datastore,
                          redis_persist=redis_persist, redis=redis)
 
@@ -448,6 +449,7 @@ class ServiceUpdater(ThreadedCoreBase):
         self.container_install: Hash[dict[str, Any]] = Hash('container-install', self.redis_persist)
         self.latest_service_tags: Hash[dict[str, str]] = Hash('service-tags', self.redis_persist)
         self.service_events = EventSender('changes.services', host=self.redis)
+        self.container_keys: Hash[dict[str, Any]] = Hash(SERVICE_API_KEY_HASH, self.redis_persist)
 
         self.incompatible_services = set()
         self.service_change_watcher = EventWatcher(self.redis, deserializer=ServiceChange.deserialize)
@@ -503,6 +505,9 @@ class ServiceUpdater(ThreadedCoreBase):
                     tag = f'{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.stable'
                 else:
                     tag = f'{FRAMEWORK_VERSION}.{SYSTEM_VERSION}.latest'
+
+                api_key = uuid.uuid4().hex + uuid.uuid4().hex
+
                 try:
                     service = Service(
                         {'name': service_name,
@@ -520,6 +525,13 @@ class ServiceUpdater(ThreadedCoreBase):
                                          f"Defaulting to '{tag}' tag...")
                         tag_name = tag
 
+                    # Install the api key
+                    self.container_keys.add(api_key, {
+                        'key': api_key,
+                        'allow_registry_writing': True,
+                        'expiry': isotime.now_as_iso(API_KEY_TIMEOUT)
+                    })
+
                     docker_config = dict(image=f"{image_name}:{tag_name}")
                     if auth:
                         docker_config.update(dict(registry_username=auth['username'],
@@ -534,6 +546,7 @@ class ServiceUpdater(ThreadedCoreBase):
                     env = {
                         "SERVICE_TAG": tag_name,
                         "REGISTER_ONLY": 'true',
+                        "SERVICE_API_KEY": api_key,
                     }
 
                     # Update environment with service defaults
@@ -550,6 +563,9 @@ class ServiceUpdater(ThreadedCoreBase):
                 except Exception as e:
                     self.log.error(
                         f"[CI] Service {service_name} has failed to install. Install procedure cancelled... [{str(e)}]")
+                finally:
+                    self.container_keys.pop(api_key)
+
                 return f"{service_name}_{str(tag_name).replace('stable', '')}"
 
             # Start up installs for services in parallel
@@ -612,8 +628,18 @@ class ServiceUpdater(ThreadedCoreBase):
 
             # Update function for services
             def update_service(service_name: str, update_data: dict) -> str:
-                self.log.info(f"[CU] Service {service_name} is being updated to version {update_data['latest_tag']}...")
+                self.log.info("[CU] Service %s is being updated to version %s...",
+                              service_name, update_data['latest_tag'])
 
+                # Create an api key
+                api_key = uuid.uuid4().hex + uuid.uuid4().hex
+                self.container_keys.add(api_key, {
+                    'key': api_key,
+                    'allow_registry_writing': True,
+                    'expiry': isotime.now_as_iso(API_KEY_TIMEOUT)
+                })
+
+                # Initailize the conatiner configuration
                 docker_config = dict(image=update_data['image'])
 
                 # Load authentication params
@@ -632,6 +658,7 @@ class ServiceUpdater(ThreadedCoreBase):
                 env = {
                     "SERVICE_TAG": update_data['latest_tag'],
                     "REGISTER_ONLY": 'true',
+                    "SERVICE_API_KEY": api_key,
                 }
 
                 # Update environment with service defaults
@@ -648,6 +675,8 @@ class ServiceUpdater(ThreadedCoreBase):
                 except Exception as e:
                     self.log.error(
                         f"[CU] Service {service_name} has failed to update. Update procedure cancelled... [{str(e)}]")
+                finally:
+                    self.container_keys.pop(api_key)
                 return service_key
 
             # Start up updates for services in parallel
