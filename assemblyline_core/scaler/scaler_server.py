@@ -743,7 +743,7 @@ class ScalerServer(ThreadedCoreBase):
             return 1
         return self.config.core.scaler.memory_overallocation
 
-    def update_scaling(self):
+    def update_scaling(self) -> None:
         """Check if we need to scale any services up or down."""
         pool = Pool()
         while self.sleep(SCALE_INTERVAL):
@@ -811,7 +811,7 @@ class ScalerServer(ThreadedCoreBase):
                     drop = [_p for _p in prof if _p.cpu > free_cpu or _p.ram > free_memory]
                     if drop:
                         summary = {_p.name: (_p.cpu, _p.ram) for _p in drop}
-                        self.log.debug(f"Can't make more because not enough resources {summary}")
+                        self.log.debug("Can't make more because not enough resources %s", summary)
                     prof = [_p for _p in prof if _p.cpu <= free_cpu and _p.ram <= free_memory]
                     return prof
 
