@@ -489,12 +489,18 @@ class ServiceUpdater(ThreadedCoreBase):
         # Add any mounts defined in the service defaults to the updater interface so they get applied to all updates/installs
         self.mounts = self.config.core.scaler.service_defaults.mounts
 
+        # If there are no services installed push the auto install services to the install table
+        installed_service_names = list(self.datastore.service_delta.keys())
+        if len(installed_service_names) == 0:
+            for service in self.config.core.updater.auto_install:
+                self.container_install.add(service.name, {'image': service.image})
+
     def _handle_service_change_event(self, data: Optional[ServiceChange]):
         if data is not None:
             if data.operation == Operation.Incompatible:
                 self.incompatible_services.add(data.name)
 
-    def container_installs(self):
+    def container_installs(self) -> None:
         """Go through the list of services and check what are the latest tags for it"""
         while self.running:
             self.log.info("[CI] Installing all services marked for install...")
@@ -561,8 +567,8 @@ class ServiceUpdater(ThreadedCoreBase):
                     )
 
                 except Exception as e:
-                    self.log.error(
-                        f"[CI] Service {service_name} has failed to install. Install procedure cancelled... [{str(e)}]")
+                    self.log.error("[CI] Service %s has failed to install. Install procedure cancelled... [%s]",
+                                   service_name, e)
                 finally:
                     self.container_keys.pop(api_key)
 
@@ -574,17 +580,18 @@ class ServiceUpdater(ThreadedCoreBase):
                 for service_name, install_data in self.container_install.items().items():
                     install_threads.append(service_installs_exec.submit(install_service, service_name, install_data))
 
-            # Check the status of the container installs
-            while install_threads:
-                # Delay each check by 5 seconds to give the container adequate time to perform version registration
-                time.sleep(5)
-                pending_threads = []
-                for thread in install_threads:
-                    if not thread.done():
-                        # Add thead to the list of still pending jobs
-                        pending_threads.append(thread)
-                    else:
-                        service_key = thread.result()
+                # Check the status of the container installs
+                while install_threads:
+                    # Delay each check by 5 seconds to give the container adequate time to perform version registration
+                    time.sleep(5)
+                    pending_threads = []
+                    for thread in install_threads:
+                        if not thread.done():
+                            # Add thead to the list of still pending jobs
+                            pending_threads.append(thread)
+                            continue
+
+                        service_key: str = thread.result()
                         service_name, latest_tag = service_key.split("_")
 
                         if self.datastore.service.get_if_exists(service_key):
@@ -612,13 +619,13 @@ class ServiceUpdater(ThreadedCoreBase):
                                 f"service key ({service_key}) does not exist. Install procedure cancelled...")
                         self.container_install.pop(service_name)
 
-                # Update with still pending and loop until all are completed/failed
-                install_threads = pending_threads
+                    # Update with still pending and loop until all are completed/failed
+                    install_threads = pending_threads
 
             # Clear out any old dead containers
             self.controller.cleanup_stale()
 
-            self.log.info(f"[CI] Done installing services, waiting {UPDATE_CHECK_INTERVAL} seconds for next install...")
+            self.log.info("[CI] Done installing services, waiting {UPDATE_CHECK_INTERVAL} seconds for next install...")
             time.sleep(UPDATE_CHECK_INTERVAL)
 
     def container_updates(self):
