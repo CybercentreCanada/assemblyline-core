@@ -163,32 +163,9 @@ class HarborRegistry(ContainerRegistry):
         return []
 
 
-class JfrogRegistry(ContainerRegistry):
-    def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None, token_server=None):
-        # Find latest tag for each types
-        # JFrog Artifactory Docker registry API: https://docs.jfrog.com/artifactory/reference/listDockerTags
-        # The repo key is derived from the first segment of the image name
-        repo_key, repo_path = image_name.split('/', 1)
-        url = f"https://{server}/artifactory/api/docker/{repo_key}/v2/{repo_path}/tags/list"
-
-        # Get tag list
-        headers = {}
-        if auth:
-            headers["Authorization"] = auth
-
-        resp = self._perform_request(url, headers, verify, proxies)
-
-        # Test for valid response
-        if resp and resp.ok:
-            resp_data = resp.json()
-            return resp_data['tags'] or []
-        return []
-
-
 REGISTRY_TYPE_MAPPING = {
     'docker': DockerRegistry(),
-    'harbor': HarborRegistry(),
-    'jfrog': JfrogRegistry()
+    'harbor': HarborRegistry()
 }
 
 def get_registry_config(docker_config: DockerConfig, system_config: SystemConfig) -> Dict[str, str]:
