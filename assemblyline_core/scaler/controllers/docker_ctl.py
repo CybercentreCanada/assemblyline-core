@@ -74,7 +74,7 @@ class DockerController(ControllerInterface):
         self._reserved_cpu = 0.3
         self._reserved_mem = 500
         self._profiles = {}
-        self.service_server = self.find_service_server()
+        self.service_servers = self.find_service_server()
 
         # Prefetch some info that shouldn't change while we are running
         self._info = self.client.info()
@@ -120,37 +120,40 @@ class DockerController(ControllerInterface):
                              "killed by OOM")
 
 
-    def find_service_server(self):
-        service_server_container = None
-        while service_server_container is None:
-            for container in self.client.containers.list():
-                if 'service_server' in container.name:
-                    service_server_container = container
-                    self.log.info(f'Found the service server at: {container.id} [{container.name}]')
-                    break
-            if not service_server_container:
+    def find_service_server(self, service_server_containers=None):
+        while not service_server_containers:
+            service_server_containers = [
+                container for container in self.client.containers.list()
+                if 'service_server' in container.name
+            ]
+            if not service_server_containers:
                 time.sleep(1)
-        return service_server_container
+        for container in service_server_containers:
+            self.log.info(f'Found the service server at: {container.id} [{container.name}]')
+        return service_server_containers
+
+    def _connect_service_servers_to_network(self, network):
+        connected_containers = {c.name for c in network.containers}
+        for service_server in self.service_servers:
+            if service_server.name not in connected_containers:
+                self._connect_to_network(service_server, network, aliases=['service-server'])
+                connected_containers.add(service_server.name)
 
     def _refresh_service_networks(self):
         while True:
             # noinspection PyBroadException
             try:
-                # Make sure the server is attached to all networks
+                self.service_servers = self.find_service_server([
+                    container for container in self.client.containers.list()
+                    if 'service_server' in container.name
+                ])
+
+                # Make sure the servers are attached to all networks
                 for service_name in self.networks:
                     network = self._get_network(service_name)
-                    if self.service_server.name not in {c.name for c in network.containers}:
-                        self._connect_to_network(self.service_server, self.networks[service_name],
-                                                 aliases=['service-server'])
+                    self._connect_service_servers_to_network(network)
 
-                # As long as the current service server is still running, just block its exit code in this thread
-                try:
-                    self.service_server.wait()
-                except docker.errors.NotFound:
-                    pass
-
-                # If it does return, find the new service server
-                self.service_server = self.find_service_server()
+                time.sleep(NETWORK_REFRESH_INTERVAL)
             except Exception:
                 self.log.exception("An error occurred while watching the service server.")
 
@@ -186,9 +189,10 @@ class DockerController(ControllerInterface):
             raise e
         except docker.errors.NotFound as e:
             if aliases == ['service-server']:
-                # We've lost our service-server container, time to find another
-                self.service_server = self.find_service_server()
-                network.connect(self.service_server, aliases=aliases)
+                # We've lost a service-server container, refresh and connect any missing servers
+                self.service_servers = self.find_service_server()
+                for service_server in self.service_servers:
+                    self._connect_to_network(service_server, network, aliases=aliases)
                 return
             raise e
 
@@ -564,8 +568,7 @@ class DockerController(ControllerInterface):
         except NotFound:
             network = self.networks[service_name] = self.client.networks.create(name=network_name, internal=True)
 
-        if self.service_server.name not in {c.name for c in network.containers}:
-            self._connect_to_network(self.service_server, self.networks[service_name], aliases=['service-server'])
+        self._connect_service_servers_to_network(network)
 
         return network
 
