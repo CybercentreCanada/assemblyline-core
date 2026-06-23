@@ -120,7 +120,8 @@ class DockerController(ControllerInterface):
                              "killed by OOM")
 
 
-    def find_service_server(self, service_server_containers=None):
+    def find_service_server(self):
+        service_server_containers = None
         while not service_server_containers:
             service_server_containers = [
                 container for container in self.client.containers.list()
@@ -143,10 +144,7 @@ class DockerController(ControllerInterface):
         while True:
             # noinspection PyBroadException
             try:
-                self.service_servers = self.find_service_server([
-                    container for container in self.client.containers.list()
-                    if 'service_server' in container.name
-                ])
+                self.service_servers = self.find_service_server()
 
                 # Make sure the servers are attached to all networks
                 for service_name in self.networks:
