@@ -16,7 +16,7 @@ def test_find_service_server_accepts_container_list():
     service_servers[1].name = 'assemblyline-service_server-2'
     service_servers[1].id = 'id-2'
 
-    assert controller.find_service_server(service_servers) == service_servers
+    assert controller.find_service_server() == service_servers
     assert controller.log.info.call_count == 2
 
 
