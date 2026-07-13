@@ -14,7 +14,7 @@ from datemath import dm
 
 from assemblyline_core.server_base import ServerBase
 from assemblyline_core.dispatching.dispatcher import BAD_SID_HASH
-from assemblyline.common import forge
+from assemblyline.common import forge, chunk
 from assemblyline.common.isotime import epoch_to_iso, now_as_iso
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
@@ -27,7 +27,8 @@ if TYPE_CHECKING:
     from assemblyline.datastore.collection import ESCollection
 
 
-def file_delete_worker(logger, filestore_urls, file_batch, archive_filestore_urls=None) -> list[tuple[str, bool]]:
+def file_delete_worker(logger, filestore_urls, file_batch: list[tuple[str, bool]],
+                       archive_filestore_urls=None) -> list[tuple[str, bool]]:
     try:
         filestore = FileStore(*filestore_urls)
         if archive_filestore_urls and filestore_urls != archive_filestore_urls:
@@ -35,37 +36,48 @@ def file_delete_worker(logger, filestore_urls, file_batch, archive_filestore_url
         else:
             archivestore = filestore
 
-        def filestore_delete(item: tuple[str, bool]) -> tuple[Optional[str], Optional[bool]]:
-            sha256, from_archive = item
-            if from_archive:
-                archivestore.delete(sha256)
-                if not archivestore.exists(sha256):
-                    return sha256, True
-            else:
-                filestore.delete(sha256)
-                if not filestore.exists(sha256):
-                    return sha256, False
-            return None, None
-
-        return _file_delete_worker(logger, filestore_delete, file_batch)
+        return _file_delete_worker(logger, filestore, archivestore, file_batch)
 
     except Exception as error:
         logger.exception("Error in filestore worker: " + str(error))
     return []
 
 
-ActionSignature = Callable[[tuple[str, bool]], tuple[Optional[str], Optional[bool]]]
+def _confirm_delete(store, from_archive, sha256: str) -> tuple[Optional[str], Optional[bool]]:
+    if not store.exists(sha256):
+        return sha256, from_archive
+    return None, None
 
 
-def _file_delete_worker(logger, delete_action: ActionSignature, file_batch) -> list[tuple[str, bool]]:
+def _file_delete_worker(logger, filestore, archivestore, file_batch: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
     finished_files: list[tuple[str, bool]] = []
     try:
-        futures = []
 
-        with ThreadPoolExecutor(8) as pool:
-            for filename in file_batch:
-                futures.append(pool.submit(delete_action, filename))
+        with ThreadPoolExecutor(16) as pool:
+            # Delete the two batches in parallel if needed
+            futures: list[Future] = []
+            archive_files = [sha256 for sha256, from_archive in file_batch if from_archive]
+            hot_files = [sha256 for sha256, from_archive in file_batch if not from_archive]
+            futures.extend(
+                pool.submit(archivestore.delete_batch, batch)
+                for batch in chunk.chunk(archive_files, archivestore.delete_batch_chunk_size())
+            )
+            futures.extend(
+                pool.submit(filestore.delete_batch, batch)
+                for batch in chunk.chunk(hot_files, filestore.delete_batch_chunk_size())
+            )
 
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as error:
+                    logger.exception("Error in filestore worker: " + str(error))
+
+            # It is CRITICALLY IMPORTANT that we don't delete the file records
+            # for files that do exists, confirm that we have actually deleted files
+            # before we procede with removing the datastore records
+            futures = [pool.submit(_confirm_delete, filestore, False, filename) for filename in hot_files]
+            futures.extend(pool.submit(_confirm_delete, archivestore, True, filename) for filename in archive_files)
             for future in as_completed(futures):
                 try:
                     erased_name, from_archive = future.result()
