@@ -314,6 +314,7 @@ class ScalerServer(ThreadedCoreBase):
         priv_labels = {}
 
         service_defaults_config = self.config.core.scaler.service_defaults
+        self.max_pending = max(1, self.config.core.scaler.max_pending)
 
         # If Scaler has envs that set service-server env, then that should override configured values
         if SERVICE_API_HOST:
@@ -807,7 +808,10 @@ class ScalerServer(ThreadedCoreBase):
                 # Make adjustments to the targets until everything is satisified
                 # or we don't have the resouces to make more adjustments
                 def trim(prof: list[ServiceProfile]):
+                    # only consider services where more are desired
                     prof = [_p for _p in prof if _p.desired_instances > targets[_p.name]]
+                    # only consider services where there is room for more pending containers
+                    prof = [_p for _p in prof if _p.running_instances + self.max_pending > targets[_p.name]]
                     drop = [_p for _p in prof if _p.cpu > free_cpu or _p.ram > free_memory]
                     if drop:
                         summary = {_p.name: (_p.cpu, _p.ram) for _p in drop}
@@ -817,7 +821,7 @@ class ScalerServer(ThreadedCoreBase):
 
                 remaining_profiles: list[ServiceProfile] = trim(list(all_profiles.values()))
                 while remaining_profiles:
-                    # TODO do we need to add balancing metrics other than 'least running' for this? probably
+                    # Prioritize by adding resources to services with the least instances requested first.
                     remaining_profiles.sort(key=lambda _p: targets[_p.name])
 
                     # Add one for the profile at the bottom
