@@ -38,7 +38,7 @@ setup(
     install_requires=[
         'assemblyline',
         'docker',
-        'kubernetes',
+        'kubernetes>=36.0.1',
     ],
     extras_require={
         'test': [
