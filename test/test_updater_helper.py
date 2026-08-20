@@ -2,27 +2,31 @@ from unittest.mock import MagicMock, patch
 
 from assemblyline_core.updater.helper import AzureContainerRegistry
 
-
 SERVER = "registry.example"
 IMAGE_NAME = "namespace/service"
 FIRST_PAGE_URL = f"https://{SERVER}/v2/{IMAGE_NAME}/tags/list?n=1000"
 NEXT_PAGE_URL = f"https://{SERVER}/v2/{IMAGE_NAME}/tags/list?n=1000&last=tag-b"
 
 
-def _make_response(tags, link_header=None):
+def _make_response(tags, links=None):
     resp = MagicMock()
     resp.ok = True
     resp.json.return_value = {"tags": tags}
-    resp.headers = {"Link": link_header} if link_header else {}
+    resp.links = links or {}
     return resp
 
 
 def test_azure_registry_follows_pagination_links():
     first_page = _make_response(
         ["tag-a", "tag-b"],
-        link_header=f'<{NEXT_PAGE_URL}>; rel="next"',
+        links= {
+            'next': {
+                'url': NEXT_PAGE_URL,
+                'rel': 'next'
+            }
+        }
     )
-    second_page = _make_response(["tag-c"], link_header=None)
+    second_page = _make_response(["tag-c"], links=None)
     requested_urls = []
 
     def fake_get(url, headers=None, verify=None, proxies=None):

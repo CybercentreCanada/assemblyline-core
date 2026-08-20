@@ -105,19 +105,16 @@ class AzureContainerRegistry(ContainerRegistry):
             resp_data = resp.json()
             tags.extend(resp_data.get('tags') or [])
 
-            # Follow the 'Link' header for pagination (RFC 5988), as documented by the Docker
-            # Registry HTTP API V2 spec. ACR caps each page at 1000 tags regardless of 'n', so
-            # repositories with more tags than that require multiple requests to retrieve them all.
-            link_header = resp.headers.get('Link')
-            if not link_header:
+            # Link header format: <https://{server}/v2/{image_name}/tags/list?n=1000&last=...>; rel="next"
+            next_link = resp.links.get("next")
+            if not next_link:
+                # If there's no next link, we've reached the last page of results
                 break
 
-            # Link header format: <https://{server}/v2/{image_name}/tags/list?n=1000&last=...>; rel="next"
-            link_match = re.match(r'<(?P<url>[^>]+)>', link_header)
-            if not link_match:
-                break
-            next_url = link_match.group('url')
+            # Prepare the next URL for the subsequent request. The 'next' link may be relative or absolute.
+            next_url = next_link["url"]
             if next_url.startswith('/'):
+                # Resolve relative URL to absolute URL if necessary
                 next_url = f"https://{server}{next_url}"
             resp = self._perform_request(next_url, headers, verify, proxies)
 
