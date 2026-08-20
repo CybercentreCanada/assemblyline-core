@@ -1,5 +1,6 @@
 PAUSABLE_COMPONENTS = ['ingester', 'dispatcher']
 
+
 def normalize_hashlist_item(tag_type: str, tag_value: str) -> str:
     # Normalize tag data pertaining to domains or URIs
     if tag_type.endswith('.domain'):
