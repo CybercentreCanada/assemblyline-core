@@ -70,7 +70,13 @@ class DockerRegistry(ContainerRegistry):
 class AzureContainerRegistry(ContainerRegistry):
     def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None, token_server=None):
         # Find latest tag for each types
-        url = f"https://{server}/v2/{image_name}/tags/list"
+        # Explicitly request the maximum page size (1000) supported by ACR. Without the 'n' parameter,
+        # ACR defaults to only 100 tags per page, alphabetically sorted (not by push date/time).
+        # Repositories with more tags than the page size (e.g. long-running services with nightly
+        # builds) would silently have their most recent tags dropped if pagination isn't followed,
+        # since lexicographic ordering of variable-length build numbers doesn't match numeric order
+        # (e.g. "100" sorts before "99").
+        url = f"https://{server}/v2/{image_name}/tags/list?n=1000"
 
         # Get tag list
         headers = {}
@@ -94,12 +100,25 @@ class AzureContainerRegistry(ContainerRegistry):
                 resp = self._perform_request(url, headers, verify, proxies)
 
         # At this point, we should have a response from the API
-        if resp and resp.ok:
-            # Test for positive list of tags
+        tags = []
+        while resp and resp.ok:
             resp_data = resp.json()
-            return resp_data['tags'] or []
+            tags.extend(resp_data.get('tags') or [])
 
-        return []
+            # Link header format: <https://{server}/v2/{image_name}/tags/list?n=1000&last=...>; rel="next"
+            next_link = resp.links.get("next")
+            if not next_link:
+                # If there's no next link, we've reached the last page of results
+                break
+
+            # Prepare the next URL for the subsequent request. The 'next' link may be relative or absolute.
+            next_url = next_link["url"]
+            if next_url.startswith('/'):
+                # Resolve relative URL to absolute URL if necessary
+                next_url = f"https://{server}{next_url}"
+            resp = self._perform_request(next_url, headers, verify, proxies)
+
+        return tags
 
 class GitHubContainerRegistry(ContainerRegistry):
     def _get_proprietary_registry_tags(self, server, image_name, auth, verify, proxies=None, token_server=None):
@@ -300,6 +319,8 @@ def get_latest_tag_for_service(service_config: ServiceConfig, system_config: Sys
         tags = registry._get_proprietary_registry_tags(server, image_name, auth,
                                                        not system_config.services.allow_insecure_registry,
                                                        proxies, token_server)
+        logger.info(f"{prefix}Fetched {len(tags)} raw tag(s) for service {service_name} - {image_name} "
+                f"from {server} before filtering.")
     # Pre-filter tags to only consider 'compatible' tags relative to the running system
     tags = [tag for tag in tags
             if re.match(f"({FRAMEWORK_VERSION})\\.({SYSTEM_VERSION})\\.\\d+\\.({update_channel})\\d+", tag)]
