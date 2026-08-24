@@ -12,10 +12,9 @@ Row = namedtuple('Row', ['timestamp', 'busy', 'throughput'])
 
 
 class Collection:
-    def __init__(self, period, ttl=None):
+    """A buffer for metrics data from multiple instances of multiple services."""
+    def __init__(self, period, ttl=None) -> None:
         """
-        A buffer for metrics data from multiple instances of multiple services.
-
         :param period: Expected seconds between updates
         :param ttl: Seconds before a message is dropped from the buffer
         """
@@ -24,6 +23,7 @@ class Collection:
         self.services: Dict[str, Dict[str, Row]] = {}
 
     def update(self, service, host, busy_seconds, throughput):
+        """Store a new record for a given host."""
         # Load the sequence of data points that
         try:
             hosts = self.services[service]
@@ -34,6 +34,7 @@ class Collection:
         hosts[host] = Row(time.time(), busy_seconds, throughput)
 
     def read(self, service):
+        """Read how many instances of a service are known and how busy they are."""
         now = time.time()
 
         # Load the last messages from this service
