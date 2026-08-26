@@ -451,10 +451,14 @@ class ScalerServer(ScalerBase):
                         if profile is None:
                             continue
 
-                        # We are only looking at services that have the ability to scale to zero
                         if profile.min_instances != 0:
-                            continue
+                            # Anything that has a min instance above zero, but is targeted to
+                            # zero needs to have scaling enabled
+                            if profile.target_instances == 0:
+                                scale_up.append(name)
+                            continue  # Otherwise ignore services with above zero min_instances
 
+                        # We are only looking at services that have the ability to scale to zero
                         # Check for services that need to having scaling re-enabled
                         if profile.queue_length > 0 and profile.target_instances == 0:
                             scale_up.append(name)
