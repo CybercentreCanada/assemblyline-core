@@ -42,7 +42,7 @@ from kubernetes.client import (
 )
 from kubernetes.client.rest import ApiException
 
-from assemblyline_core.scaler.controllers.kubernetes_ctl import (
+from assemblyline_core.scaler.controllers.kubernetes import (
     PRIVILEGED_SERVICE_ACCOUNT_NAME,
     create_docker_auth_config,
     selector_to_node_affinity,
