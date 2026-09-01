@@ -44,6 +44,10 @@ class ControllerInterface:
         """Set the target for running instances of a service."""
         raise NotImplementedError()
 
+    def get_unavailable(self) -> dict[str, int]:
+        """Report the number of pending containers from deployments monitored by the system."""
+        raise NotImplementedError()
+
     def restart(self, service: ServiceProfile):
         raise NotImplementedError()
 
