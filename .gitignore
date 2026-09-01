@@ -84,3 +84,4 @@ venv.bak/
 
 # Cython debug symbols
 cython_debug/
+kubernetes-metrics-adapter/assemblyline-kubernetes
