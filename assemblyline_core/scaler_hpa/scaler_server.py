@@ -524,3 +524,10 @@ class ScalerServer(ScalerBase):
                             profile.running_instances = 0
                             profile.duty_cycle = 0.7
 
+    def get_cpu_info(self, overallocation: bool) -> tuple[float, float]:
+        # Get the raw used resource numbers
+        return self.controller.cpu_info()
+
+    def get_memory_info(self, overallocation: bool) -> tuple[float, float]:
+        # Get the raw used resource numbers
+        return self.controller.memory_info()

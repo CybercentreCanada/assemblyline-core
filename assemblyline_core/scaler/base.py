@@ -243,44 +243,6 @@ class ScalerBase(ThreadedCoreBase):
             return 1
         return self.config.core.scaler.memory_overallocation
 
-    def get_cpu_info(self, overallocation: bool) -> tuple[float, float]:
-        # Get the raw used resource numbers
-        free_cpu, total_cpu = self.controller.cpu_info()
-
-        # Recalculate the amount of free resources expanding the total quantity by the overallocation
-        if overallocation:
-            used_cpu = total_cpu - free_cpu
-            free_cpu = total_cpu * self.get_cpu_overallocation() - used_cpu
-
-        # Include the service containers not counted in the raw numbers because they are pending
-        for name, pending in self.controller.get_unavailable().items():
-            profile = self.profiles.get(name)
-            if not profile or not pending:
-                continue
-
-            free_cpu = free_cpu - profile.container_config.cpu_cores * pending
-
-        return (free_cpu, total_cpu)
-
-    def get_memory_info(self, overallocation: bool) -> tuple[float, float]:
-        # Get the raw used resource numbers
-        free_memory, total_memory = self.controller.memory_info()
-
-        # Recalculate the amount of free resources expanding the total quantity by the overallocation
-        if overallocation:
-            used_memory = total_memory - free_memory
-            free_memory = total_memory * self.get_memory_overallocation() - used_memory
-
-        # Include the service containers not counted in the raw numbers because they are pending
-        for name, pending in self.controller.get_unavailable().items():
-            profile = self.profiles.get(name)
-            if not profile or not pending:
-                continue
-
-            free_memory = free_memory - profile.container_config.ram_mb * pending
-
-        return (free_memory, total_memory)
-
     def log_container_events(self):
         """The service status table may have references to containers that have crashed. Try to remove them all."""
         while self.sleep(CONTAINER_EVENTS_LOG_INTERVAL):
@@ -315,7 +277,8 @@ class ScalerBase(ThreadedCoreBase):
                     'memory_total': memory_total,
                     'cpu_total': cpu_total,
                     'memory_free': memory,
-                    'cpu_free': cpu
+                    'cpu_free': cpu,
+                    'pending_containers': sum(self.controller.get_unavailable().values())
                 }
                 export_metrics_once('scaler', Metrics, metrics, host=HOSTNAME,
                                     counter_type='scaler', config=self.config, redis=self.redis)
@@ -324,4 +287,10 @@ class ScalerBase(ThreadedCoreBase):
         raise NotImplementedError()
 
     def sync_metrics(self):
+        raise NotImplementedError()
+
+    def get_cpu_info(self, overallocation: bool) -> tuple[float, float]:
+        raise NotImplementedError()
+
+    def get_memory_info(self, overallocation: bool) -> tuple[float, float]:
         raise NotImplementedError()

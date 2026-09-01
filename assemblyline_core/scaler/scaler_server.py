@@ -729,3 +729,40 @@ class ScalerServer(ScalerBase):
                                 duty_cycle=profile.high_duty_cycle
                             )
 
+    def get_cpu_info(self, overallocation: bool) -> tuple[float, float]:
+        # Get the raw used resource numbers
+        free_cpu, total_cpu = self.controller.cpu_info()
+
+        # Recalculate the amount of free resources expanding the total quantity by the overallocation
+        if overallocation:
+            used_cpu = total_cpu - free_cpu
+            free_cpu = total_cpu * self.get_cpu_overallocation() - used_cpu
+
+        # Include the service containers not counted in the raw numbers because they are pending
+        for name, pending in self.controller.get_unavailable().items():
+            profile = self.profiles.get(name)
+            if not profile or not pending:
+                continue
+
+            free_cpu = free_cpu - profile.container_config.cpu_cores * pending
+
+        return (free_cpu, total_cpu)
+
+    def get_memory_info(self, overallocation: bool) -> tuple[float, float]:
+        # Get the raw used resource numbers
+        free_memory, total_memory = self.controller.memory_info()
+
+        # Recalculate the amount of free resources expanding the total quantity by the overallocation
+        if overallocation:
+            used_memory = total_memory - free_memory
+            free_memory = total_memory * self.get_memory_overallocation() - used_memory
+
+        # Include the service containers not counted in the raw numbers because they are pending
+        for name, pending in self.controller.get_unavailable().items():
+            profile = self.profiles.get(name)
+            if not profile or not pending:
+                continue
+
+            free_memory = free_memory - profile.container_config.ram_mb * pending
+
+        return (free_memory, total_memory)
