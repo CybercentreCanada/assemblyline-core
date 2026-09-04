@@ -23,5 +23,5 @@ The point value is increased:
 The point value is decreased:
  - When service instances are idle.
 
-The monitoring loop that applies these changes first lists all services that should be scaled up or down. Services being scaled down have this applied immediately. The list of services that should be scaled up are considered in order starting from the service with the least number of service instances currently allocated. Services are considered for scaling up until the limits of cluster resources are reached.
+The monitoring loop that applies these changes first lists all services that should be scaled up or down. Services being scaled down have this applied immediately. In order to limit how often a service starting later is completely starved of resources the list of services that should be scaled up are considered in order starting from the service with the least number of service instances currently allocated. Services are considered for scaling up until the limits of cluster resources are reached.
 
