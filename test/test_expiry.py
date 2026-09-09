@@ -1,12 +1,14 @@
 
 import pytest
 import random
+import threading
 import concurrent.futures
 
 from assemblyline.common.isotime import now_as_iso
 from assemblyline.datastore.helper import AssemblylineDatastore
 from assemblyline.odm.randomizer import random_model_obj
 
+import assemblyline_core.expiry.run_expiry
 from assemblyline_core.expiry.run_expiry import ExpiryManager
 
 MAX_OBJECTS = 10
@@ -60,9 +62,15 @@ def test_expire_all(config, ds_expiry, filestore):
     expiry = ExpiryManager(config=config, datastore=ds_expiry, filestore=filestore)
     expiry.running = True
     expiry.counter = FakeCounter()
+
+    assemblyline_core.expiry.run_expiry.QUERY_WORKER_CHECK_VOLUME = 0
+
     with concurrent.futures.ThreadPoolExecutor(5) as pool:
         for collection in expiry.expirable_collections:
-            expiry.feed_expiry_jobs(collection=collection, pool=pool, start='*', jobs=[])
+            if collection.name in expiry.fs_hashmap:
+                expiry.feed_expiry_jobs(collection=collection, pool=pool, start='*', jobs=[])
+            else:
+                pool.submit(expiry.run_collection, collection)
 
     for k, v in expiry_collections_len.items():
         assert v == expiry.counter.get(k)

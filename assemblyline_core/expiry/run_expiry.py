@@ -489,7 +489,7 @@ class ExpiryManager(ServerBase):
             except Exception as e:
                 self.log.exception(str(e))
 
-            if total_deleted > QUERY_WORKER_CHECK_VOLUME:
+            if total_deleted >= QUERY_WORKER_CHECK_VOLUME:
                 return
 
             # If the number deleted is small wait before running the delete command again
