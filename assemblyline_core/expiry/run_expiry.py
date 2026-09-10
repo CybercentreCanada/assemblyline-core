@@ -486,7 +486,7 @@ class ExpiryManager(ServerBase):
             try:
                 deleted = collection.simple_delete_by_query(query, sort='expiry_ts asc', max_docs=QUERY_DELETE_SIZE)
                 total_deleted += deleted
-                self.counter.increment(f'{collection.name}', increment_by=deleted)
+                self.counter.increment(collection.name, increment_by=deleted)
                 self.log.info(f"[{collection.name}] Deleted {deleted} items from the datastore...")
 
             except Exception as e:
