@@ -70,7 +70,7 @@ def test_expire_all(config, ds_expiry, filestore):
             if collection.name in expiry.fs_hashmap:
                 expiry.feed_expiry_jobs(collection=collection, pool=pool, start='*', jobs=[])
             else:
-                pool.submit(expiry.run_collection, collection)
+                pool.submit(expiry.run_collection_once, collection)
 
     for k, v in expiry_collections_len.items():
         assert v == expiry.counter.get(k)

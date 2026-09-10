@@ -427,21 +427,24 @@ class ExpiryManager(ServerBase):
         Perodically a workers will terminate and this calculation will be redone.
         """
         while self.running:
-            # Calculate how many queries we want to run
-            queries = self.day_chunks(collection)
+            self.run_collection_once(collection)
 
-            # prepare a thread pool suitable for that operation
-            with ThreadPoolExecutor(len(queries)) as pool:
-                # Prepare a signal so we can stop all the workers as desired
-                stop = threading.Event()
+    def run_collection_once(self, collection):
+        # Calculate how many queries we want to run
+        queries = self.day_chunks(collection)
 
-                # dispatch each of these queries
-                futures = [pool.submit(self.run_collection_query, collection, stop, query) for query in queries]
+        # prepare a thread pool suitable for that operation
+        with ThreadPoolExecutor(len(queries)) as pool:
+            # Prepare a signal so we can stop all the workers as desired
+            stop = threading.Event()
 
-                # wait for one of them to finish
-                for future in as_completed(futures):
-                    stop.set()
-                    future.result()
+            # dispatch each of these queries
+            futures = [pool.submit(self.run_collection_query, collection, stop, query) for query in queries]
+
+            # wait for one of them to finish
+            for future in as_completed(futures):
+                stop.set()
+                future.result()
 
     def day_chunks(self, collection):
         # Base no settings we will truncade expiry ranges by the day
