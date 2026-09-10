@@ -444,17 +444,17 @@ class ExpiryManager(ServerBase):
                     future.result()
 
     def day_chunks(self, collection):
-        # Figure out the range of time we want to build queries for
-        earliest = self.get_earliest_expiring(collection)
-        if not earliest:
-            return []
-        days = int((now() - earliest)/(60 * 60 * 24)) + 1
-
         # Base no settings we will truncade expiry ranges by the day
         if self.config.core.expiry.batch_delete:
             suffix = f"-{self.config.core.expiry.delay}h/d"
         else:
             suffix = f"-{self.config.core.expiry.delay}h"
+
+        # Figure out the range of time we want to build queries for
+        earliest = self.get_earliest_expiring(collection)
+        if not earliest:
+            return [f"expiry_ts: [* TO now{suffix}}}"]
+        days = int((now() - earliest)/(60 * 60 * 24)) + 1
 
         # construct the ranges that build queries covering all of those days, bounded by
         # the appropirately modifide NOW on the high end, and modfied to be open on the low end
