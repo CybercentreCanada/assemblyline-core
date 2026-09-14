@@ -15,7 +15,7 @@ from datemath import dm
 from assemblyline_core.server_base import ServerBase
 from assemblyline_core.dispatching.dispatcher import BAD_SID_HASH
 from assemblyline.common import forge, chunk
-from assemblyline.common.isotime import epoch_to_iso, now_as_iso
+from assemblyline.common.isotime import epoch_to_iso, now_as_iso, now
 from assemblyline.common.metrics import MetricsFactory
 from assemblyline.filestore import FileStore
 from assemblyline.odm.messages.expiry_heartbeat import Metrics
@@ -25,6 +25,9 @@ from assemblyline.remote.datatypes.set import Set
 
 if TYPE_CHECKING:
     from assemblyline.datastore.collection import ESCollection
+
+QUERY_DELETE_SIZE = 100_000
+QUERY_WORKER_CHECK_VOLUME = 5_000_000
 
 
 def file_delete_worker(logger, filestore_urls, file_batch: list[tuple[str, bool]],
@@ -215,12 +218,6 @@ class ExpiryManager(ServerBase):
         if not hot_file_list and not archive_file_list:
             self.log.warning(f'[{collection.name}] Expiry unable to clean up any of the files in filestore.')
 
-    def _simple_delete(self, collection: ESCollection, delete_query, number_to_delete):
-        self.heartbeat()
-        collection.delete_by_query(delete_query, index_type=self.index_type)
-        self.counter.increment(f'{collection.name}', increment_by=number_to_delete)
-        self.log.info(f"[{collection.name}] Deleted {number_to_delete} items from the datastore...")
-
     def _cleanup_canceled_submission(self, sid):
         # Allowing us at minimum 5 minutes to cleanup the submission
         self.heartbeat(int(time.time() + 5 * 60))
@@ -246,53 +243,47 @@ class ExpiryManager(ServerBase):
         # blob would be deleted anyway, leaving a file record with no filestore object
         delete_query = f"expiry_ts:{{{start} TO {end}]"
 
-        # check if we are dealing with an index that needs file cleanup
-        if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
-            # Delete associated files
-            delete_objects: list[tuple[str, bool]] = []
-            for item in collection.stream_search(
-                    delete_query, fl='id,from_archive', as_obj=False, index_type=self.index_type):
-                self.heartbeat()
-                delete_objects.append((item['id'], item.get('from_archive', False)))
+        # Delete associated files
+        delete_objects: list[tuple[str, bool]] = []
+        for item in collection.stream_search(
+                delete_query, fl='id,from_archive', as_obj=False, index_type=self.index_type):
+            self.heartbeat()
+            delete_objects.append((item['id'], item.get('from_archive', False)))
 
-            # Filter archived documents if archive filestore is the same as the filestore
-            expire_only: list[tuple[str, bool]] = []
-            if self.same_storage and self.archive_access and collection.name == 'file':
-                # Separate hot and archive files
-                delete_from_archive = [i[0] for i in delete_objects if i[1]]
-                delete_from_hot = [i[0] for i in delete_objects if not i[1]]
+        # Filter archived documents if archive filestore is the same as the filestore
+        expire_only: list[tuple[str, bool]] = []
+        if self.same_storage and self.archive_access and collection.name == 'file':
+            # Separate hot and archive files
+            delete_from_archive = [i[0] for i in delete_objects if i[1]]
+            delete_from_hot = [i[0] for i in delete_objects if not i[1]]
 
-                # Check for overlap
-                overlap = set(delete_from_archive).intersection(set(delete_from_hot))
-                delete_from_archive = list(set(delete_from_archive)-overlap)
-                delete_from_hot = list(set(delete_from_hot)-overlap)
+            # Check for overlap
+            overlap = set(delete_from_archive).intersection(set(delete_from_hot))
+            delete_from_archive = list(set(delete_from_archive)-overlap)
+            delete_from_hot = list(set(delete_from_hot)-overlap)
 
-                # Create the original delete_object form the overlap
-                delete_objects = [(k, False) for k in overlap]
-                delete_objects.extend([(k, True) for k in overlap])
+            # Create the original delete_object form the overlap
+            delete_objects = [(k, False) for k in overlap]
+            delete_objects.extend([(k, True) for k in overlap])
 
-                if delete_from_hot:
-                    # Check hot objects to delete if they are in archive
-                    archived_files = self.datastore.file.multiexists(delete_from_hot, index_type=Index.ARCHIVE)
-                    delete_objects.extend([(k, False) for k, v in archived_files.items() if not v])
-                    expire_only.extend([(k, False) for k, v in archived_files.items() if v])
+            if delete_from_hot:
+                # Check hot objects to delete if they are in archive
+                archived_files = self.datastore.file.multiexists(delete_from_hot, index_type=Index.ARCHIVE)
+                delete_objects.extend([(k, False) for k, v in archived_files.items() if not v])
+                expire_only.extend([(k, False) for k, v in archived_files.items() if v])
 
-                if delete_from_archive:
-                    # Check hot objects to delete if they are in archive
-                    hot_files = self.datastore.file.multiexists(delete_from_archive, index_type=Index.HOT)
-                    delete_objects.extend([(k, True) for k, v in hot_files.items() if not v])
-                    expire_only.extend([(k, True) for k, v in hot_files.items() if v])
+            if delete_from_archive:
+                # Check hot objects to delete if they are in archive
+                hot_files = self.datastore.file.multiexists(delete_from_archive, index_type=Index.HOT)
+                delete_objects.extend([(k, True) for k, v in hot_files.items() if not v])
+                expire_only.extend([(k, True) for k, v in hot_files.items() if v])
 
-            delete_tasks = self.fs_hashmap[collection.name](delete_objects, final_date)
+        delete_tasks = self.fs_hashmap[collection.name](delete_objects, final_date)
 
-            # Proceed with deletion, but only after all the scheduled deletes for this
-            self.log.info(f"[{collection.name}] Scheduled {len(delete_objects)}/{number_to_delete} files to be "
-                          f"removed from the {'cachestore' if 'cache' in collection.name else 'filestore'}")
-            self._finish_delete(collection, delete_tasks, expire_only)
-
-        else:
-            # Proceed with deletion
-            self._simple_delete(collection, delete_query, number_to_delete)
+        # Proceed with deletion, but only after all the scheduled deletes for this
+        self.log.info(f"[{collection.name}] Scheduled {len(delete_objects)}/{number_to_delete} files to be "
+                      f"removed from the {'cachestore' if 'cache' in collection.name else 'filestore'}")
+        self._finish_delete(collection, delete_tasks, expire_only)
 
     def feed_expiry_jobs(self, collection, start, jobs: list[concurrent.futures.Future],
                          pool: ThreadPoolExecutor) -> tuple[str, bool]:
@@ -329,11 +320,11 @@ class ExpiryManager(ServerBase):
         return start, number_to_delete < self.expiry_size
 
     def _get_final_date(self):
-        now = now_as_iso()
+        _now = now_as_iso()
         if self.config.core.expiry.batch_delete:
-            final_date = dm(f"{now}||-{self.config.core.expiry.delay}h/d").float_timestamp
+            final_date = dm(f"{_now}||-{self.config.core.expiry.delay}h/d").float_timestamp
         else:
-            final_date = dm(f"{now}||-{self.config.core.expiry.delay}h").float_timestamp
+            final_date = dm(f"{_now}||-{self.config.core.expiry.delay}h").float_timestamp
         return epoch_to_iso(final_date)
 
     def _get_next_chunk(self, collection: ESCollection, start, final_date):
@@ -357,7 +348,11 @@ class ExpiryManager(ServerBase):
 
         # Launch threads that expire data from each collection of data
         for collection in self.expirable_collections:
-            thread = threading.Thread(target=self.run_collection, args=[pool, collection])
+            # check if we are dealing with an index that needs file cleanup
+            if self.config.core.expiry.delete_storage and collection.name in self.fs_hashmap:
+                thread = threading.Thread(target=self.run_file_collection, args=[pool, collection])
+            else:
+                thread = threading.Thread(target=self.run_collection, args=[collection])
             thread.start()
             main_threads.append(thread)
 
@@ -376,8 +371,13 @@ class ExpiryManager(ServerBase):
                     pool.submit(self.log_errors(self._cleanup_canceled_submission), submission.sid)
             self.sleep_with_heartbeat(self.config.core.expiry.sleep_time)
 
-    def run_collection(self, pool: concurrent.futures.ThreadPoolExecutor, collection):
-        """Feed batches of jobs to delete to the thread pool for the given collection."""
+    def run_file_collection(self, pool: concurrent.futures.ThreadPoolExecutor, collection):
+        """
+        Feed batches of jobs to delete to the thread pool for the given collection.
+
+        The files must be cleaned up for this collection so we operate by
+        batching rather than delete by query.
+        """
         start = "*"
         jobs: list[concurrent.futures.Future] = []
 
@@ -411,6 +411,93 @@ class ExpiryManager(ServerBase):
             except BrokenProcessPool:
                 self.log.error("File delete worker pool crashed.")
                 self.file_delete_worker = ProcessPoolExecutor(self.config.core.expiry.delete_workers)
+
+    def run_collection(self, collection):
+        """
+        For collections where no file cleanup is needed we can simply run delete by query.
+
+        In cases where there are large quantities of records expiring (or a large backlog) multiple
+        delete by query calls running on non-overlapping sections of the data can be needed to catch
+        up.
+
+        The metric we use here is that every day gets its own delete query. When the expiry daemon
+        starts we will probe to see how many days of historical data we need to clean up and
+        start that many query workers.
+
+        Perodically a workers will terminate and this calculation will be redone.
+        """
+        while self.running:
+            self.run_collection_once(collection)
+
+    def run_collection_once(self, collection):
+        # Calculate how many queries we want to run
+        queries = self.day_chunks(collection)
+
+        # prepare a thread pool suitable for that operation
+        with ThreadPoolExecutor(len(queries)) as pool:
+            # Prepare a signal so we can stop all the workers as desired
+            stop = threading.Event()
+
+            # dispatch each of these queries
+            futures = [pool.submit(self.run_collection_query, collection, stop, query) for query in queries]
+
+            # wait for one of them to finish
+            for future in as_completed(futures):
+                stop.set()
+                future.result()
+
+    def day_chunks(self, collection):
+        # Base no settings we will truncade expiry ranges by the day
+        if self.config.core.expiry.batch_delete:
+            suffix = f"-{self.config.core.expiry.delay}h/d"
+        else:
+            suffix = f"-{self.config.core.expiry.delay}h"
+
+        # Figure out the range of time we want to build queries for
+        earliest = self.get_earliest_expiring(collection)
+        if not earliest:
+            return [f"expiry_ts: [* TO now{suffix}}}"]
+        days = int((now() - earliest)/(60 * 60 * 24)) + 1
+
+        # construct the ranges that build queries covering all of those days, bounded by
+        # the appropirately modifide NOW on the high end, and modfied to be open on the low end
+        ranges = [(f"now-1d{suffix}", f"now{suffix}")]
+        for days in range(1, days):
+            ranges.append((f"now-{days + 1}d{suffix}", f"now-{days}d{suffix}"))
+        ranges[-1] = ("*", ranges[-1][1])
+
+        # Convert those ranges to queries, each inclusive on the low end and exclusive on the high end
+        queries = [f"expiry_ts: [{s} TO {e}}}" for s, e in ranges]
+        return queries
+
+    def get_earliest_expiring(self, collection) -> None | float:
+        final = self._get_final_date()
+        rows = collection.search(f"expiry_ts: [* TO {final}]", rows=1, fl='expiry_ts', sort="expiry_ts asc")
+        if rows['items']:
+            return rows['items'][0]['expiry_ts'].timestamp()
+        return None
+
+    def run_collection_query(self, collection, stop, query):
+        total_deleted = 0
+        while self.running or stop.is_set():
+            self.heartbeat()
+            deleted = 0
+
+            try:
+                deleted = collection.simple_delete_by_query(query, sort='expiry_ts asc', max_docs=QUERY_DELETE_SIZE)
+                total_deleted += deleted
+                self.counter.increment(collection.name, increment_by=deleted)
+                self.log.info(f"[{collection.name}] Deleted {deleted} items from the datastore...")
+
+            except Exception as e:
+                self.log.exception(str(e))
+
+            if total_deleted >= QUERY_WORKER_CHECK_VOLUME:
+                return
+
+            # If the number deleted is small wait before running the delete command again
+            if deleted < QUERY_DELETE_SIZE * 0.9:
+                self.sleep_with_heartbeat(self.config.core.expiry.sleep_time)
 
 
 if __name__ == "__main__":
