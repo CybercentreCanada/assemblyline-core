@@ -1,3 +1,0 @@
-# Only used in test files
-pytest
-assemblyline_client

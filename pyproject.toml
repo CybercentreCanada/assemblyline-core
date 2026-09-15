@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "assemblyline-core"
+version = "4.0.0.dev0"
+description = "Assemblyline 4 - Core components"
+readme = { file = "README.md", content-type = "text/markdown" }
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "CCCS Assemblyline development team", email = "assemblyline@cyber.gc.ca" },
+]
+keywords = [
+    "assemblyline",
+    "automated",
+    "malware",
+    "analysis",
+    "gc",
+    "canada",
+    "cse-cst",
+    "cse",
+    "cst",
+    "cyber",
+    "cccs",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "assemblyline",
+    "docker",
+    "kubernetes>=36.0.1",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "assemblyline_client",
+]
+
+[project.urls]
+Repository = "https://github.com/CybercentreCanada/assemblyline-core/"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+exclude = ["deployment*", "test*"]
+
+[tool.setuptools.package-data]
+"*" = [
+    "*classification.yml",
+    "*.magic",
+    "VERSION",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]

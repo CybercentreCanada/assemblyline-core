@@ -1,5 +1,3 @@
-version: "3"
-
 services:
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.19.3
@@ -9,20 +7,47 @@ services:
       - logger.level=WARN
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
       - ELASTIC_PASSWORD=devpass
+    tmpfs:
+      - /usr/share/elasticsearch/data
     ports:
       - "9200:9200"
-
-  minio:
-    image: minio/minio
-    environment:
-      MINIO_ROOT_USER: al_storage_key
-      MINIO_ROOT_PASSWORD: Ch@ngeTh!sPa33w0rd
-    ports:
-      - "9000:9000"
-    command: server /data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl --silent --fail -u elastic:$$ELASTIC_PASSWORD localhost:9200/_cluster/health || exit 1",
+        ]
+      interval: 30s
+      timeout: 30s
+      retries: 3
 
   redis:
     image: redis
     ports:
       - "6379:6379"
-      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+  pytest:
+    build:
+      context: ../..
+      dockerfile: assemblyline-core/test/Dockerfile
+      args:
+        - PYTHON_VERSION=${PYTHON_VERSION:-3.14}
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ${PATH_REWRITE:-.}/config/:/etc/assemblyline/
+      - ${ROOT_REWRITE:-../../assemblyline-base}:/opt/alv4/assemblyline-base
+      - ${ROOT_REWRITE:-../}:/opt/alv4/assemblyline-core
+    working_dir: /opt/alv4/assemblyline-core
+    command: "pytest -vv --full-trace"
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    network_mode: "host"

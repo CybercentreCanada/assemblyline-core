@@ -11,20 +11,6 @@ variables:
   BRANCH_NAME: $[coalesce(variables['System.PullRequest.SourceBranch'], variables['System.PullRequest.TargetBranch'], replace(variables['Build.SourceBranch'], 'refs/heads/', ''))]
 
 resources:
-  containers:
-    - container: redis
-      image: redis
-      ports:
-        - 6379:6379
-    - container: elasticsearch
-      image: docker.elastic.co/elasticsearch/elasticsearch:8.19.3
-      env:
-        xpack.security.enabled: true
-        discovery.type: single-node
-        ES_JAVA_OPTS: "-Xms256m -Xmx512m"
-        ELASTIC_PASSWORD: devpass
-      ports:
-        - 9200:9200
   repositories:
     - repository: assemblyline-base
       type: github
@@ -39,39 +25,42 @@ jobs:
           python.version: "3.11"
         Python3_12:
           python.version: "3.12"
+        Python3_13:
+          python.version: "3.13"
+        Python3_14:
+          python.version: "3.14"
     timeoutInMinutes: 10
     services:
       elasticsearch: elasticsearch
       redis: redis
 
     steps:
-      - task: UsePythonVersion@0
-        displayName: Set python version
-        inputs:
-          versionSpec: "$(python.version)"
       - checkout: self
       - checkout: assemblyline-base
+
       - script: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libffi-dev libfuzzy-dev python3-dev git
-          sudo mkdir -p /etc/assemblyline/
-          sudo mkdir -p /var/cache/assemblyline/
-          sudo cp pipelines/config.yml /etc/assemblyline
-          sudo chmod a+rw /var/cache/assemblyline/
-          sudo env "PATH=$PATH" "PIP_USE_PEP517=true" python -m pip install --no-cache-dir -U pip cython setuptools wheel
-        workingDirectory: $(Pipeline.Workspace)/s/assemblyline-core
-        displayName: Setup Environment
-      - script: |
+          # Checkout the branch corresponding to the pull request or the current branch
           set -xv
           git checkout -b $BRANCH_NAME -t origin/$BRANCH_NAME || true
           git status
-          sudo env "PATH=$PATH" "PIP_USE_PEP517=true" python -m pip install --no-cache-dir -e .
-        displayName: Install assemblyline
-        workingDirectory: $(Pipeline.Workspace)/s/assemblyline-base
+        displayName: Checkout branch
+
       - script: |
-          sudo env "PATH=$PATH" "PIP_USE_PEP517=true" python -m pip install --no-cache-dir -e .[test]
-        displayName: Install assemblyline_core
-        workingDirectory: $(Pipeline.Workspace)/s/assemblyline-core
-      - script: sudo env "PATH=$PATH" python -m pytest -x -rsx -vv
+          # Start all services except pytest
+          docker compose up -d --wait $(docker compose config --services | grep -v pytest)
+        displayName: Setup environment
+        workingDirectory: $(System.DefaultWorkingDirectory)/assemblyline-core/test
+
+      - script: |
+          # Start up pytest service from Docker Compose and run the tests
+          docker compose run --build pytest pytest --durations=10 -rsx -vv --color=yes --junitxml=/opt/alv4/assemblyline-core/test/test-results.xml
         displayName: Test
-        workingDirectory: $(Pipeline.Workspace)/s/assemblyline-core
+        workingDirectory: $(System.DefaultWorkingDirectory)/assemblyline-core/test
+
+      - task: PublishTestResults@2
+        condition: always()
+        displayName: Publish test results
+        inputs:
+          testResultsFiles: "assemblyline-core/test/test-results.xml"
+          searchFolder: $(System.DefaultWorkingDirectory)
+          testRunTitle: "python$(PYTHON_VERSION)"
