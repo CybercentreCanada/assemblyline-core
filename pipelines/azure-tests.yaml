@@ -30,10 +30,6 @@ jobs:
         Python3_14:
           python.version: "3.14"
     timeoutInMinutes: 10
-    services:
-      elasticsearch: elasticsearch
-      redis: redis
-
     steps:
       - checkout: self
       - checkout: assemblyline-base
