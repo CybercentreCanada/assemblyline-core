@@ -471,6 +471,8 @@ class KubernetesController(ControllerInterface):
                                   label_selector=label_selector, **WATCH_ARGS):
             if not self.running:
                 break
+            if not isinstance(event, dict) or event['type'] == 'BOOKMARK':
+                continue
 
             name: str = event['raw_object']['metadata']['name']
 
@@ -523,6 +525,8 @@ class KubernetesController(ControllerInterface):
         for event in watch.stream(func=list_pods, **kwargs):
             if not self.running:
                 break
+            if not isinstance(event, dict) or event['type'] == 'BOOKMARK':
+                continue
 
             pod_name = "Unknown Pod"
             try:
@@ -596,7 +600,7 @@ class KubernetesController(ControllerInterface):
                                   **WATCH_ARGS):
             if not self.running:
                 break
-            if not isinstance(event, dict):
+            if not isinstance(event, dict) or event['type'] == 'BOOKMARK':
                 continue
 
             name = event['raw_object']['metadata']['name']
@@ -672,6 +676,11 @@ class KubernetesController(ControllerInterface):
         for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
                                   namespace=self.namespace, label_selector=label_selector,
                                   **WATCH_ARGS):
+            if not self.running:
+                break
+            if not isinstance(event, dict) or event['type'] == 'BOOKMARK':
+                continue
+
             if 'dependency_for' in event['raw_object']['metadata']['labels']:
                 continue
 
