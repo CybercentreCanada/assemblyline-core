@@ -24,7 +24,8 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from dateutil.tz import tzlocal
-from kubernetes import client, config, watch
+from kubernetes import client, config
+from kubernetes.watch import Watch
 from kubernetes.client import (
     V1Affinity,
     V1Capabilities,
@@ -74,8 +75,6 @@ from assemblyline_core.scaler.controllers.interface import ControllerInterface
 # RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
 
 API_TIMEOUT = 90
-WATCH_TIMEOUT = 10 * 60
-WATCH_API_TIMEOUT = WATCH_TIMEOUT + 10
 CHANGE_KEY_NAME = 'al_change_key'
 DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() == 'true'
 CONTAINER_RESTART_THRESHOLD = int(os.environ.get('CONTAINER_RESTART_THRESHOLD', 1))
@@ -92,6 +91,9 @@ RESTRICTED_POD_SECURITY_CONTEXT = V1SecurityContext(
     allow_privilege_escalation=False,
     seccomp_profile=V1SeccompProfile(type="RuntimeDefault")
 )
+WATCH_ARGS: dict[str, bool | str] = {
+    'allow_watch_bookmarks': True,
+}
 
 AL_ROOT_CA = os.environ.get('AL_ROOT_CA', '/etc/assemblyline/ssl/al_root-ca.crt')
 AL_ROOT_CA_PK = os.environ.get('AL_ROOT_CA_PK', '/etc/assemblyline/ssl/al_root-ca.key')
@@ -132,13 +134,6 @@ class CacheDict(OrderedDict):
         super().move_to_end(key)
 
         return val
-
-
-class TypelessWatch(watch.Watch):
-    """A kubernetes watch object that doesn't marshal the response."""
-
-    def get_return_type(self, func):
-        return None
 
 
 def median(values: list[float]) -> float:
@@ -468,15 +463,16 @@ class KubernetesController(ControllerInterface):
         self._node_pool_max_cpu = 0
         self._node_pool_max_ram = 0
         self.node_count = 0
-        watch = TypelessWatch()
+        watch = Watch()
         self.ready_nodes: dict[str, tuple[float, float]] = {}
         field_selector, label_selector = selector_to_list_filters(self.linux_node_selector)
 
-        for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT,
-                                  field_selector=field_selector, label_selector=label_selector,
-                                  _request_timeout=WATCH_API_TIMEOUT):
+        for event in watch.stream(func=self.api.list_node, field_selector=field_selector,
+                                  label_selector=label_selector, **WATCH_ARGS):
             if not self.running:
                 break
+            if not isinstance(event, dict) or event['type'] == 'BOOKMARK':
+                continue
 
             name: str = event['raw_object']['metadata']['name']
 
@@ -510,7 +506,7 @@ class KubernetesController(ControllerInterface):
             self._node_pool_max_ram = max_ram
 
     def _monitor_pods(self):
-        watch = TypelessWatch()
+        watch = Watch()
         log_cache = CacheDict(cache_len=8000)
         per_node_containers: dict[str, dict[str, tuple[float, float]]] = defaultdict(dict)
         per_node_namespaced_containers: dict[str, dict[str, tuple[float, float]]] = defaultdict(dict)
@@ -519,17 +515,18 @@ class KubernetesController(ControllerInterface):
         self._pod_used_namespace_cpu = defaultdict(float)
         self._pod_used_namespace_ram = defaultdict(float)
 
+        kwargs = dict(WATCH_ARGS)
         if self.cluster_pod_list:
             list_pods = self.api.list_pod_for_all_namespaces
-            kwargs = dict()
         else:
             list_pods = self.api.list_namespaced_pod
-            kwargs = dict(namespace=self.namespace)
+            kwargs['namespace'] = self.namespace
 
-        for event in watch.stream(func=list_pods, timeout_seconds=WATCH_TIMEOUT,
-                                  _request_timeout=WATCH_API_TIMEOUT, **kwargs):
+        for event in watch.stream(func=list_pods, **kwargs):
             if not self.running:
                 break
+            if not isinstance(event, dict) or event['type'] == 'BOOKMARK':
+                continue
 
             pod_name = "Unknown Pod"
             try:
@@ -588,7 +585,7 @@ class KubernetesController(ControllerInterface):
             self._pod_used_namespace_ram[node] = sum(memory_used) + memory_unrestricted * mean(memory_used)
 
     def _monitor_quotas(self):
-        watch = TypelessWatch()
+        watch = Watch()
         cpu_limits = {}
         cpu_used = {}
         mem_limits = {}
@@ -600,9 +597,11 @@ class KubernetesController(ControllerInterface):
         self._quota_mem_used = None
 
         for event in watch.stream(func=self.api.list_namespaced_resource_quota, namespace=self.namespace,
-                                  timeout_seconds=WATCH_TIMEOUT, _request_timeout=WATCH_API_TIMEOUT):
+                                  **WATCH_ARGS):
             if not self.running:
                 break
+            if not isinstance(event, dict) or event['type'] == 'BOOKMARK':
+                continue
 
             name = event['raw_object']['metadata']['name']
             if 'scope_selector' in event['raw_object']['spec'] or 'scopes' in event['raw_object']['spec']:
@@ -668,7 +667,7 @@ class KubernetesController(ControllerInterface):
                 self._quota_mem_used = None
 
     def _monitor_deployments(self):
-        watch = TypelessWatch()
+        watch = Watch()
 
         self._deployment_targets = {}
         self._deployment_unavailable = {}
@@ -676,7 +675,12 @@ class KubernetesController(ControllerInterface):
 
         for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
                                   namespace=self.namespace, label_selector=label_selector,
-                                  timeout_seconds=WATCH_TIMEOUT, _request_timeout=WATCH_API_TIMEOUT):
+                                  **WATCH_ARGS):
+            if not self.running:
+                break
+            if not isinstance(event, dict) or event['type'] == 'BOOKMARK':
+                continue
+
             if 'dependency_for' in event['raw_object']['metadata']['labels']:
                 continue
 
