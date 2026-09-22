@@ -24,7 +24,8 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from dateutil.tz import tzlocal
-from kubernetes import client, config, watch
+from kubernetes import client, config
+from kubernetes.watch import Watch
 from kubernetes.client import (
     V1Affinity,
     V1Capabilities,
@@ -74,8 +75,6 @@ from assemblyline_core.scaler.controllers.interface import ControllerInterface
 # RESERVE_MEMORY_PER_NODE = os.environ.get('RESERVE_MEMORY_PER_NODE')
 
 API_TIMEOUT = 90
-WATCH_TIMEOUT = 10 * 60
-WATCH_API_TIMEOUT = WATCH_TIMEOUT + 10
 CHANGE_KEY_NAME = 'al_change_key'
 DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() == 'true'
 CONTAINER_RESTART_THRESHOLD = int(os.environ.get('CONTAINER_RESTART_THRESHOLD', 1))
@@ -92,6 +91,9 @@ RESTRICTED_POD_SECURITY_CONTEXT = V1SecurityContext(
     allow_privilege_escalation=False,
     seccomp_profile=V1SeccompProfile(type="RuntimeDefault")
 )
+WATCH_ARGS: dict[str, bool | str] = {
+    'allow_watch_bookmarks': True,
+}
 
 AL_ROOT_CA = os.environ.get('AL_ROOT_CA', '/etc/assemblyline/ssl/al_root-ca.crt')
 AL_ROOT_CA_PK = os.environ.get('AL_ROOT_CA_PK', '/etc/assemblyline/ssl/al_root-ca.key')
@@ -132,13 +134,6 @@ class CacheDict(OrderedDict):
         super().move_to_end(key)
 
         return val
-
-
-class TypelessWatch(watch.Watch):
-    """A kubernetes watch object that doesn't marshal the response."""
-
-    def get_return_type(self, func):
-        return None
 
 
 def median(values: list[float]) -> float:
@@ -361,10 +356,11 @@ class KubernetesController(ControllerInterface):
         node_background = threading.Thread(target=self._loop_forever(self._monitor_node_pool), daemon=True)
         node_background.start()
 
-        self._pod_used_ram: dict[str, float] = defaultdict(float)
-        self._pod_used_cpu: dict[str, float] = defaultdict(float)
-        self._pod_used_namespace_ram: dict[str, float] = defaultdict(float)
-        self._pod_used_namespace_cpu: dict[str, float] = defaultdict(float)
+        self._pod_used_ram: dict[str | None, float] = defaultdict(float)
+        self._pod_used_cpu: dict[str | None, float] = defaultdict(float)
+        self._pod_used_namespace_ram: dict[str | None, float] = defaultdict(float)
+        self._pod_used_namespace_cpu: dict[str | None, float] = defaultdict(float)
+        self.node_count = 0
         pod_background = threading.Thread(target=self._loop_forever(self._monitor_pods), daemon=True)
         pod_background.start()
 
@@ -445,7 +441,7 @@ class KubernetesController(ControllerInterface):
         self._create_deployment(profile.name, self._deployment_name(profile.name),
                                 profile.container_config, profile.shutdown_seconds, scale,
                                 change_key=profile.config_blob, core_mounts=profile.privileged,
-                                security_context=self.security_policy),
+                                security_context=self.security_policy)
         self._external_profiles[profile.name] = profile
 
     def _loop_forever(self, function):
@@ -464,19 +460,20 @@ class KubernetesController(ControllerInterface):
                     self.logger.exception(f"Error in {function.__name__}")
         return _function
 
-    def _monitor_node_pool(self):
+    def _monitor_node_pool(self) -> None:
         self._node_pool_max_cpu = 0
         self._node_pool_max_ram = 0
         self.node_count = 0
-        watch = TypelessWatch()
+        watch = Watch()
         self.ready_nodes: dict[str, tuple[float, float]] = {}
         field_selector, label_selector = selector_to_list_filters(self.linux_node_selector)
 
-        for event in watch.stream(func=self.api.list_node, timeout_seconds=WATCH_TIMEOUT,
-                                  field_selector=field_selector, label_selector=label_selector,
-                                  _request_timeout=WATCH_API_TIMEOUT):
+        for event in watch.stream(func=self.api.list_node, field_selector=field_selector,
+                                  label_selector=label_selector, **WATCH_ARGS):
             if not self.running:
                 break
+            if not isinstance(event, dict) or event['type'] == 'BOOKMARK':
+                continue
 
             name: str = event['raw_object']['metadata']['name']
 
@@ -501,50 +498,66 @@ class KubernetesController(ControllerInterface):
 
             # Update the totals
             self.node_count = len(self.ready_nodes)
-            max_cpu = 0
-            max_ram = 0
+            max_cpu = 0.0
+            max_ram = 0.0
             for cpu, ram in self.ready_nodes.values():
                 max_cpu += cpu
                 max_ram += ram
             self._node_pool_max_cpu = max_cpu
             self._node_pool_max_ram = max_ram
 
-    def _monitor_pods(self):
-        watch = TypelessWatch()
+    def _monitor_pods(self) -> None:
+        watch = Watch()
         log_cache = CacheDict(cache_len=8000)
-        per_node_containers: dict[str, dict[str, tuple[float, float]]] = defaultdict(dict)
-        per_node_namespaced_containers: dict[str, dict[str, tuple[float, float]]] = defaultdict(dict)
+        per_node_containers: dict[str | None, dict[str, tuple[float, float]]] = defaultdict(dict)
+        per_node_namespaced_containers: dict[str | None, dict[str, tuple[float, float]]] = defaultdict(dict)
         self._pod_used_cpu = defaultdict(float)
         self._pod_used_ram = defaultdict(float)
         self._pod_used_namespace_cpu = defaultdict(float)
         self._pod_used_namespace_ram = defaultdict(float)
 
+        kwargs = dict(WATCH_ARGS)
         if self.cluster_pod_list:
             list_pods = self.api.list_pod_for_all_namespaces
-            kwargs = dict()
         else:
             list_pods = self.api.list_namespaced_pod
-            kwargs = dict(namespace=self.namespace)
+            kwargs['namespace'] = self.namespace
 
-        for event in watch.stream(func=list_pods, timeout_seconds=WATCH_TIMEOUT,
-                                  _request_timeout=WATCH_API_TIMEOUT, **kwargs):
+        for event in watch.stream(func=list_pods, **kwargs):
             if not self.running:
                 break
+            if not isinstance(event, dict) or event['type'] == 'BOOKMARK':
+                continue
 
             pod_name = "Unknown Pod"
+            changed_nodes: list[str | None] = []
             try:
+                # Read some basic information about the pod we are looking at
                 pod_name = event['raw_object']['metadata']['name']
                 uid = event['raw_object']['metadata']['uid']
                 namespace = event['raw_object']['metadata']['namespace']
-                node = event['raw_object']['spec']['nodeName']
+                node = event['raw_object']['spec'].get('nodeName', None)
+                changed_nodes.append(node)
+
                 containers = per_node_containers[node]
                 namespaced_containers = per_node_namespaced_containers[node]
 
                 if event['type'] in ['ADDED', 'MODIFIED']:
                     for container in event['raw_object']['spec']['containers']:
-                        containers[f"{uid}-{container['name']}"] = get_resources(container)
+                        key = f"{uid}-{container['name']}"
+
+                        # If the pod has already been seen without a node assigned we will have records
+                        # for it under the None node, if we see it again with a non-null node we need to
+                        # clean up those duplicate records.
+                        if node is not None:
+                            per_node_namespaced_containers[None].pop(key, None)
+                            if per_node_containers[None].pop(key, None) is not None:
+                                changed_nodes.append(None)
+
+                        # Write resource records under the current node's container -> resource map
+                        containers[key] = get_resources(container)
                         if namespace == self.namespace:
-                            namespaced_containers[f"{uid}-{container['name']}"] = get_resources(container)
+                            namespaced_containers[key] = get_resources(container)
                     for status in event['raw_object']['status'].get('containerStatuses', []):
                         restarts = status['restartCount']
                         if restarts > CONTAINER_RESTART_THRESHOLD and log_cache.get(pod_name, 0) <= restarts:
@@ -556,8 +569,12 @@ class KubernetesController(ControllerInterface):
                                                 f"with reason {detail.get('reason', 'UNKNOWN')}")
                 elif event['type'] == 'DELETED':
                     for container in event['raw_object']['spec']['containers']:
-                        containers.pop(f"{uid}-{container['name']}", None)
-                        namespaced_containers.pop(f"{uid}-{container['name']}", None)
+                        key = f"{uid}-{container['name']}"
+                        containers.pop(key, None)
+                        namespaced_containers.pop(key, None)
+                        per_node_namespaced_containers[None].pop(key, None)
+                        if per_node_containers[None].pop(key, None) is not None:
+                            changed_nodes.append(None)
                 else:
                     continue
             except KeyError as e:
@@ -569,26 +586,30 @@ class KubernetesController(ControllerInterface):
                 self.logger.exception(f"Couldn't parse container information for {pod_name}: {e}")
                 continue
 
-            memory_unrestricted = sum(1 for _, mem in containers.values() if mem is None)
-            cpu_unrestricted = sum(1 for cpu, _ in containers.values() if cpu is None)
+            for node in changed_nodes:
+                containers = per_node_containers[node]
+                namespaced_containers = per_node_namespaced_containers[node]
 
-            memory_used = [mem for _, mem in containers.values() if mem is not None]
-            cpu_used = [cpu for cpu, _ in containers.values() if cpu is not None]
+                memory_unrestricted = sum(1 for _, mem in containers.values() if mem is None)
+                cpu_unrestricted = sum(1 for cpu, _ in containers.values() if cpu is None)
 
-            self._pod_used_cpu[node] = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
-            self._pod_used_ram[node] = sum(memory_used) + memory_unrestricted * mean(memory_used)
+                memory_used = [mem for _, mem in containers.values() if mem is not None]
+                cpu_used = [cpu for cpu, _ in containers.values() if cpu is not None]
 
-            memory_unrestricted = sum(1 for _, mem in namespaced_containers.values() if mem is None)
-            cpu_unrestricted = sum(1 for cpu, _ in namespaced_containers.values() if cpu is None)
+                self._pod_used_cpu[node] = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
+                self._pod_used_ram[node] = sum(memory_used) + memory_unrestricted * mean(memory_used)
 
-            memory_used = [mem for _, mem in namespaced_containers.values() if mem is not None]
-            cpu_used = [cpu for cpu, _ in namespaced_containers.values() if cpu is not None]
+                memory_unrestricted = sum(1 for _, mem in namespaced_containers.values() if mem is None)
+                cpu_unrestricted = sum(1 for cpu, _ in namespaced_containers.values() if cpu is None)
 
-            self._pod_used_namespace_cpu[node] = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
-            self._pod_used_namespace_ram[node] = sum(memory_used) + memory_unrestricted * mean(memory_used)
+                memory_used = [mem for _, mem in namespaced_containers.values() if mem is not None]
+                cpu_used = [cpu for cpu, _ in namespaced_containers.values() if cpu is not None]
+
+                self._pod_used_namespace_cpu[node] = sum(cpu_used) + cpu_unrestricted * mean(cpu_used)
+                self._pod_used_namespace_ram[node] = sum(memory_used) + memory_unrestricted * mean(memory_used)
 
     def _monitor_quotas(self):
-        watch = TypelessWatch()
+        watch = Watch()
         cpu_limits = {}
         cpu_used = {}
         mem_limits = {}
@@ -600,9 +621,11 @@ class KubernetesController(ControllerInterface):
         self._quota_mem_used = None
 
         for event in watch.stream(func=self.api.list_namespaced_resource_quota, namespace=self.namespace,
-                                  timeout_seconds=WATCH_TIMEOUT, _request_timeout=WATCH_API_TIMEOUT):
+                                  **WATCH_ARGS):
             if not self.running:
                 break
+            if not isinstance(event, dict) or event['type'] == 'BOOKMARK':
+                continue
 
             name = event['raw_object']['metadata']['name']
             if 'scope_selector' in event['raw_object']['spec'] or 'scopes' in event['raw_object']['spec']:
@@ -668,7 +691,7 @@ class KubernetesController(ControllerInterface):
                 self._quota_mem_used = None
 
     def _monitor_deployments(self):
-        watch = TypelessWatch()
+        watch = Watch()
 
         self._deployment_targets = {}
         self._deployment_unavailable = {}
@@ -676,7 +699,12 @@ class KubernetesController(ControllerInterface):
 
         for event in watch.stream(func=self.apps_api.list_namespaced_deployment,
                                   namespace=self.namespace, label_selector=label_selector,
-                                  timeout_seconds=WATCH_TIMEOUT, _request_timeout=WATCH_API_TIMEOUT):
+                                  **WATCH_ARGS):
+            if not self.running:
+                break
+            if not isinstance(event, dict) or event['type'] == 'BOOKMARK':
+                continue
+
             if 'dependency_for' in event['raw_object']['metadata']['labels']:
                 continue
 
