@@ -53,7 +53,7 @@ Repository = "https://github.com/CybercentreCanada/assemblyline-core/"
 include-package-data = true
 
 [tool.setuptools.dynamic]
-version = { file = ["VERSION"] }
+version = { file = ["assemblyline_core/VERSION"] }
 
 [tool.setuptools.packages.find]
 exclude = ["deployment*", "test*"]
