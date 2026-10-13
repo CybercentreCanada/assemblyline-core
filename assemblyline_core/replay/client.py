@@ -477,7 +477,7 @@ class DirectClient(ClientBase):
         ds_collection.update(id, operations)
 
     def get_next_message(self, message_type):
-        return self.queues[message_type].pop(blocking=True, timeout=30)
+        return self.queues[message_type].pop(blocking=True, timeout=2)
 
     def put_message(self, message_type, message):
         if isinstance(message, Model):
