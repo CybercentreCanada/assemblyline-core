@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "assemblyline-core"
-version = "4.0.0.dev0"
 description = "Assemblyline 4 - Core components"
 readme = { file = "README.md", content-type = "text/markdown" }
 license = "MIT"
 requires-python = ">=3.11"
+dynamic = ["readme", "version"]
 authors = [
     { name = "CCCS Assemblyline development team", email = "assemblyline@cyber.gc.ca" },
 ]
@@ -51,6 +51,9 @@ Repository = "https://github.com/CybercentreCanada/assemblyline-core/"
 
 [tool.setuptools]
 include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { file = ["VERSION"] }
 
 [tool.setuptools.packages.find]
 exclude = ["deployment*", "test*"]
