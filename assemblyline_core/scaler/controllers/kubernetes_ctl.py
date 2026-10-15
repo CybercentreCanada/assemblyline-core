@@ -798,8 +798,8 @@ class KubernetesController(ControllerInterface):
             volume_mounts=mounts,
             security_context=security_context,
             resources=V1ResourceRequirements(
-                limits={'cpu': cores*self.cpu_slack, 'memory': f'{memory}Mi'},
-                requests={'cpu': cores*self.cpu_reservation, 'memory': f'{min_memory}Mi'},
+                limits={'cpu': str(cores*self.cpu_slack), 'memory': f'{memory}Mi'},
+                requests={'cpu': str(cores*self.cpu_reservation), 'memory': f'{min_memory}Mi'},
             ),
             liveness_probe=health_probe,
             readiness_probe=health_probe
