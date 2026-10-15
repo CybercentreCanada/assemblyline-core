@@ -625,7 +625,7 @@ class ServiceUpdater(ThreadedCoreBase):
             # Clear out any old dead containers
             self.controller.cleanup_stale()
 
-            self.log.info("[CI] Done installing services, waiting {UPDATE_CHECK_INTERVAL} seconds for next install...")
+            self.log.info(f"[CI] Done installing services, waiting {UPDATE_CHECK_INTERVAL} seconds for next install...")
             time.sleep(UPDATE_CHECK_INTERVAL)
 
     def container_updates(self):
