@@ -1,5 +1,6 @@
 import collections
 import json
+from time import sleep
 import os
 import random
 import tarfile
@@ -287,6 +288,11 @@ def test_replay_single_data_collection(datastore, creator, creator_worker, loade
 
     # Test replay creator
     getattr(creator.client, f'setup_{collection}_input_queue')(once=True)
+
+    # Wait at least a second to make sure the item gets queued
+    sleep(1)
+
+    # Assert that the message has been received and queued for tasking
     assert creator.client.queues[collection].length() == 1
     assert creator.client.queues[collection].peek_next()['id'] == item.id
     # Test replay creator worker
