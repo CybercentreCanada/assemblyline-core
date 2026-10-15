@@ -37,7 +37,7 @@ classifiers = [
 dependencies = [
     "assemblyline",
     "docker",
-    "kubernetes>=36.0.1",
+    "kubernetes==36.0.3",
 ]
 
 [project.optional-dependencies]
