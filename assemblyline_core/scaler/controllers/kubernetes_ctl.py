@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import functools
 import json
+import math
 import os
 import threading
 import uuid
@@ -374,9 +375,10 @@ class KubernetesController(ControllerInterface):
         quota_background = threading.Thread(target=self._loop_forever(self._monitor_quotas), daemon=True)
         quota_background.start()
 
-        self.ready_nodes: dict[str, tuple[float, float]] = {}
+        self.ready_nodes: dict[str, tuple[float, float, float]] = {}
         self._node_pool_max_ram: float = 0
         self._node_pool_max_cpu: float = 0
+        self._node_pool_max_pods: float = 0
         node_background = threading.Thread(target=self._loop_forever(self._monitor_node_pool), daemon=True)
         node_background.start()
 
@@ -384,6 +386,7 @@ class KubernetesController(ControllerInterface):
         self._pod_used_cpu: dict[str | None, float] = defaultdict(float)
         self._pod_used_namespace_ram: dict[str | None, float] = defaultdict(float)
         self._pod_used_namespace_cpu: dict[str | None, float] = defaultdict(float)
+        self._node_active_pods: dict[str | None, set[str]] = defaultdict(set)
         self.node_count = 0
         pod_background = threading.Thread(target=self._loop_forever(self._monitor_pods), daemon=True)
         pod_background.start()
@@ -487,9 +490,10 @@ class KubernetesController(ControllerInterface):
     def _monitor_node_pool(self) -> None:
         self._node_pool_max_cpu = 0
         self._node_pool_max_ram = 0
+        self._node_pool_max_pods = 0
         self.node_count = 0
         watch = Watch()
-        self.ready_nodes: dict[str, tuple[float, float]] = {}
+        self.ready_nodes: dict[str, tuple[float, float, float]] = {}
         field_selector, label_selector = selector_to_list_filters(self.linux_node_selector)
 
         for event in watch.stream(func=self.api.list_node, field_selector=field_selector,
@@ -512,7 +516,9 @@ class KubernetesController(ControllerInterface):
                 if ready and node_is_schedulable(event['raw_object'], self.default_service_tolerations):
                     cpu = parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
                     ram = parse_memory(event['raw_object']['status']['allocatable']['memory'])
-                    self.ready_nodes[name] = (cpu, ram)
+                    # A node that doesn't report a pod limit shouldn't stall scaling
+                    pods = float(event['raw_object']['status']['allocatable'].get('pods', math.inf))
+                    self.ready_nodes[name] = (cpu, ram, pods)
                 else:
                     self.ready_nodes.pop(name, None)
 
@@ -524,11 +530,14 @@ class KubernetesController(ControllerInterface):
             self.node_count = len(self.ready_nodes)
             max_cpu = 0.0
             max_ram = 0.0
-            for cpu, ram in self.ready_nodes.values():
+            max_pods = 0.0
+            for cpu, ram, pods in self.ready_nodes.values():
                 max_cpu += cpu
                 max_ram += ram
+                max_pods += pods
             self._node_pool_max_cpu = max_cpu
             self._node_pool_max_ram = max_ram
+            self._node_pool_max_pods = max_pods
 
     def _monitor_pods(self) -> None:
         watch = Watch()
@@ -539,6 +548,7 @@ class KubernetesController(ControllerInterface):
         self._pod_used_ram = defaultdict(float)
         self._pod_used_namespace_cpu = defaultdict(float)
         self._pod_used_namespace_ram = defaultdict(float)
+        self._node_active_pods = defaultdict(set)
 
         kwargs = dict(WATCH_ARGS)
         if self.cluster_pod_list:
@@ -567,6 +577,13 @@ class KubernetesController(ControllerInterface):
                 namespaced_containers = per_node_namespaced_containers[node]
 
                 if event['type'] in ['ADDED', 'MODIFIED']:
+                    # Terminal pods stay listed until garbage collected but no longer hold a node's pod slot
+                    if node is not None:
+                        self._node_active_pods[None].discard(uid)
+                    if event['raw_object']['status'].get('phase') in ('Succeeded', 'Failed'):
+                        self._node_active_pods[node].discard(uid)
+                    else:
+                        self._node_active_pods[node].add(uid)
                     for container in event['raw_object']['spec']['containers']:
                         key = f"{uid}-{container['name']}"
 
@@ -592,6 +609,8 @@ class KubernetesController(ControllerInterface):
                                                 f"Last State: {lastState} "
                                                 f"with reason {detail.get('reason', 'UNKNOWN')}")
                 elif event['type'] == 'DELETED':
+                    self._node_active_pods[node].discard(uid)
+                    self._node_active_pods[None].discard(uid)
                     for container in event['raw_object']['spec']['containers']:
                         key = f"{uid}-{container['name']}"
                         containers.pop(key, None)
@@ -779,6 +798,13 @@ class KubernetesController(ControllerInterface):
                 return self._quota_mem_limit - self._quota_mem_used, self._quota_mem_limit
             return self._quota_mem_limit - self._get_pod_used_namespace_ram(), self._quota_mem_limit
         return self._node_pool_max_ram - self._get_pod_used_ram(), self._node_pool_max_ram
+
+    def pods_info(self) -> tuple[float, float]:
+        # Without a cluster wide pod list, pods from other namespaces are invisible and the free count would be wrong
+        if not self.cluster_pod_list:
+            return math.inf, math.inf
+        used = sum(len(self._node_active_pods[name]) for name in self.ready_nodes.keys())
+        return self._node_pool_max_pods - used, self._node_pool_max_pods
 
     def _create_containers(self, service_name: str, deployment_name: str, container_config, mounts, security_context,
                            core_container=False):

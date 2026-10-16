@@ -1,3 +1,4 @@
+import math
 from unittest.mock import Mock, patch
 
 import pytest
@@ -11,7 +12,7 @@ from assemblyline_core.scaler.controllers.kubernetes_ctl import (
 )
 
 
-def make_node(name='node-a', ready=True, unschedulable=False, taints=None, cpu='4', memory='8Gi'):
+def make_node(name='node-a', ready=True, unschedulable=False, taints=None, cpu='4', memory='8Gi', pods='110'):
     spec = {}
     if unschedulable:
         spec['unschedulable'] = True
@@ -22,7 +23,7 @@ def make_node(name='node-a', ready=True, unschedulable=False, taints=None, cpu='
         'spec': spec,
         'status': {
             'conditions': [{'type': 'Ready', 'status': 'True' if ready else 'False'}],
-            'allocatable': {'cpu': cpu, 'memory': memory},
+            'allocatable': {'cpu': cpu, 'memory': memory, 'pods': pods},
         },
     }
 
@@ -117,3 +118,87 @@ def test_monitor_node_pool_drops_node_when_cordoned():
     ])
 
     assert set(ctl.ready_nodes) == {'worker-a'}
+
+
+def test_monitor_node_pool_sums_pod_capacity():
+    ctl = monitor_node_pool([
+        ('ADDED', make_node('worker-a', pods='110')),
+        ('ADDED', make_node('worker-b', pods='30')),
+        ('ADDED', make_node('control-plane', taints=[CONTROL_PLANE], pods='110')),
+    ])
+
+    assert ctl._node_pool_max_pods == 140
+
+    node = make_node('virtual')
+    del node['status']['allocatable']['pods']
+    ctl = monitor_node_pool([('ADDED', make_node('worker-a')), ('ADDED', node)])
+    assert ctl._node_pool_max_pods == math.inf
+
+
+def make_pod(uid, node, phase='Running', namespace='al'):
+    return {
+        'metadata': {'name': f'pod-{uid}', 'uid': uid, 'namespace': namespace},
+        'spec': {
+            'nodeName': node,
+            'containers': [{'name': 'main', 'resources': {'requests': {'cpu': '100m', 'memory': '64Mi'}}}],
+        },
+        'status': {'phase': phase},
+    }
+
+
+def pod_controller(node_pods, cluster_pod_list=True):
+    ctl = KubernetesController.__new__(KubernetesController)
+    ctl.running = True
+    ctl.api = Mock()
+    ctl.logger = Mock()
+    ctl.namespace = 'al'
+    ctl.cluster_pod_list = cluster_pod_list
+    ctl.ready_nodes = {name: (4.0, 8192.0, pods) for name, pods in node_pods.items()}
+    ctl._node_pool_max_pods = sum(node_pods.values())
+    return ctl
+
+
+def monitor_pods(ctl, events):
+    watch = Mock()
+    watch.stream.return_value = [{'type': kind, 'raw_object': pod} for kind, pod in events]
+    with patch('assemblyline_core.scaler.controllers.kubernetes_ctl.Watch', return_value=watch):
+        ctl._monitor_pods()
+    return ctl
+
+
+def test_pods_info_counts_active_pods_on_schedulable_nodes():
+    ctl = monitor_pods(pod_controller({'worker-a': 10, 'worker-b': 5}), [
+        ('ADDED', make_pod('1', 'worker-a')),
+        ('ADDED', make_pod('2', 'worker-a', namespace='kube-system')),
+        ('ADDED', make_pod('3', 'worker-b', phase='Pending')),
+        # Terminal pods don't occupy a slot
+        ('ADDED', make_pod('4', 'worker-b', phase='Succeeded')),
+        ('ADDED', make_pod('5', 'worker-b', phase='Failed')),
+        # Pods on nodes outside the pool, or not yet bound to a node, aren't counted
+        ('ADDED', make_pod('6', 'control-plane')),
+        ('ADDED', make_pod('7', None, phase='Pending')),
+    ])
+
+    assert ctl.pods_info() == (12, 15)
+
+
+def test_pods_info_tracks_pod_lifecycle():
+    ctl = monitor_pods(pod_controller({'worker-a': 10}), [
+        ('ADDED', make_pod('1', None, phase='Pending')),
+        ('MODIFIED', make_pod('1', 'worker-a', phase='Pending')),
+        ('MODIFIED', make_pod('1', 'worker-a', phase='Running')),
+        ('ADDED', make_pod('2', 'worker-a')),
+        ('MODIFIED', make_pod('2', 'worker-a', phase='Succeeded')),
+        ('ADDED', make_pod('3', 'worker-a')),
+        ('DELETED', make_pod('3', 'worker-a')),
+    ])
+
+    assert ctl.pods_info() == (9, 10)
+
+
+def test_pods_info_unbounded_without_cluster_pod_list():
+    ctl = monitor_pods(pod_controller({'worker-a': 10}, cluster_pod_list=False), [
+        ('ADDED', make_pod('1', 'worker-a')),
+    ])
+
+    assert ctl.pods_info() == (math.inf, math.inf)
