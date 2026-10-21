@@ -1127,9 +1127,14 @@ class KubernetesController(ControllerInterface):
                     not_valid_before=(datetime.utcnow() - timedelta(days=1)),
                     not_valid_after=(datetime.utcnow() + timedelta(days=CERTIFICATE_VALIDITY_PERIOD)),
                     public_key=cert_key.public_key(),
-                    serial_number=x509.random_serial_number()).add_extension(
-                        x509.SubjectAlternativeName([x509.DNSName(deployment_name)]),
-                    critical=False).sign(rootca_pk, hashes.SHA256())
+                    serial_number=x509.random_serial_number()
+                ).add_extension(
+                    x509.SubjectAlternativeName([x509.DNSName(deployment_name)]),
+                    critical=False
+                ).add_extension(
+                    x509.AuthorityKeyIdentifier.from_issuer_public_key(rootca_cert.public_key()),
+                    critical=False
+                ).sign(rootca_pk, hashes.SHA256())
 
                 return V1Secret(metadata=V1ObjectMeta(name=cert_secret_name, namespace=self.namespace),
                                 type='kubernetes.io/tls',
