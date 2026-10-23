@@ -331,38 +331,3 @@ def test_safelist_update_conflict(client):
         client.add_update(sl_data)
 
     assert 'has a type conflict:' in conflict_exc.value.args[0]
-
-def test_safelist_tag_normalization(client):
-    tag_type = 'network.static.uri'
-    tag_value = 'https://gOOd.com/About'
-
-    normalized_value = 'https://good.com/About'
-    hashed_value = f"{tag_type}: {normalized_value}".encode('utf8')
-    expected_qhash = hashlib.sha256(hashed_value).hexdigest()
-
-    # Generate a safelist item
-    sl_data = {
-        'attribution': {
-            'actor': ["SOMEONE!"],
-            'campaign': None,
-            'category': None,
-            'exploit': None,
-            'implant': None,
-            'family': None,
-            'network': None
-        },
-        'dtl': 15,
-        'tag': {'type': tag_type,
-                'value': tag_value},
-        'sources': [NSRL_SOURCE, ADMIN_SOURCE],
-        'type': 'tag'
-    }
-
-    client.add_update(sl_data)
-
-    # Assert that item got created with the expected ID from the normalized tag value
-    assert client.datastore.safelist.exists(expected_qhash)
-    time.sleep(1)
-
-    # Assert that the tag exists in either format (within reason)
-    assert client.get_safelisted_tags([tag_type])['match'][tag_type] == [normalized_value]

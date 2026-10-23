@@ -376,8 +376,7 @@ class DirectClient(ClientBase):
         config = forge.get_config()
         redis = get_client(config.core.redis.nonpersistent.host, config.core.redis.nonpersistent.port, False)
         # Initialize connection to redis-persistent for checkpointing
-        redis_persist = get_client(config.core.redis.persistent.host,
-                                   config.core.redis.persistent.port, False)
+        redis_persist = get_client(config.core.redis.persistent.host, config.core.redis.persistent.port, False)
         self.classification = forge.get_classification()
         self.datastore = forge.get_datastore(config=config)
         self.queues = {

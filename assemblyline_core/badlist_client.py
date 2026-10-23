@@ -167,7 +167,7 @@ class BadlistClient:
             _, long, _ = ssdeep.replace('/', '\\/').split(":")
             return self.datastore.badlist.search(f"hashes.ssdeep:{long}~", fl="*", as_obj=False)['items']
         except ValueError:
-            self.log.warning(f'This is not a valid SSDeep hash: {ssdeep}')
+            self.log.warning('This is not a valid SSDeep hash: %s', ssdeep)
             return []
 
     @staticmethod
@@ -249,4 +249,4 @@ class BadlistClient:
             old['expiry_ts'] = new.get('expiry_ts', None)
             return old
         except Exception as e:
-            raise InvalidBadhash(f"Invalid data provided: {str(e)}")
+            raise InvalidBadhash(f"Invalid data provided: {str(e)}") from e
