@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import math
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -31,6 +33,14 @@ class ControllerInterface:
     def free_memory(self) -> float:
         """Megabytes of RAM that has not been reserved."""
         return self.memory_info()[0]
+
+    def pods_info(self) -> tuple[float, float]:
+        """Return free and total pod slots in the system, unbounded where the orchestrator has no pod limit."""
+        return math.inf, math.inf
+
+    def free_pods(self) -> float:
+        """Number of pod slots available for new containers."""
+        return self.pods_info()[0]
 
     def get_target(self, service_name):
         """Get the target for running instances of a service."""

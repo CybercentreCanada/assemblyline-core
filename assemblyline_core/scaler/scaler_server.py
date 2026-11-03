@@ -804,6 +804,7 @@ class ScalerServer(ThreadedCoreBase):
                 # Get the processed resource numbers
                 free_cpu, _ = self.get_cpu_info(overallocation=True)
                 free_memory, _ = self.get_memory_info(overallocation=True)
+                free_pods = self.get_free_pods()
 
                 # Make adjustments to the targets until everything is satisified
                 # or we don't have the resouces to make more adjustments
@@ -812,6 +813,10 @@ class ScalerServer(ThreadedCoreBase):
                     prof = [_p for _p in prof if _p.desired_instances > targets[_p.name]]
                     # only consider services where there is room for more pending containers
                     prof = [_p for _p in prof if _p.running_instances + self.max_pending > targets[_p.name]]
+                    if free_pods < 1:
+                        if prof:
+                            self.log.debug("Can't make more because no pod slots are free %s", [_p.name for _p in prof])
+                        return []
                     drop = [_p for _p in prof if _p.cpu > free_cpu or _p.ram > free_memory]
                     if drop:
                         summary = {_p.name: (_p.cpu, _p.ram) for _p in drop}
@@ -827,6 +832,7 @@ class ScalerServer(ThreadedCoreBase):
                     # Add one for the profile at the bottom
                     free_memory -= remaining_profiles[0].container_config.ram_mb
                     free_cpu -= remaining_profiles[0].container_config.cpu_cores
+                    free_pods -= 1
                     targets[remaining_profiles[0].name] += 1
 
                     # Take out any services that should be happy now
@@ -865,6 +871,20 @@ class ScalerServer(ThreadedCoreBase):
             free_cpu = free_cpu - profile.container_config.cpu_cores * pending
 
         return (free_cpu, total_cpu)
+
+    def get_free_pods(self) -> float:
+        # Overallocation relies on pending pods to drive a cluster autoscaler, which a pod slot cap would block
+        if self.get_cpu_overallocation() > 1 or self.get_memory_overallocation() > 1:
+            return math.inf
+
+        free_pods, _ = self.controller.pods_info()
+
+        # Include the service containers not counted in the raw numbers because they are pending
+        for name, pending in self.controller.get_unavailable().items():
+            if name in self.profiles and pending:
+                free_pods -= pending
+
+        return free_pods
 
     def get_memory_info(self, overallocation: bool) -> tuple[float, float]:
         # Get the raw used resource numbers
