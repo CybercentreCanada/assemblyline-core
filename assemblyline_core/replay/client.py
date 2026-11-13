@@ -188,7 +188,7 @@ class ClientBase(object):
         while self.running:
             # Find objects of the collection that haven't been replayed
             for obj in self._stream_objects(
-                    collection, f"{date_field}:[{checkpoint} TO now]", fl="*,id", filter_queries=fqs):
+                    collection, f"{date_field}:{{{checkpoint} TO now]", fl="*,id", filter_queries=fqs):
                 self.log.info(f"Replaying {collection}: {obj[id_field]}")
                 # Submit name queue to be tasked to worker(s) for replay
                 self.put_message(collection, obj)

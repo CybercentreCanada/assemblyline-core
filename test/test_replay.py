@@ -344,3 +344,48 @@ def test_replay_single_data_collection(datastore, creator, creator_worker, loade
         # If the workflow was edited by someone else, they shouldn't have control over the enabled state
         loaded_workflow = datastore.workflow.get(item.workflow_id)
         assert loaded_workflow.enabled != item.enabled and loaded_workflow.edited_by == item.edited_by
+
+def test_replay(datastore, creator, creator_worker, loader, loader_worker):
+    # Start the creator and it's worker to process items
+    with creator, creator_worker:
+        creator.start()
+        creator_worker.start()
+
+        # Wait until items are processed and saved to the output directory
+        local_dir = creator.replay_config.creator.output_filestore[7:]
+        output_files = os.listdir(local_dir)
+        while len(output_files) == 0:
+            # Wait until files appear
+            sleep(5)
+            output_files = os.listdir(local_dir)
+
+    collection_backup = {}
+    for file in output_files:
+        # Get collection from filename
+        collection = file.split('_')[0]
+
+        # Backup data for later comparison
+        collection_backup[collection] = getattr(datastore, collection).search("*", fl="id", as_obj=False)['items']
+
+        # Wipe the respective collection
+        getattr(datastore, collection).wipe()
+        assert getattr(datastore, collection).search("*")['total'] == 0
+
+    # Make sure there's a backup for comparison
+    assert collection_backup
+
+    # Modify the loader to read the output from the creator, and start it and the worker
+    loader.replay_config.loader.input_directory = local_dir
+    with loader, loader_worker:
+        loader.start()
+        loader_worker.start()
+
+        output_files = os.listdir(local_dir)
+        while len(output_files) != 0:
+            # Wait until files are removed
+            sleep(5)
+            output_files = os.listdir(local_dir)
+
+    # After data has been loaded, check it matches backup
+    for collection, items in collection_backup.items():
+        assert getattr(datastore, collection).search("*", fl="id", as_obj=False)['items'] == items
