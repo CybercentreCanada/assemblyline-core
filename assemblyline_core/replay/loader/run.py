@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 from assemblyline_core.replay.client import APIClient, DirectClient
 from assemblyline_core.replay.replay import ReplayBase
 
-
 class ReplayLoader(ReplayBase):
     def __init__(self):
         super().__init__("assemblyline.replay_loader")
@@ -15,12 +14,6 @@ class ReplayLoader(ReplayBase):
         os.makedirs(self.replay_config.loader.working_directory, exist_ok=True)
         os.makedirs(self.replay_config.loader.input_directory, exist_ok=True)
         os.makedirs(self.replay_config.loader.failed_directory, exist_ok=True)
-
-        # Create/Load the cache
-        self.cache = shelve.open(os.path.join(self.replay_config.loader.working_directory, 'loader_cache.db'))
-        self.last_sync_check = datetime.now()
-        if 'files' not in self.cache:
-            self.cache['files'] = set()
 
         # Load client
         if self.replay_config.loader.client.type == 'direct':
@@ -34,48 +27,54 @@ class ReplayLoader(ReplayBase):
                              'Must be either \'api\' or \'direct\'.')
 
     def load_files(self, once=False):
-        while self.running:
-            new_files = False
-            new_cache = set()
+        # Create/Load the cache
+        with shelve.open(os.path.join(self.replay_config.loader.working_directory, 'loader_cache.db')) as cache:
+            last_sync_check = datetime.now()
+            if 'files' not in cache:
+                cache['files'] = set()
 
-            # Check the datastore periodically for the last Replay bundle that was imported
-            if datetime.now() > self.last_sync_check + timedelta(seconds=self.replay_config.loader.sync_check_interval):
+            while self.running:
+                new_files = False
+                new_cache = set()
 
-                if not self.client.query_alerts(
-                        query=f"metadata.bundle.loaded:[now-{self.replay_config.loader.sync_check_interval}s TO now]",
-                        track_total_hits=True):
-                    self.log.warning("Haven't received a new bundle since the last check!")
-                self.last_sync_check = datetime.now()
+                # Check the datastore periodically for the last Replay bundle that was imported
+                if datetime.now() > last_sync_check + timedelta(seconds=self.replay_config.loader.sync_check_interval):
 
-            for root, _, files in os.walk(self.replay_config.loader.input_directory, topdown=False):
-                for name in files:
-                    # Unexpected files that could be the result of external transfer mechanisms
-                    if name.startswith('.') or not (name.endswith('.al_bundle') or \
-                                                    name.endswith('.al_json') or \
-                                                    name.endswith('.al_json.cart')):
-                        continue
+                    if not self.client.query_alerts(
+                            query=f"metadata.bundle.loaded:[now-{self.replay_config.loader.sync_check_interval}s TO now]",
+                            track_total_hits=True):
+                        self.log.warning("Haven't received a new bundle since the last check!")
+                    last_sync_check = datetime.now()
 
-                    file_path = os.path.join(root, name)
+                for root, _, files in os.walk(self.replay_config.loader.input_directory, topdown=False):
+                    for name in files:
+                        # Unexpected files that could be the result of external transfer mechanisms
+                        if name.startswith('.') or not (name.endswith('.al_bundle') or \
+                                                        name.endswith('.al_json') or \
+                                                        name.endswith('.al_json.cart')):
+                            continue
 
-                    # Cache file
-                    new_cache.add(file_path)
+                        file_path = os.path.join(root, name)
 
-                    if file_path not in self.cache['files']:
-                        self.log.info(f'Queueing file: {file_path}')
-                        self.client.put_file(file_path)
-                        new_files = True
+                        # Cache file
+                        new_cache.add(file_path)
 
-                    # Cache file
-                    self.cache['files'].add(file_path)
+                        if file_path not in cache['files']:
+                            self.log.info(f'Queueing file: {file_path}')
+                            self.client.put_file(file_path)
+                            new_files = True
 
-            # Cleanup cache
-            self.cache['files'] = new_cache
+                        # Cache file
+                        cache['files'].add(file_path)
 
-            if once:
-                break
+                # Cleanup cache
+                cache['files'] = new_cache
 
-            if not new_files:
-                self.sleep(5)
+                if once:
+                    break
+
+                if not new_files:
+                    self.sleep(5)
 
     def try_run(self):
         threads = {
@@ -86,7 +85,6 @@ class ReplayLoader(ReplayBase):
         self.maintain_threads(threads)
 
     def stop(self):
-        self.cache.close()
         return super().stop()
 
 
