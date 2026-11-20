@@ -331,8 +331,8 @@ class KubernetesUpdateInterface:
             volume_mounts=volume_mounts,
             security_context=self.security_policy,
             resources=V1ResourceRequirements(
-                limits={'cpu': cores, 'memory': f'{memory}Mi'},
-                requests={'cpu': cores / 4, 'memory': f'{memory_min}Mi'},
+                limits={'cpu': str(cores), 'memory': f'{memory}Mi'},
+                requests={'cpu': str(cores / 4), 'memory': f'{memory_min}Mi'},
             )
         )
 
