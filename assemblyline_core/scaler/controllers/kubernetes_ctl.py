@@ -228,6 +228,30 @@ def get_resources(container) -> Tuple[float, float]:
     return cpu_value, memory_value
 
 
+def toleration_matches_taint(toleration: V1Toleration, taint: dict) -> bool:
+    """Match a toleration against a raw node taint, following kube-scheduler's ToleratesTaint."""
+    if toleration.effect and toleration.effect != taint.get('effect'):
+        return False
+    if toleration.key and toleration.key != taint.get('key'):
+        return False
+    if toleration.operator == 'Exists':
+        return True
+    return (toleration.value or '') == (taint.get('value') or '')
+
+
+def node_is_schedulable(node: dict, tolerations: list[V1Toleration]) -> bool:
+    """Check whether service pods with the given tolerations can be placed on a raw node object."""
+    spec = node.get('spec', {})
+    if spec.get('unschedulable'):
+        return False
+    for taint in spec.get('taints') or []:
+        if taint.get('effect') not in ('NoSchedule', 'NoExecute'):
+            continue
+        if not any(toleration_matches_taint(toleration, taint) for toleration in tolerations):
+            return False
+    return True
+
+
 def create_docker_auth_config(image: str, username: str, password: str) -> str:
     # Take the registry part of the image if set, use the default registry if no registry component is in the string
     if '/' in image:
@@ -485,7 +509,7 @@ class KubernetesController(ControllerInterface):
                         ready = condition['status'] == 'True'
                         break
 
-                if ready:
+                if ready and node_is_schedulable(event['raw_object'], self.default_service_tolerations):
                     cpu = parse_cpu(event['raw_object']['status']['allocatable']['cpu'])
                     ram = parse_memory(event['raw_object']['status']['allocatable']['memory'])
                     self.ready_nodes[name] = (cpu, ram)
