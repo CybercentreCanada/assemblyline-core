@@ -30,6 +30,7 @@ from assemblyline_core.ingester import INGEST_QUEUE_NAME, drop_chance
 from assemblyline_core.ingester.constants import COMPLETE_QUEUE_NAME
 
 STATUS_QUEUE = "status"
+HEARTBEAT_HASH = "heartbeats"
 
 
 def get_working_and_idle(redis, current_service):
@@ -68,6 +69,10 @@ class HeartbeatFormatter(object):
             private=False,
         )
         self.status_queue = CommsQueue(STATUS_QUEUE, self.redis)
+        # The TTL covers the whole hash, so it only clears once every heartbeat stops;
+        # readers judge a single component by the age of its entry's timestamp.
+        self.heartbeat_cache = ExpiringHash(HEARTBEAT_HASH, host=self.redis,
+                                            ttl=self.config.core.metrics.export_interval * 2)
         self.dispatch_active_hash = Hash(DISPATCH_TASK_HASH, self.redis_persist)
         self.dispatcher_submission_queue = NamedQueue(SUBMISSION_QUEUE, self.redis)
         self.ingest_scanning = Hash('m-scanning-table', self.redis_persist)
@@ -114,6 +119,13 @@ class HeartbeatFormatter(object):
         except Exception:
             self.log.exception("Unknown exception occurred while reloading expiry queues:")
 
+    def _publish(self, m_type, m_name, message):
+        self.status_queue.publish(message)
+        try:
+            self.heartbeat_cache.set(f"{m_type}.{m_name}", {**message, "timestamp": time.time()})
+        except Exception:
+            self.log.exception(f"Failed to cache {m_type} heartbeat for {m_name}")
+
     def send_heartbeat(self, m_type, m_name, m_data, instances):
         if m_type == "dispatcher":
             try:
@@ -140,7 +152,7 @@ class HeartbeatFormatter(object):
                         "component": m_name,
                     }
                 }
-                self.status_queue.publish(DispatcherMessage(msg).as_primitives())
+                self._publish(m_type, m_name, DispatcherMessage(msg).as_primitives())
                 self.log.info(f"Sent dispatcher heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating DispatcherMessage")
@@ -176,7 +188,7 @@ class HeartbeatFormatter(object):
                         }
                     }
                 }
-                self.status_queue.publish(IngestMessage(msg).as_primitives())
+                self._publish(m_type, m_name, IngestMessage(msg).as_primitives())
                 self.log.info(f"Sent ingester heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating IngestMessage")
@@ -194,7 +206,7 @@ class HeartbeatFormatter(object):
                         }
                     }
                 }
-                self.status_queue.publish(AlerterMessage(msg).as_primitives())
+                self._publish(m_type, m_name, AlerterMessage(msg).as_primitives())
                 self.log.info(f"Sent alerter heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating AlerterMessage")
@@ -209,7 +221,7 @@ class HeartbeatFormatter(object):
                         "queues": self.to_expire
                     }
                 }
-                self.status_queue.publish(ExpiryMessage(msg).as_primitives())
+                self._publish(m_type, m_name, ExpiryMessage(msg).as_primitives())
                 self.log.info(f"Sent expiry heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating ExpiryMessage")
@@ -224,7 +236,7 @@ class HeartbeatFormatter(object):
                         "queued": self.archiver_queue.length()
                     }
                 }
-                self.status_queue.publish(ArchiveMessage(msg).as_primitives())
+                self._publish(m_type, m_name, ArchiveMessage(msg).as_primitives())
                 self.log.info(f"Sent archive heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating ArchiveMessage")
@@ -238,7 +250,7 @@ class HeartbeatFormatter(object):
                         "metrics": m_data,
                     }
                 }
-                self.status_queue.publish(ScalerMessage(msg).as_primitives())
+                self._publish(m_type, m_name, ScalerMessage(msg).as_primitives())
                 self.log.info(f"Sent scaler heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating WatcherMessage")
@@ -252,7 +264,7 @@ class HeartbeatFormatter(object):
                         "metrics": m_data,
                     }
                 }
-                self.status_queue.publish(ScalerStatusMessage(msg).as_primitives())
+                self._publish(m_type, m_name, ScalerStatusMessage(msg).as_primitives())
                 self.log.info(f"Sent scaler status heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating WatcherMessage")
@@ -273,7 +285,7 @@ class HeartbeatFormatter(object):
                         "service_name": m_name
                     }
                 }
-                self.status_queue.publish(ServiceMessage(msg).as_primitives())
+                self._publish(m_type, m_name, ServiceMessage(msg).as_primitives())
                 self.log.info(f"Sent service heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating ServiceMessage")
@@ -286,7 +298,7 @@ class HeartbeatFormatter(object):
                         "metrics": m_data,
                     }
                 }
-                self.status_queue.publish(VacuumMessage(msg).as_primitives())
+                self._publish(m_type, m_name, VacuumMessage(msg).as_primitives())
                 self.log.info(f"Sent vacuum heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating VacuumMessage")
@@ -303,7 +315,7 @@ class HeartbeatFormatter(object):
                                         for index, size in m_data['shard_sizes'].items()],
                     }
                 }
-                self.status_queue.publish(ElasticMessage(msg).as_primitives())
+                self._publish(m_type, m_name, ElasticMessage(msg).as_primitives())
                 self.log.info(f"Sent elastic heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating ElasticMessage")
@@ -337,7 +349,7 @@ class HeartbeatFormatter(object):
                         'total_memory_used': memory,
                     }
                 }
-                self.status_queue.publish(RetrohuntMessage(msg).as_primitives())
+                self._publish(m_type, m_name, RetrohuntMessage(msg).as_primitives())
                 self.log.info(f"Sent retrohunt heartbeat: {msg['msg']}")
             except Exception:
                 self.log.exception("An exception occurred while generating RetrohuntMessage")
